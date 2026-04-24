@@ -1,6 +1,6 @@
 import './styles.css';
 
-const downloadUrl = '#download';
+const downloadUrl = 'https://github.com/Ethereum-dAI/local-wallet/releases/download/v0.1.0/LocalWallet-Demo-macOS-AppleSilicon.zip';
 const releaseFileName = 'LocalWallet-Demo-macOS-AppleSilicon.zip';
 const repoUrl = 'https://github.com/Ethereum-dAI/local-wallet';
 

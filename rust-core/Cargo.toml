@@ -1,0 +1,15 @@
+[workspace]
+members = ["crates/signature", "crates/kernel", "crates/ffi"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+alloy-primitives = "0.8"
+alloy-sol-types  = "0.8"
+sha2             = "0.10"
+p256             = { version = "0.13", features = ["ecdsa"] }
+hex-literal      = "0.4"

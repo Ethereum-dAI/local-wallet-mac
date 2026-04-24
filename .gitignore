@@ -1,0 +1,40 @@
+# Local assistant / planning files
+.claude/
+.codex/
+TODO.md
+ARCHITECTURE.md
+docs/
+
+# macOS noise
+.DS_Store
+
+# Rust build outputs
+rust-core/target/
+build/
+dist/
+
+# SwiftPM / Swift build outputs
+swift-bridge/.build/
+swift-bridge/.swiftpm/
+swift-probe/.build/
+wallet-macos/.build/
+swift-bridge/lib/
+swift-bridge/Sources/WalletFFI/wallet_ffi.h
+
+# Website dependencies / build outputs
+node_modules/
+
+# Xcode user-specific state
+LocalWallet.xcodeproj/xcuserdata/
+*.xcuserstate
+DerivedData/
+
+# Editor / shell noise
+.idea/
+*.swp
+*.swo
+*.log
+
+# Environment / secrets
+.env
+.env.*

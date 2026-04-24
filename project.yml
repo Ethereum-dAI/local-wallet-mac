@@ -1,0 +1,51 @@
+name: LocalWallet
+options:
+  minimumXcodeGenVersion: 2.45.4
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  WalletBridge:
+    path: swift-bridge
+targets:
+  LocalWalletApp:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: wallet-macos/Sources/WalletMacOSApp
+      - path: wallet-macos/App/Assets.xcassets
+    resources:
+      - path: wallet-macos/Sources/WalletMacOSApp/Resources
+    info:
+      path: wallet-macos/App/Info.plist
+      properties:
+        CFBundleDisplayName: Local Wallet
+        CFBundleName: Local Wallet
+        LSApplicationCategoryType: public.app-category.finance
+        NSPrincipalClass: NSApplication
+    settings:
+      base:
+        DEVELOPMENT_TEAM: MZ5U9N8DBS
+        PRODUCT_BUNDLE_IDENTIFIER: ai.ethereum.localwallet.demo
+        PRODUCT_NAME: Local Wallet
+        SWIFT_VERSION: 6.0
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: wallet-macos/App/LocalWallet.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+        MACOSX_DEPLOYMENT_TARGET: 14.0
+        ARCHS: arm64
+        EXCLUDED_ARCHS: x86_64
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
+    dependencies:
+      - package: WalletBridge
+        product: WalletSignature
+schemes:
+  LocalWalletApp:
+    build:
+      targets:
+        LocalWalletApp: all
+    run:
+      config: Debug
+    archive:
+      config: Release

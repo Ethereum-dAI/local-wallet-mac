@@ -1,0 +1,12 @@
+language = "C"
+include_guard = "WALLET_FFI_H"
+includes = ["stdint.h", "stdbool.h"]
+style = "both"
+cpp_compat = false
+
+[export]
+include = ["WalletResult"]
+
+[enum]
+rename_variants = "ScreamingSnakeCase"
+prefix_with_name = true

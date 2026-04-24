@@ -1,0 +1,5 @@
+module WalletFFI [system] {
+    header "wallet_ffi.h"
+    link "wallet_ffi"
+    export *
+}

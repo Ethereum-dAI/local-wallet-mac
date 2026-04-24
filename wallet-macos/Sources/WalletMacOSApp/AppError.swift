@@ -36,7 +36,7 @@ enum AppError: LocalizedError {
         case .missingKeyReference:
             return "The Secure Enclave key reference is missing from Keychain."
         case .missingEntitlement:
-            return "This Secure Enclave flow must run as a signed macOS app bundle. Open `LocalWallet.xcodeproj`, select a development team for `LocalWalletApp`, and run it from Xcode instead of `swift run`."
+            return "This Secure Enclave flow needs a signed macOS app bundle with Keychain access entitlements. Use the packaged app release, or open `LocalWallet.xcodeproj`, select a development team for `LocalWalletApp`, and run it from Xcode instead of `swift run`."
         case .metadataKeyMismatch:
             return "Stored wallet metadata does not match the loaded Secure Enclave key."
         case .corruptedMetadataStore:

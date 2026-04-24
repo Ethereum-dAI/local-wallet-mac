@@ -62,7 +62,11 @@ if [[ -n "$BUNDLER_URL" ]]; then
     echo "Could not determine signing identity from built app."
     exit 1
   fi
-  codesign --force --sign "$SIGNING_IDENTITY" "$PRODUCTS_DIR/$APP_NAME"
+
+  ENTITLEMENTS_PLIST="$BUILD_DIR/packaged-entitlements.plist"
+  codesign -d --entitlements :- "$APP_PATH" >"$ENTITLEMENTS_PLIST"
+  plutil -lint "$ENTITLEMENTS_PLIST" >/dev/null
+  codesign --force --sign "$SIGNING_IDENTITY" --entitlements "$ENTITLEMENTS_PLIST" "$PRODUCTS_DIR/$APP_NAME"
 else
   echo "=== No Sepolia bundler URL configured ==="
   echo "Set LOCAL_WALLET_SEPOLIA_BUNDLER_URL before packaging to enable hosted bundler submission in the release app."

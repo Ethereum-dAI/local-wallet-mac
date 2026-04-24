@@ -95,62 +95,55 @@ final class AppModel: ObservableObject {
             if let existing = try metadataStore.load() {
                 appendLog("bootstrap: loaded wallet metadata for \(existing.walletId.uuidString)")
 
-                guard existing.keyTag == keyStore.keyTag, existing.matches(coordinates) else {
-                    throw AppError.metadataKeyMismatch
+                if existing.keyTag != keyStore.keyTag || !existing.matches(coordinates) {
+                    appendLog("bootstrap: stored metadata does not match the current Secure Enclave key")
+
+                    guard !hasExistingKey else {
+                        appendLog("bootstrap: refusing automatic recovery because an existing key was loaded")
+                        throw AppError.metadataKeyMismatch
+                    }
+
+                    appendLog("bootstrap: replacing stale metadata for the newly created key")
+                    try metadataStore.clear()
+
+                    let created = try createFreshWalletRecord(coordinates: coordinates, now: now)
+                    try metadataStore.save(created)
+                    walletRecord = created
+                    appendLog("bootstrap: stored new wallet record with predicted account \(created.kernelAccountAddress ?? "unavailable")")
+                    shouldInspectAfterBootstrap = true
+                } else {
+                    let predictedAddress = try kernelAccountAddressPredictor.predictedAddress(
+                        chain: activeChain,
+                        publicKey: coordinates,
+                        authenticatorIdHash: existing.authenticatorIdHash,
+                        salt: existing.kernelSalt
+                    )
+
+                    let refreshed = WalletRecord(
+                        walletId: existing.walletId,
+                        keyTag: existing.keyTag,
+                        pubkeyX: existing.pubkeyX,
+                        pubkeyY: existing.pubkeyY,
+                        chainId: activeChain.id,
+                        kernelAccountAddress: predictedAddress,
+                        authenticatorIdHash: existing.authenticatorIdHash,
+                        kernelSalt: existing.kernelSalt,
+                        isDeployed: existing.isDeployed,
+                        createdAt: existing.createdAt,
+                        updatedAt: now
+                    )
+                    try metadataStore.save(refreshed)
+                    walletRecord = refreshed
+                    appendLog("bootstrap: refreshed predicted account \(predictedAddress)")
+                    shouldInspectAfterBootstrap = true
                 }
-
-                let predictedAddress = try kernelAccountAddressPredictor.predictedAddress(
-                    chain: activeChain,
-                    publicKey: coordinates,
-                    authenticatorIdHash: existing.authenticatorIdHash,
-                    salt: existing.kernelSalt
-                )
-
-                let refreshed = WalletRecord(
-                    walletId: existing.walletId,
-                    keyTag: existing.keyTag,
-                    pubkeyX: existing.pubkeyX,
-                    pubkeyY: existing.pubkeyY,
-                    chainId: activeChain.id,
-                    kernelAccountAddress: predictedAddress,
-                    authenticatorIdHash: existing.authenticatorIdHash,
-                    kernelSalt: existing.kernelSalt,
-                    isDeployed: existing.isDeployed,
-                    createdAt: existing.createdAt,
-                    updatedAt: now
-                )
-                try metadataStore.save(refreshed)
-                walletRecord = refreshed
-                appendLog("bootstrap: refreshed predicted account \(predictedAddress)")
-                shouldInspectAfterBootstrap = true
             } else {
                 appendLog("bootstrap: metadata store empty; creating the first wallet record")
 
-                let authenticatorIdHash = KernelAccountAddressPredictor.defaultAuthenticatorIdHash
-                let kernelSalt = KernelAccountAddressPredictor.defaultSalt
-                let predictedAddress = try kernelAccountAddressPredictor.predictedAddress(
-                    chain: activeChain,
-                    publicKey: coordinates,
-                    authenticatorIdHash: authenticatorIdHash,
-                    salt: kernelSalt
-                )
-
-                let created = WalletRecord(
-                    walletId: UUID(),
-                    keyTag: keyStore.keyTag,
-                    pubkeyX: coordinates.x,
-                    pubkeyY: coordinates.y,
-                    chainId: activeChain.id,
-                    kernelAccountAddress: predictedAddress,
-                    authenticatorIdHash: authenticatorIdHash,
-                    kernelSalt: kernelSalt,
-                    isDeployed: false,
-                    createdAt: now,
-                    updatedAt: now
-                )
+                let created = try createFreshWalletRecord(coordinates: coordinates, now: now)
                 try metadataStore.save(created)
                 walletRecord = created
-                appendLog("bootstrap: stored new wallet record with predicted account \(predictedAddress)")
+                appendLog("bootstrap: stored new wallet record with predicted account \(created.kernelAccountAddress ?? "unavailable")")
                 shouldInspectAfterBootstrap = true
             }
 
@@ -167,6 +160,31 @@ final class AppModel: ObservableObject {
         if shouldInspectAfterBootstrap {
             runDemo()
         }
+    }
+
+    private func createFreshWalletRecord(coordinates: PublicKeyCoordinates, now: Date) throws -> WalletRecord {
+        let authenticatorIdHash = KernelAccountAddressPredictor.defaultAuthenticatorIdHash
+        let kernelSalt = KernelAccountAddressPredictor.defaultSalt
+        let predictedAddress = try kernelAccountAddressPredictor.predictedAddress(
+            chain: activeChain,
+            publicKey: coordinates,
+            authenticatorIdHash: authenticatorIdHash,
+            salt: kernelSalt
+        )
+
+        return WalletRecord(
+            walletId: UUID(),
+            keyTag: keyStore.keyTag,
+            pubkeyX: coordinates.x,
+            pubkeyY: coordinates.y,
+            chainId: activeChain.id,
+            kernelAccountAddress: predictedAddress,
+            authenticatorIdHash: authenticatorIdHash,
+            kernelSalt: kernelSalt,
+            isDeployed: false,
+            createdAt: now,
+            updatedAt: now
+        )
     }
 
     func resetDemoWallet() {

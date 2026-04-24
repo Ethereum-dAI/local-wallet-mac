@@ -22,7 +22,7 @@ npm run dev
 npm run build
 ```
 
-The download button is currently a placeholder. Update `src/main.js` after uploading the demo zip to GitHub Releases or another host.
+The download button points to the latest published demo zip on GitHub Releases. Update `downloadUrl` in `src/main.js` when publishing a newer release.
 
 Expected demo artifact:
 
@@ -30,6 +30,6 @@ Expected demo artifact:
 LocalWallet-Demo-macOS-AppleSilicon.zip
 ```
 
-Before publishing, update:
+When publishing a newer release, update:
 
 - `downloadUrl` in `src/main.js`

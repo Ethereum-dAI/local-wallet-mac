@@ -145,7 +145,7 @@ document.querySelector('#app').innerHTML = `
       </div>
       <div class="download-box">
         <span class="file-name">${releaseFileName}</span>
-        <a class="button primary full" href="${downloadUrl}" aria-disabled="true">Release link coming soon</a>
+        <a class="button primary full" href="${downloadUrl}">Download macOS demo</a>
         <a class="button ghost full" href="${repoUrl}">View source repository</a>
       </div>
     </section>

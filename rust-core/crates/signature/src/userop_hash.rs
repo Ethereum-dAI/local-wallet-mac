@@ -56,7 +56,8 @@ mod tests {
             nonce: U256::from_str_radix(
                 "0000baac0ddb0000000000000000000000000000000000000000000000000001",
                 16,
-            ).unwrap(),
+            )
+            .unwrap(),
             init_code: Bytes::new(),
             call_data: Bytes::from(include_bytes!("../testdata/neKodex_calldata.bin").to_vec()),
             account_gas_limits: FixedBytes::from(hex!(
@@ -66,14 +67,17 @@ mod tests {
             gas_fees: FixedBytes::from(hex!(
                 "00000000000000000000000001a39de00000000000000000000000000c028d49"
             )),
-            paymaster_and_data: Bytes::from(hex!(
-                "777777777777aec03fd955926dbf81597e66834c"
-                "0000000000000000000000000000b578"
-                "000000000000000000000000000000010100006982dcf2"
-                "000000000000d8d11407392c3df4c4228006b5b955cc1d9fbb63"
-                "b7611ee6edb4fb1153b988ca276ccc833f9ce4dde4d6b4a9283b"
-                "8745db82a3b1a8fa2555bd17eee3fb9c4f1c1c"
-            ).to_vec()),
+            paymaster_and_data: Bytes::from(
+                hex!(
+                    "777777777777aec03fd955926dbf81597e66834c"
+                    "0000000000000000000000000000b578"
+                    "000000000000000000000000000000010100006982dcf2"
+                    "000000000000d8d11407392c3df4c4228006b5b955cc1d9fbb63"
+                    "b7611ee6edb4fb1153b988ca276ccc833f9ce4dde4d6b4a9283b"
+                    "8745db82a3b1a8fa2555bd17eee3fb9c4f1c1c"
+                )
+                .to_vec(),
+            ),
         };
 
         let hash = compute_userop_hash(&userop, ENTRY_POINT_V07, 1);

@@ -9,6 +9,8 @@ The website has two pages:
 - `index.html` is the public demo/download landing page.
 - `docs.html` is the documentation page for `wallet-signature`, `wallet-kernel`, `swift-bridge`, and the internal `wallet-ffi` bridge.
 
+The local `wallet-node` daemon is documented in the repository READMEs and internal tracker docs. It is not currently presented as a public website/download surface.
+
 ## Development
 
 ```bash

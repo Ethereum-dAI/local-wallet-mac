@@ -13,6 +13,7 @@ alloy-primitives = { workspace = true }
 alloy-sol-types  = { workspace = true }
 sha2             = { workspace = true }
 p256             = { workspace = true }
+hex              = { workspace = true }
 
 [dev-dependencies]
 hex-literal = { workspace = true }

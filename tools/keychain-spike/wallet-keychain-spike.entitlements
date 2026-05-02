@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- NOTE: $(AppIdentifierPrefix) is NOT auto-substituted by codesign when run
+     outside Xcode. The run script (scripts/run-keychain-spike.sh) substitutes it
+     with DEVELOPER_TEAM_ID. before signing. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.localwallet</string>
+    </array>
+</dict>
+</plist>

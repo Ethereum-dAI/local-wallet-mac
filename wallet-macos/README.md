@@ -12,6 +12,8 @@ What this demo currently exercises:
 - Secure Enclave signing + hosted bundler submission on Ethereum Sepolia
 - debug logging for bootstrap, inspection, gas estimation, signing, submission, and receipt polling
 
+The package also contains `SpawnHelper`, the process-launch shim for the local `wallet-node` daemon. The shim is tested from Swift, but the current demo UI still uses the hosted Sepolia workbench flow rather than the mainnet daemon as its primary transaction path.
+
 This app must be run as a signed macOS app bundle.
 
 The direct Secure Enclave persistence model now uses permanent Keychain key items. That works in the real app target, but it will fail with `OSStatus -34018` if you try to run the app with `swift run`.
@@ -34,8 +36,11 @@ xcodegen generate
 ## Current Layout
 
 - `wallet-macos/Sources/WalletMacOSApp` contains the demo app code.
+- `wallet-macos/Sources/Spawn` contains the C `posix_spawn` shim for launching `wallet-node`.
+- `wallet-macos/Sources/SpawnHelper` contains the Swift wrapper around that shim.
+- `wallet-macos/Tests/SpawnHelperTests` verifies daemon launch, ready-event delivery, and alive-pipe shutdown.
 - `swift-bridge` is the Swift package that calls the Rust FFI layer.
-- `rust-core` contains the UserOperation, WebAuthn, and signature encoding logic.
+- `rust-core` contains the UserOperation, WebAuthn, Kernel, daemon, bundler, chain, store, and FFI logic.
 
 ## App Module Map
 
@@ -67,6 +72,25 @@ xcodegen generate
 - Sepolia-only demo mode is currently enforced in the app shell.
 - The app currently focuses on ETH transfer as the first transaction type.
 - The UI is intentionally a workbench/demo shell, not the final wallet interface.
+- The local mainnet `wallet-node` daemon is implemented and tested separately, but is not yet the default transaction backend for this demo UI.
+
+## Daemon Spawn Test
+
+Build the daemon first:
+
+```bash
+cd ../rust-core
+cargo build -p wallet-node
+```
+
+Then run the Swift spawn helper test:
+
+```bash
+cd ../wallet-macos
+swift test --filter SpawnHelperTests
+```
+
+Set `WALLET_NODE_BIN=/absolute/path/to/wallet-node` to test a non-default daemon binary.
 
 ## Hosted Bundler Configuration
 

@@ -10,6 +10,10 @@ docs/
 
 # Rust build outputs
 rust-core/target/
+rust-core/crates/*/target/
+rust-core/crates/wallet-chain/helios/
+tools/keychain-spike/target/
+tools/keychain-spike/build-stage/
 build/
 dist/
 
@@ -20,6 +24,7 @@ swift-probe/.build/
 wallet-macos/.build/
 swift-bridge/lib/
 swift-bridge/Sources/WalletFFI/wallet_ffi.h
+swift-bridge/Sources/WalletFFI/wallet_node_api_version.h
 
 # Website dependencies / build outputs
 node_modules/
@@ -38,3 +43,4 @@ DerivedData/
 # Environment / secrets
 .env
 .env.*
+!.env.example

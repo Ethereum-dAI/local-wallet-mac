@@ -19,6 +19,10 @@ It does **not** handle:
 - WebAuthn signing-message construction
 - P-256 signature parsing or low-s normalization
 - bundler or RPC transport
+- deployed Kernel module enumeration
+- live allowlist manifest promotion
+
+Those runtime checks live in the daemon stack, primarily `wallet-bundler` and `wallet-node`.
 
 ## Example
 
@@ -44,4 +48,12 @@ assert_eq!(predicted, address!("ea18d505d23f0b73a91409cd468aecf3beab03ba"));
 ```bash
 cd rust-core
 cargo test -p wallet-kernel
+```
+
+The app-pinned deployed Kernel path is also covered by the mainnet-fork fixture:
+
+```bash
+ETH_RPC_URL=https://your-mainnet-rpc.example \
+WALLET_FORK_BLOCK_NUMBER=25001071 \
+scripts/run-kernel-mainnet-fork-check.sh
 ```

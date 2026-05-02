@@ -113,6 +113,8 @@ abi.decode(signature, (bytes, string, uint256, uint256, uint256, bool))
 
 The `usePrecompiled` flag controls whether on-chain verification uses the RIP-7212 precompile (`0x100`, ~3.4k gas) or the Daimo P256 fallback verifier (`0xc2b78...De4`, ~330k gas).
 
+`abi_encode_dummy_signature(use_precompiled)` builds the Kernel/WebAuthn dummy signature used for gas estimation. For the deployed Kernel validator path, the dummy uses `responseTypeLocation = uint256.max`, matching the validator's sentinel path. The mainnet fork fixture in `wallet-node` validates this against deployed code through EntryPointSimulations.
+
 ## Constants
 
 | Constant | Value | Purpose |
@@ -139,3 +141,9 @@ cargo build -p wallet-signature --release # release build
 - Kernel account initialization or address prediction
 - Session key logic
 - Bundler communication
+
+## Related Crates
+
+- `wallet-kernel` for Kernel initialization and counterfactual address prediction.
+- `wallet-bundler` for daemon-side EntryPoint, simulation, funding, and policy logic.
+- `wallet-ffi` and `swift-bridge` for Apple consumers.

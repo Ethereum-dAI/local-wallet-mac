@@ -1,12 +1,12 @@
+use alloy_primitives::{Address, Bytes, FixedBytes, B256, U256};
+use sha2::{Digest, Sha256};
 use std::panic::catch_unwind;
-use wallet_signature::{
-    compute_userop_hash, build_signature, abi_encode_webauthn_signature,
-    normalise_low_s, PackedUserOperation,
-    webauthn::{build_authenticator_data, build_client_data_json},
-};
 use wallet_kernel::{encode_initialize_call, predict_kernel_account_address};
-use alloy_primitives::{Address, B256, Bytes, FixedBytes, U256};
-use sha2::{Sha256, Digest};
+use wallet_signature::{
+    abi_encode_webauthn_signature, build_signature, compute_userop_hash, normalise_low_s,
+    webauthn::{build_authenticator_data, build_client_data_json},
+    PackedUserOperation,
+};
 
 /// Result codes for FFI functions.
 #[repr(i32)]
@@ -20,22 +20,29 @@ pub enum WalletResult {
 /// All pointer parameters must be valid and point to buffers of the documented sizes.
 #[no_mangle]
 pub unsafe extern "C" fn wallet_compute_userop_hash(
-    sender: *const u8,                      // 20 bytes
-    nonce: *const u8,                       // 32 bytes big-endian
-    init_code: *const u8,                   init_code_len: u32,
-    call_data: *const u8,                   call_data_len: u32,
-    account_gas_limits: *const u8,          // 32 bytes
-    pre_verification_gas: *const u8,        // 32 bytes big-endian
-    gas_fees: *const u8,                    // 32 bytes
-    paymaster_and_data: *const u8,          paymaster_and_data_len: u32,
-    entry_point: *const u8,                 // 20 bytes
+    sender: *const u8, // 20 bytes
+    nonce: *const u8,  // 32 bytes big-endian
+    init_code: *const u8,
+    init_code_len: u32,
+    call_data: *const u8,
+    call_data_len: u32,
+    account_gas_limits: *const u8,   // 32 bytes
+    pre_verification_gas: *const u8, // 32 bytes big-endian
+    gas_fees: *const u8,             // 32 bytes
+    paymaster_and_data: *const u8,
+    paymaster_and_data_len: u32,
+    entry_point: *const u8, // 20 bytes
     chain_id: u64,
-    out_hash: *mut u8,                      // 32 bytes, caller-allocated
+    out_hash: *mut u8, // 32 bytes, caller-allocated
 ) -> i32 {
     let result = catch_unwind(|| {
-        if sender.is_null() || nonce.is_null() || account_gas_limits.is_null()
-            || pre_verification_gas.is_null() || gas_fees.is_null()
-            || entry_point.is_null() || out_hash.is_null()
+        if sender.is_null()
+            || nonce.is_null()
+            || account_gas_limits.is_null()
+            || pre_verification_gas.is_null()
+            || gas_fees.is_null()
+            || entry_point.is_null()
+            || out_hash.is_null()
         {
             return WalletResult::InvalidInput as i32;
         }
@@ -111,9 +118,7 @@ pub unsafe extern "C" fn wallet_compute_signing_preimage(
 /// # Safety
 /// `s_inout` must point to 32 bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wallet_normalise_low_s(
-    s_inout: *mut u8,
-) -> i32 {
+pub unsafe extern "C" fn wallet_normalise_low_s(s_inout: *mut u8) -> i32 {
     let result = catch_unwind(|| {
         if s_inout.is_null() {
             return WalletResult::InvalidInput as i32;
@@ -140,8 +145,11 @@ pub unsafe extern "C" fn wallet_abi_encode_signature(
     out_len: *mut u32,
 ) -> i32 {
     let result = catch_unwind(|| {
-        if userop_hash.is_null() || r.is_null() || s.is_null()
-            || out_ptr.is_null() || out_len.is_null()
+        if userop_hash.is_null()
+            || r.is_null()
+            || s.is_null()
+            || out_ptr.is_null()
+            || out_len.is_null()
         {
             return WalletResult::InvalidInput as i32;
         }
@@ -190,14 +198,14 @@ pub unsafe extern "C" fn wallet_abi_encode_dummy_signature(
 /// All pointer parameters must be valid and point to fixed-size buffers.
 #[no_mangle]
 pub unsafe extern "C" fn wallet_predict_kernel_account_address(
-    factory: *const u8,                // 20 bytes
-    implementation: *const u8,         // 20 bytes
-    webauthn_validator: *const u8,     // 20 bytes
-    pub_key_x: *const u8,              // 32 bytes big-endian
-    pub_key_y: *const u8,              // 32 bytes big-endian
-    authenticator_id_hash: *const u8,  // 32 bytes
-    salt: *const u8,                   // 32 bytes
-    out_address: *mut u8,              // 20 bytes caller-allocated
+    factory: *const u8,               // 20 bytes
+    implementation: *const u8,        // 20 bytes
+    webauthn_validator: *const u8,    // 20 bytes
+    pub_key_x: *const u8,             // 32 bytes big-endian
+    pub_key_y: *const u8,             // 32 bytes big-endian
+    authenticator_id_hash: *const u8, // 32 bytes
+    salt: *const u8,                  // 32 bytes
+    out_address: *mut u8,             // 20 bytes caller-allocated
 ) -> i32 {
     let result = catch_unwind(|| {
         if factory.is_null()
@@ -216,8 +224,16 @@ pub unsafe extern "C" fn wallet_predict_kernel_account_address(
             Address::from_slice(std::slice::from_raw_parts(factory, 20)),
             Address::from_slice(std::slice::from_raw_parts(implementation, 20)),
             Address::from_slice(std::slice::from_raw_parts(webauthn_validator, 20)),
-            U256::from_be_bytes::<32>(std::slice::from_raw_parts(pub_key_x, 32).try_into().unwrap()),
-            U256::from_be_bytes::<32>(std::slice::from_raw_parts(pub_key_y, 32).try_into().unwrap()),
+            U256::from_be_bytes::<32>(
+                std::slice::from_raw_parts(pub_key_x, 32)
+                    .try_into()
+                    .unwrap(),
+            ),
+            U256::from_be_bytes::<32>(
+                std::slice::from_raw_parts(pub_key_y, 32)
+                    .try_into()
+                    .unwrap(),
+            ),
             B256::from_slice(std::slice::from_raw_parts(authenticator_id_hash, 32)),
             B256::from_slice(std::slice::from_raw_parts(salt, 32)),
         );
@@ -234,10 +250,10 @@ pub unsafe extern "C" fn wallet_predict_kernel_account_address(
 /// Caller must free returned buffer with `wallet_free_buffer`.
 #[no_mangle]
 pub unsafe extern "C" fn wallet_encode_kernel_initialize_call(
-    webauthn_validator: *const u8,     // 20 bytes
-    pub_key_x: *const u8,              // 32 bytes big-endian
-    pub_key_y: *const u8,              // 32 bytes big-endian
-    authenticator_id_hash: *const u8,  // 32 bytes
+    webauthn_validator: *const u8,    // 20 bytes
+    pub_key_x: *const u8,             // 32 bytes big-endian
+    pub_key_y: *const u8,             // 32 bytes big-endian
+    authenticator_id_hash: *const u8, // 32 bytes
     out_ptr: *mut *const u8,
     out_len: *mut u32,
 ) -> i32 {
@@ -254,8 +270,16 @@ pub unsafe extern "C" fn wallet_encode_kernel_initialize_call(
 
         let encoded = encode_initialize_call(
             Address::from_slice(std::slice::from_raw_parts(webauthn_validator, 20)),
-            U256::from_be_bytes::<32>(std::slice::from_raw_parts(pub_key_x, 32).try_into().unwrap()),
-            U256::from_be_bytes::<32>(std::slice::from_raw_parts(pub_key_y, 32).try_into().unwrap()),
+            U256::from_be_bytes::<32>(
+                std::slice::from_raw_parts(pub_key_x, 32)
+                    .try_into()
+                    .unwrap(),
+            ),
+            U256::from_be_bytes::<32>(
+                std::slice::from_raw_parts(pub_key_y, 32)
+                    .try_into()
+                    .unwrap(),
+            ),
             B256::from_slice(std::slice::from_raw_parts(authenticator_id_hash, 32)),
         );
 
@@ -290,7 +314,8 @@ mod tests {
         let nonce = hex!("0000baac0ddb0000000000000000000000000000000000000000000000000001");
         let init_code: &[u8] = &[];
         let call_data = include_bytes!("../../signature/testdata/neKodex_calldata.bin");
-        let account_gas_limits = hex!("00000000000000000000000000098a2100000000000000000000000000023dad");
+        let account_gas_limits =
+            hex!("00000000000000000000000000098a2100000000000000000000000000023dad");
         let pre_verification_gas = U256::from(70952u64).to_be_bytes::<32>();
         let gas_fees = hex!("00000000000000000000000001a39de00000000000000000000000000c028d49");
         let paymaster_and_data = hex!(
@@ -307,13 +332,17 @@ mod tests {
 
         let result = unsafe {
             wallet_compute_userop_hash(
-                sender.as_ptr(), nonce.as_ptr(),
-                init_code.as_ptr(), 0,
-                call_data.as_ptr(), call_data.len() as u32,
+                sender.as_ptr(),
+                nonce.as_ptr(),
+                init_code.as_ptr(),
+                0,
+                call_data.as_ptr(),
+                call_data.len() as u32,
                 account_gas_limits.as_ptr(),
                 pre_verification_gas.as_ptr(),
                 gas_fees.as_ptr(),
-                paymaster_and_data.as_ptr(), paymaster_and_data.len() as u32,
+                paymaster_and_data.as_ptr(),
+                paymaster_and_data.len() as u32,
                 entry_point_bytes.as_ptr(),
                 1,
                 out_hash.as_mut_ptr(),
@@ -332,9 +361,8 @@ mod tests {
         let userop_hash = hex!("0d3bcda18875420351920008f9219e06945a31beb0b2699af4cef7da6fdf1c4d");
         let mut out = [0u8; 69];
 
-        let result = unsafe {
-            wallet_compute_signing_preimage(userop_hash.as_ptr(), out.as_mut_ptr())
-        };
+        let result =
+            unsafe { wallet_compute_signing_preimage(userop_hash.as_ptr(), out.as_mut_ptr()) };
 
         assert_eq!(result, WalletResult::Ok as i32);
         assert_eq!(out[32], 0x05); // flags byte
@@ -406,8 +434,12 @@ mod tests {
 
         let result = unsafe {
             wallet_abi_encode_signature(
-                userop_hash.as_ptr(), r.as_ptr(), s.as_ptr(),
-                true, &mut out_ptr, &mut out_len,
+                userop_hash.as_ptr(),
+                r.as_ptr(),
+                s.as_ptr(),
+                true,
+                &mut out_ptr,
+                &mut out_len,
             )
         };
 

@@ -7,11 +7,7 @@ use wallet_kernel::{
 
 #[test]
 fn validator_data_is_three_words() {
-    let encoded = encode_webauthn_validator_data(
-        U256::from(1u64),
-        U256::from(2u64),
-        B256::ZERO,
-    );
+    let encoded = encode_webauthn_validator_data(U256::from(1u64), U256::from(2u64), B256::ZERO);
 
     assert_eq!(encoded.len(), 96);
 }
@@ -49,12 +45,7 @@ fn create2_prediction_matches_kernel_prediction() {
     let authenticator_id_hash = B256::ZERO;
     let salt = B256::ZERO;
 
-    let init_data = encode_initialize_call(
-        validator,
-        pub_key_x,
-        pub_key_y,
-        authenticator_id_hash,
-    );
+    let init_data = encode_initialize_call(validator, pub_key_x, pub_key_y, authenticator_id_hash);
     let actual_salt = compute_actual_salt(&init_data, salt);
     let init_code_hash = erc1967_init_code_hash(implementation);
 

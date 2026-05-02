@@ -1,0 +1,4 @@
+module CSpawn {
+    umbrella header "include/spawn.h"
+    export *
+}

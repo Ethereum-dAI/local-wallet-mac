@@ -19,9 +19,8 @@ pub const RP_ID: &str = DEFAULT_RP_ID;
 
 /// sha256(b"wallet")
 pub const RP_ID_HASH: [u8; 32] = [
-    0xe8, 0xd4, 0x40, 0x50, 0x87, 0x3d, 0xba, 0x86, 0x5a, 0xa7, 0xc1, 0x70, 0xab, 0x4c, 0xce,
-    0x64, 0xd9, 0x08, 0x39, 0xa3, 0x4d, 0xcf, 0xd6, 0xcf, 0x71, 0xd1, 0x4e, 0x02, 0x05, 0x44,
-    0x3b, 0x1b,
+    0xe8, 0xd4, 0x40, 0x50, 0x87, 0x3d, 0xba, 0x86, 0x5a, 0xa7, 0xc1, 0x70, 0xab, 0x4c, 0xce, 0x64,
+    0xd9, 0x08, 0x39, 0xa3, 0x4d, 0xcf, 0xd6, 0xcf, 0x71, 0xd1, 0x4e, 0x02, 0x05, 0x44, 0x3b, 0x1b,
 ];
 
 pub const DEFAULT_ORIGIN: &str = "https://wallet.local";
@@ -95,8 +94,16 @@ fn base64_encode(input: &[u8]) -> String {
     let mut i = 0;
     while i < input.len() {
         let b0 = input[i] as u32;
-        let b1 = if i + 1 < input.len() { input[i + 1] as u32 } else { 0 };
-        let b2 = if i + 2 < input.len() { input[i + 2] as u32 } else { 0 };
+        let b1 = if i + 1 < input.len() {
+            input[i + 1] as u32
+        } else {
+            0
+        };
+        let b2 = if i + 2 < input.len() {
+            input[i + 2] as u32
+        } else {
+            0
+        };
 
         let n = (b0 << 16) | (b1 << 8) | b2;
 
@@ -328,16 +335,28 @@ mod tests {
         let hash = [0x22u8; 32];
         let context = WebAuthnContext::default();
 
-        assert_eq!(build_authenticator_data(), build_authenticator_data_with_context(&context));
-        assert_eq!(build_client_data_json(&hash), build_client_data_json_with_context(&hash, &context));
-        assert_eq!(compute_signing_message(&hash), compute_signing_message_with_context(&hash, &context));
+        assert_eq!(
+            build_authenticator_data(),
+            build_authenticator_data_with_context(&context)
+        );
+        assert_eq!(
+            build_client_data_json(&hash),
+            build_client_data_json_with_context(&hash, &context)
+        );
+        assert_eq!(
+            compute_signing_message(&hash),
+            compute_signing_message_with_context(&hash, &context)
+        );
     }
 
     /// 6. Sign with P-256 using `sign_prehash` (matches Secure Enclave behaviour).
     #[test]
     fn signing_message_verifies_with_p256() {
-        use p256::ecdsa::{SigningKey, VerifyingKey, signature::hazmat::PrehashSigner, signature::hazmat::PrehashVerifier};
         use p256::ecdsa::Signature;
+        use p256::ecdsa::{
+            signature::hazmat::PrehashSigner, signature::hazmat::PrehashVerifier, SigningKey,
+            VerifyingKey,
+        };
 
         let hash = [0x01u8; 32];
         let (msg, _cdj) = compute_signing_message(&hash);
@@ -373,8 +392,8 @@ mod tests {
     }
 
     // Tiny shim so we don't need to add a new dependency just for the test.
-    fn rand_core_getrandom() -> impl p256::elliptic_curve::rand_core::CryptoRng
-        + p256::elliptic_curve::rand_core::RngCore
+    fn rand_core_getrandom(
+    ) -> impl p256::elliptic_curve::rand_core::CryptoRng + p256::elliptic_curve::rand_core::RngCore
     {
         use p256::elliptic_curve::rand_core::OsRng;
         OsRng

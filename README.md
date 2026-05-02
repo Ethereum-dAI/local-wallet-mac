@@ -1,122 +1,143 @@
 # Local Wallet
 
-Native macOS demo wallet plus reusable signing/tooling for Kernel smart accounts and WebAuthn P-256 flows.
+Local Wallet is a native macOS wallet prototype plus reusable Rust and Swift tooling for Kernel smart accounts, WebAuthn/P-256 signatures, and a local ERC-4337 bundler daemon.
 
-This repository is not the final product wallet yet. It currently contains:
+The repository currently contains two active tracks:
 
-- a signed macOS demo app that exercises the intended key-management and account-abstraction flow end to end
-- reusable Rust and Swift layers that are intended to outlive the demo app and become open-source developer tooling
+- a signed macOS demo app for Secure Enclave signing and Sepolia workbench flows
+- a Rust daemon stack for Ethereum mainnet verified reads, local bundling, Kernel allowlisting, EntryPoint simulation, raw `handleOps` submission, and receipt watching
 
-## Repo Layers
+This is not the final product wallet UX yet. Treat it as a working implementation repo with reusable protocol crates and a demo/reference app.
 
-- `wallet-macos/`
-  - Real signed macOS app target used as a demo/reference consumer
-  - Secure Enclave + Keychain persistence
-  - Local wallet metadata
-  - Demo UI for account inspection, funding, local UserOperation building, signing, and Sepolia submission
-- `swift-bridge/`
-  - Narrow Swift package that wraps the Rust FFI layer
-  - Candidate Apple SDK surface once the API stabilizes
-- `rust-core/crates/signature`
-  - Reusable Rust protocol/signature crate
-  - Intended public surface for WebAuthn/P-256 signing primitives
-- `rust-core/crates/kernel`
-  - Reusable Rust crate for Kernel-specific account initialization and address prediction
-  - Intended public surface for Kernel helper logic
-- `rust-core/crates/ffi`
-  - Internal C ABI bridge used by the Swift package and app
-  - Not intended as the primary public SDK yet
-- `website/`
-  - Minimal Vite website package for the demo project page and download link
-  - Placeholder UI until the final project page is designed
+## Repository Map
 
-## Repo Overview
+| Path | Purpose |
+|---|---|
+| `rust-core/` | Rust workspace for signature helpers, Kernel helpers, FFI, chain access, bundler logic, daemon API, SQLite store, and `wallet-node`. |
+| `rust-core/crates/wallet-node/` | Local wallet daemon binary. It serves authenticated JSON-RPC over Unix sockets or loopback HTTP. |
+| `rust-core/crates/wallet-bundler/` | ERC-4337 policy, UserOperation parsing, EntryPoint v0.7 helpers, Kernel allowlist, simulations, raw tx helpers, and watcher logic. |
+| `rust-core/crates/wallet-chain/` | Helios-backed verified chain adapter plus a mock adapter for tests. |
+| `rust-core/crates/wallet-node-api/` | Shared JSON-RPC method/error/body definitions and generated API version header. |
+| `rust-core/crates/wallet-node-store/` | SQLite persistence for UserOps, raw transactions, nonce reservations, receipts, bundler EOAs, and daemon metadata. |
+| `rust-core/crates/signature/` | Reusable WebAuthn/P-256 and EntryPoint v0.7 UserOperation hashing crate. |
+| `rust-core/crates/kernel/` | Reusable Kernel account initialization and CREATE2 prediction helpers. |
+| `rust-core/crates/ffi/` | Internal C ABI bridge used by Swift. |
+| `swift-bridge/` | Swift package wrapping the internal Rust FFI bridge. |
+| `wallet-macos/` | Signed macOS demo app and daemon spawn helper. |
+| `website/` | Vite site for the demo/download page and developer docs. |
+| `scripts/` | Build, packaging, fork-test, and signing-spike helper scripts. |
+| `tools/keychain-spike/` | Focused macOS Keychain entitlement spike. |
 
-The repository is organized as a layered stack:
+## Current Scope
 
-1. `wallet-macos`
-   - Signed macOS demo/reference app
-   - Owns Secure Enclave access, Keychain persistence, local metadata, UI, RPC orchestration, and hosted bundler submission
-   - Proves the end-to-end flow on Apple platforms
+The daemon path is currently scoped to:
 
-2. `swift-bridge`
-   - Apple-facing Swift wrapper over the internal C ABI
-   - Gives Swift code a cleaner API for hashing, signing-preimage construction, signature encoding, and Kernel prediction helpers
+- Ethereum mainnet
+- EntryPoint v0.7 at `0x0000000071727De22E5E9d8BAf0edAc6f37da032`
+- the app's fixed Kernel factory, implementation, and WebAuthn validator addresses
+- no paymaster support
+- no user-facing EntryPoint deposit management or reclaim UX
+- ETH transfer execution as the fork-tested transaction shape
+- a development Keychain fallback for the bundler EOA secret on macOS
 
-3. `rust-core/crates/ffi`
-   - Internal C ABI bridge between Swift and Rust
-   - Exists to support the Apple bridge layer
-   - Stays internal because its pointer/buffer ABI is tuned for this repo's Swift consumer, not for a stable public multi-language SDK
+Future chains, EntryPoint versions, Kernel module permutations, live signed-manifest promotion, recovery flows, ERC20/batch/delegate/executor paths, and production Keychain access-group validation are tracked separately in `docs/wallet-node-open-items.md`.
 
-4. `rust-core/crates/signature`
-   - Reusable Rust crate for deterministic signature/protocol primitives
-   - Owns UserOperation hashing, WebAuthn message construction, P-256 DER parsing, low-s normalization, and validator signature encoding
+## Fresh Clone Setup
 
-5. `rust-core/crates/kernel`
-   - Reusable Rust crate for Kernel-specific account helpers
-   - Owns ValidationId construction, `Kernel.initialize(...)` calldata, CREATE2 salt derivation, and counterfactual address prediction
+Install the usual platform tools first:
 
-6. `website`
-   - Vite site for the public demo/download page
-   - Lives in this repo for now so the website copy and downloadable demo can evolve together
+- Rust toolchain matching `rust-core/Cargo.toml`
+- Xcode and command-line tools for Swift/macOS work
+- `cbindgen` for generating the Swift bridge header
+- Foundry (`anvil`, `cast`) for mainnet-fork checks
+- Node.js/npm for the website
 
-The intended public developer surfaces are:
+Build and test the Rust workspace:
 
-- Rust developers: `wallet-signature` and `wallet-kernel`
-- Apple developers: `swift-bridge`
-- Internal plumbing only: `wallet-ffi`
+```bash
+cd rust-core
+cargo test --workspace
+```
 
-## Open-Source Plan
-
-This repo serves two products in parallel:
-
-1. `wallet-macos` as the demo/reference app for the wallet architecture
-2. reusable developer tooling from `rust-core`
-
-The current release posture is:
-
-- `wallet-signature` is the first publishable Rust crate
-- `wallet-kernel` is the second publishable Rust crate
-- `wallet-ffi` remains internal for now
-- `WalletBridge` stays available as the app-facing Swift wrapper, but is not yet treated as a stable SDK contract
-
-## OSS Release Hygiene
-
-For the open-source repo, the intended source-of-truth split is:
-
-- commit source code, tests, public markdown, and release metadata
-- ignore local editor state, OS noise, and build outputs
-- do not commit generated Rust build outputs or prebuilt bridge binaries
-- do not commit internal planning docs under `docs/` or `ARCHITECTURE.md`
-
-The repo now follows a generated-bridge policy:
-
-- `swift-bridge/Package.swift` expects a generated C header plus a static library from `scripts/build-ffi.sh`
-- those artifacts are intentionally ignored:
-  - `swift-bridge/Sources/WalletFFI/wallet_ffi.h`
-  - `swift-bridge/lib/libwallet_ffi.a`
-
-That means fresh clones should run:
+Build the Swift FFI bridge artifacts:
 
 ```bash
 ./scripts/build-ffi.sh
 ```
 
-before building Swift consumers such as `swift-bridge` tests or the macOS demo app.
-
-For local-only files and build products, see [`.gitignore`](.gitignore).
-
-## Setup
-
-Typical contributor bootstrap:
+Then test Swift consumers:
 
 ```bash
-./scripts/build-ffi.sh
-cd rust-core && cargo test
-cd ../swift-bridge && swift test
+cd swift-bridge
+swift test
+
+cd ../wallet-macos
+swift test
 ```
 
-Website bootstrap:
+Build the daemon:
+
+```bash
+cd rust-core
+cargo build -p wallet-node --release --locked
+```
+
+## Daemon Quick Start
+
+The daemon can run in loopback HTTP mode for manual development:
+
+```bash
+cd rust-core
+cargo run -p wallet-node -- --http 127.0.0.1:0 --print-ready --debug
+```
+
+It prints a ready JSON object containing the bound address, API version, and bearer token. Requests must use:
+
+```text
+Authorization: Bearer <token>
+```
+
+The macOS app integration path uses the Unix-socket mode through `wallet-macos/Sources/Spawn`:
+
+```text
+wallet-node --ready-fd 3 --alive-fd 4
+```
+
+See `rust-core/crates/wallet-node/README.md` for daemon configuration, supported methods, lifecycle, and operational notes.
+
+## Mainnet Fork Check
+
+The deterministic Kernel/EntryPoint fork fixture lives in `rust-core/crates/wallet-node/tests/mainnet_fork_kernel.rs`.
+
+Run it with an archive-capable Ethereum mainnet RPC:
+
+```bash
+ETH_RPC_URL=https://your-mainnet-rpc.example \
+WALLET_FORK_BLOCK_NUMBER=25001071 \
+scripts/run-kernel-mainnet-fork-check.sh
+```
+
+The script also reads `.env` by default. Use `.env.example` as a template. Do not commit live RPC secrets.
+
+The fixture validates pinned Kernel bytecode, deployed proxy behavior, EntryPointSimulations state override, deterministic WebAuthn signing, a real ETH-transfer `handleOps`, and a 50-send bundler EOA flatness run.
+
+## Generated Artifacts
+
+`swift-bridge` depends on generated files from `scripts/build-ffi.sh`:
+
+- `swift-bridge/Sources/WalletFFI/wallet_ffi.h`
+- `swift-bridge/Sources/WalletFFI/wallet_node_api_version.h`
+- `swift-bridge/lib/libwallet_ffi.a`
+
+The generated C header and static library are build artifacts. Regenerate them after Rust FFI or API-version changes.
+
+## macOS Demo
+
+Open `LocalWallet.xcodeproj` in Xcode and run the `LocalWalletApp` scheme. The demo app currently exercises Secure Enclave key creation, Keychain-backed metadata, Kernel address prediction, Sepolia account inspection, local UserOperation building, and hosted Sepolia bundler submission when configured.
+
+See `wallet-macos/README.md` for signing and packaging details.
+
+## Website
 
 ```bash
 cd website
@@ -124,55 +145,24 @@ npm install
 npm run dev
 ```
 
-## Current SDK Boundary
+See `website/README.md` for release-page details.
 
-Reusable/public:
+## Documentation Index
 
-- UserOperation hashing
-- WebAuthn signing-preimage construction
-- P-256 low-s normalization
-- ABI encoding for Kernel WebAuthn validator signatures
-- Kernel validator-data encoding and `initialize(...)` calldata
-- Kernel CREATE2 salt derivation and counterfactual address prediction
-
-App-specific/internal:
-
-- Secure Enclave key lifecycle
-- Keychain access policy
-- biometrics and user presence UX
-- wallet metadata persistence
-- macOS UI and onboarding
-
-## Developer Entry Points
-
-Choose the layer based on what you are building:
-
-- Rust service, CLI, wallet backend, or test harness:
-  - use `wallet-signature` and `wallet-kernel` directly
-- Swift/macOS consumer:
-  - use `swift-bridge`
-- C ABI / other languages:
-  - technically possible through `wallet-ffi`, but not yet the intended stable public SDK
-
-## Demo Scope
-
-`wallet-macos` currently demonstrates:
-
-- Secure Enclave P-256 key creation, loading, and signing
-- Keychain-backed persistence of the wallet root key
-- precomputed Kernel smart-account address derivation
-- public-RPC inspection of deployment state and balance
-- local ERC-4337 UserOperation draft construction
-- hosted bundler gas estimation and submission on Ethereum Sepolia
-- in-app debug logging for bootstrap, inspection, signing, and submission
-
-It does not yet represent the final wallet product surface. Missing product layers still include:
-
-- broader onboarding and account lifecycle UX
-- richer transaction types and batching
-- production network/bundler/paymaster strategy
-- Helios/local infra integration
-- the eventual final UI/architecture decisions for the wallet app
+- `rust-core/README.md` - Rust workspace overview
+- `rust-core/crates/wallet-node/README.md` - daemon implementation and operation
+- `rust-core/crates/wallet-bundler/README.md` - bundler library
+- `rust-core/crates/wallet-chain/README.md` - Helios chain adapter
+- `rust-core/crates/wallet-node-api/README.md` - JSON-RPC API crate
+- `rust-core/crates/wallet-node-store/README.md` - SQLite store
+- `rust-core/crates/signature/README.md` - WebAuthn/P-256 helpers
+- `rust-core/crates/kernel/README.md` - Kernel account helpers
+- `rust-core/crates/ffi/README.md` - internal C ABI
+- `swift-bridge/README.md` - Swift wrapper
+- `wallet-macos/README.md` - macOS demo app
+- `wallet-macos/Sources/Spawn/README.md` - daemon spawn shim
+- `scripts/README.md` - local helper scripts
+- `tools/keychain-spike/README.md` - Keychain entitlement spike
 
 ## Licensing
 

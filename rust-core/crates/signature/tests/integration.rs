@@ -1,6 +1,6 @@
-use wallet_signature::*;
 use alloy_primitives::{address, Bytes, FixedBytes, U256};
 use hex_literal::hex;
+use wallet_signature::*;
 
 #[test]
 fn full_pipeline_signs_and_encodes() {
@@ -23,7 +23,10 @@ fn full_pipeline_signs_and_encodes() {
     assert!(client_data_json.contains("webauthn.get"));
 
     // 3. Sign with a test p256 key using prehash (matches Secure Enclave behavior)
-    use ::p256::ecdsa::{SigningKey, Signature, signature::hazmat::{PrehashSigner, PrehashVerifier}};
+    use ::p256::ecdsa::{
+        signature::hazmat::{PrehashSigner, PrehashVerifier},
+        Signature, SigningKey,
+    };
     use ::p256::elliptic_curve::rand_core::OsRng;
     let sk = SigningKey::random(&mut OsRng);
     let (sig, _): (Signature, _) = sk.sign_prehash(&signing_msg).unwrap();
@@ -54,7 +57,7 @@ fn full_pipeline_signs_and_encodes() {
 /// and that the Enclave signature verifies in Rust.
 #[test]
 fn real_enclave_signature_verifies() {
-    use ::p256::ecdsa::{Signature, VerifyingKey, signature::hazmat::PrehashVerifier};
+    use ::p256::ecdsa::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
     use ::p256::EncodedPoint;
 
     // Values from swift-probe run (real Secure Enclave output).
@@ -79,15 +82,9 @@ fn real_enclave_signature_verifies() {
     let (r, s) = normalise_low_s(r, s);
 
     // 3. Reconstruct public key and verify the Enclave signature
-    let point = EncodedPoint::from_affine_coordinates(
-        &pubkey_x.into(),
-        &pubkey_y.into(),
-        false,
-    );
-    let vk = VerifyingKey::from_encoded_point(&point)
-        .expect("invalid public key");
-    let sig = Signature::from_scalars(r, s)
-        .expect("invalid signature scalars");
+    let point = EncodedPoint::from_affine_coordinates(&pubkey_x.into(), &pubkey_y.into(), false);
+    let vk = VerifyingKey::from_encoded_point(&point).expect("invalid public key");
+    let sig = Signature::from_scalars(r, s).expect("invalid signature scalars");
 
     vk.verify_prehash(&signing_msg, &sig)
         .expect("Enclave signature must verify in Rust");

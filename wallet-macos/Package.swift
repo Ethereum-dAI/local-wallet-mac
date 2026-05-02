@@ -10,6 +10,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "WalletMacOSApp", targets: ["WalletMacOSApp"]),
+        .library(name: "SpawnHelper", targets: ["SpawnHelper"]),
     ],
     dependencies: [
         .package(path: "../swift-bridge"),
@@ -19,6 +20,7 @@ let package = Package(
             name: "WalletMacOSApp",
             dependencies: [
                 .product(name: "WalletSignature", package: "swift-bridge"),
+                "SpawnHelper",
             ],
             path: "Sources/WalletMacOSApp",
             resources: [
@@ -27,6 +29,21 @@ let package = Package(
             linkerSettings: [
                 .unsafeFlags(["-L", bridgeLibraryPath]),
             ]
+        ),
+        .target(
+            name: "CSpawn",
+            path: "Sources/Spawn",
+            publicHeadersPath: "include"
+        ),
+        .target(
+            name: "SpawnHelper",
+            dependencies: ["CSpawn"],
+            path: "Sources/SpawnHelper"
+        ),
+        .testTarget(
+            name: "SpawnHelperTests",
+            dependencies: ["SpawnHelper"],
+            path: "Tests/SpawnHelperTests"
         ),
     ]
 )

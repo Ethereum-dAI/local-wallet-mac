@@ -40,7 +40,7 @@ The daemon path is currently scoped to:
 - ETH transfer execution as the fork-tested transaction shape
 - a development Keychain fallback for the bundler EOA secret on macOS
 
-Future chains, EntryPoint versions, Kernel module permutations, live signed-manifest promotion, recovery flows, ERC20/batch/delegate/executor paths, and production Keychain access-group validation are tracked separately in `docs/wallet-node-open-items.md`.
+Future chains, EntryPoint versions, Kernel module permutations, live signed-manifest promotion, recovery flows, ERC20/batch/delegate/executor paths, and production Keychain access-group validation remain outside the current public scope.
 
 ## Fresh Clone Setup
 

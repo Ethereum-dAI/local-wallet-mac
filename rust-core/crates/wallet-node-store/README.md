@@ -1,5 +1,7 @@
 # wallet-node-store
 
+> **Status:** Open source under MIT/Apache-2.0. App-coupled, pre-1.0. The public JSON-RPC surface and stability policy for the daemon stack are documented in `rust-core/crates/wallet-node-api/README.md`. The SQLite schema and internal types in this crate may move between releases.
+
 `wallet-node-store` is the SQLite persistence layer for `wallet-node`.
 
 It owns schema migrations, typed repository helpers, and an async store actor used by the daemon to keep blocking SQLite work off the request path.

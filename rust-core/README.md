@@ -2,7 +2,7 @@
 
 `rust-core` is the Rust workspace for Local Wallet's protocol, daemon, storage, and FFI layers.
 
-It contains both reusable crates and app-internal infrastructure. The reusable pieces are `wallet-signature` and `wallet-kernel`; the daemon stack is currently internal to this repository.
+All crates are open source under MIT/Apache-2.0. They split into two stability tiers: `wallet-signature` and `wallet-kernel` are stable libraries with semver-managed APIs; the daemon stack is open source but app-coupled and pre-1.0 — its public JSON-RPC surface is documented in `crates/wallet-node-api/README.md`.
 
 ## Workspace Crates
 
@@ -80,12 +80,12 @@ That builds `wallet-ffi` for `aarch64-apple-darwin`, runs `cbindgen`, copies the
 
 ## Boundaries
 
-Reusable library surface:
+Stable library surface (semver):
 
 - `wallet-signature`
 - `wallet-kernel`
 
-Daemon/internal surface:
+App-coupled surface (open source, pre-1.0):
 
 - `wallet-node`
 - `wallet-bundler`
@@ -94,7 +94,7 @@ Daemon/internal surface:
 - `wallet-node-store`
 - `wallet-ffi`
 
-The daemon is scoped to Ethereum mainnet/Sepolia, EntryPoint v0.7, and the app's fixed Kernel/WebAuthn account path for now.
+The daemon is scoped to Ethereum mainnet/Sepolia, EntryPoint v0.7, and the app's fixed Kernel/WebAuthn account path for now. Its public JSON-RPC surface and stability policy are documented in `crates/wallet-node-api/README.md`.
 
 ## Workspace Layering
 

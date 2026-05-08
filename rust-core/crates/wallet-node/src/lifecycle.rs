@@ -167,6 +167,7 @@ pub async fn deliver_ready_event_to_fd(
     let event = crate::ready::ReadyEvent {
         token: event.token.clone(),
         api_version: event.api_version,
+        daemon_spawn_protocol: event.daemon_spawn_protocol,
         socket_path: event.socket_path.clone(),
         http_addr: event.http_addr.clone(),
     };

@@ -1,4 +1,5 @@
 pub const API_VERSION: u32 = 1;
+pub const DAEMON_SPAWN_PROTOCOL: u32 = 1;
 
 #[cfg(test)]
 mod tests {
@@ -7,6 +8,11 @@ mod tests {
     #[test]
     fn api_version_is_one() {
         assert_eq!(API_VERSION, 1);
+    }
+
+    #[test]
+    fn daemon_spawn_protocol_is_one() {
+        assert_eq!(DAEMON_SPAWN_PROTOCOL, 1);
     }
 
     #[test]

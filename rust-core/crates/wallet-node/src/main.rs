@@ -225,6 +225,7 @@ async fn main() -> ExitCode {
         let event = ReadyEvent {
             token: token.encoded(),
             api_version: wallet_node_api::API_VERSION,
+            daemon_spawn_protocol: wallet_node_api::DAEMON_SPAWN_PROTOCOL,
             socket_path: None,
             http_addr: Some(bound_addr.to_string()),
         };
@@ -256,6 +257,7 @@ async fn main() -> ExitCode {
         let event = ReadyEvent {
             token: token.encoded(),
             api_version: wallet_node_api::API_VERSION,
+            daemon_spawn_protocol: wallet_node_api::DAEMON_SPAWN_PROTOCOL,
             socket_path: Some(socket_path),
             http_addr: None,
         };

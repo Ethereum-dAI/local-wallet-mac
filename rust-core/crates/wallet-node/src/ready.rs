@@ -10,6 +10,7 @@ use std::path::PathBuf;
 pub struct ReadyEvent {
     pub token: String,
     pub api_version: u32,
+    pub daemon_spawn_protocol: u32,
     pub socket_path: Option<PathBuf>,
     pub http_addr: Option<String>,
 }
@@ -42,10 +43,29 @@ mod tests {
     use super::ReadyEvent;
 
     #[test]
+    fn serializes_daemon_spawn_protocol() {
+        let event = ReadyEvent {
+            token: "abc".to_string(),
+            api_version: 1,
+            daemon_spawn_protocol: 1,
+            socket_path: None,
+            http_addr: None,
+        };
+
+        let json = serde_json::to_string(&event).expect("serialize ready event");
+
+        assert_eq!(
+            json,
+            r#"{"token":"abc","apiVersion":1,"daemonSpawnProtocol":1,"socketPath":null,"httpAddr":null}"#
+        );
+    }
+
+    #[test]
     fn serializes_http_addr_with_null_socket_path() {
         let event = ReadyEvent {
             token: "abc".to_string(),
             api_version: 1,
+            daemon_spawn_protocol: 1,
             socket_path: None,
             http_addr: Some("127.0.0.1:1234".to_string()),
         };
@@ -54,7 +74,7 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"token":"abc","apiVersion":1,"socketPath":null,"httpAddr":"127.0.0.1:1234"}"#
+            r#"{"token":"abc","apiVersion":1,"daemonSpawnProtocol":1,"socketPath":null,"httpAddr":"127.0.0.1:1234"}"#
         );
     }
 
@@ -63,6 +83,7 @@ mod tests {
         let event = ReadyEvent {
             token: "abc".to_string(),
             api_version: 1,
+            daemon_spawn_protocol: 1,
             socket_path: Some("/tmp/x.sock".into()),
             http_addr: None,
         };
@@ -71,7 +92,7 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"token":"abc","apiVersion":1,"socketPath":"/tmp/x.sock","httpAddr":null}"#
+            r#"{"token":"abc","apiVersion":1,"daemonSpawnProtocol":1,"socketPath":"/tmp/x.sock","httpAddr":null}"#
         );
     }
 }

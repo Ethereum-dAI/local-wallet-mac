@@ -1,5 +1,7 @@
 # wallet-node-api
 
+> **Status:** Open source under MIT/Apache-2.0. App-coupled, pre-1.0. This crate centralizes the public wire surface for the daemon. Stability policy and the explicit list of stable methods/error codes/wire shapes are defined in the "Public Surface And Stability" section below (added in Phase 2 of the open-source-readiness work).
+
 `wallet-node-api` contains the shared JSON-RPC API definitions for `wallet-node` and its Swift/FFI consumers.
 
 It is intentionally small and dependency-light. It centralizes the method names, error-code namespace, request body parsing limits, JSON-RPC structs, and API version value.

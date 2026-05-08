@@ -1,7 +1,15 @@
+pub mod admin_action;
+pub mod audit_history;
+pub mod audit_report;
+pub mod audit_store;
 pub(crate) mod bundler_account;
 pub mod bundler_status;
 pub mod cancel_pending_operation;
+pub mod delete_bundler_eoa;
+pub mod install_bundler_eoa;
 pub mod pending_operations;
+pub(crate) mod relayer_audit;
+pub mod repair_store;
 pub(crate) mod replacement;
 pub mod rotate_bundler_eoa;
 pub mod wallet_status;

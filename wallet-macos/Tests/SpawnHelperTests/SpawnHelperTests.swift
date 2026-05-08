@@ -31,8 +31,10 @@ final class SpawnHelperTests: XCTestCase {
 
         var readyPipe: [Int32] = [-1, -1]
         var alivePipe: [Int32] = [-1, -1]
+        var secretPipe: [Int32] = [-1, -1]
         XCTAssertEqual(pipe(&readyPipe), 0)
         XCTAssertEqual(pipe(&alivePipe), 0)
+        XCTAssertEqual(pipe(&secretPipe), 0)
 
         var childPid: pid_t = -1
         var childReaped = false
@@ -41,6 +43,8 @@ final class SpawnHelperTests: XCTestCase {
             closeIfOpen(&readyPipe[1])
             closeIfOpen(&alivePipe[0])
             closeIfOpen(&alivePipe[1])
+            closeIfOpen(&secretPipe[0])
+            closeIfOpen(&secretPipe[1])
 
             if childPid > 0 && !childReaped {
                 let status = waitChildWithTimeout(pid: childPid, timeout: 1)
@@ -55,11 +59,22 @@ final class SpawnHelperTests: XCTestCase {
         try setCloseOnExec(readyPipe[1])
         try setCloseOnExec(alivePipe[0])
         try setCloseOnExec(alivePipe[1])
+        try setCloseOnExec(secretPipe[0])
+        try setCloseOnExec(secretPipe[1])
 
-        childPid = try spawnHelper(execPath: daemonBinPath, readyWrite: readyPipe[1], aliveRead: alivePipe[0])
+        childPid = try spawnHelper(
+            execPath: daemonBinPath,
+            readyWrite: readyPipe[1],
+            aliveRead: alivePipe[0],
+            secretRead: secretPipe[0]
+        )
 
         closeIfOpen(&readyPipe[1])
         closeIfOpen(&alivePipe[0])
+        closeIfOpen(&secretPipe[0])
+        let payload = #"{"keys":[{"keyRef":"bundler-eoa:default:1:1","secret":"0x0101010101010101010101010101010101010101010101010101010101010101"}]}"#
+        writeAll(fd: secretPipe[1], data: Data(payload.utf8))
+        closeIfOpen(&secretPipe[1])
 
         let readyData = readLineWithTimeout(fd: readyPipe[0], timeout: 5)
         XCTAssertFalse(readyData.isEmpty, "ready pipe should produce a JSON line")
@@ -132,6 +147,23 @@ private func readLineWithTimeout(fd: Int32, timeout: TimeInterval) -> Data {
 
     XCTFail("timed out waiting for ready pipe")
     return Data()
+}
+
+private func writeAll(fd: Int32, data: Data) {
+    data.withUnsafeBytes { buffer in
+        guard var base = buffer.baseAddress else {
+            return
+        }
+        var remaining = data.count
+        while remaining > 0 {
+            let written = Darwin.write(fd, base, remaining)
+            if written <= 0 {
+                return
+            }
+            base = base.advanced(by: written)
+            remaining -= written
+        }
+    }
 }
 
 private func waitChildWithTimeout(pid: pid_t, timeout: TimeInterval) -> Int32 {

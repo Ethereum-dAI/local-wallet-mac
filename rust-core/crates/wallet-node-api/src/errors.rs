@@ -21,6 +21,7 @@ pub const APIVERSION_MISMATCH: i64 = -32013;
 pub const WITHDRAW_AMOUNT_EXCEEDS_RECLAIMABLE: i64 = -32014;
 pub const HELIOS_STATE_OVERRIDE_UNSUPPORTED: i64 = -32015;
 pub const ACCOUNT_CODE_NOT_ALLOWLISTED: i64 = -32016;
+pub const SERVICE_UNAVAILABLE: i64 = -32099;
 pub const MAX_REQUEST_BODY_BYTES: usize = 262_144;
 
 impl JsonRpcError {
@@ -103,13 +104,14 @@ mod tests {
             WITHDRAW_AMOUNT_EXCEEDS_RECLAIMABLE,
             HELIOS_STATE_OVERRIDE_UNSUPPORTED,
             ACCOUNT_CODE_NOT_ALLOWLISTED,
+            SERVICE_UNAVAILABLE,
         ];
 
         assert_eq!(
             codes,
             [
                 -32001, -32002, -32003, -32004, -32005, -32006, -32007, -32008, -32009, -32010,
-                -32011, -32012, -32013, -32014, -32015, -32016,
+                -32011, -32012, -32013, -32014, -32015, -32016, -32099,
             ]
         );
     }

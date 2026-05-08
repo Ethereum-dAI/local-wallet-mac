@@ -23,10 +23,13 @@ pub mod p256;
 pub mod userop_hash;
 pub mod webauthn;
 
-pub use encoding::{abi_encode_dummy_signature, abi_encode_webauthn_signature};
+pub use encoding::{
+    abi_encode_dummy_signature, abi_encode_webauthn_signature, decode_use_precompiled,
+};
 pub use error::{Result, SignatureError};
 pub use p256::{der_to_raw, normalise_low_s};
 pub use userop_hash::{compute_userop_hash, PackedUserOperation, ENTRY_POINT_V07};
+pub use wallet_addresses::DAIMO_P256_VERIFIER_ADDRESS as DAIMO_P256_VERIFIER;
 pub use webauthn::{
     build_authenticator_data, build_authenticator_data_with_context, build_client_data_json,
     build_client_data_json_with_context, build_rp_id_hash, build_signature,
@@ -34,9 +37,6 @@ pub use webauthn::{
     WebAuthnContext, WebAuthnSignature, CHALLENGE_LOCATION, DEFAULT_ORIGIN, DEFAULT_RP_ID, ORIGIN,
     RESPONSE_TYPE_LOCATION, RP_ID, RP_ID_HASH,
 };
-
-/// Daimo P-256 verifier (fallback when RIP-7212 precompile unavailable).
-pub const DAIMO_P256_VERIFIER: &str = "0xc2b78104907F722DABAc4C69f826a522B2754De4";
 
 /// RIP-7212 P-256 precompile address.
 pub const P256_PRECOMPILE: &str = "0x0000000000000000000000000000000000000100";

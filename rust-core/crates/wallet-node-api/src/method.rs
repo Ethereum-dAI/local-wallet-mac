@@ -12,12 +12,28 @@ pub enum Method {
     WalletWalletStatus,
     #[serde(rename = "wallet_pendingOperations")]
     WalletPendingOperations,
+    #[serde(rename = "wallet_auditStore")]
+    WalletAuditStore,
+    #[serde(rename = "wallet_auditHistory")]
+    WalletAuditHistory,
+    #[serde(rename = "wallet_auditReport")]
+    WalletAuditReport,
+    #[serde(rename = "wallet_repairStore")]
+    WalletRepairStore,
     #[serde(rename = "wallet_cancelPendingOperation")]
     WalletCancelPendingOperation,
+    #[serde(rename = "wallet_beginAdminAction")]
+    WalletBeginAdminAction,
     #[serde(rename = "wallet_rotateBundlerEOA")]
     WalletRotateBundlerEOA,
+    #[serde(rename = "wallet_installBundlerEOA")]
+    WalletInstallBundlerEOA,
+    #[serde(rename = "wallet_deleteBundlerEOA")]
+    WalletDeleteBundlerEOA,
     #[serde(rename = "wallet_shutdown")]
     WalletShutdown,
+    #[serde(rename = "eth_chainId")]
+    EthChainId,
     #[serde(rename = "eth_getBalance")]
     EthGetBalance,
     #[serde(rename = "eth_getCode")]
@@ -49,16 +65,24 @@ pub enum Method {
 }
 
 impl Method {
-    pub fn from_str(s: &str) -> Option<Method> {
+    pub fn parse_wire_name(s: &str) -> Option<Method> {
         match s {
             "wallet_health" => Some(Method::WalletHealth),
             "wallet_networkStatus" => Some(Method::WalletNetworkStatus),
             "wallet_bundlerStatus" => Some(Method::WalletBundlerStatus),
             "wallet_walletStatus" => Some(Method::WalletWalletStatus),
             "wallet_pendingOperations" => Some(Method::WalletPendingOperations),
+            "wallet_auditStore" => Some(Method::WalletAuditStore),
+            "wallet_auditHistory" => Some(Method::WalletAuditHistory),
+            "wallet_auditReport" => Some(Method::WalletAuditReport),
+            "wallet_repairStore" => Some(Method::WalletRepairStore),
             "wallet_cancelPendingOperation" => Some(Method::WalletCancelPendingOperation),
+            "wallet_beginAdminAction" => Some(Method::WalletBeginAdminAction),
             "wallet_rotateBundlerEOA" => Some(Method::WalletRotateBundlerEOA),
+            "wallet_installBundlerEOA" => Some(Method::WalletInstallBundlerEOA),
+            "wallet_deleteBundlerEOA" => Some(Method::WalletDeleteBundlerEOA),
             "wallet_shutdown" => Some(Method::WalletShutdown),
+            "eth_chainId" => Some(Method::EthChainId),
             "eth_getBalance" => Some(Method::EthGetBalance),
             "eth_getCode" => Some(Method::EthGetCode),
             "eth_getTransactionCount" => Some(Method::EthGetTransactionCount),
@@ -84,9 +108,17 @@ impl Method {
             Method::WalletBundlerStatus => "wallet_bundlerStatus",
             Method::WalletWalletStatus => "wallet_walletStatus",
             Method::WalletPendingOperations => "wallet_pendingOperations",
+            Method::WalletAuditStore => "wallet_auditStore",
+            Method::WalletAuditHistory => "wallet_auditHistory",
+            Method::WalletAuditReport => "wallet_auditReport",
+            Method::WalletRepairStore => "wallet_repairStore",
             Method::WalletCancelPendingOperation => "wallet_cancelPendingOperation",
+            Method::WalletBeginAdminAction => "wallet_beginAdminAction",
             Method::WalletRotateBundlerEOA => "wallet_rotateBundlerEOA",
+            Method::WalletInstallBundlerEOA => "wallet_installBundlerEOA",
+            Method::WalletDeleteBundlerEOA => "wallet_deleteBundlerEOA",
             Method::WalletShutdown => "wallet_shutdown",
+            Method::EthChainId => "eth_chainId",
             Method::EthGetBalance => "eth_getBalance",
             Method::EthGetCode => "eth_getCode",
             Method::EthGetTransactionCount => "eth_getTransactionCount",
@@ -116,9 +148,17 @@ mod tests {
             Method::WalletBundlerStatus,
             Method::WalletWalletStatus,
             Method::WalletPendingOperations,
+            Method::WalletAuditStore,
+            Method::WalletAuditHistory,
+            Method::WalletAuditReport,
+            Method::WalletRepairStore,
             Method::WalletCancelPendingOperation,
+            Method::WalletBeginAdminAction,
             Method::WalletRotateBundlerEOA,
+            Method::WalletInstallBundlerEOA,
+            Method::WalletDeleteBundlerEOA,
             Method::WalletShutdown,
+            Method::EthChainId,
             Method::EthGetBalance,
             Method::EthGetCode,
             Method::EthGetTransactionCount,
@@ -139,12 +179,12 @@ mod tests {
     #[test]
     fn all_variants_round_trip_through_wire_name() {
         for method in all_methods() {
-            assert_eq!(Method::from_str(method.as_str()), Some(method));
+            assert_eq!(Method::parse_wire_name(method.as_str()), Some(method));
         }
     }
 
     #[test]
     fn unknown_method_returns_none() {
-        assert_eq!(Method::from_str("nonsense"), None);
+        assert_eq!(Method::parse_wire_name("nonsense"), None);
     }
 }

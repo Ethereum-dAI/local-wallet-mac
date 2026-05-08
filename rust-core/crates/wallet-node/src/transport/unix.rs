@@ -1,7 +1,7 @@
-use std::io;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::{io, sync::Arc};
 
 use bytes::Bytes;
 use http_body_util::Full;
@@ -12,17 +12,20 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::watch;
+use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinSet;
-use tokio::time::timeout;
+use tokio::{io::AsyncWriteExt, time::timeout};
 
 use super::handler::{
-    body_too_large_response, drain_with_deadline, read_body_limited, DrainResult, Handler,
+    body_too_large_response, can_accept_connection, drain_with_deadline, read_body_limited,
+    with_connection_deadline, DrainResult, Handler, REQUEST_DEADLINE,
 };
 use super::TransportError;
 
 const STALE_SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const CONNECTION_CAP_RETRY_AFTER_SECONDS: u64 = 1;
+const MAX_REJECTION_WRITERS: usize = 16;
 
 pub async fn serve(
     socket_path: PathBuf,
@@ -33,6 +36,7 @@ pub async fn serve(
 
     let listener = UnixListener::bind(&socket_path).map_err(TransportError::BindFailed)?;
     let mut connections = JoinSet::new();
+    let rejection_writers = Arc::new(Semaphore::new(MAX_REJECTION_WRITERS));
 
     let parent = socket_path.parent().ok_or_else(|| {
         TransportError::Io(io::Error::new(
@@ -62,6 +66,20 @@ pub async fn serve(
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
+                if !can_accept_connection(connections.len()) {
+                    tracing::warn!(
+                        event = "wallet_node_unix_connection_limit_reached",
+                        active_connections = connections.len(),
+                        "dropping Unix connection because the active connection cap was reached"
+                    );
+                    if let Ok(permit) = rejection_writers.clone().try_acquire_owned() {
+                        tokio::spawn(async move {
+                            reject_connection_cap(stream).await;
+                            drop(permit);
+                        });
+                    }
+                    continue;
+                }
                 let connection_handler = handler.clone();
 
                 connections.spawn(async move {
@@ -70,12 +88,21 @@ pub async fn serve(
                         handle_request(request, connection_handler.clone())
                     });
 
-                    if let Err(err) = http1::Builder::new()
+                    match with_connection_deadline(
+                        REQUEST_DEADLINE,
+                        http1::Builder::new()
                         .keep_alive(false)
-                        .serve_connection(io, service)
-                        .await
+                        .serve_connection(io, service),
+                    )
+                    .await
                     {
-                        eprintln!("wallet-node unix connection failed: {err}");
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => eprintln!("wallet-node unix connection failed: {err}"),
+                        Err(_) => tracing::warn!(
+                            event = "wallet_node_unix_connection_timed_out",
+                            deadline_ms = REQUEST_DEADLINE.as_millis(),
+                            "closing Unix connection after request deadline"
+                        ),
                     }
                 });
             }
@@ -103,6 +130,24 @@ pub async fn serve(
     Ok(())
 }
 
+async fn reject_connection_cap(mut stream: UnixStream) {
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","error":{{"code":{},"message":"Service unavailable: connection cap"}},"id":null}}"#,
+        wallet_node_api::SERVICE_UNAVAILABLE
+    );
+    let response = format!(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        CONNECTION_CAP_RETRY_AFTER_SECONDS,
+        body.len(),
+        body
+    );
+    let _ = timeout(
+        Duration::from_secs(CONNECTION_CAP_RETRY_AFTER_SECONDS),
+        stream.write_all(response.as_bytes()),
+    )
+    .await;
+}
+
 async fn check_stale_socket(socket_path: &Path) -> Result<(), TransportError> {
     let metadata = match tokio::fs::symlink_metadata(socket_path).await {
         Ok(metadata) => metadata,
@@ -119,7 +164,7 @@ async fn check_stale_socket(socket_path: &Path) -> Result<(), TransportError> {
     if file_type.is_symlink() {
         return Err(TransportError::StaleSocketCheckFailed {
             path: socket_path.to_path_buf(),
-            source: io::Error::new(io::ErrorKind::Other, "unexpected symlink at socket path"),
+            source: io::Error::other("unexpected symlink at socket path"),
         });
     }
 

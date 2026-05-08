@@ -74,6 +74,7 @@ pub async fn handle(
     } else {
         U256::ZERO
     };
+    let receipt_state = receipt_state_for_sender(state, smart_account).await?;
     Ok(serde_json::json!({
         "smartAccount": format!("{smart_account:#x}"),
         "accountBalance": wallet_bundler::gas::u256_hex(account_balance),
@@ -82,7 +83,45 @@ pub async fn handle(
         "gasReserve": wallet_bundler::gas::u256_hex(entry_point_deposit),
         "readyToSend": account_balance > U256::ZERO,
         "readyToSendReason": if account_balance > U256::ZERO { Value::Null } else { Value::String("insufficient_smart_account_balance".to_string()) },
+        "receiptState": receipt_state,
         "blockNumber": head.number,
         "blockHash": format!("{:#x}", head.hash)
+    }))
+}
+
+async fn receipt_state_for_sender(
+    state: &DaemonState,
+    smart_account: Address,
+) -> Result<Value, wallet_node_api::JsonRpcError> {
+    let pending = state
+        .store
+        .user_ops_list_pending()
+        .await
+        .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
+    let sender = format!("{smart_account:#x}");
+    let mut tentative = Vec::new();
+    let mut invalidated = Vec::new();
+    for op in pending
+        .into_iter()
+        .filter(|op| op.sender.eq_ignore_ascii_case(&sender))
+    {
+        let Some(receipt) = state
+            .store
+            .receipt_get(&op.user_op_hash)
+            .await
+            .map_err(|_| wallet_node_api::JsonRpcError::internal())?
+        else {
+            continue;
+        };
+        if receipt.tentative {
+            tentative.push(op.user_op_hash.clone());
+        }
+        if receipt.invalidated {
+            invalidated.push(op.user_op_hash);
+        }
+    }
+    Ok(serde_json::json!({
+        "tentativeUserOps": tentative,
+        "invalidatedUserOps": invalidated
     }))
 }

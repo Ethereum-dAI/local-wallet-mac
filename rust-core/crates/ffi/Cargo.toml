@@ -14,6 +14,8 @@ wallet-signature  = { path = "../signature" }
 wallet-kernel     = { path = "../kernel" }
 alloy-primitives  = { workspace = true }
 sha2              = { workspace = true }
+secp256k1         = { version = "0.30", features = ["rand"] }
+zeroize           = { workspace = true }
 
 [dev-dependencies]
 hex-literal = { workspace = true }

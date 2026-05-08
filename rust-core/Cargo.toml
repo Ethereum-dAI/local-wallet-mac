@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/wallet-addresses",
     "crates/signature",
     "crates/kernel",
     "crates/ffi",
@@ -37,3 +38,4 @@ rusqlite         = { version = "0.32", features = ["bundled"] }
 rusqlite_migration = "1"
 tracing-appender = "0.2"
 hex              = "0.4"
+zeroize          = "1"

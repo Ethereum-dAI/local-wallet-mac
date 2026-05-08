@@ -29,16 +29,18 @@ int posix_spawn_file_actions_init(posix_spawn_file_actions_t *file_actions);
 enum {
     WALLET_NODE_READY_FD = 3,
     WALLET_NODE_ALIVE_FD = 4,
+    WALLET_NODE_SECRET_FD = 5,
 };
 
-static int duplicate_for_spawn_if_needed(int fd, int *owned_fd) {
+static int duplicate_for_spawn_if_needed(int fd, int target_fd, int *owned_fd) {
     *owned_fd = -1;
 
-    if (fd != WALLET_NODE_READY_FD) {
+    if (fd == target_fd || (fd != WALLET_NODE_READY_FD && fd != WALLET_NODE_ALIVE_FD &&
+                            fd != WALLET_NODE_SECRET_FD)) {
         return 0;
     }
 
-    int duplicated = fcntl(fd, F_DUPFD_CLOEXEC, WALLET_NODE_ALIVE_FD + 1);
+    int duplicated = fcntl(fd, F_DUPFD_CLOEXEC, WALLET_NODE_SECRET_FD + 1);
     if (duplicated == -1) {
         return errno;
     }
@@ -48,7 +50,8 @@ static int duplicate_for_spawn_if_needed(int fd, int *owned_fd) {
 }
 
 static int add_close_if_extra(posix_spawn_file_actions_t *actions, int fd) {
-    if (fd == WALLET_NODE_READY_FD || fd == WALLET_NODE_ALIVE_FD) {
+    if (fd == WALLET_NODE_READY_FD || fd == WALLET_NODE_ALIVE_FD ||
+        fd == WALLET_NODE_SECRET_FD) {
         return 0;
     }
 
@@ -58,37 +61,73 @@ static int add_close_if_extra(posix_spawn_file_actions_t *actions, int fd) {
 int wallet_node_spawn_helper(const char *exec_path,
                              int ready_write_fd,
                              int alive_read_fd,
+                             int secret_read_fd,
                              pid_t *out_pid) {
     if (exec_path == NULL || exec_path[0] == '\0' || out_pid == NULL ||
-        ready_write_fd < 0 || alive_read_fd < 0 || ready_write_fd == alive_read_fd) {
+        ready_write_fd < 0 || alive_read_fd < 0 || secret_read_fd < 0 ||
+        ready_write_fd == alive_read_fd || ready_write_fd == secret_read_fd ||
+        alive_read_fd == secret_read_fd) {
         return EINVAL;
     }
 
+    int owned_ready_fd = -1;
     int owned_alive_fd = -1;
-    int err = duplicate_for_spawn_if_needed(alive_read_fd, &owned_alive_fd);
+    int owned_secret_fd = -1;
+    int err = duplicate_for_spawn_if_needed(ready_write_fd, WALLET_NODE_READY_FD, &owned_ready_fd);
     if (err != 0) {
         return err;
     }
-    int spawn_alive_fd = owned_alive_fd == -1 ? alive_read_fd : owned_alive_fd;
-
-    posix_spawn_file_actions_t actions;
-    err = posix_spawn_file_actions_init(&actions);
+    int spawn_ready_fd = owned_ready_fd == -1 ? ready_write_fd : owned_ready_fd;
+    err = duplicate_for_spawn_if_needed(alive_read_fd, WALLET_NODE_ALIVE_FD, &owned_alive_fd);
     if (err != 0) {
+        if (owned_ready_fd != -1) {
+            close(owned_ready_fd);
+        }
+        return err;
+    }
+    int spawn_alive_fd = owned_alive_fd == -1 ? alive_read_fd : owned_alive_fd;
+    err = duplicate_for_spawn_if_needed(secret_read_fd, WALLET_NODE_SECRET_FD, &owned_secret_fd);
+    if (err != 0) {
+        if (owned_ready_fd != -1) {
+            close(owned_ready_fd);
+        }
         if (owned_alive_fd != -1) {
             close(owned_alive_fd);
         }
         return err;
     }
+    int spawn_secret_fd = owned_secret_fd == -1 ? secret_read_fd : owned_secret_fd;
 
-    err = posix_spawn_file_actions_adddup2(&actions, ready_write_fd, WALLET_NODE_READY_FD);
+    posix_spawn_file_actions_t actions;
+    err = posix_spawn_file_actions_init(&actions);
+    if (err != 0) {
+        if (owned_ready_fd != -1) {
+            close(owned_ready_fd);
+        }
+        if (owned_alive_fd != -1) {
+            close(owned_alive_fd);
+        }
+        if (owned_secret_fd != -1) {
+            close(owned_secret_fd);
+        }
+        return err;
+    }
+
+    err = posix_spawn_file_actions_adddup2(&actions, spawn_ready_fd, WALLET_NODE_READY_FD);
     if (err == 0) {
         err = posix_spawn_file_actions_adddup2(&actions, spawn_alive_fd, WALLET_NODE_ALIVE_FD);
     }
     if (err == 0) {
-        err = add_close_if_extra(&actions, ready_write_fd);
+        err = posix_spawn_file_actions_adddup2(&actions, spawn_secret_fd, WALLET_NODE_SECRET_FD);
+    }
+    if (err == 0) {
+        err = add_close_if_extra(&actions, spawn_ready_fd);
     }
     if (err == 0) {
         err = add_close_if_extra(&actions, spawn_alive_fd);
+    }
+    if (err == 0) {
+        err = add_close_if_extra(&actions, spawn_secret_fd);
     }
 
     if (err == 0) {
@@ -98,6 +137,8 @@ int wallet_node_spawn_helper(const char *exec_path,
             "3",
             "--alive-fd",
             "4",
+            "--secret-fd",
+            "5",
             NULL,
         };
 
@@ -109,8 +150,14 @@ int wallet_node_spawn_helper(const char *exec_path,
     }
 
     int destroy_err = posix_spawn_file_actions_destroy(&actions);
+    if (owned_ready_fd != -1) {
+        close(owned_ready_fd);
+    }
     if (owned_alive_fd != -1) {
         close(owned_alive_fd);
+    }
+    if (owned_secret_fd != -1) {
+        close(owned_secret_fd);
     }
 
     if (err != 0) {

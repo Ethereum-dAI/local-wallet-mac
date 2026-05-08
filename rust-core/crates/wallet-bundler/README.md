@@ -10,13 +10,12 @@ It does not run a server and does not own secrets. It provides deterministic hel
 - Compute local gas estimates from EntryPoint validation data.
 - Expose Pimlico-shaped gas price responses from configured policy caps.
 - Enforce bundler policy, including fee caps, one-op bundles, no paymasters, and replacement bump limits.
-- Validate the current mainnet-only Kernel allowlist:
-  - pinned Kernel factory
-  - pinned Kernel implementation
-  - pinned WebAuthn validator
-  - deterministic Solady ERC-1967 proxy runtime
-  - ERC-1967 implementation slot
-  - pinned WebAuthn root validator
+- Validate the current mainnet/Sepolia Kernel allowlist:
+  - pinned Kernel factory address + chain-scoped factory code hash
+  - pinned Kernel implementation address + chain-scoped implementation code hash
+  - pinned WebAuthn validator address + chain-scoped validator code hash
+  - deterministic Solady ERC-1967 proxy runtime + ERC-1967 implementation slot
+  - pinned WebAuthn root validator id resolved from `rootValidator()`
   - nonce key zero
 - Encode EntryPoint v0.7 calls:
   - `handleOps([op], beneficiary)`
@@ -34,7 +33,7 @@ It does not run a server and does not own secrets. It provides deterministic hel
 
 Supported:
 
-- Ethereum mainnet assumptions
+- Ethereum mainnet and Sepolia assumptions
 - EntryPoint v0.7
 - no paymasters
 - app-shaped Kernel WebAuthn accounts
@@ -64,8 +63,8 @@ Not a generic bundler:
 | `receipt` | `UserOperationEvent` topic and ABI-data decoding. |
 | `funding` | Smart-account minimum balance, shortfall, top-up display helpers. |
 | `execution` | ERC-7579 single-call and EntryPoint `withdrawTo` decoding. |
-| `manifest` | Inert signed-manifest schema and verification helpers for future allowlist promotion. |
-| `watcher` | Replacement-candidate helpers. |
+| `manifest` | Ed25519-verifying signed-manifest schema with 30-day max lifetime, denylist precedence, and effective-additions lookup. Runtime promotion is disabled in non-debug daemon builds and the runtime allowlist resolver does not consult manifest additions today. |
+| `watcher` | Same-nonce replacement-candidate helpers and post-submit receipt reconciliation (`reconcile_once`) used by the daemon's receipt watcher. |
 
 ## Module Flow
 

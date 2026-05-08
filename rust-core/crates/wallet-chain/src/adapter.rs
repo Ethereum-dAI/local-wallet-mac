@@ -60,4 +60,8 @@ pub trait ChainAdapter: Send + Sync {
     fn offline_reason(&self) -> Option<&'static str> {
         None
     }
+
+    async fn current_gas_price(&self) -> Result<U256, ChainError>;
+
+    async fn current_max_priority_fee_per_gas(&self) -> Result<U256, ChainError>;
 }

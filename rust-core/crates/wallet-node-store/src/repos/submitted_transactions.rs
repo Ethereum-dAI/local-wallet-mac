@@ -2,11 +2,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, Error};
 
-use crate::{StoreError, SubmittedTransaction, SubmittedTxStatus};
+use crate::{AbandonedSubmission, StoreError, SubmittedTransaction, SubmittedTxStatus};
 
 const TABLE: &str = "submitted_transactions";
 const INSERT_SQL: &str = "INSERT INTO submitted_transactions (tx_hash, user_op_hash, chain_id, bundler_address, nonce, raw_tx, max_fee_per_gas, max_priority_fee_per_gas, status, replacement_of, submitted_at_block, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 const SELECT_COLUMNS: &str = "tx_hash, user_op_hash, chain_id, bundler_address, nonce, raw_tx, max_fee_per_gas, max_priority_fee_per_gas, status, replacement_of, submitted_at_block, created_at, updated_at";
+type SubmittedTxRow = (
+    String,
+    String,
+    u64,
+    String,
+    u64,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+    i64,
+    i64,
+);
 
 pub(crate) fn submitted_tx_insert(
     conn: &Connection,
@@ -98,6 +113,77 @@ pub(crate) fn submitted_txs_list_for_watcher(
     Ok(txs)
 }
 
+pub(crate) fn submitted_txs_list_all(
+    conn: &Connection,
+) -> Result<Vec<SubmittedTransaction>, StoreError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SELECT_COLUMNS} FROM submitted_transactions ORDER BY updated_at"
+    ))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, u64>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, u64>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, Option<String>>(9)?,
+            row.get::<_, Option<i64>>(10)?,
+            row.get::<_, i64>(11)?,
+            row.get::<_, i64>(12)?,
+        ))
+    })?;
+
+    let mut txs = Vec::new();
+    for row in rows {
+        txs.push(submitted_tx_from_row(row?)?);
+    }
+
+    Ok(txs)
+}
+
+pub(crate) fn submitted_txs_abandon_for_bundler(
+    conn: &mut Connection,
+    chain_id: u64,
+    bundler_address: &str,
+) -> Result<Vec<AbandonedSubmission>, StoreError> {
+    let tx = conn.transaction()?;
+    let mut abandoned = Vec::new();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT tx_hash, nonce FROM submitted_transactions \
+             WHERE chain_id = ? AND lower(bundler_address) = lower(?) \
+             AND status IN ('submitting', 'submitted') \
+             ORDER BY nonce, tx_hash",
+        )?;
+        let rows = stmt.query_map(params![chain_id, bundler_address], |row| {
+            Ok(AbandonedSubmission {
+                tx_hash: row.get::<_, String>(0)?,
+                nonce: row.get::<_, u64>(1)?,
+            })
+        })?;
+        for row in rows {
+            abandoned.push(row?);
+        }
+    }
+
+    if !abandoned.is_empty() {
+        tx.execute(
+            "UPDATE submitted_transactions \
+             SET status = 'abandoned', updated_at = ? \
+             WHERE chain_id = ? AND lower(bundler_address) = lower(?) \
+             AND status IN ('submitting', 'submitted')",
+            params![now_unix_seconds(), chain_id, bundler_address],
+        )?;
+    }
+
+    tx.commit()?;
+    Ok(abandoned)
+}
+
 pub(crate) fn submitted_txs_replace(
     conn: &mut Connection,
     old_tx_hash: &str,
@@ -170,23 +256,7 @@ fn insert_submitted_tx(conn: &Connection, tx: SubmittedTransaction) -> Result<()
     Ok(())
 }
 
-fn submitted_tx_from_row(
-    row: (
-        String,
-        String,
-        u64,
-        String,
-        u64,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<i64>,
-        i64,
-        i64,
-    ),
-) -> Result<SubmittedTransaction, StoreError> {
+fn submitted_tx_from_row(row: SubmittedTxRow) -> Result<SubmittedTransaction, StoreError> {
     let (
         tx_hash,
         user_op_hash,
@@ -313,6 +383,7 @@ mod tests {
             ("0xincluded", SubmittedTxStatus::Included),
             ("0xdropped", SubmittedTxStatus::Dropped),
             ("0xreplaced", SubmittedTxStatus::Replaced),
+            ("0xabandoned", SubmittedTxStatus::Abandoned),
             ("0xfailed", SubmittedTxStatus::Failed),
         ];
 

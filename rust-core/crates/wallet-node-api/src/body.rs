@@ -10,11 +10,20 @@ pub fn parse_body_with_max(bytes: &[u8], max: usize) -> Result<JsonRpcRequest, J
         return Err(JsonRpcError::body_too_large_with_max(bytes.len(), max));
     }
 
-    serde_json::from_slice::<JsonRpcRequest>(bytes).map_err(|e| JsonRpcError {
+    let request = serde_json::from_slice::<JsonRpcRequest>(bytes).map_err(|e| JsonRpcError {
         code: INVALID_REQUEST,
         message: format!("Invalid request: {}", e),
         data: None,
-    })
+    })?;
+    if request.jsonrpc != "2.0" {
+        return Err(JsonRpcError {
+            code: INVALID_REQUEST,
+            message: "Invalid request: jsonrpc must be \"2.0\"".to_string(),
+            data: None,
+        });
+    }
+
+    Ok(request)
 }
 
 #[cfg(test)]
@@ -31,7 +40,7 @@ mod tests {
 
         let mut payload = Vec::with_capacity(len);
         payload.extend_from_slice(prefix);
-        payload.extend(std::iter::repeat(b'a').take(padding_len));
+        payload.extend(std::iter::repeat_n(b'a', padding_len));
         payload.extend_from_slice(suffix);
         payload
     }
@@ -51,6 +60,22 @@ mod tests {
 
         assert_eq!(request.jsonrpc, "2.0");
         assert_eq!(request.method, "wallet_health");
+    }
+
+    #[test]
+    fn parse_body_rejects_jsonrpc_one_dot_zero() {
+        let payload = br#"{"jsonrpc":"1.0","method":"wallet_health","params":null,"id":1}"#;
+        let error = parse_body(payload).expect_err("wrong jsonrpc version should fail");
+
+        assert_eq!(error.code, INVALID_REQUEST);
+    }
+
+    #[test]
+    fn parse_body_rejects_unknown_jsonrpc_version() {
+        let payload = br#"{"jsonrpc":"banana","method":"wallet_health","params":null,"id":1}"#;
+        let error = parse_body(payload).expect_err("wrong jsonrpc version should fail");
+
+        assert_eq!(error.code, INVALID_REQUEST);
     }
 
     #[test]

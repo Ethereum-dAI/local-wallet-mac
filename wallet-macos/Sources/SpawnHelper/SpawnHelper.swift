@@ -18,10 +18,15 @@ public struct SpawnError: Error, LocalizedError {
     }
 }
 
-public func spawnHelper(execPath: String, readyWrite: Int32, aliveRead: Int32) throws -> pid_t {
+public func spawnHelper(
+    execPath: String,
+    readyWrite: Int32,
+    aliveRead: Int32,
+    secretRead: Int32
+) throws -> pid_t {
     var pid = pid_t()
     let result = execPath.withCString { execPathPointer in
-        wallet_node_spawn_helper(execPathPointer, readyWrite, aliveRead, &pid)
+        wallet_node_spawn_helper(execPathPointer, readyWrite, aliveRead, secretRead, &pid)
     }
 
     if result != 0 {

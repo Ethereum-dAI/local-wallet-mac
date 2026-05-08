@@ -50,3 +50,11 @@ current descriptor table and matches the daemon's fd lifecycle tests.
 - Spawn errors: `wallet_node_spawn_helper` returns the `errno`-style integer
   from `posix_spawn` or file-action setup; the Swift wrapper surfaces this as
   `SpawnError`.
+
+## Daemon-Side Lifecycle
+
+The spawned daemon owns two complementary lifecycle guarantees on top of the
+fd-4 alive pipe: it watches fd `4` for EOF and shuts down when the parent app
+closes its end, and it independently exits when `getppid() == 1` (orphan
+backstop) — so the daemon dies even if the alive pipe is bypassed or the parent
+crashes without cleanly closing it.

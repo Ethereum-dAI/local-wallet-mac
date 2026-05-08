@@ -8,6 +8,7 @@
 //!
 //! Signing message: sha256(authenticatorData || sha256(clientDataJSON))
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
@@ -74,55 +75,11 @@ impl Default for WebAuthnContext {
 
 /// RFC 4648 §5 base64url encoding without padding characters.
 pub fn base64url_encode_nopad(input: &[u8]) -> String {
-    // Standard base64 alphabet replaced: '+' -> '-', '/' -> '_', no '='
-    let encoded = base64_encode(input);
-    encoded
-        .replace('+', "-")
-        .replace('/', "_")
-        .trim_end_matches('=')
-        .to_string()
+    URL_SAFE_NO_PAD.encode(input)
 }
 
 pub fn build_rp_id_hash(rp_id: &str) -> [u8; 32] {
     Sha256::digest(rp_id.as_bytes()).into()
-}
-
-/// Minimal base64 encoder (standard alphabet, with padding).
-fn base64_encode(input: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    let mut i = 0;
-    while i < input.len() {
-        let b0 = input[i] as u32;
-        let b1 = if i + 1 < input.len() {
-            input[i + 1] as u32
-        } else {
-            0
-        };
-        let b2 = if i + 2 < input.len() {
-            input[i + 2] as u32
-        } else {
-            0
-        };
-
-        let n = (b0 << 16) | (b1 << 8) | b2;
-
-        out.push(CHARS[((n >> 18) & 0x3f) as usize] as char);
-        out.push(CHARS[((n >> 12) & 0x3f) as usize] as char);
-        if i + 1 < input.len() {
-            out.push(CHARS[((n >> 6) & 0x3f) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if i + 2 < input.len() {
-            out.push(CHARS[(n & 0x3f) as usize] as char);
-        } else {
-            out.push('=');
-        }
-
-        i += 3;
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +246,11 @@ mod tests {
         let input = hex!("6d0a394861c05e39fb043ecfa6bca7ef8976ee6c8300547977c39b8a39b39dda");
         let encoded = base64url_encode_nopad(&input);
         assert_eq!(encoded, "bQo5SGHAXjn7BD7Ppryn74l27myDAFR5d8Obijmzndo");
+    }
+
+    #[test]
+    fn default_rp_id_hash_matches_default_rp_id() {
+        assert_eq!(RP_ID_HASH, build_rp_id_hash(DEFAULT_RP_ID));
     }
 
     /// 5. Signing message construction sanity checks.

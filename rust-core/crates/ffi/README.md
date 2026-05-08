@@ -4,6 +4,10 @@
 
 It is not the intended stable public SDK. The public-facing Apple API is the Swift wrapper, and the reusable Rust APIs are `wallet-signature` and `wallet-kernel`.
 
+## Privacy Boundary
+
+Private-key material never crosses the FFI. Rust only sees public coordinates, hashes, and signatures. Secure Enclave and Keychain access remain entirely on the Swift side.
+
 ## Exports
 
 The C ABI currently exposes helpers for:
@@ -50,7 +54,23 @@ wallet_free_buffer(ptr, len)
 
 exactly once for each returned buffer.
 
-All fixed-size pointer arguments must point to buffers of the documented sizes in `src/lib.rs`.
+The buffer-returning functions are:
+
+- `wallet_abi_encode_signature` — Kernel/WebAuthn signature ABI bytes
+- `wallet_abi_encode_dummy_signature` — gas-estimation dummy signature ABI bytes
+- `wallet_encode_kernel_initialize_call` — Kernel `initialize(...)` calldata
+
+Fixed-size pointer arguments use these buffer sizes:
+
+| Argument | Size (bytes) |
+|---|---|
+| sender / address output | 20 |
+| user-op nonce (BE) | 32 |
+| user-op hash output | 32 |
+| signing preimage output | 69 |
+| P-256 `r` / `s` scalar | 32 |
+
+See `src/lib.rs` for the canonical per-function size contracts.
 
 ## Tests
 

@@ -474,7 +474,10 @@ async fn daemon_creates_and_migrates_sqlite_on_first_launch() {
     let user_version: u32 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("read sqlite user_version");
-    assert_eq!(user_version, 1);
+    assert_eq!(
+        user_version,
+        wallet_node_store::migrations::HIGHEST_MIGRATION
+    );
     drop(conn);
 
     let shutdown = send_json_rpc(

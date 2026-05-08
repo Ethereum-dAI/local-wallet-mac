@@ -1,4 +1,5 @@
 pub mod call;
+pub mod chain_id;
 pub mod estimate_gas;
 pub mod gas_price;
 pub mod get_balance;

@@ -52,6 +52,12 @@ pub fn abi_encode_dummy_signature(use_precompiled: bool) -> Vec<u8> {
     encoded.abi_encode_params()
 }
 
+pub fn decode_use_precompiled(encoded: &[u8]) -> Option<bool> {
+    WebAuthnSigEncoded::abi_decode_params(encoded)
+        .ok()
+        .map(|sig| sig.usePrecompiled)
+}
+
 fn hex_array(value: &str) -> [u8; 32] {
     hex::decode(value)
         .expect("static dummy signature scalar is valid hex")
@@ -86,7 +92,7 @@ mod tests {
         let decoded = WebAuthnSigEncoded::abi_decode_params(&encoded).expect("must decode back");
         assert_eq!(decoded.r, U256::from_be_bytes(sig.r));
         assert_eq!(decoded.s, U256::from_be_bytes(sig.s));
-        assert_eq!(decoded.usePrecompiled, true);
+        assert!(decoded.usePrecompiled);
         assert_eq!(decoded.responseTypeLocation, U256::from(1u64));
     }
 
@@ -128,5 +134,18 @@ mod tests {
         assert!(!decoded.r.is_zero());
         assert!(!decoded.s.is_zero());
         assert!(decoded.usePrecompiled);
+    }
+
+    #[test]
+    fn decodes_use_precompiled_flag_from_encoded_signature() {
+        assert_eq!(
+            decode_use_precompiled(&abi_encode_dummy_signature(false)),
+            Some(false)
+        );
+        assert_eq!(
+            decode_use_precompiled(&abi_encode_dummy_signature(true)),
+            Some(true)
+        );
+        assert_eq!(decode_use_precompiled(&[0xab]), None);
     }
 }

@@ -12,7 +12,7 @@ What this demo currently exercises:
 - Secure Enclave signing + hosted bundler submission on Ethereum Sepolia
 - debug logging for bootstrap, inspection, gas estimation, signing, submission, and receipt polling
 
-The package also contains `SpawnHelper`, the process-launch shim for the local `wallet-node` daemon. The shim is tested from Swift, but the current demo UI still uses the hosted Sepolia workbench flow rather than the mainnet daemon as its primary transaction path.
+The package also contains `SpawnHelper`, the process-launch shim for the local `wallet-node` daemon. The current demo UI uses the hosted Sepolia composer for primary transaction submission, but it also starts/connects to the local daemon for relayer-key admin flows (rotate/export/delete the bundler EOA via admin challenges) and surfaces local relayer status independently of the hosted Sepolia path.
 
 This app must be run as a signed macOS app bundle.
 
@@ -66,13 +66,25 @@ xcodegen generate
   - Demo-side models for draft representation and bundler payload shaping.
 - `DemoModels.swift`
   - View-model structs used by the current demo dashboard and transaction composer.
+- `DemoSettingsStore.swift`
+  - Persistent demo-time settings (e.g., testnet-mode toggle).
+- `WalletNodeClient.swift`
+  - JSON-RPC client for the local `wallet-node` daemon over Unix socket or HTTP, including admin-authorized rotate/export/delete bundler-EOA flows.
+- `WalletNodeDaemon.swift`
+  - Lifecycle wrapper around the spawned daemon process.
+- `WalletRecord.swift`
+  - Aggregated per-wallet record (Secure Enclave key, metadata, predicted address).
+- `AppError.swift`
+  - App-level error types surfaced in UI.
+- `EtherAmountParser.swift`, `WeiFormatter.swift`, `HexEncoding.swift`, `QRCodeImageFactory.swift`
+  - Small formatting/encoding utilities.
 
 ## Current Limits
 
 - Sepolia-only demo mode is currently enforced in the app shell.
 - The app currently focuses on ETH transfer as the first transaction type.
 - The UI is intentionally a workbench/demo shell, not the final wallet interface.
-- The local mainnet `wallet-node` daemon is implemented and tested separately, but is not yet the default transaction backend for this demo UI.
+- The local mainnet `wallet-node` daemon is integrated for relayer-key admin flows but is not yet the default transaction submission backend for this demo UI; the composer still routes through the hosted Sepolia bundler.
 
 ## Daemon Spawn Test
 
@@ -90,7 +102,7 @@ cd ../wallet-macos
 swift test --filter SpawnHelperTests
 ```
 
-Set `WALLET_NODE_BIN=/absolute/path/to/wallet-node` to test a non-default daemon binary.
+Set `WALLET_NODE_BIN=/absolute/path/to/wallet-node` to test a non-default daemon binary. The fd-3 ready / fd-4 alive contract used by the spawn helper is documented in [`Sources/Spawn/README.md`](Sources/Spawn/README.md).
 
 ## Hosted Bundler Configuration
 

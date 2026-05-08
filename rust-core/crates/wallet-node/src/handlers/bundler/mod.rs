@@ -104,12 +104,14 @@ async fn ensure_sender_account_allowlisted(
     let sender = op.sender;
     if code.is_empty() {
         wallet_bundler::validate_counterfactual_kernel_account(
+            state.config.network.chain_id,
             sender,
             op.nonce,
             op.factory,
             &op.factory_data,
         )
         .map_err(map_bundler_error)?;
+        ensure_daimo_verifier_allowlisted_for_signature(state, op, block).await?;
 
         return Ok(());
     }
@@ -123,69 +125,121 @@ async fn ensure_sender_account_allowlisted(
     }
     wallet_bundler::validate_kernel_nonce_key(sender, op.nonce).map_err(map_bundler_error)?;
 
-    match wallet_bundler::validate_sender_proxy_code(sender, code) {
-        Ok(_) => Ok(()),
+    let proxy_check = match wallet_bundler::validate_sender_proxy_code(
+        state.config.network.chain_id,
+        sender,
+        code,
+    ) {
+        Ok(check) => check,
         Err(BundlerError::AccountCodeNotAllowlisted { code_hash, .. })
             if code_hash == wallet_bundler::SOLADY_ERC1967_PROXY_RUNTIME_HASH =>
         {
-            let implementation_word = state
-                .chain
-                .eth_get_storage_at(sender, wallet_bundler::ERC1967_IMPLEMENTATION_SLOT, block)
-                .await
-                .map_err(BundlerError::from)
-                .map_err(map_bundler_error)?;
-            let implementation = wallet_bundler::erc1967_implementation_address(
-                implementation_word,
-            )
-            .ok_or_else(|| {
-                map_bundler_error(BundlerError::AccountCodeNotAllowlisted {
-                    layer: "implementation",
-                    module_type: "kernel_implementation_slot",
-                    address: sender,
-                    code_hash: implementation_word,
-                })
-            })?;
-            let implementation_code = state
-                .chain
-                .eth_get_code(implementation, block)
-                .await
-                .map_err(BundlerError::from)
-                .map_err(map_bundler_error)?;
-            let implementation_check = wallet_bundler::validate_kernel_implementation_code(
-                implementation,
-                &implementation_code,
-            )
-            .map_err(map_bundler_error)?;
-            let root_validator = state
-                .chain
-                .eth_call(
-                    CallRequest {
-                        to: Some(sender),
-                        data: Some(Bytes::from(rootValidatorCall {}.abi_encode())),
-                        ..CallRequest::default()
-                    },
-                    block,
-                    None,
-                )
-                .await
-                .map_err(BundlerError::from)
-                .map_err(map_bundler_error)?;
-            let root_validator =
-                rootValidatorCall::abi_decode_returns(&root_validator).map_err(|_| {
-                    map_bundler_error(BundlerError::AccountCodeNotAllowlisted {
-                        layer: "validator",
-                        module_type: "kernel_root_validator_call",
-                        address: sender,
-                        code_hash: implementation_check.code_hash,
-                    })
-                })?;
-            wallet_bundler::validate_kernel_root_validator(sender, root_validator)
-                .map_err(map_bundler_error)?;
-
-            Ok(())
+            None
         }
-        Err(error) => Err(map_bundler_error(error)),
+        Err(error) => return Err(map_bundler_error(error)),
+    };
+
+    let requires_erc1967_resolution = match proxy_check {
+        Some(check) => check.code_hash == wallet_bundler::SOLADY_ERC1967_PROXY_RUNTIME_HASH,
+        None => true,
+    };
+    if !requires_erc1967_resolution {
+        return Ok(());
     }
+
+    let implementation_word = state
+        .chain
+        .eth_get_storage_at(sender, wallet_bundler::ERC1967_IMPLEMENTATION_SLOT, block)
+        .await
+        .map_err(BundlerError::from)
+        .map_err(map_bundler_error)?;
+    let implementation = wallet_bundler::erc1967_implementation_address(implementation_word)
+        .ok_or_else(|| {
+            map_bundler_error(BundlerError::AccountCodeNotAllowlisted {
+                layer: "implementation",
+                module_type: "kernel_implementation_slot",
+                address: sender,
+                code_hash: implementation_word,
+            })
+        })?;
+    let implementation_code = state
+        .chain
+        .eth_get_code(implementation, block)
+        .await
+        .map_err(BundlerError::from)
+        .map_err(map_bundler_error)?;
+    let implementation_check = wallet_bundler::validate_kernel_implementation_code(
+        state.config.network.chain_id,
+        implementation,
+        &implementation_code,
+    )
+    .map_err(map_bundler_error)?;
+    let root_validator = state
+        .chain
+        .eth_call(
+            CallRequest {
+                to: Some(sender),
+                data: Some(Bytes::from(rootValidatorCall {}.abi_encode())),
+                ..CallRequest::default()
+            },
+            block,
+            None,
+        )
+        .await
+        .map_err(BundlerError::from)
+        .map_err(map_bundler_error)?;
+    let root_validator = rootValidatorCall::abi_decode_returns(&root_validator).map_err(|_| {
+        map_bundler_error(BundlerError::AccountCodeNotAllowlisted {
+            layer: "validator",
+            module_type: "kernel_root_validator_call",
+            address: sender,
+            code_hash: implementation_check.code_hash,
+        })
+    })?;
+    wallet_bundler::validate_kernel_root_validator(sender, root_validator)
+        .map_err(map_bundler_error)?;
+    ensure_daimo_verifier_allowlisted_for_signature(state, op, block).await?;
+
+    Ok(())
+}
+
+async fn ensure_daimo_verifier_allowlisted_for_signature(
+    state: &DaemonState,
+    op: &wallet_bundler::UserOperation,
+    block: BlockTag,
+) -> Result<(), JsonRpcError> {
+    match wallet_bundler::signature_uses_precompiled(&op.signature) {
+        Some(false) => ensure_daimo_verifier_allowlisted(state, block).await?,
+        Some(true) => {}
+        None if op.signature.is_empty() || !is_webauthn_abi_shaped(&op.signature) => {}
+        None => {
+            return Err(map_bundler_error(
+                wallet_bundler::BundlerError::InvalidUserOperation(
+                    "malformed_webauthn_signature".to_string(),
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_webauthn_abi_shaped(signature: &alloy_primitives::Bytes) -> bool {
+    signature.len() >= 32 && signature.len().is_multiple_of(32)
+}
+
+async fn ensure_daimo_verifier_allowlisted(
+    state: &DaemonState,
+    block: BlockTag,
+) -> Result<(), JsonRpcError> {
+    let code = state
+        .chain
+        .eth_get_code(wallet_bundler::DAIMO_P256_VERIFIER_ADDRESS, block)
+        .await
+        .map_err(BundlerError::from)
+        .map_err(map_bundler_error)?;
+    wallet_bundler::validate_daimo_p256_verifier_code(state.config.network.chain_id, &code)
+        .map_err(map_bundler_error)?;
+    Ok(())
 }
 
 fn not_ready(reason: &str) -> JsonRpcError {
@@ -415,4 +469,68 @@ fn now_unix_seconds() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use alloy_primitives::{Address, Bytes, U256};
+    use serde_json::json;
+    use wallet_chain::{BlockTag, MockChainAdapter};
+
+    use crate::state::DaemonState;
+
+    fn user_operation_with_signature(signature: Bytes) -> wallet_bundler::UserOperation {
+        wallet_bundler::UserOperation {
+            sender: Address::from([0x11; 20]),
+            nonce: U256::ZERO,
+            factory: None,
+            factory_data: Bytes::new(),
+            call_data: Bytes::new(),
+            call_gas_limit: U256::from(1),
+            verification_gas_limit: U256::from(1),
+            pre_verification_gas: U256::from(1),
+            max_fee_per_gas: U256::from(1),
+            max_priority_fee_per_gas: U256::from(1),
+            paymaster: None,
+            paymaster_verification_gas_limit: None,
+            paymaster_post_op_gas_limit: None,
+            paymaster_data: Bytes::new(),
+            signature,
+            raw: json!({}),
+        }
+    }
+
+    #[tokio::test]
+    async fn daimo_verifier_gate_runs_only_for_non_precompiled_webauthn_signature() {
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let precompiled =
+            user_operation_with_signature(wallet_bundler::dummy_webauthn_signature(true));
+
+        super::ensure_daimo_verifier_allowlisted_for_signature(
+            &state,
+            &precompiled,
+            BlockTag::Latest,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(chain.code_call_count(), 0);
+
+        let non_precompiled =
+            user_operation_with_signature(wallet_bundler::dummy_webauthn_signature(false));
+        let error = super::ensure_daimo_verifier_allowlisted_for_signature(
+            &state,
+            &non_precompiled,
+            BlockTag::Latest,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(chain.code_call_count(), 1);
+        assert_eq!(error.code, wallet_node_api::ACCOUNT_CODE_NOT_ALLOWLISTED);
+        assert_eq!(error.data.unwrap()["moduleType"], "daimo_p256_verifier");
+    }
 }

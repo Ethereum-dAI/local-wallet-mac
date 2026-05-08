@@ -39,6 +39,7 @@ alloy-primitives = { workspace = true }
 alloy-sol-types = { workspace = true }
 hex             = { workspace = true }
 secp256k1       = { version = "0.30", features = ["rand", "recovery"] }
+zeroize         = "1"
 
 [dev-dependencies]
 rusqlite = { workspace = true }

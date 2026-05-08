@@ -1,7 +1,5 @@
-use alloy_primitives::{address, keccak256, Address, Bytes, FixedBytes, U256};
-
-/// EntryPoint v0.7 address.
-pub const ENTRY_POINT_V07: Address = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
+use alloy_primitives::{keccak256, Address, Bytes, FixedBytes, U256};
+pub use wallet_addresses::ENTRY_POINT_V07;
 
 #[derive(Clone, Debug)]
 pub struct PackedUserOperation {
@@ -47,6 +45,7 @@ pub fn compute_userop_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::address;
     use hex_literal::hex;
 
     #[test]

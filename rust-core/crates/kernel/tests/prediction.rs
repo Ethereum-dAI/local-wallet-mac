@@ -1,4 +1,8 @@
 use alloy_primitives::{address, b256, keccak256, B256, U256};
+use wallet_addresses::{
+    PINNED_KERNEL_FACTORY_ADDRESS, PINNED_KERNEL_IMPLEMENTATION_ADDRESS,
+    PINNED_WEBAUTHN_VALIDATOR_ADDRESS,
+};
 use wallet_kernel::{
     build_validation_id, compute_actual_salt, encode_initialize_call,
     encode_webauthn_validator_data, erc1967_init_code_hash, predict_create2_address,
@@ -37,9 +41,9 @@ fn actual_salt_matches_packed_concat_hash() {
 
 #[test]
 fn create2_prediction_matches_kernel_prediction() {
-    let factory = address!("2577507b78c2008Ff367261CB6285d44ba5eF2E9");
-    let implementation = address!("d6CEDDe84be40893d153Be9d467CD6aD37875b28");
-    let validator = address!("7ab16Ff354AcB328452F1D445b3Ddee9a91e9e69");
+    let factory = PINNED_KERNEL_FACTORY_ADDRESS;
+    let implementation = PINNED_KERNEL_IMPLEMENTATION_ADDRESS;
+    let validator = PINNED_WEBAUTHN_VALIDATOR_ADDRESS;
     let pub_key_x = U256::from(1u64);
     let pub_key_y = U256::from(2u64);
     let authenticator_id_hash = B256::ZERO;

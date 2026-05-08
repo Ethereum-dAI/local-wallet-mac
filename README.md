@@ -4,8 +4,8 @@ Local Wallet is a native macOS wallet prototype plus reusable Rust and Swift too
 
 The repository currently contains two active tracks:
 
-- a signed macOS demo app for Secure Enclave signing and Sepolia workbench flows
-- a Rust daemon stack for Ethereum mainnet verified reads, local bundling, Kernel allowlisting, EntryPoint simulation, raw `handleOps` submission, and receipt watching
+- a signed macOS demo app for Secure Enclave signing and Ethereum mainnet/Sepolia workbench flows
+- a Rust daemon stack for Ethereum mainnet and Sepolia verified reads, local bundling, Kernel allowlisting, EntryPoint simulation, raw `handleOps` submission, and receipt watching
 
 This is not the final product wallet UX yet. Treat it as a working implementation repo with reusable protocol crates and a demo/reference app.
 
@@ -32,15 +32,15 @@ This is not the final product wallet UX yet. Treat it as a working implementatio
 
 The daemon path is currently scoped to:
 
-- Ethereum mainnet
+- Ethereum mainnet and Ethereum Sepolia by explicit mode
 - EntryPoint v0.7 at `0x0000000071727De22E5E9d8BAf0edAc6f37da032`
 - the app's fixed Kernel factory, implementation, and WebAuthn validator addresses
 - no paymaster support
 - no user-facing EntryPoint deposit management or reclaim UX
 - ETH transfer execution as the fork-tested transaction shape
-- a development Keychain fallback for the bundler EOA secret on macOS
+- bundler EOA secret owned by the macOS app's Keychain under biometry; the daemon receives the secret over the authenticated transport at install time and holds it only in process RAM
 
-Future chains, EntryPoint versions, Kernel module permutations, live signed-manifest promotion, recovery flows, ERC20/batch/delegate/executor paths, and production Keychain access-group validation remain outside the current public scope.
+Additional chains, EntryPoint versions, Kernel module permutations, live signed-manifest promotion, recovery flows, ERC20/batch/delegate/executor paths, and production Keychain access-group validation remain outside the current public scope.
 
 ## Fresh Clone Setup
 

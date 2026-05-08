@@ -9,7 +9,7 @@ use alloy::eips::BlockId;
 use alloy::primitives::{map::AddressHashMap, TxKind};
 use alloy::rpc::types::{
     state::{AccountOverride as HeliosAccountOverride, StateOverride as HeliosStateOverride},
-    TransactionInput, TransactionRequest,
+    SyncStatus, TransactionInput, TransactionRequest,
 };
 use async_trait::async_trait;
 use helios_ethereum::config::networks::Network;
@@ -17,7 +17,7 @@ use helios_ethereum::database::FileDB;
 use helios_ethereum::{EthereumClient, EthereumClientBuilder};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::fs;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
@@ -264,17 +264,80 @@ impl ChainAdapter for HeliosChainAdapter {
         )
     }
 
-    async fn is_synced(&self) -> bool {
-        self.client
-            .syncing()
+    async fn current_gas_price(&self) -> Result<U256, ChainError> {
+        let response = self
+            .exec_rpc_client
+            .post(&self.exec_rpc_url)
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1_u64,
+                "method": "eth_gasPrice",
+                "params": [],
+            }))
+            .send()
             .await
-            .ok()
-            .and_then(|status| serde_json::to_value(status).ok())
-            .is_some_and(|status| status == Value::Bool(false))
+            .map_err(rpc_error)?;
+
+        if !response.status().is_success() {
+            return Err(ChainError::RpcError(format!(
+                "eth_gasPrice HTTP status {}",
+                response.status()
+            )));
+        }
+
+        let body = response.text().await.map_err(rpc_error)?;
+        parse_hex_u256_response("eth_gasPrice", &body)
+    }
+
+    async fn current_max_priority_fee_per_gas(&self) -> Result<U256, ChainError> {
+        let response = self
+            .exec_rpc_client
+            .post(&self.exec_rpc_url)
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1_u64,
+                "method": "eth_maxPriorityFeePerGas",
+                "params": [],
+            }))
+            .send()
+            .await
+            .map_err(rpc_error)?;
+
+        if !response.status().is_success() {
+            return Err(ChainError::RpcError(format!(
+                "eth_maxPriorityFeePerGas HTTP status {}",
+                response.status()
+            )));
+        }
+
+        let body = response.text().await.map_err(rpc_error)?;
+        parse_hex_u256_response("eth_maxPriorityFeePerGas", &body)
+    }
+
+    async fn is_synced(&self) -> bool {
+        match self.client.syncing().await {
+            Ok(status) => is_helios_synced(status),
+            Err(error) => {
+                tracing::warn!(error = ?error, "is_synced rpc failure");
+                false
+            }
+        }
     }
 
     async fn shutdown(&self) {
         self.client.shutdown().await;
+    }
+}
+
+fn is_helios_synced(status: SyncStatus) -> bool {
+    match status {
+        SyncStatus::None => true,
+        SyncStatus::Info(_) => false,
+        #[allow(unreachable_patterns)]
+        unknown => {
+            tracing::warn!(status = ?unknown, "unknown Helios sync status");
+            false
+        }
     }
 }
 
@@ -396,6 +459,36 @@ fn parse_hex_u64(value: &str) -> Result<u64, ChainError> {
         .map_err(|error| ChainError::RpcError(format!("invalid hex quantity: {error}")))
 }
 
+fn parse_hex_u256_response(method: &'static str, body: &str) -> Result<U256, ChainError> {
+    #[derive(Debug, Deserialize)]
+    struct RpcErrorBody {
+        code: i64,
+        message: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RpcResponse {
+        result: Option<String>,
+        error: Option<RpcErrorBody>,
+    }
+
+    let parsed: RpcResponse = serde_json::from_str(body)
+        .map_err(|error| ChainError::RpcError(format!("{method} parse: {error}")))?;
+    if let Some(error) = parsed.error {
+        return Err(ChainError::RpcError(format!(
+            "{method} error {}: {}",
+            error.code, error.message
+        )));
+    }
+
+    let raw = parsed
+        .result
+        .ok_or_else(|| ChainError::RpcError(format!("{method} missing result")))?;
+    let stripped = raw.strip_prefix("0x").unwrap_or(raw.as_str());
+    U256::from_str_radix(stripped, 16)
+        .map_err(|error| ChainError::RpcError(format!("{method} hex: {error}")))
+}
+
 fn helios_error(error: impl std::fmt::Display) -> ChainError {
     let message = error.to_string();
     if let Some(data) = extract_revert_data(&message) {
@@ -412,6 +505,9 @@ fn internal_error(error: impl Into<anyhow::Error>) -> ChainError {
     ChainError::Internal(error.into())
 }
 
+// Helios currently exposes EVM revert data through Display text for this path.
+// Keep this parser intentionally narrow and pinned with tests so malformed text
+// falls back to ChainError::Helios instead of inventing revert bytes.
 fn extract_revert_data(message: &str) -> Option<Bytes> {
     let marker = "execution reverted: ";
     let start = message.find(marker)? + marker.len();
@@ -479,6 +575,16 @@ mod tests {
     }
 
     #[test]
+    fn helios_sync_status_none_is_synced() {
+        assert!(is_helios_synced(SyncStatus::None));
+    }
+
+    #[test]
+    fn helios_sync_status_info_is_not_synced() {
+        assert!(!is_helios_synced(SyncStatus::Info(Box::default())));
+    }
+
+    #[test]
     fn helios_error_preserves_raw_revert_bytes_when_display_exposes_hex() {
         let error = helios_error(
             "evm error: execution reverted: 810f00230000000000000000000000000000000000000000000000000000000000000001",
@@ -493,5 +599,80 @@ mod tests {
             }
             other => panic!("expected CallReverted, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn helios_revert_parser_accepts_prefixed_and_quoted_revert_data() {
+        let data = extract_revert_data(
+            r#"provider error ("execution reverted: 0x810f00230000000000000000000000000000000000000000000000000000000000000001")"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            format!("{data:#x}"),
+            "0x810f00230000000000000000000000000000000000000000000000000000000000000001"
+        );
+    }
+
+    #[test]
+    fn helios_revert_parser_accepts_comma_delimited_revert_data() {
+        let data = extract_revert_data("execution reverted: 0x1234, gas used 21000").unwrap();
+
+        assert_eq!(format!("{data:#x}"), "0x1234");
+    }
+
+    #[test]
+    fn helios_revert_parser_rejects_absent_or_malformed_revert_data() {
+        assert_eq!(extract_revert_data("execution reverted without data"), None);
+        assert_eq!(extract_revert_data("execution reverted: 0x123"), None);
+        assert_eq!(extract_revert_data("execution reverted: 0xzz"), None);
+    }
+
+    #[test]
+    fn parses_valid_hex_u256() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":"0x174876e800"}"#;
+        let value = parse_hex_u256_response("eth_gasPrice", body).unwrap();
+
+        assert_eq!(value.to_string(), "100000000000");
+    }
+
+    #[test]
+    fn parses_zero_u256() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":"0x0"}"#;
+        let value = parse_hex_u256_response("eth_gasPrice", body).unwrap();
+
+        assert_eq!(value, U256::ZERO);
+    }
+
+    #[test]
+    fn missing_result_returns_rpc_error() {
+        let body = r#"{"jsonrpc":"2.0","id":1}"#;
+
+        assert!(matches!(
+            parse_hex_u256_response("eth_gasPrice", body),
+            Err(ChainError::RpcError(_))
+        ));
+    }
+
+    #[test]
+    fn rpc_error_body_returns_rpc_error() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"not found"}}"#;
+        let Err(ChainError::RpcError(message)) = parse_hex_u256_response("eth_gasPrice", body)
+        else {
+            panic!("expected RpcError");
+        };
+
+        assert!(message.contains("-32601"));
+        assert!(message.contains("not found"));
+    }
+
+    #[test]
+    fn malformed_hex_returns_rpc_error() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":"not-hex"}"#;
+
+        assert!(matches!(
+            parse_hex_u256_response("eth_gasPrice", body),
+            Err(ChainError::RpcError(_))
+        ));
     }
 }

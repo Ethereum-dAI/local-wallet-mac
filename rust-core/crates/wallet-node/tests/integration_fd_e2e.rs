@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -16,15 +16,18 @@ fn fd_handshake_full_lifecycle() {
     let test_home = TempHome::new();
     let (ready_read_fd, ready_write_fd) = pipe().expect("create ready pipe");
     let (alive_read_fd, alive_write_fd) = pipe().expect("create alive pipe");
+    let (secret_read_fd, secret_write_fd) = pipe().expect("create secret pipe");
 
     let ready_read_raw = ready_read_fd.as_raw_fd();
     let ready_write_raw = ready_write_fd.as_raw_fd();
     let alive_read_raw = alive_read_fd.as_raw_fd();
     let alive_write_raw = alive_write_fd.as_raw_fd();
+    let secret_read_raw = secret_read_fd.as_raw_fd();
+    let secret_write_raw = secret_write_fd.as_raw_fd();
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_wallet-node"));
     command
-        .args(["--ready-fd", "3", "--alive-fd", "4"])
+        .args(["--ready-fd", "3", "--alive-fd", "4", "--secret-fd", "5"])
         .env("HOME", test_home.path())
         .env_remove("XDG_DATA_HOME");
 
@@ -41,17 +44,27 @@ fn fd_handshake_full_lifecycle() {
                 return Err(std::io::Error::last_os_error());
             }
 
-            if ready_read_raw != 3 && ready_read_raw != 4 {
+            if secret_read_raw != 5 && libc::dup2(secret_read_raw, 5) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            if ready_read_raw != 3 && ready_read_raw != 4 && ready_read_raw != 5 {
                 libc::close(ready_read_raw);
             }
-            if ready_write_raw != 3 && ready_write_raw != 4 {
+            if ready_write_raw != 3 && ready_write_raw != 4 && ready_write_raw != 5 {
                 libc::close(ready_write_raw);
             }
-            if alive_read_raw != 3 && alive_read_raw != 4 {
+            if alive_read_raw != 3 && alive_read_raw != 4 && alive_read_raw != 5 {
                 libc::close(alive_read_raw);
             }
-            if alive_write_raw != 3 && alive_write_raw != 4 {
+            if alive_write_raw != 3 && alive_write_raw != 4 && alive_write_raw != 5 {
                 libc::close(alive_write_raw);
+            }
+            if secret_read_raw != 3 && secret_read_raw != 4 && secret_read_raw != 5 {
+                libc::close(secret_read_raw);
+            }
+            if secret_write_raw != 3 && secret_write_raw != 4 && secret_write_raw != 5 {
+                libc::close(secret_write_raw);
             }
 
             Ok(())
@@ -63,6 +76,15 @@ fn fd_handshake_full_lifecycle() {
 
     drop(ready_write_fd);
     drop(alive_read_fd);
+    drop(secret_read_fd);
+
+    let mut secret_writer = File::from(secret_write_fd);
+    secret_writer
+        .write_all(
+            br#"{"keys":[{"keyRef":"bundler-eoa:default:1:1","secret":"0x0101010101010101010101010101010101010101010101010101010101010101"}]}"#,
+        )
+        .expect("write secret payload");
+    drop(secret_writer);
 
     wait_for_readable(&ready_read_fd, Duration::from_secs(5));
     let mut ready_reader = BufReader::new(File::from(ready_read_fd));
@@ -93,6 +115,7 @@ fn fd_handshake_full_lifecycle() {
         wait_for_path(socket_path, Duration::from_secs(5)),
         "socket file should exist at {socket_path}"
     );
+    assert_secret_fd_inserted_active_bundler_account(socket_path);
 
     drop(alive_write_fd);
 
@@ -134,6 +157,30 @@ impl Drop for TestProcess {
             }
         }
     }
+}
+
+fn assert_secret_fd_inserted_active_bundler_account(socket_path: &str) {
+    let db_path = Path::new(socket_path)
+        .parent()
+        .expect("socket path should have parent")
+        .join("node.sqlite");
+    assert!(
+        wait_for_path(
+            db_path.to_str().expect("db path should be UTF-8"),
+            Duration::from_secs(5)
+        ),
+        "node sqlite db should exist at {}",
+        db_path.display()
+    );
+    let conn = rusqlite::Connection::open(db_path).expect("open node sqlite db");
+    let lifecycle: String = conn
+        .query_row(
+            "SELECT lifecycle FROM bundler_accounts WHERE owner_scope = ?1 AND chain_id = ?2 AND key_ref = ?3",
+            ("default", 1_i64, "bundler-eoa:default:1:1"),
+            |row| row.get(0),
+        )
+        .expect("secret-fd bundler account row should exist");
+    assert_eq!(lifecycle, "active");
 }
 
 struct TempHome {

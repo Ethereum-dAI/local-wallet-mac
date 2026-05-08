@@ -73,7 +73,7 @@ pub async fn handle(
                 super::now_unix_seconds().max(0) as u64,
                 MIN_SUBMISSION_WINDOW_SECS,
                 MAX_BLOCK_DRIFT_SECS,
-                true,
+                wallet_bundler::SimulationMode::Estimate,
             )
             .map_err(super::map_bundler_error)?;
             Ok(wallet_bundler::estimate_user_operation_gas_from_validation(

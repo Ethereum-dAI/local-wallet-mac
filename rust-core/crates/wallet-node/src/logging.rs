@@ -123,7 +123,7 @@ mod tests {
             tracing::info!("token: {token:?}");
         });
 
-        let output = output.to_string();
+        let output = output.as_string();
         assert_eq!(encoded.len(), 43);
         assert!(!output.contains(&encoded), "log output leaked bearer token");
         assert!(
@@ -246,7 +246,7 @@ mod tests {
     }
 
     impl CapturedOutput {
-        fn to_string(&self) -> String {
+        fn as_string(&self) -> String {
             let bytes = self
                 .bytes
                 .lock()

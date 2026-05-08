@@ -1,5 +1,7 @@
 use crate::StoreError;
 
+pub const DEFAULT_OWNER_SCOPE: &str = "default";
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DaemonMetaEntry {
     pub key: String,
@@ -8,11 +10,18 @@ pub struct DaemonMetaEntry {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BundlerAccount {
+    pub owner_scope: String,
     pub chain_id: u64,
     pub address: String,
     pub key_ref: String,
     pub lifecycle: BundlerLifecycle,
     pub created_at: i64,
+    pub activated_at: Option<i64>,
+    pub retired_at: Option<i64>,
+    pub deleted_at: Option<i64>,
+    pub last_used_at: Option<i64>,
+    pub last_exported_at: Option<i64>,
+    pub compromise_status: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -57,6 +66,12 @@ pub struct SubmittedTransaction {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AbandonedSubmission {
+    pub tx_hash: String,
+    pub nonce: u64,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UserOperationReceipt {
     pub user_op_hash: String,
@@ -67,6 +82,23 @@ pub struct UserOperationReceipt {
     pub revert_reason: Option<String>,
     pub receipt_json: String,
     pub tentative: bool,
+    pub invalidated: bool,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RelayerKeyAuditEvent {
+    pub id: Option<i64>,
+    pub event_type: String,
+    pub owner_scope: String,
+    pub chain_id: u64,
+    pub key_ref: Option<String>,
+    pub address: Option<String>,
+    pub previous_lifecycle: Option<String>,
+    pub new_lifecycle: Option<String>,
+    pub admin_action_id: Option<String>,
+    pub result: String,
+    pub failure_reason: Option<String>,
     pub created_at: i64,
 }
 
@@ -127,13 +159,16 @@ status_enum!(SubmittedTxStatus, "submitted_transactions", {
     Included => "included",
     Dropped => "dropped",
     Replaced => "replaced",
+    Abandoned => "abandoned",
     Failed => "failed",
 });
 
 status_enum!(BundlerLifecycle, "bundler_accounts", {
     Active => "active",
+    PendingFunding => "pending_funding",
     Retiring => "retiring",
     Retired => "retired",
+    Deleted => "deleted",
 });
 
 #[cfg(test)]
@@ -203,6 +238,7 @@ mod tests {
             SubmittedTxStatus::Included,
             SubmittedTxStatus::Dropped,
             SubmittedTxStatus::Replaced,
+            SubmittedTxStatus::Abandoned,
             SubmittedTxStatus::Failed,
         ] {
             assert_round_trip(
@@ -218,8 +254,10 @@ mod tests {
     fn bundler_lifecycle_round_trip() {
         for value in [
             BundlerLifecycle::Active,
+            BundlerLifecycle::PendingFunding,
             BundlerLifecycle::Retiring,
             BundlerLifecycle::Retired,
+            BundlerLifecycle::Deleted,
         ] {
             assert_round_trip(
                 value,

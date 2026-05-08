@@ -36,6 +36,7 @@ pub async fn handle(
         op.user_op_hash(entry_point, state.config.network.chain_id)
             .map_err(super::map_bundler_error)?,
     );
+
     if state
         .store
         .user_op_get(&hash)
@@ -46,6 +47,7 @@ pub async fn handle(
         return Ok(Value::String(hash));
     }
 
+    enforce_per_sender_quota(state, &op)?;
     let active_bundler =
         crate::handlers::wallet::bundler_account::ensure_active_bundler_account(state).await?;
     let active_bundler_address = active_bundler
@@ -130,6 +132,31 @@ async fn persist_sign_and_submit(
         .await
         .map_err(wallet_bundler::BundlerError::from)
         .map_err(super::map_bundler_error)?;
+    let relayer_lifecycle_guard = state
+        .relayer_lifecycle_locks
+        .acquire(
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            state.config.network.chain_id,
+        )
+        .await;
+    if state
+        .store
+        .user_op_get(user_op_hash)
+        .await
+        .map_err(|_| wallet_node_api::JsonRpcError::internal())?
+        .is_some()
+    {
+        drop(relayer_lifecycle_guard);
+        return Ok(());
+    }
+    let current_active =
+        crate::handlers::wallet::bundler_account::ensure_active_bundler_account(state).await?;
+    if current_active.address != active_bundler.address
+        || current_active.key_ref != active_bundler.key_ref
+    {
+        drop(relayer_lifecycle_guard);
+        return Err(super::not_ready("relayer_rotated_during_send"));
+    }
     let bundler_nonce = state
         .store
         .reserve_next_nonce(
@@ -151,12 +178,15 @@ async fn persist_sign_and_submit(
         op.max_priority_fee_per_gas,
     )
     .map_err(super::map_bundler_error)?;
-    let signing_payload = wallet_bundler::encode_eip1559_payload_for_signing(&tx)
-        .map_err(super::map_bundler_error)?;
-    let signature = state
-        .bundler_keys
-        .sign_eip1559_payload(&active_bundler.key_ref, &signing_payload)
-        .map_err(crate::handlers::wallet::bundler_account::map_key_error)?;
+    let signature = crate::relayer_signer::sign_validated_handle_ops_transaction(
+        state.bundler_keys.as_ref(),
+        &active_bundler.key_ref,
+        &tx,
+        state.config.network.chain_id,
+        active_bundler_address,
+        op,
+    )
+    .map_err(crate::handlers::wallet::bundler_account::map_key_error)?;
     let raw_tx = wallet_bundler::encode_signed_eip1559_tx(&tx, &signature)
         .map_err(super::map_bundler_error)?;
     let tx_hash = wallet_bundler::signed_eip1559_tx_hash(&tx, &signature)
@@ -165,23 +195,37 @@ async fn persist_sign_and_submit(
 
     match state
         .store
-        .user_op_insert(StoredUserOperation {
-            user_op_hash: user_op_hash.to_string(),
-            chain_id: state.config.network.chain_id,
-            entry_point: format!("{entry_point:#x}"),
-            sender: format!("{:#x}", op.sender),
-            nonce: wallet_bundler::gas::u256_hex(op.nonce),
-            user_op_json: op.raw.to_string(),
-            status: UserOpStatus::Submitted,
-            created_at: now,
-            updated_at: now,
-        })
+        .user_op_insert_abandon_nonce_on_exists(
+            StoredUserOperation {
+                user_op_hash: user_op_hash.to_string(),
+                chain_id: state.config.network.chain_id,
+                entry_point: format!("{entry_point:#x}"),
+                sender: format!("{:#x}", op.sender),
+                nonce: wallet_bundler::gas::u256_hex(op.nonce),
+                user_op_json: op.raw.to_string(),
+                status: UserOpStatus::Submitted,
+                created_at: now,
+                updated_at: now,
+            },
+            state.config.network.chain_id,
+            &active_bundler.address,
+            bundler_nonce,
+        )
         .await
         .map_err(|_| wallet_node_api::JsonRpcError::internal())?
     {
         UserOpInsertOutcome::Inserted => {}
         UserOpInsertOutcome::AlreadyExists(_) => return Ok(()),
     }
+    state
+        .store
+        .bundler_account_mark_used_for_owner(
+            &active_bundler.owner_scope,
+            state.config.network.chain_id,
+            &active_bundler.address,
+        )
+        .await
+        .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
 
     let tx_hash_hex = format!("{tx_hash:#x}");
     state
@@ -224,6 +268,8 @@ async fn persist_sign_and_submit(
         .await
         .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
 
+    drop(relayer_lifecycle_guard);
+
     match state
         .raw_submitter
         .submit_raw_transaction(&raw_tx, tx_hash)
@@ -240,12 +286,30 @@ async fn persist_sign_and_submit(
                 .await
                 .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
         }
-        Err(err) => {
+        Err(_) => {
+            state
+                .store
+                .diagnostic_set(
+                    "user_operation",
+                    user_op_hash,
+                    "raw_transaction_first_submit_failed",
+                )
+                .await
+                .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
+            state
+                .store
+                .diagnostic_set(
+                    "submitted_transaction",
+                    &tx_hash_hex,
+                    "raw_transaction_first_submit_failed",
+                )
+                .await
+                .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
             tracing::warn!(
-                error = %err,
+                error.kind = "raw_transaction_first_submit_failed",
                 tx_hash = tx_hash_hex,
                 user_op_hash,
-                "raw transaction first-submit failed; watcher will retry persisted transaction"
+                "raw transaction first-submit failed; watcher will retry persisted transaction without storing provider error text"
             );
         }
     }
@@ -267,9 +331,139 @@ fn handle_ops_gas_limit(op: &UserOperation) -> Result<u64, wallet_node_api::Json
     Ok(total.to::<u64>())
 }
 
+fn enforce_per_sender_quota(
+    state: &DaemonState,
+    op: &UserOperation,
+) -> Result<(), wallet_node_api::JsonRpcError> {
+    let max_gas_wei_per_hour = U256::from_str_radix(
+        state
+            .config
+            .policy
+            .max_gas_wei_per_sender_per_hour
+            .trim_start_matches("0x"),
+        16,
+    )
+    .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
+    let decision = state.per_sender_rate_limiter.check(
+        state.config.network.chain_id,
+        op.sender,
+        op.required_prefund(),
+        crate::rate_limit::SenderQuotaConfig {
+            max_user_ops_per_minute: state.config.policy.max_user_ops_per_sender_per_minute,
+            max_gas_wei_per_hour,
+        },
+    );
+
+    if decision.allowed {
+        Ok(())
+    } else {
+        Err(wallet_node_api::JsonRpcError {
+            code: wallet_node_api::RATE_LIMITED,
+            message: "Rate limited".to_string(),
+            data: Some(serde_json::json!({
+                "reason": decision.reason.unwrap_or("sender_quota_exceeded"),
+                "retryAfterMs": (decision.retry_after_secs * 1000.0).ceil() as u64,
+            })),
+        })
+    }
+}
+
 fn now_unix_seconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use wallet_chain::MockChainAdapter;
+    use wallet_node_store::BundlerLifecycle;
+
+    use super::*;
+
+    fn sample_user_op() -> UserOperation {
+        UserOperation::parse(json!({
+            "sender": "0x1111111111111111111111111111111111111111",
+            "nonce": "0x01",
+            "callData": "0x1234",
+            "callGasLimit": "0x10",
+            "verificationGasLimit": "0x20",
+            "preVerificationGas": "0x30",
+            "maxFeePerGas": "0x40",
+            "maxPriorityFeePerGas": "0x05",
+            "signature": "0xab"
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn persist_sign_and_submit_rejects_stale_active_bundler_after_rotation() {
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let stale_address = "0x1111111111111111111111111111111111111112";
+        let current_address = "0x2222222222222222222222222222222222222222";
+        state
+            .store
+            .bundler_account_insert(1, stale_address, "bundler-eoa:1")
+            .await
+            .unwrap();
+        let stale_active =
+            crate::handlers::wallet::bundler_account::ensure_active_bundler_account(&state)
+                .await
+                .unwrap();
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                current_address,
+                "bundler-eoa:2",
+                BundlerLifecycle::PendingFunding,
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .bundler_account_activate_pending_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                current_address,
+            )
+            .await
+            .unwrap();
+
+        let op = sample_user_op();
+        let err = persist_sign_and_submit(
+            &state,
+            &stale_active,
+            stale_active.address.parse().unwrap(),
+            wallet_bundler::ENTRY_POINT_V07,
+            &op,
+            "0x1234",
+            1,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, wallet_node_api::NOT_READY);
+        assert_eq!(err.data.unwrap()["reason"], "relayer_rotated_during_send");
+        assert_eq!(chain.transaction_count_call_count(), 1);
+        assert!(state
+            .store
+            .nonces_list_pending(1, stale_address)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state.store.user_op_get("0x1234").await.unwrap().is_none());
+        assert!(state
+            .store
+            .submitted_txs_list_all()
+            .await
+            .unwrap()
+            .is_empty());
+    }
 }

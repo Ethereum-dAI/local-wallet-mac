@@ -20,11 +20,15 @@
 		6FC50B3D78A1BEDD7A8AAC56 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E4918C4C23C14A6A28B3460D /* Assets.xcassets */; };
 		82C23E6456D6B25C14A4338E /* EtherAmountParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0565FE58E3D3C819258A03C1 /* EtherAmountParser.swift */; };
 		8A4F334C71F0A61F144B033B /* BundlerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10EF37094DF3BB75ADE15500 /* BundlerClient.swift */; };
+		B0F9B69A3FA938E86D0F3B27 /* WalletNodeDaemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 762567355B5B9F2F1A4B670F /* WalletNodeDaemon.swift */; };
 		B38890B21BDBE3CABB8508A2 /* UserOperationBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7296A0E20202CF12178A7D1F /* UserOperationBuilder.swift */; };
 		B616F0E8ECB9A8CB3DC9875B /* WalletMetadataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CBF66DFCFB8A95EFB9CCE34 /* WalletMetadataStore.swift */; };
 		C3EDF8D9DFBAC3CE779616FB /* KeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0BC22C212DB57DCEC672193 /* KeyStore.swift */; };
 		C7372C6CA4E7765A2AA35B7A /* DemoModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9D44A78B0A9523321B9F367 /* DemoModels.swift */; };
+		C76D43CA4AE90A97B1B8ADA0 /* WalletNodeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 923CF6BF725AB85178781926 /* WalletNodeClient.swift */; };
+		D22634FEBE836B433F07F764 /* SpawnHelper in Frameworks */ = {isa = PBXBuildFile; productRef = 4C0AA8A8621EF14A086C5866 /* SpawnHelper */; };
 		D612FF089828F9AA74757307 /* HexEncoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71F6CC5F8F55F7C5D22BBD6F /* HexEncoding.swift */; };
+		D720097E3C1CA355A0CB0B69 /* BundlerKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 338C3CE5B2A1B13400716881 /* BundlerKeyStore.swift */; };
 		E3E827E96E85611AC6AB0CFF /* DemoRPCClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EF992555A66C55E68BD7DB9 /* DemoRPCClient.swift */; };
 		EABBBB4361487720CC466308 /* KernelAccountAddressPredictor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6220284599C5BA1AD595394 /* KernelAccountAddressPredictor.swift */; };
 		F090CBF43D86C2A57BC2D110 /* QRCodeImageFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A23DA49317E3EDDFC173857 /* QRCodeImageFactory.swift */; };
@@ -37,18 +41,22 @@
 		0EF992555A66C55E68BD7DB9 /* DemoRPCClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoRPCClient.swift; sourceTree = "<group>"; };
 		10EF37094DF3BB75ADE15500 /* BundlerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundlerClient.swift; sourceTree = "<group>"; };
 		1B2090660CAE81D103494C90 /* KernelFactory.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = KernelFactory.json; sourceTree = "<group>"; };
+		338C3CE5B2A1B13400716881 /* BundlerKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundlerKeyStore.swift; sourceTree = "<group>"; };
 		5FF9147DC25C40D4A7D8DA39 /* DemoSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoSettingsStore.swift; sourceTree = "<group>"; };
 		611B7A76D937ADC7B38FEDA8 /* WalletMacOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletMacOSApp.swift; sourceTree = "<group>"; };
 		71035AA789A3F89268A157B9 /* WalletRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletRecord.swift; sourceTree = "<group>"; };
 		71DDE5CB6A4F86F27DE37255 /* WeiFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeiFormatter.swift; sourceTree = "<group>"; };
 		71F6CC5F8F55F7C5D22BBD6F /* HexEncoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HexEncoding.swift; sourceTree = "<group>"; };
 		7296A0E20202CF12178A7D1F /* UserOperationBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserOperationBuilder.swift; sourceTree = "<group>"; };
+		762567355B5B9F2F1A4B670F /* WalletNodeDaemon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletNodeDaemon.swift; sourceTree = "<group>"; };
 		7FDBD8207805F91A08B2FA8F /* WebAuthnValidator.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = WebAuthnValidator.json; sourceTree = "<group>"; };
 		86145305356A12B55B0C0B52 /* AppError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppError.swift; sourceTree = "<group>"; };
 		8A23DA49317E3EDDFC173857 /* QRCodeImageFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeImageFactory.swift; sourceTree = "<group>"; };
 		8CBF66DFCFB8A95EFB9CCE34 /* WalletMetadataStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletMetadataStore.swift; sourceTree = "<group>"; };
 		8F7EDA7770D91F75143A2D4E /* SmartAccountConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartAccountConfiguration.swift; sourceTree = "<group>"; };
+		923CF6BF725AB85178781926 /* WalletNodeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletNodeClient.swift; sourceTree = "<group>"; };
 		AA6F8962EB73A62EDF82FBDD /* UserOperationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserOperationModels.swift; sourceTree = "<group>"; };
+		AE110FB5D2CF3D2479562BF8 /* wallet-macos */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "wallet-macos"; path = "wallet-macos"; sourceTree = SOURCE_ROOT; };
 		B9D44A78B0A9523321B9F367 /* DemoModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoModels.swift; sourceTree = "<group>"; };
 		BF4BC97318D96D64FC625767 /* KernelImplementation.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = KernelImplementation.json; sourceTree = "<group>"; };
 		D0BC22C212DB57DCEC672193 /* KeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyStore.swift; sourceTree = "<group>"; };
@@ -65,6 +73,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F1CF4DB3F8639BF2395566B0 /* WalletSignature in Frameworks */,
+				D22634FEBE836B433F07F764 /* SpawnHelper in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -94,6 +103,7 @@
 			isa = PBXGroup;
 			children = (
 				DB20A1FAB1133686554EA1F8 /* swift-bridge */,
+				AE110FB5D2CF3D2479562BF8 /* wallet-macos */,
 			);
 			name = Packages;
 			sourceTree = "<group>";
@@ -130,6 +140,7 @@
 				86145305356A12B55B0C0B52 /* AppError.swift */,
 				F0414C26F11FE88CF6E50E1F /* AppModel.swift */,
 				10EF37094DF3BB75ADE15500 /* BundlerClient.swift */,
+				338C3CE5B2A1B13400716881 /* BundlerKeyStore.swift */,
 				B9D44A78B0A9523321B9F367 /* DemoModels.swift */,
 				0EF992555A66C55E68BD7DB9 /* DemoRPCClient.swift */,
 				5FF9147DC25C40D4A7D8DA39 /* DemoSettingsStore.swift */,
@@ -143,6 +154,8 @@
 				AA6F8962EB73A62EDF82FBDD /* UserOperationModels.swift */,
 				611B7A76D937ADC7B38FEDA8 /* WalletMacOSApp.swift */,
 				8CBF66DFCFB8A95EFB9CCE34 /* WalletMetadataStore.swift */,
+				923CF6BF725AB85178781926 /* WalletNodeClient.swift */,
+				762567355B5B9F2F1A4B670F /* WalletNodeDaemon.swift */,
 				71035AA789A3F89268A157B9 /* WalletRecord.swift */,
 				71DDE5CB6A4F86F27DE37255 /* WeiFormatter.swift */,
 				B888CE77FC20C7FE9DF6239B /* Resources */,
@@ -169,6 +182,7 @@
 			name = LocalWalletApp;
 			packageProductDependencies = (
 				23F0EA007DFFA7126DA580A6 /* WalletSignature */,
+				4C0AA8A8621EF14A086C5866 /* SpawnHelper */,
 			);
 			productName = LocalWalletApp;
 			productReference = ED2B1ADEF8D6A75E702D54E0 /* LocalWalletApp.app */;
@@ -200,6 +214,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				8306362F3070C10759FE2C9A /* XCLocalSwiftPackageReference "swift-bridge" */,
+				A493A373C737382821970C0E /* XCLocalSwiftPackageReference "wallet-macos" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = C6F0021447FFC7412652DC31 /* Products */;
@@ -233,6 +248,7 @@
 				F1987C5627761B64C579BD75 /* AppError.swift in Sources */,
 				2FB2FA7472F27D70E6ADBDF3 /* AppModel.swift in Sources */,
 				8A4F334C71F0A61F144B033B /* BundlerClient.swift in Sources */,
+				D720097E3C1CA355A0CB0B69 /* BundlerKeyStore.swift in Sources */,
 				C7372C6CA4E7765A2AA35B7A /* DemoModels.swift in Sources */,
 				E3E827E96E85611AC6AB0CFF /* DemoRPCClient.swift in Sources */,
 				0AEF64FBB3ECFADFD9712B00 /* DemoSettingsStore.swift in Sources */,
@@ -246,6 +262,8 @@
 				5A43B2D9426FBAE3A87FC324 /* UserOperationModels.swift in Sources */,
 				040411231BD12B67EE891E4C /* WalletMacOSApp.swift in Sources */,
 				B616F0E8ECB9A8CB3DC9875B /* WalletMetadataStore.swift in Sources */,
+				C76D43CA4AE90A97B1B8ADA0 /* WalletNodeClient.swift in Sources */,
+				B0F9B69A3FA938E86D0F3B27 /* WalletNodeDaemon.swift in Sources */,
 				274EC1F7AF7D01549E14B740 /* WalletRecord.swift in Sources */,
 				2E17357921E0DF8E3F920EC5 /* WeiFormatter.swift in Sources */,
 			);
@@ -453,12 +471,20 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "swift-bridge";
 		};
+		A493A373C737382821970C0E /* XCLocalSwiftPackageReference "wallet-macos" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "wallet-macos";
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		23F0EA007DFFA7126DA580A6 /* WalletSignature */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = WalletSignature;
+		};
+		4C0AA8A8621EF14A086C5866 /* SpawnHelper */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = SpawnHelper;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

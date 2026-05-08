@@ -23,12 +23,26 @@ Wallet methods:
 - `wallet_bundlerStatus`
 - `wallet_walletStatus`
 - `wallet_pendingOperations`
+- `wallet_auditStore`
+- `wallet_auditHistory`
+- `wallet_auditReport`
+- `wallet_repairStore`
 - `wallet_cancelPendingOperation`
+- `wallet_beginAdminAction`
 - `wallet_rotateBundlerEOA`
+- `wallet_installBundlerEOA`
+- `wallet_deleteBundlerEOA`
 - `wallet_shutdown`
+
+`wallet_bundlerStatus` includes the active relayer address, lifecycle, balance,
+rotation state, recent relayer-key audit events, and non-secret `keyHistory`
+entries for current/retired/deleted relayer metadata. Private key material is
+never returned by status or any daemon RPC; human export is handled app-side
+from the app-owned Keychain entry.
 
 Ethereum read methods:
 
+- `eth_chainId`
 - `eth_getBalance`
 - `eth_getCode`
 - `eth_getTransactionCount`

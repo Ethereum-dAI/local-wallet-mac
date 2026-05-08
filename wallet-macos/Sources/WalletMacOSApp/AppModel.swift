@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import WalletSignature
 
 // AppModel drives the signed macOS demo shell. It is intentionally opinionated
@@ -23,9 +24,19 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastSubmittedUserOperationHash: String?
     @Published private(set) var lastBundledTransactionHash: String?
     @Published private(set) var debugLogText = ""
+    @Published private(set) var localRelayerStatus: WalletNodeClient.RelayerStatus?
+    @Published private(set) var localRelayerMessage = "Local daemon not connected"
+    @Published private(set) var isRefreshingLocalRelayer = false
+    @Published private(set) var isRotatingLocalRelayer = false
+    @Published private(set) var isExportingLocalRelayer = false
+    @Published private(set) var isDeletingLocalRelayer = false
 
     var activeChain: ChainConfiguration {
         configuration.activeChain
+    }
+
+    var hasLocalRelayerClient: Bool {
+        walletNodeClient != nil || WalletNodeClient.Configuration.fromEnvironment() == nil
     }
 
     private let keyStore: KeyStore
@@ -34,6 +45,8 @@ final class AppModel: ObservableObject {
     private let kernelAccountAddressPredictor: KernelAccountAddressPredictor
     private let rpcClient: DemoRPCClient
     private let bundlerClient: BundlerClient
+    private var walletNodeClient: WalletNodeClient?
+    private var walletNodeDaemon: WalletNodeDaemon?
     private let userOperationBuilder: UserOperationBuilder
 
     init(
@@ -43,6 +56,9 @@ final class AppModel: ObservableObject {
         kernelAccountAddressPredictor: KernelAccountAddressPredictor = KernelAccountAddressPredictor(),
         rpcClient: DemoRPCClient = DemoRPCClient(),
         bundlerClient: BundlerClient = BundlerClient(),
+        walletNodeClient: WalletNodeClient? = WalletNodeClient.Configuration.fromEnvironment().map {
+            WalletNodeClient(configuration: $0)
+        },
         userOperationBuilder: UserOperationBuilder = UserOperationBuilder()
     ) {
         self.keyStore = keyStore
@@ -51,11 +67,14 @@ final class AppModel: ObservableObject {
         self.kernelAccountAddressPredictor = kernelAccountAddressPredictor
         self.rpcClient = rpcClient
         self.bundlerClient = bundlerClient
+        self.walletNodeClient = walletNodeClient
         self.userOperationBuilder = userOperationBuilder
         self.configuration = DemoAppConfiguration(
-            isTestnetModeEnabled: true
+            isTestnetModeEnabled: settingsStore.isTestnetModeEnabled
         )
-        self.settingsStore.setTestnetModeEnabled(true)
+        self.localRelayerMessage = walletNodeClient == nil
+            ? "Local wallet-node daemon will start on refresh."
+            : "Local wallet-node daemon configured from environment."
     }
 
     func bootstrap() {
@@ -80,28 +99,22 @@ final class AppModel: ObservableObject {
             appendLog("bootstrap: active chain \(activeChain.name) (\(activeChain.id))")
             appendLog("bootstrap: key tag \(keyStore.keyTag)")
 
-            let hasExistingKey = try keyStore.loadKey() != nil
-            appendLog(
-                hasExistingKey
-                    ? "bootstrap: found existing Secure Enclave key reference in Keychain"
-                    : "bootstrap: no existing Secure Enclave key found; creating a new device-bound key"
-            )
-
-            let coordinates = try keyStore.publicKeyCoordinates()
-            appendLog("bootstrap: public key x=\(coordinates.x.shortHex) y=\(coordinates.y.shortHex)")
-
             let now = Date()
 
             if let existing = try metadataStore.load() {
                 appendLog("bootstrap: loaded wallet metadata for \(existing.walletId.uuidString)")
 
-                if existing.keyTag != keyStore.keyTag || !existing.matches(coordinates) {
+                if existing.keyTag != keyStore.keyTag {
                     appendLog("bootstrap: stored metadata does not match the current Secure Enclave key")
 
+                    let hasExistingKey = try keyStore.loadKey() != nil
                     guard !hasExistingKey else {
                         appendLog("bootstrap: refusing automatic recovery because an existing key was loaded")
                         throw AppError.metadataKeyMismatch
                     }
+
+                    let coordinates = try keyStore.publicKeyCoordinates()
+                    appendLog("bootstrap: public key x=\(coordinates.x.shortHex) y=\(coordinates.y.shortHex)")
 
                     appendLog("bootstrap: replacing stale metadata for the newly created key")
                     try metadataStore.clear()
@@ -109,9 +122,15 @@ final class AppModel: ObservableObject {
                     let created = try createFreshWalletRecord(coordinates: coordinates, now: now)
                     try metadataStore.save(created)
                     walletRecord = created
-                    appendLog("bootstrap: stored new wallet record with predicted account \(created.kernelAccountAddress ?? "unavailable")")
+                        appendLog("bootstrap: stored new wallet record with predicted account \(created.kernelAccountAddress ?? "unavailable")")
                     shouldInspectAfterBootstrap = true
                 } else {
+                    let coordinates = PublicKeyCoordinates(
+                        x: existing.pubkeyX,
+                        y: existing.pubkeyY
+                    )
+                    appendLog("bootstrap: using cached public key x=\(coordinates.x.shortHex) y=\(coordinates.y.shortHex)")
+
                     let predictedAddress = try kernelAccountAddressPredictor.predictedAddress(
                         chain: activeChain,
                         publicKey: coordinates,
@@ -140,6 +159,16 @@ final class AppModel: ObservableObject {
             } else {
                 appendLog("bootstrap: metadata store empty; creating the first wallet record")
 
+                let hasExistingKey = try keyStore.loadKey() != nil
+                appendLog(
+                    hasExistingKey
+                        ? "bootstrap: found existing Secure Enclave key reference in Keychain"
+                        : "bootstrap: no existing Secure Enclave key found; creating a new device-bound key"
+                )
+
+                let coordinates = try keyStore.publicKeyCoordinates()
+                appendLog("bootstrap: public key x=\(coordinates.x.shortHex) y=\(coordinates.y.shortHex)")
+
                 let created = try createFreshWalletRecord(coordinates: coordinates, now: now)
                 try metadataStore.save(created)
                 walletRecord = created
@@ -160,6 +189,7 @@ final class AppModel: ObservableObject {
         if shouldInspectAfterBootstrap {
             runDemo()
         }
+        refreshLocalRelayerStatus()
     }
 
     private func createFreshWalletRecord(coordinates: PublicKeyCoordinates, now: Date) throws -> WalletRecord {
@@ -198,6 +228,8 @@ final class AppModel: ObservableObject {
         do {
             try keyStore.deleteKey()
             appendLog("reset: deleted Secure Enclave key for tag \(keyStore.keyTag)")
+            try BundlerKeyStore.shared.deleteAll()
+            appendLog("reset: deleted local relayer keys")
             try metadataStore.clear()
             appendLog("reset: cleared local wallet metadata")
 
@@ -277,13 +309,6 @@ final class AppModel: ObservableObject {
     }
 
     func setTestnetModeEnabled(_ isEnabled: Bool) {
-        guard isEnabled else {
-            appendLog("chain: mainnet mode is disabled in the current demo build; keeping Sepolia active")
-            configuration = DemoAppConfiguration(isTestnetModeEnabled: true)
-            settingsStore.setTestnetModeEnabled(true)
-            return
-        }
-
         guard configuration.isTestnetModeEnabled != isEnabled else {
             return
         }
@@ -324,6 +349,169 @@ final class AppModel: ObservableObject {
     func clearDebugLog() {
         debugLogText = ""
         appendLog("log: cleared debug activity panel")
+    }
+
+    func refreshLocalRelayerStatus() {
+        guard !isRefreshingLocalRelayer else {
+            return
+        }
+
+        isRefreshingLocalRelayer = true
+        Task {
+            do {
+                let walletNodeClient = try await ensureWalletNodeClient()
+                let status = try await walletNodeClient.bundlerStatus()
+                localRelayerStatus = status
+                localRelayerMessage = status.ready
+                    ? "Local relayer ready on \(status.networkProfile)."
+                    : "Local relayer needs attention."
+                appendLog("relayer: status \(status.lifecycle) \(status.eoa.shortAddress)")
+            } catch {
+                localRelayerStatus = nil
+                localRelayerMessage = error.localizedDescription
+                appendLog("relayer: status failed — \(error.localizedDescription)")
+            }
+            isRefreshingLocalRelayer = false
+        }
+    }
+
+    func rotateLocalRelayerKey() async throws {
+        guard !isRotatingLocalRelayer else {
+            return
+        }
+
+        isRotatingLocalRelayer = true
+        defer { isRotatingLocalRelayer = false }
+        let walletNodeClient = try await ensureWalletNodeClient()
+        appendSection("Rotate Local Relayer")
+        let keyRef = nextBundlerKeyRef()
+        let challenge = try await walletNodeClient.beginAdminAction(
+            action: "install_bundler_eoa",
+            chainId: localRelayerStatus?.chainId ?? Int(activeChain.id),
+            keyRef: keyRef
+        )
+        try await authorizeLocalRelayerAdminAction(summary: challenge.summary)
+        let record = try BundlerKeyStore.shared.createIfNeeded(keyRef: keyRef)
+        let status = try await walletNodeClient.installBundlerEOA(
+            keyRef: keyRef,
+            secret: record.secret,
+            authorization: WalletNodeClient.AdminAuthorization(
+                adminActionId: challenge.adminActionId,
+                nonce: challenge.nonce
+            )
+        )
+        localRelayerStatus = status
+        localRelayerMessage = "New relayer key is waiting for top-up."
+        appendLog("relayer: rotation requested; active view \(status.eoa.shortAddress)")
+    }
+
+    private func nextBundlerKeyRef() -> String {
+        let prefix = "bundler-eoa:default:\(activeChain.id):"
+        let existingRefs = ([localRelayerStatus?.keyRef] + (localRelayerStatus?.keyHistory.map(\.keyRef) ?? []))
+            .compactMap { $0 }
+        let maxSuffix = existingRefs.compactMap { ref -> Int? in
+            guard ref.hasPrefix(prefix) else {
+                return nil
+            }
+            return Int(ref.dropFirst(prefix.count))
+        }.max() ?? 0
+        return "\(prefix)\(maxSuffix + 1)"
+    }
+
+    func exportLocalRelayerKey(
+        keyRef targetKeyRef: String? = nil,
+        label targetLabel: String? = nil
+    ) async throws -> String {
+        guard let status = localRelayerStatus, let keyRef = targetKeyRef ?? status.keyRef else {
+            throw AppError.localRelayerKeyMissing
+        }
+        guard !isExportingLocalRelayer else {
+            throw AppError.localRelayerKeyMissing
+        }
+
+        isExportingLocalRelayer = true
+        defer { isExportingLocalRelayer = false }
+        appendSection("Export Local Relayer")
+        let record = try BundlerKeyStore.shared.read(
+            keyRef: keyRef,
+            reason: "Reveal the local relayer private key"
+        )
+        let privateKey = "0x" + record.secret.lowercaseHexString
+        localRelayerMessage = "Relayer key exported after local authentication."
+        appendLog("relayer: exported key for \(targetLabel ?? status.eoa.shortAddress)")
+        refreshLocalRelayerStatus()
+        return privateKey
+    }
+
+    func deleteLocalRelayerKey(
+        keyRef targetKeyRef: String? = nil,
+        label targetLabel: String? = nil,
+        unsafeReset: Bool
+    ) async throws {
+        let walletNodeClient = try await ensureWalletNodeClient()
+        guard let status = localRelayerStatus, let keyRef = targetKeyRef ?? status.keyRef else {
+            throw AppError.localRelayerKeyMissing
+        }
+        guard !isDeletingLocalRelayer else {
+            return
+        }
+
+        isDeletingLocalRelayer = true
+        defer { isDeletingLocalRelayer = false }
+        appendSection(unsafeReset ? "Unsafe Reset Local Relayer" : "Delete Local Relayer")
+        let challenge = try await walletNodeClient.beginAdminAction(
+            action: "delete_bundler_eoa",
+            chainId: status.chainId,
+            keyRef: keyRef
+        )
+        try await authorizeLocalRelayerAdminAction(summary: challenge.summary)
+        try await walletNodeClient.deleteBundlerEOA(
+            keyRef: keyRef,
+            unsafeReset: unsafeReset,
+            authorization: WalletNodeClient.AdminAuthorization(
+                adminActionId: challenge.adminActionId,
+                nonce: challenge.nonce
+            )
+        )
+        try BundlerKeyStore.shared.delete(keyRef: keyRef)
+        localRelayerStatus = nil
+        localRelayerMessage = unsafeReset
+            ? "Relayer key reset. Submissions stay blocked until a funded relayer exists."
+            : "Relayer key deleted. Submissions stay blocked until a funded relayer exists."
+        appendLog("relayer: \(unsafeReset ? "unsafe reset" : "delete") completed for \(targetLabel ?? status.eoa.shortAddress)")
+        refreshLocalRelayerStatus()
+    }
+
+    private func ensureWalletNodeClient() async throws -> WalletNodeClient {
+        if let walletNodeClient {
+            return walletNodeClient
+        }
+        localRelayerMessage = "Starting local wallet-node daemon..."
+        let keyRef = "bundler-eoa:default:\(activeChain.id):1"
+        let bundlerSecret = try BundlerKeyStore.shared.createIfNeeded(keyRef: keyRef)
+        let daemon = try await WalletNodeDaemon.launch(
+            bundlerSecret: bundlerSecret,
+            chain: activeChain
+        )
+        walletNodeDaemon = daemon
+        walletNodeClient = daemon.client
+        localRelayerMessage = "Local wallet-node daemon connected."
+        appendLog("relayer: wallet-node daemon started")
+        return daemon.client
+    }
+
+    private func authorizeLocalRelayerAdminAction(summary: String) async throws {
+        let context = LAContext()
+        context.localizedReason = summary
+        try await withCheckedThrowingContinuation { continuation in
+            context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: summary) { success, error in
+                if success {
+                    continuation.resume()
+                } else {
+                    continuation.resume(throwing: error ?? AppError.localRelayerKeyMissing)
+                }
+            }
+        }
     }
 
     func buildCurrentUserOperationDraft(isDeployedOverride: Bool? = nil) async throws -> UserOperationDraft {

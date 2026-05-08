@@ -2,24 +2,24 @@
 
 `wallet-node` is the Local Wallet daemon. It exposes a small authenticated JSON-RPC surface for wallet health, verified Ethereum reads, ERC-4337 UserOperation estimation/submission, bundler EOA management, pending-operation inspection, cancellation, and shutdown.
 
-The daemon is designed to run locally beside the macOS app. It owns the local bundler EOA secret, Helios verified reads, policy checks, SQLite persistence, raw `handleOps` submission, and receipt watching.
+The daemon is designed to run locally beside the macOS app. The app owns the durable bundler EOA secret in its Keychain; the daemon only holds app-provided relayer secrets in process RAM while it handles Helios verified reads, policy checks, SQLite persistence, raw `handleOps` submission, and receipt watching.
 
 ## Current Scope
 
 Supported now:
 
-- Ethereum mainnet
+- Ethereum mainnet and Ethereum Sepolia by explicit mode
 - EntryPoint v0.7
 - app-pinned Kernel factory, implementation, and WebAuthn validator addresses
-- fixed mainnet account-code allowlist for the current Kernel path
+- chain-scoped account-code allowlist for the current Kernel path
 - no paymasters
 - local smart-account funding checks using account balance plus EntryPoint deposit
 - ETH-transfer execution path in fork coverage
-- development Keychain storage for the bundler EOA secret on macOS
+- app-owned Keychain storage for the bundler EOA secret on macOS, with daemon RAM-only signing after startup/install
 
 Not supported in V1:
 
-- user-configurable chains, EntryPoints, Kernel modules, or account addresses
+- user-configurable chains beyond mainnet/Sepolia, EntryPoints, Kernel modules, or account addresses
 - paymaster UserOperations
 - EntryPoint deposit management or reclaim UX
 - recovery after Secure Enclave/WebAuthn key loss
@@ -68,6 +68,22 @@ Other useful flags:
 --manifest-url <URL>         Debug-only manifest URL override; promotion is disabled in this build
 ```
 
+`--print-ready` requires `--http`; the inverse is not enforced — `--http` runs without `--print-ready`.
+
+## Admin Subcommand
+
+The same daemon binary exposes an operator-facing CLI under the `admin` subcommand, which talks to a running daemon over the existing JSON-RPC surface (HTTP or Unix socket) using the bearer token:
+
+```text
+wallet-node admin --socket <PATH> --token <TOKEN> audit [--persist]
+wallet-node admin --socket <PATH> --token <TOKEN> audit-history [--limit N]
+wallet-node admin --socket <PATH> --token <TOKEN> audit-report --run-id <ID>
+wallet-node admin --socket <PATH> --token <TOKEN> repair --action <ACTION> [...]
+wallet-node admin --socket <PATH> --token <TOKEN> pending
+```
+
+Either `--http <URL>` or `--socket <PATH>` selects transport; `--token <STRING>` or `--token-file <PATH>` provides the bearer token; `--json` opts into machine-readable output. Repair actions and their gating to specific findings are documented under "Audit and Repair" below.
+
 ## Configuration
 
 If no config file exists, defaults are used.
@@ -103,6 +119,8 @@ Notes:
 - `[chain]` can optionally override `[network]` for Helios internals during tests or compatibility work.
 - fee caps are safety caps. Recheck them against live mainnet before release.
 - default bundler EOA cushion/threshold values are development defaults. Recheck before release.
+- `policy.max_request_body_bytes` (default `262144`) is enforced by the transport handler before JSON-RPC parsing; bodies above the cap are rejected with `PAYLOAD_TOO_LARGE`.
+- `[rate_limits]` configures token-bucket rate limits per method bucket. Defaults: `eth_sendUserOperation` 3 burst @ 0.166/sec, `eth_estimateUserOperationGas` 10 burst @ 1/sec, `read_methods_total` 20 burst @ 1.66/sec. Methods without a bucket bypass the limiter.
 
 ## JSON-RPC Methods
 
@@ -113,12 +131,27 @@ Wallet methods:
 - `wallet_bundlerStatus`
 - `wallet_walletStatus`
 - `wallet_pendingOperations`
+- `wallet_auditStore`
+- `wallet_auditHistory`
+- `wallet_auditReport`
+- `wallet_repairStore`
 - `wallet_cancelPendingOperation`
+- `wallet_beginAdminAction`
 - `wallet_rotateBundlerEOA`
+- `wallet_installBundlerEOA`
+- `wallet_deleteBundlerEOA`
 - `wallet_shutdown`
+
+`wallet_bundlerStatus` reports the active relayer, balance/threshold, lifecycle,
+rotation state, recent relayer-key audit events, and non-secret `keyHistory`
+metadata for current and historical relayer keys. It does not expose private key
+material.
+
+`wallet_rotateBundlerEOA`, `wallet_installBundlerEOA`, and `wallet_deleteBundlerEOA` require an admin challenge issued by `wallet_beginAdminAction`. Challenges have a 60-second TTL, are single-use, and are bound to `(action, ownerScope, chainId, keyRef)`. The daemon does not itself prompt for user presence — the app is expected to gate the admin call behind a local user-presence check before forwarding the authorization.
 
 Ethereum read methods:
 
+- `eth_chainId`
 - `eth_getBalance`
 - `eth_getCode`
 - `eth_getTransactionCount`
@@ -231,6 +264,7 @@ The fork fixture validates the app-pinned Kernel path, real EntryPointSimulation
 ## Operational Notes
 
 - Helios is pinned in the workspace and should not be routine-bumped.
-- The daemon fails closed when stateOverride smoke fails for simulation-dependent sends.
+- The daemon fails closed when stateOverride smoke fails for simulation-dependent sends. The smoke check is one-shot per process: it runs after the chain becomes synced and is not re-run periodically — appropriate for a session-scoped daemon.
 - If Helios checkpoint data is stale, the daemon can start with an offline chain adapter for authenticated control APIs while verified reads are degraded.
 - Production Keychain access-group entitlement and provisioning validation remain outside the development fallback until Apple Developer Program setup is available.
+- Signed-manifest scaffolding exists in `wallet-bundler::manifest` (Ed25519 signature verification, 30-day max lifetime, denylist precedence) but no production trust roots are embedded; runtime promotion is disabled in non-debug builds, and the runtime allowlist consults only the static, chain-scoped pinned set.

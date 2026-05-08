@@ -12,6 +12,7 @@ useful to wallets, scripts, and infrastructure code:
 - CREATE2 salt derivation for the Kernel factory flow
 - Solady ERC-1967 clone init-code hashing
 - counterfactual Kernel account address prediction
+- Kernel v3 nonce decoding via `KernelNonce::decode` (validation mode, validation type, validation id, parallel key, sequence)
 
 It does **not** handle:
 
@@ -23,6 +24,8 @@ It does **not** handle:
 - live allowlist manifest promotion
 
 Those runtime checks live in the daemon stack, primarily `wallet-bundler` and `wallet-node`.
+
+The pinned Kernel factory, implementation, and WebAuthn validator addresses used by the daemon's app-shaped path live in [`wallet-bundler/src/allowlist.rs`](../wallet-bundler/src/allowlist.rs), not here. This crate is generic over those addresses.
 
 ## Example
 

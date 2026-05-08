@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use thiserror::Error;
+
+use crate::admin::AdminArgs;
 
 #[derive(Debug, Parser)]
 pub struct Cli {
@@ -10,6 +12,9 @@ pub struct Cli {
 
     #[arg(long, value_name = "N")]
     pub alive_fd: Option<u32>,
+
+    #[arg(long, value_name = "N")]
+    pub secret_fd: Option<u32>,
 
     #[arg(long, value_name = "ADDR")]
     pub http: Option<String>,
@@ -28,6 +33,14 @@ pub struct Cli {
 
     #[arg(long, value_name = "URL")]
     pub manifest_url: Option<String>,
+
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CliCommand {
+    Admin(AdminArgs),
 }
 
 #[derive(Debug, Error)]
@@ -40,6 +53,9 @@ pub enum CliError {
 
     #[error("--http cannot be used with --ready-fd or --alive-fd")]
     HttpAndFdsMutuallyExclusive,
+
+    #[error("--secret-fd requires --ready-fd")]
+    SecretFdRequiresReadyFd,
 
     #[error("--print-ready requires --http")]
     PrintReadyRequiresHttp,
@@ -63,6 +79,10 @@ impl Cli {
 
         if self.http.is_some() && (self.ready_fd.is_some() || self.alive_fd.is_some()) {
             return Err(CliError::HttpAndFdsMutuallyExclusive);
+        }
+
+        if self.secret_fd.is_some() && self.ready_fd.is_none() {
+            return Err(CliError::SecretFdRequiresReadyFd);
         }
 
         if self.print_ready && self.http.is_none() {
@@ -89,6 +109,21 @@ mod tests {
     #[test]
     fn validates_ready_and_alive_fds() {
         let cli = parse(&["wallet-node", "--ready-fd", "3", "--alive-fd", "4"]);
+
+        assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn validates_secret_fd_with_ready_fd() {
+        let cli = parse(&[
+            "wallet-node",
+            "--ready-fd",
+            "3",
+            "--alive-fd",
+            "4",
+            "--secret-fd",
+            "5",
+        ]);
 
         assert!(cli.validate().is_ok());
     }
@@ -204,6 +239,16 @@ mod tests {
         assert!(matches!(
             cli.validate(),
             Err(CliError::HttpAndFdsMutuallyExclusive)
+        ));
+    }
+
+    #[test]
+    fn rejects_secret_fd_without_ready_fd() {
+        let cli = parse(&["wallet-node", "--http", "127.0.0.1:0", "--secret-fd", "5"]);
+
+        assert!(matches!(
+            cli.validate(),
+            Err(CliError::SecretFdRequiresReadyFd)
         ));
     }
 

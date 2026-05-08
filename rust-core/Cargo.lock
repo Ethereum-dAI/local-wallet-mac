@@ -6728,6 +6728,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wallet-addresses"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+]
+
+[[package]]
 name = "wallet-bundler"
 version = "0.1.0"
 dependencies = [
@@ -6744,6 +6751,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "wallet-addresses",
  "wallet-chain",
  "wallet-kernel",
  "wallet-node-store",
@@ -6778,9 +6786,11 @@ dependencies = [
  "alloy-primitives",
  "hex-literal",
  "p256",
+ "secp256k1 0.30.0",
  "sha2 0.10.9",
  "wallet-kernel",
  "wallet-signature",
+ "zeroize",
 ]
 
 [[package]]
@@ -6790,6 +6800,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
  "hex-literal",
+ "wallet-addresses",
 ]
 
 [[package]]
@@ -6831,6 +6842,7 @@ dependencies = [
  "wallet-node-api",
  "wallet-node-store",
  "wallet-signature",
+ "zeroize",
 ]
 
 [[package]]
@@ -6861,11 +6873,13 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
+ "base64 0.22.1",
  "hex",
  "hex-literal",
  "p256",
  "serde_json",
  "sha2 0.10.9",
+ "wallet-addresses",
 ]
 
 [[package]]

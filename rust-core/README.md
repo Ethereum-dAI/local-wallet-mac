@@ -94,7 +94,7 @@ Daemon/internal surface:
 - `wallet-node-store`
 - `wallet-ffi`
 
-The daemon is scoped to Ethereum mainnet, EntryPoint v0.7, and the app's fixed Kernel/WebAuthn account path for now.
+The daemon is scoped to Ethereum mainnet/Sepolia, EntryPoint v0.7, and the app's fixed Kernel/WebAuthn account path for now.
 
 ## Workspace Layering
 

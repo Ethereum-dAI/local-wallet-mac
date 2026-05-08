@@ -98,6 +98,12 @@ pub enum SimulationRevert {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SimulationMode {
+    Estimate,
+    Submit,
+}
+
 pub fn encode_simulate_validation(op: &UserOperation) -> Result<Bytes> {
     let fields = op.pack_fields()?;
     let packed = PackedUserOperationSol {
@@ -188,7 +194,7 @@ pub fn validate_validation_result(
     wall_now_timestamp: u64,
     min_submission_window_secs: u64,
     max_block_drift_secs: u64,
-    allow_sig_failed: bool,
+    mode: SimulationMode,
 ) -> Result<()> {
     if result.aggregator != Address::ZERO {
         return Err(BundlerError::SimulationFailed {
@@ -200,7 +206,7 @@ pub fn validate_validation_result(
             reason: "paymaster_validation_not_supported".to_string(),
         });
     }
-    if result.sig_failed && !allow_sig_failed {
+    if result.sig_failed && mode == SimulationMode::Submit {
         return Err(BundlerError::SimulationFailed {
             reason: "signature_validation_failed".to_string(),
         });
@@ -503,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_result_time_window_rejects_expiring_userops() {
+    fn estimate_mode_allows_sig_failed_but_still_rejects_expiring_userops() {
         let result = DecodedValidationResult {
             pre_op_gas: U256::ZERO,
             prefund: U256::ZERO,
@@ -515,11 +521,33 @@ mod tests {
             valid_until: 1059,
         };
 
-        assert!(validate_validation_result(&result, 1000, 1000, 60, 90, true).is_err());
+        assert!(
+            validate_validation_result(&result, 1000, 1000, 60, 90, SimulationMode::Estimate)
+                .is_err()
+        );
 
         let mut valid = result;
         valid.valid_until = 1060;
-        validate_validation_result(&valid, 1000, 1000, 60, 90, true).unwrap();
+        validate_validation_result(&valid, 1000, 1000, 60, 90, SimulationMode::Estimate).unwrap();
+    }
+
+    #[test]
+    fn submit_mode_rejects_sig_failed() {
+        let result = DecodedValidationResult {
+            pre_op_gas: U256::ZERO,
+            prefund: U256::ZERO,
+            account_validation_data: U256::ZERO,
+            paymaster_validation_data: U256::ZERO,
+            sig_failed: true,
+            aggregator: Address::ZERO,
+            valid_after: 0,
+            valid_until: 0,
+        };
+
+        assert!(matches!(
+            validate_validation_result(&result, 1000, 1000, 60, 90, SimulationMode::Submit),
+            Err(BundlerError::SimulationFailed { reason }) if reason == "signature_validation_failed"
+        ));
     }
 
     #[test]
@@ -535,9 +563,9 @@ mod tests {
             valid_until: 0,
         };
 
-        validate_validation_result(&result, 1000, 1090, 60, 90, false).unwrap();
+        validate_validation_result(&result, 1000, 1090, 60, 90, SimulationMode::Submit).unwrap();
         assert!(matches!(
-            validate_validation_result(&result, 1000, 1091, 60, 90, false),
+            validate_validation_result(&result, 1000, 1091, 60, 90, SimulationMode::Submit),
             Err(BundlerError::SimulationFailed { reason }) if reason == "simulated_block_too_old"
         ));
     }

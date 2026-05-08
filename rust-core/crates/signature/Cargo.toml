@@ -11,9 +11,11 @@ categories = ["cryptography::cryptocurrencies", "authentication"]
 [dependencies]
 alloy-primitives = { workspace = true }
 alloy-sol-types  = { workspace = true }
+wallet-addresses = { path = "../wallet-addresses" }
 sha2             = { workspace = true }
 p256             = { workspace = true }
 hex              = { workspace = true }
+base64           = "0.22"
 
 [dev-dependencies]
 hex-literal = { workspace = true }

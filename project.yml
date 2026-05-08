@@ -6,6 +6,8 @@ options:
 packages:
   WalletBridge:
     path: swift-bridge
+  WalletMacOS:
+    path: wallet-macos
 targets:
   LocalWalletApp:
     type: application
@@ -40,6 +42,8 @@ targets:
     dependencies:
       - package: WalletBridge
         product: WalletSignature
+      - package: WalletMacOS
+        product: SpawnHelper
 schemes:
   LocalWalletApp:
     build:

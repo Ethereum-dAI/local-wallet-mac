@@ -208,6 +208,10 @@ pub fn dummy_webauthn_signature(use_precompiled: bool) -> Bytes {
     ))
 }
 
+pub fn signature_uses_precompiled(signature: &Bytes) -> Option<bool> {
+    wallet_signature::decode_use_precompiled(signature)
+}
+
 fn required(field: &'static str, value: Option<String>) -> Result<String> {
     value.ok_or_else(|| BundlerError::InvalidUserOperation(format!("{field} is required")))
 }

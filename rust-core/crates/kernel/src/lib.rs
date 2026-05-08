@@ -7,12 +7,63 @@
 //! - `Kernel.initialize(...)` calldata encoding
 //! - CREATE2 salt derivation for Kernel factory deployment
 //! - counterfactual account-address prediction
+//! - Kernel v3 nonce decoding
 
 use alloy_primitives::{keccak256, Address, Bytes, FixedBytes, B256, U256};
 use alloy_sol_types::{sol, SolCall, SolValue};
 
 /// Validation type byte for a root validator.
 pub const VALIDATOR_TYPE: u8 = 0x01;
+
+pub const VALIDATION_MODE_DEFAULT: u8 = 0x00;
+pub const VALIDATION_MODE_ENABLE: u8 = 0x01;
+pub const VALIDATION_MODE_INSTALL: u8 = 0x02;
+
+pub const VALIDATION_TYPE_ROOT: u8 = 0x00;
+pub const VALIDATION_TYPE_VALIDATOR: u8 = 0x01;
+pub const VALIDATION_TYPE_PERMISSION: u8 = 0x02;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KernelNonce {
+    pub validation_mode: u8,
+    pub validation_type: u8,
+    pub validation_id_without_type: [u8; 20],
+    pub parallel_key: u16,
+    pub sequence: u64,
+}
+
+impl KernelNonce {
+    pub fn decode(nonce: U256) -> Self {
+        let bytes = nonce.to_be_bytes::<32>();
+        let mut validation_id_without_type = [0u8; 20];
+        validation_id_without_type.copy_from_slice(&bytes[2..22]);
+
+        Self {
+            validation_mode: bytes[0],
+            validation_type: bytes[1],
+            validation_id_without_type,
+            parallel_key: u16::from_be_bytes([bytes[22], bytes[23]]),
+            sequence: u64::from_be_bytes([
+                bytes[24], bytes[25], bytes[26], bytes[27], bytes[28], bytes[29], bytes[30],
+                bytes[31],
+            ]),
+        }
+    }
+
+    pub fn validation_id(&self) -> FixedBytes<21> {
+        let mut validation_id = [0u8; 21];
+        validation_id[0] = self.validation_type;
+        validation_id[1..].copy_from_slice(&self.validation_id_without_type);
+        FixedBytes::from(validation_id)
+    }
+
+    pub fn is_default_root_key_zero(&self) -> bool {
+        self.validation_mode == VALIDATION_MODE_DEFAULT
+            && self.validation_type == VALIDATION_TYPE_ROOT
+            && self.validation_id_without_type == [0u8; 20]
+            && self.parallel_key == 0
+    }
+}
 
 sol! {
     struct WebAuthnValidatorDataEncoded {
@@ -137,13 +188,17 @@ pub fn predict_kernel_account_address(
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, b256, uint};
+    use wallet_addresses::{
+        PINNED_KERNEL_FACTORY_ADDRESS, PINNED_KERNEL_IMPLEMENTATION_ADDRESS,
+        PINNED_WEBAUTHN_VALIDATOR_ADDRESS,
+    };
 
     use super::*;
 
     #[test]
     fn initialize_call_has_expected_selector_and_length() {
         let call = encode_initialize_call(
-            address!("7ab16Ff354AcB328452F1D445b3Ddee9a91e9e69"),
+            PINNED_WEBAUTHN_VALIDATOR_ADDRESS,
             uint!(1_U256),
             uint!(2_U256),
             B256::ZERO,
@@ -155,22 +210,56 @@ mod tests {
 
     #[test]
     fn validation_id_prefixes_validator_type() {
-        let validation_id =
-            build_validation_id(address!("7ab16Ff354AcB328452F1D445b3Ddee9a91e9e69"));
+        let validation_id = build_validation_id(PINNED_WEBAUTHN_VALIDATOR_ADDRESS);
 
         assert_eq!(validation_id[0], VALIDATOR_TYPE);
         assert_eq!(
             &validation_id[1..21],
-            address!("7ab16Ff354AcB328452F1D445b3Ddee9a91e9e69").as_slice()
+            PINNED_WEBAUTHN_VALIDATOR_ADDRESS.as_slice()
         );
+    }
+
+    #[test]
+    fn decodes_kernel_v3_root_nonce_key_zero() {
+        let decoded = KernelNonce::decode(U256::from(7u64));
+
+        assert_eq!(decoded.validation_mode, VALIDATION_MODE_DEFAULT);
+        assert_eq!(decoded.validation_type, VALIDATION_TYPE_ROOT);
+        assert_eq!(decoded.validation_id_without_type, [0u8; 20]);
+        assert_eq!(decoded.parallel_key, 0);
+        assert_eq!(decoded.sequence, 7);
+        assert_eq!(decoded.validation_id(), FixedBytes::<21>::ZERO);
+        assert!(decoded.is_default_root_key_zero());
+    }
+
+    #[test]
+    fn decodes_kernel_v3_permission_nonce_layout() {
+        let mut bytes = [0u8; 32];
+        bytes[0] = VALIDATION_MODE_DEFAULT;
+        bytes[1] = VALIDATION_TYPE_PERMISSION;
+        bytes[18..22].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        bytes[22..24].copy_from_slice(&0x1234u16.to_be_bytes());
+        bytes[24..32].copy_from_slice(&9u64.to_be_bytes());
+
+        let decoded = KernelNonce::decode(U256::from_be_bytes(bytes));
+
+        assert_eq!(decoded.validation_mode, VALIDATION_MODE_DEFAULT);
+        assert_eq!(decoded.validation_type, VALIDATION_TYPE_PERMISSION);
+        assert_eq!(decoded.parallel_key, 0x1234);
+        assert_eq!(decoded.sequence, 9);
+        assert_eq!(
+            &decoded.validation_id_without_type[16..20],
+            &[0xaa, 0xbb, 0xcc, 0xdd]
+        );
+        assert!(!decoded.is_default_root_key_zero());
     }
 
     #[test]
     fn predicts_kernel_account_address_for_pinned_vector() {
         let predicted = predict_kernel_account_address(
-            address!("2577507b78c2008Ff367261CB6285d44ba5eF2E9"),
-            address!("d6CEDDe84be40893d153Be9d467CD6aD37875b28"),
-            address!("7ab16Ff354AcB328452F1D445b3Ddee9a91e9e69"),
+            PINNED_KERNEL_FACTORY_ADDRESS,
+            PINNED_KERNEL_IMPLEMENTATION_ADDRESS,
+            PINNED_WEBAUTHN_VALIDATOR_ADDRESS,
             b256!("0000000000000000000000000000000000000000000000000000000000000001").into(),
             b256!("0000000000000000000000000000000000000000000000000000000000000002").into(),
             B256::ZERO,

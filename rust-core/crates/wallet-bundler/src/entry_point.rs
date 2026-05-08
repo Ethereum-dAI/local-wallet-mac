@@ -1,9 +1,8 @@
-use alloy_primitives::{address, Address, Bytes};
+use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{sol, SolCall};
+pub use wallet_addresses::ENTRY_POINT_V07;
 
 use crate::{Result, UserOperation};
-
-pub const ENTRY_POINT_V07: Address = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
 
 sol! {
     struct PackedUserOperationSol {

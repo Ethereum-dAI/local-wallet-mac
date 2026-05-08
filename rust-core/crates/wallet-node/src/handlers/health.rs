@@ -39,6 +39,7 @@ pub async fn handle(state: &DaemonState) -> Value {
         reason,
         api_version: wallet_node_api::API_VERSION,
         chain_id: state.config.network.chain_id,
+        network_profile: state.config.network_profile().as_str(),
         daemon_version: daemon_version(),
         transport: TransportStatus {
             kind: state.transport.kind.as_str(),
@@ -315,6 +316,7 @@ struct HealthResponse {
     reason: Option<String>,
     api_version: u32,
     chain_id: u64,
+    network_profile: &'static str,
     daemon_version: String,
     transport: TransportStatus,
     helios: HeliosStatus,
@@ -402,6 +404,7 @@ fn phase_one_starting_response(state: &DaemonState) -> Value {
         "status": "starting",
         "apiVersion": wallet_node_api::API_VERSION,
         "chainId": state.config.network.chain_id,
+        "networkProfile": state.config.network_profile().as_str(),
         "daemonVersion": daemon_version(),
         "transport": {
             "kind": state.transport.kind.as_str(),
@@ -617,6 +620,26 @@ mod tests {
             Self: 'async_trait,
         {
             Box::pin(async { Err(ChainError::RpcError("execution rpc down".to_string())) })
+        }
+
+        fn current_gas_price<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<Box<dyn Future<Output = Result<U256, ChainError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.inner.current_gas_price().await })
+        }
+
+        fn current_max_priority_fee_per_gas<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<Box<dyn Future<Output = Result<U256, ChainError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.inner.current_max_priority_fee_per_gas().await })
         }
 
         fn is_synced<'life0, 'async_trait>(

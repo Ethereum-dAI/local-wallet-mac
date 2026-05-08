@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, Error, TransactionBehavior};
 
-use crate::{StoreError, UserOpStatus, UserOperation};
+use crate::{NonceStatus, StoreError, UserOpStatus, UserOperation};
 
 const TABLE: &str = "user_operations";
 
@@ -55,6 +55,66 @@ pub(crate) fn user_op_insert(
                     table: TABLE,
                     reason: "insert ignored but existing row missing",
                 })?;
+            UserOpInsertOutcome::AlreadyExists(existing)
+        }
+        1 => UserOpInsertOutcome::Inserted,
+        _ => {
+            return Err(StoreError::DataIntegrity {
+                table: TABLE,
+                reason: "unexpected insert row count",
+            });
+        }
+    };
+
+    tx.commit()?;
+    Ok(outcome)
+}
+
+pub(crate) fn user_op_insert_abandon_nonce_on_exists(
+    conn: &mut Connection,
+    op: UserOperation,
+    nonce_chain_id: u64,
+    nonce_bundler_address: &str,
+    nonce: u64,
+) -> Result<UserOpInsertOutcome, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let inserted = tx.execute(
+        "INSERT OR IGNORE INTO user_operations (user_op_hash, chain_id, entry_point, sender, nonce, user_op_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            &op.user_op_hash,
+            op.chain_id,
+            &op.entry_point,
+            &op.sender,
+            &op.nonce,
+            &op.user_op_json,
+            op.status.as_str(),
+            op.created_at,
+            op.updated_at,
+        ],
+    )?;
+
+    let outcome = match inserted {
+        0 => {
+            let existing =
+                user_op_get(&tx, &op.user_op_hash)?.ok_or(StoreError::DataIntegrity {
+                    table: TABLE,
+                    reason: "insert ignored but existing row missing",
+                })?;
+            let deleted = tx.execute(
+                "DELETE FROM nonce_reservations WHERE chain_id = ? AND bundler_address = ? AND nonce = ? AND status = ?",
+                params![
+                    nonce_chain_id,
+                    nonce_bundler_address,
+                    nonce,
+                    NonceStatus::Reserved.as_str(),
+                ],
+            )?;
+            if deleted == 0 {
+                return Err(StoreError::DataIntegrity {
+                    table: "nonce_reservations",
+                    reason: "no reserved nonce row to release after duplicate user op",
+                });
+            }
             UserOpInsertOutcome::AlreadyExists(existing)
         }
         1 => UserOpInsertOutcome::Inserted,
@@ -257,6 +317,41 @@ mod tests {
             }
             other => panic!("expected AlreadyExists, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn insert_releases_reserved_nonce_atomically_on_duplicate_user_op_hash() {
+        let mut conn = migrated_in_memory_conn();
+
+        user_op_insert(
+            &mut conn,
+            user_op("0xaaaa", "0xS1", UserOpStatus::Received, 1),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO nonce_reservations (chain_id, bundler_address, nonce, status, user_op_hash, tx_hash, created_at, updated_at) VALUES (?, ?, ?, 'reserved', NULL, NULL, ?, ?)",
+            params![1_u64, "0xbeef", 7_u64, 1_i64, 1_i64],
+        )
+        .unwrap();
+
+        let outcome = user_op_insert_abandon_nonce_on_exists(
+            &mut conn,
+            user_op("0xaaaa", "0xS2", UserOpStatus::Submitted, 2),
+            1,
+            "0xbeef",
+            7,
+        )
+        .unwrap();
+        let nonce_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM nonce_reservations WHERE chain_id = ? AND bundler_address = ? AND nonce = ?",
+                params![1_u64, "0xbeef", 7_u64],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(matches!(outcome, UserOpInsertOutcome::AlreadyExists(_)));
+        assert_eq!(nonce_rows, 0);
     }
 
     #[test]

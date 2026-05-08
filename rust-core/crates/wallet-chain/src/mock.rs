@@ -24,6 +24,8 @@ pub struct MockChainAdapter {
     block_calls: AtomicU64,
     current_head_calls: AtomicU64,
     execution_rpc_head_calls: AtomicU64,
+    current_gas_price_calls: AtomicU64,
+    current_max_priority_fee_calls: AtomicU64,
     is_synced_calls: AtomicU64,
 }
 
@@ -41,7 +43,10 @@ struct MockState {
     current_head: Option<BlockHeader>,
     execution_rpc_head: u64,
     synced: bool,
+    current_gas_price: Option<U256>,
+    current_max_priority_fee_per_gas: Option<U256>,
     error_factory: Option<ErrorFactory>,
+    current_head_error_factory: Option<ErrorFactory>,
 }
 
 impl MockChainAdapter {
@@ -145,8 +150,23 @@ impl MockChainAdapter {
         self
     }
 
+    pub fn set_current_gas_price(&self, value: U256) -> &Self {
+        self.state().current_gas_price = Some(value);
+        self
+    }
+
+    pub fn set_current_max_priority_fee_per_gas(&self, value: U256) -> &Self {
+        self.state().current_max_priority_fee_per_gas = Some(value);
+        self
+    }
+
     pub fn inject_error(&self, error_factory: ErrorFactory) -> &Self {
         self.state().error_factory = Some(error_factory);
+        self
+    }
+
+    pub fn inject_current_head_error(&self, error_factory: ErrorFactory) -> &Self {
+        self.state().current_head_error_factory = Some(error_factory);
         self
     }
 
@@ -193,6 +213,14 @@ impl MockChainAdapter {
 
     pub fn execution_rpc_head_call_count(&self) -> u64 {
         self.execution_rpc_head_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn current_gas_price_call_count(&self) -> u64 {
+        self.current_gas_price_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn current_max_priority_fee_call_count(&self) -> u64 {
+        self.current_max_priority_fee_calls.load(Ordering::SeqCst)
     }
 
     pub fn is_synced_call_count(&self) -> u64 {
@@ -335,6 +363,13 @@ impl ChainAdapter for MockChainAdapter {
     async fn current_head(&self) -> Result<BlockHeader, ChainError> {
         self.current_head_calls.fetch_add(1, Ordering::SeqCst);
         let state = self.state();
+        if let Some(error) = state
+            .current_head_error_factory
+            .as_ref()
+            .map(|factory| factory())
+        {
+            return Err(error);
+        }
         if let Some(error) = Self::injected_error(&state) {
             return Err(error);
         }
@@ -348,6 +383,25 @@ impl ChainAdapter for MockChainAdapter {
             return Err(error);
         }
         Ok(state.execution_rpc_head)
+    }
+
+    async fn current_gas_price(&self) -> Result<U256, ChainError> {
+        self.current_gas_price_calls.fetch_add(1, Ordering::SeqCst);
+        let state = self.state();
+        if let Some(error) = Self::injected_error(&state) {
+            return Err(error);
+        }
+        Ok(state.current_gas_price.unwrap_or(U256::ZERO))
+    }
+
+    async fn current_max_priority_fee_per_gas(&self) -> Result<U256, ChainError> {
+        self.current_max_priority_fee_calls
+            .fetch_add(1, Ordering::SeqCst);
+        let state = self.state();
+        if let Some(error) = Self::injected_error(&state) {
+            return Err(error);
+        }
+        Ok(state.current_max_priority_fee_per_gas.unwrap_or(U256::ZERO))
     }
 
     async fn is_synced(&self) -> bool {
@@ -726,6 +780,56 @@ mod tests {
                 .unwrap(),
             U256::ZERO
         );
+    }
+
+    #[tokio::test]
+    async fn returns_set_gas_price() {
+        let adapter = MockChainAdapter::new();
+        adapter.set_current_gas_price(U256::from(7_000_000_000_u64));
+
+        assert_eq!(
+            adapter.current_gas_price().await.unwrap(),
+            U256::from(7_000_000_000_u64)
+        );
+        assert_eq!(adapter.current_gas_price_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn returns_set_max_priority_fee() {
+        let adapter = MockChainAdapter::new();
+        adapter.set_current_max_priority_fee_per_gas(U256::from(2_000_000_000_u64));
+
+        assert_eq!(
+            adapter.current_max_priority_fee_per_gas().await.unwrap(),
+            U256::from(2_000_000_000_u64)
+        );
+        assert_eq!(adapter.current_max_priority_fee_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn unset_gas_price_and_priority_fee_return_zero_by_default() {
+        let adapter = MockChainAdapter::new();
+
+        assert_eq!(adapter.current_gas_price().await.unwrap(), U256::ZERO);
+        assert_eq!(
+            adapter.current_max_priority_fee_per_gas().await.unwrap(),
+            U256::ZERO
+        );
+    }
+
+    #[tokio::test]
+    async fn error_factory_propagates_to_fee_sources() {
+        let adapter = MockChainAdapter::new();
+        adapter.inject_error(Box::new(|| ChainError::RpcError("simulated".into())));
+
+        assert!(matches!(
+            adapter.current_gas_price().await,
+            Err(ChainError::RpcError(_))
+        ));
+        assert!(matches!(
+            adapter.current_max_priority_fee_per_gas().await,
+            Err(ChainError::RpcError(_))
+        ));
     }
 
     #[test]

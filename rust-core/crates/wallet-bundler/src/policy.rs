@@ -45,11 +45,7 @@ pub fn validate_user_operation(
     if chain_id != policy.chain_id {
         return Err(PolicyError::ChainMismatch);
     }
-    if !policy
-        .entry_points
-        .iter()
-        .any(|allowed| *allowed == entry_point)
-    {
+    if !policy.entry_points.contains(&entry_point) {
         return Err(PolicyError::EntrypointNotAllowlisted);
     }
     if op.paymaster.is_some()

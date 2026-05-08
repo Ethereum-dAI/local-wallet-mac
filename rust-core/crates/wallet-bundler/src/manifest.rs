@@ -192,46 +192,67 @@ pub fn manifest_allows_hash(
 }
 
 pub fn canonical_additions_payload(manifest: &AllowlistManifest) -> String {
-    let additions = manifest
-        .additions
+    let AllowlistManifest {
+        version,
+        issued_at,
+        expires_at,
+        additions,
+        denylist: _,
+        signatures: _,
+    } = manifest;
+    let additions = additions
         .iter()
         .map(canonical_addition)
         .collect::<Vec<_>>()
         .join(",");
     format!(
         "{{\"version\":{},\"issuedAt\":{},\"expiresAt\":{},\"additions\":[{}]}}",
-        manifest.version, manifest.issued_at, manifest.expires_at, additions
+        version, issued_at, expires_at, additions
     )
 }
 
 pub fn canonical_denylist_payload(manifest: &AllowlistManifest) -> String {
-    let denylist = manifest
-        .denylist
+    let AllowlistManifest {
+        version,
+        issued_at,
+        expires_at,
+        additions: _,
+        denylist,
+        signatures: _,
+    } = manifest;
+    let denylist = denylist
         .iter()
         .map(canonical_denylist_entry)
         .collect::<Vec<_>>()
         .join(",");
     format!(
         "{{\"version\":{},\"issuedAt\":{},\"expiresAt\":{},\"denylist\":[{}]}}",
-        manifest.version, manifest.issued_at, manifest.expires_at, denylist
+        version, issued_at, expires_at, denylist
     )
 }
 
 fn canonical_addition(addition: &ManifestAddition) -> String {
+    let ManifestAddition {
+        layer,
+        module_type,
+        hash,
+        label,
+    } = addition;
     format!(
         "{{\"layer\":{},\"moduleType\":{},\"hash\":{},\"label\":{}}}",
-        json_string(&addition.layer.to_string()),
-        json_string(&addition.module_type),
-        json_string(&format!("{:#x}", addition.hash)),
-        json_string(&addition.label)
+        json_string(&layer.to_string()),
+        json_string(module_type),
+        json_string(&format!("{hash:#x}")),
+        json_string(label)
     )
 }
 
 fn canonical_denylist_entry(entry: &ManifestDenylistEntry) -> String {
+    let ManifestDenylistEntry { hash, reason } = entry;
     format!(
         "{{\"hash\":{},\"reason\":{}}}",
-        json_string(&format!("{:#x}", entry.hash)),
-        json_string(&entry.reason)
+        json_string(&format!("{hash:#x}")),
+        json_string(reason)
     )
 }
 
@@ -322,6 +343,8 @@ mod tests {
 
     #[test]
     fn canonical_payloads_match_signature_contract_field_order() {
+        // The canonical formatters use exhaustive destructuring so new signed
+        // fields force this code to change at compile time.
         let manifest = sample_manifest();
 
         assert_eq!(

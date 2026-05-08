@@ -2,15 +2,36 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection};
 
+#[cfg(test)]
+use crate::DEFAULT_OWNER_SCOPE;
 use crate::{BundlerAccount, BundlerLifecycle, StoreError};
 
 const TABLE: &str = "bundler_accounts";
 
+#[cfg(test)]
 pub(crate) fn bundler_account_insert(
     conn: &Connection,
     chain_id: u64,
     address: &str,
     key_ref: &str,
+) -> Result<(), StoreError> {
+    bundler_account_insert_for_owner(
+        conn,
+        DEFAULT_OWNER_SCOPE,
+        chain_id,
+        address,
+        key_ref,
+        BundlerLifecycle::Active,
+    )
+}
+
+pub(crate) fn bundler_account_insert_for_owner(
+    conn: &Connection,
+    owner_scope: &str,
+    chain_id: u64,
+    address: &str,
+    key_ref: &str,
+    lifecycle: BundlerLifecycle,
 ) -> Result<(), StoreError> {
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -18,19 +39,41 @@ pub(crate) fn bundler_account_insert(
         .as_secs() as i64;
 
     conn.execute(
-        "INSERT INTO bundler_accounts (chain_id, address, key_ref, lifecycle, created_at) VALUES (?, ?, ?, 'active', ?)",
-        params![chain_id, address, key_ref, created_at],
+        "INSERT INTO bundler_accounts (owner_scope, chain_id, address, key_ref, lifecycle, created_at, activated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        params![
+            owner_scope,
+            chain_id,
+            address,
+            key_ref,
+            lifecycle.as_str(),
+            created_at,
+            if lifecycle == BundlerLifecycle::Active {
+                Some(created_at)
+            } else {
+                None
+            }
+        ],
     )?;
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn bundler_account_active(
     conn: &Connection,
     chain_id: u64,
 ) -> Result<Option<BundlerAccount>, StoreError> {
+    bundler_account_active_for_owner(conn, DEFAULT_OWNER_SCOPE, chain_id)
+}
+
+pub(crate) fn bundler_account_active_for_owner(
+    conn: &Connection,
+    owner_scope: &str,
+    chain_id: u64,
+) -> Result<Option<BundlerAccount>, StoreError> {
     let accounts = query_accounts(
         conn,
-        "SELECT chain_id, address, key_ref, lifecycle, created_at FROM bundler_accounts WHERE chain_id = ? AND lifecycle = 'active'",
+        "SELECT owner_scope, chain_id, address, key_ref, lifecycle, created_at, activated_at, retired_at, deleted_at, last_used_at, last_exported_at, compromise_status FROM bundler_accounts WHERE owner_scope = ? AND chain_id = ? AND lifecycle = 'active'",
+        owner_scope,
         chain_id,
     )?;
 
@@ -44,55 +87,187 @@ pub(crate) fn bundler_account_active(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn bundler_account_set_lifecycle(
     conn: &Connection,
     chain_id: u64,
     address: &str,
     new_state: BundlerLifecycle,
 ) -> Result<(), StoreError> {
+    bundler_account_set_lifecycle_for_owner(conn, DEFAULT_OWNER_SCOPE, chain_id, address, new_state)
+}
+
+pub(crate) fn bundler_account_set_lifecycle_for_owner(
+    conn: &Connection,
+    owner_scope: &str,
+    chain_id: u64,
+    address: &str,
+    new_state: BundlerLifecycle,
+) -> Result<(), StoreError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
     conn.execute(
-        "UPDATE bundler_accounts SET lifecycle = ? WHERE chain_id = ? AND address = ?",
-        params![new_state.as_str(), chain_id, address],
+        "UPDATE bundler_accounts SET lifecycle = ?, activated_at = CASE WHEN ? = 'active' THEN COALESCE(activated_at, ?) ELSE activated_at END, retired_at = CASE WHEN ? = 'retired' THEN COALESCE(retired_at, ?) ELSE retired_at END, deleted_at = CASE WHEN ? = 'deleted' THEN COALESCE(deleted_at, ?) ELSE deleted_at END WHERE owner_scope = ? AND chain_id = ? AND address = ?",
+        params![
+            new_state.as_str(),
+            new_state.as_str(),
+            now,
+            new_state.as_str(),
+            now,
+            new_state.as_str(),
+            now,
+            owner_scope,
+            chain_id,
+            address
+        ],
     )?;
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn bundler_account_list(
     conn: &Connection,
     chain_id: u64,
 ) -> Result<Vec<BundlerAccount>, StoreError> {
+    bundler_account_list_for_owner(conn, DEFAULT_OWNER_SCOPE, chain_id)
+}
+
+pub(crate) fn bundler_account_list_for_owner(
+    conn: &Connection,
+    owner_scope: &str,
+    chain_id: u64,
+) -> Result<Vec<BundlerAccount>, StoreError> {
     query_accounts(
         conn,
-        "SELECT chain_id, address, key_ref, lifecycle, created_at FROM bundler_accounts WHERE chain_id = ? ORDER BY created_at",
+        "SELECT owner_scope, chain_id, address, key_ref, lifecycle, created_at, activated_at, retired_at, deleted_at, last_used_at, last_exported_at, compromise_status FROM bundler_accounts WHERE owner_scope = ? AND chain_id = ? ORDER BY created_at",
+        owner_scope,
         chain_id,
     )
+}
+
+pub(crate) fn bundler_account_pending_funding(
+    conn: &Connection,
+    owner_scope: &str,
+    chain_id: u64,
+) -> Result<Option<BundlerAccount>, StoreError> {
+    let accounts = query_accounts(
+        conn,
+        "SELECT owner_scope, chain_id, address, key_ref, lifecycle, created_at, activated_at, retired_at, deleted_at, last_used_at, last_exported_at, compromise_status FROM bundler_accounts WHERE owner_scope = ? AND chain_id = ? AND lifecycle = 'pending_funding'",
+        owner_scope,
+        chain_id,
+    )?;
+
+    match accounts.len() {
+        0 => Ok(None),
+        1 => Ok(accounts.into_iter().next()),
+        _ => Err(StoreError::DataIntegrity {
+            table: TABLE,
+            reason: "multiple pending_funding rows",
+        }),
+    }
+}
+
+pub(crate) fn bundler_account_activate_pending(
+    conn: &mut Connection,
+    owner_scope: &str,
+    chain_id: u64,
+    pending_address: &str,
+) -> Result<(), StoreError> {
+    let tx = conn.transaction()?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    tx.execute(
+        "UPDATE bundler_accounts SET lifecycle = 'retiring' WHERE owner_scope = ? AND chain_id = ? AND lifecycle = 'active'",
+        params![owner_scope, chain_id],
+    )?;
+    let updated = tx.execute(
+        "UPDATE bundler_accounts SET lifecycle = 'active', activated_at = COALESCE(activated_at, ?) WHERE owner_scope = ? AND chain_id = ? AND address = ? AND lifecycle = 'pending_funding'",
+        params![now, owner_scope, chain_id, pending_address],
+    )?;
+    if updated != 1 {
+        return Err(StoreError::DataIntegrity {
+            table: TABLE,
+            reason: "pending_funding row not found for activation",
+        });
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub(crate) fn bundler_account_mark_used(
+    conn: &Connection,
+    owner_scope: &str,
+    chain_id: u64,
+    address: &str,
+) -> Result<(), StoreError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    conn.execute(
+        "UPDATE bundler_accounts SET last_used_at = ? WHERE owner_scope = ? AND chain_id = ? AND address = ?",
+        params![now, owner_scope, chain_id, address],
+    )?;
+    Ok(())
 }
 
 fn query_accounts(
     conn: &Connection,
     sql: &str,
+    owner_scope: &str,
     chain_id: u64,
 ) -> Result<Vec<BundlerAccount>, StoreError> {
     let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(params![chain_id], |row| {
+    let rows = stmt.query_map(params![owner_scope, chain_id], |row| {
         Ok((
-            row.get::<_, u64>(0)?,
-            row.get::<_, String>(1)?,
+            row.get::<_, String>(0)?,
+            row.get::<_, u64>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, String>(3)?,
-            row.get::<_, i64>(4)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, Option<i64>>(6)?,
+            row.get::<_, Option<i64>>(7)?,
+            row.get::<_, Option<i64>>(8)?,
+            row.get::<_, Option<i64>>(9)?,
+            row.get::<_, Option<i64>>(10)?,
+            row.get::<_, Option<String>>(11)?,
         ))
     })?;
 
     let mut accounts = Vec::new();
     for row in rows {
-        let (chain_id, address, key_ref, lifecycle, created_at) = row?;
+        let (
+            owner_scope,
+            chain_id,
+            address,
+            key_ref,
+            lifecycle,
+            created_at,
+            activated_at,
+            retired_at,
+            deleted_at,
+            last_used_at,
+            last_exported_at,
+            compromise_status,
+        ) = row?;
         accounts.push(BundlerAccount {
+            owner_scope,
             chain_id,
             address,
             key_ref,
             lifecycle: BundlerLifecycle::from_str(&lifecycle, TABLE)?,
             created_at,
+            activated_at,
+            retired_at,
+            deleted_at,
+            last_used_at,
+            last_exported_at,
+            compromise_status,
         });
     }
 
@@ -118,9 +293,11 @@ mod tests {
         let account = bundler_account_active(&conn, 1).unwrap().unwrap();
 
         assert_eq!(account.chain_id, 1);
+        assert_eq!(account.owner_scope, DEFAULT_OWNER_SCOPE);
         assert_eq!(account.address, "0xabc");
         assert_eq!(account.key_ref, "bundler-eoa:1");
         assert_eq!(account.lifecycle, BundlerLifecycle::Active);
+        assert!(account.activated_at.is_some());
     }
 
     #[test]
@@ -147,7 +324,15 @@ mod tests {
         let conn = migrated_in_memory_conn();
 
         bundler_account_insert(&conn, 1, "0xaaa", "bundler-eoa:1a").unwrap();
-        bundler_account_insert(&conn, 1, "0xbbb", "bundler-eoa:1b").unwrap();
+        bundler_account_insert_for_owner(
+            &conn,
+            DEFAULT_OWNER_SCOPE,
+            1,
+            "0xbbb",
+            "bundler-eoa:1b",
+            BundlerLifecycle::PendingFunding,
+        )
+        .unwrap();
         bundler_account_insert(&conn, 2, "0xccc", "bundler-eoa:2").unwrap();
 
         let accounts = bundler_account_list(&conn, 1).unwrap();
@@ -159,26 +344,79 @@ mod tests {
     }
 
     #[test]
-    fn multiple_active_rows_returns_data_integrity_error() {
+    fn duplicate_active_rows_are_rejected_by_schema() {
         let conn = migrated_in_memory_conn();
 
         conn.execute(
-            "INSERT INTO bundler_accounts (chain_id, address, key_ref, lifecycle, created_at) VALUES (?, ?, ?, 'active', ?)",
-            params![1_u64, "0xaaa", "bundler-eoa:1a", 1_i64],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO bundler_accounts (chain_id, address, key_ref, lifecycle, created_at) VALUES (?, ?, ?, 'active', ?)",
-            params![1_u64, "0xbbb", "bundler-eoa:1b", 2_i64],
+            "INSERT INTO bundler_accounts (owner_scope, chain_id, address, key_ref, lifecycle, created_at) VALUES (?, ?, ?, ?, 'active', ?)",
+            params![DEFAULT_OWNER_SCOPE, 1_u64, "0xaaa", "bundler-eoa:1a", 1_i64],
         )
         .unwrap();
 
-        match bundler_account_active(&conn, 1).unwrap_err() {
-            StoreError::DataIntegrity { table, reason } => {
-                assert_eq!(table, TABLE);
-                assert_eq!(reason, "multiple active rows");
-            }
-            other => panic!("expected DataIntegrity, got {other:?}"),
-        }
+        let duplicate = conn.execute(
+            "INSERT INTO bundler_accounts (owner_scope, chain_id, address, key_ref, lifecycle, created_at) VALUES (?, ?, ?, ?, 'active', ?)",
+            params![DEFAULT_OWNER_SCOPE, 1_u64, "0xbbb", "bundler-eoa:1b", 2_i64],
+        );
+        assert!(duplicate.is_err());
+    }
+
+    #[test]
+    fn same_address_can_exist_under_different_owner_scopes() {
+        let conn = migrated_in_memory_conn();
+
+        bundler_account_insert_for_owner(
+            &conn,
+            DEFAULT_OWNER_SCOPE,
+            1,
+            "0xabc",
+            "bundler-eoa:default",
+            BundlerLifecycle::Active,
+        )
+        .unwrap();
+        bundler_account_insert_for_owner(
+            &conn,
+            "tenant-b",
+            1,
+            "0xabc",
+            "bundler-eoa:tenant-b",
+            BundlerLifecycle::Active,
+        )
+        .unwrap();
+
+        let default_active = bundler_account_active_for_owner(&conn, DEFAULT_OWNER_SCOPE, 1)
+            .unwrap()
+            .unwrap();
+        let tenant_active = bundler_account_active_for_owner(&conn, "tenant-b", 1)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(default_active.address, "0xabc");
+        assert_eq!(tenant_active.address, "0xabc");
+        assert_ne!(default_active.owner_scope, tenant_active.owner_scope);
+    }
+
+    #[test]
+    fn activate_pending_retires_previous_active_atomically() {
+        let mut conn = migrated_in_memory_conn();
+        bundler_account_insert(&conn, 1, "0xaaa", "bundler-eoa:1a").unwrap();
+        bundler_account_insert_for_owner(
+            &conn,
+            DEFAULT_OWNER_SCOPE,
+            1,
+            "0xbbb",
+            "bundler-eoa:1b",
+            BundlerLifecycle::PendingFunding,
+        )
+        .unwrap();
+
+        bundler_account_activate_pending(&mut conn, DEFAULT_OWNER_SCOPE, 1, "0xbbb").unwrap();
+
+        let active = bundler_account_active(&conn, 1).unwrap().unwrap();
+        assert_eq!(active.address, "0xbbb");
+        let accounts = bundler_account_list(&conn, 1).unwrap();
+        assert!(accounts
+            .iter()
+            .any(|account| account.address == "0xaaa"
+                && account.lifecycle == BundlerLifecycle::Retiring));
     }
 }

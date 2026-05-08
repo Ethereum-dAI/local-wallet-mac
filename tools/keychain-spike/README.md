@@ -1,8 +1,16 @@
 # Wallet Keychain Spike
 
-This spike validates the macOS Keychain entitlement chain before Phase 4 integration.
-It isolates the risky part: can a signed helper with `keychain-access-groups` store,
-read, compare, and delete a 32-byte secret using the intended access group?
+This spike validates the macOS Keychain entitlement chain. It isolates the risky part:
+can a signed helper with `keychain-access-groups` store, read, compare, and delete a
+32-byte secret using the intended access group?
+
+**Status:** the spike has been run and the production access-group path has been
+proven to require a paid Apple Developer Program membership ($99/yr) plus an
+embedded `embedded.provisionprofile`; without those, macOS kills the helper at
+launch. The current wallet flow keeps the durable relayer secret in the app's
+generic-password Keychain item and passes it to the daemon for RAM-only signing;
+production access-group entitlement validation is still tracked as a downstream
+production-readiness item (OPEN-8).
 
 The binary writes a random 32-byte generic password item under service
 `com.localwallet.spike` and account `keychain-spike-test-1`, reads it back, verifies
@@ -18,8 +26,11 @@ Run:
 
 ```bash
 export DEVELOPER_TEAM_ID=YOURTEAMID
+export CODESIGN_IDENTITY="Apple Development: Your Name (XXXXXXXXXX)"
 bash scripts/run-keychain-spike.sh
 ```
+
+`CODESIGN_IDENTITY` selects which signing identity from your keychain to use; see `scripts/README.md` for the full list of environment variables the helper script honors.
 
 Find your signing identity with:
 

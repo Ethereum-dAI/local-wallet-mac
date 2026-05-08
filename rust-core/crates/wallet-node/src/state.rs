@@ -22,6 +22,9 @@ pub struct DaemonState {
     pub bundler_keys: Arc<dyn BundlerKeyStore>,
     pub raw_submitter: Arc<dyn RawTransactionSubmitter>,
     pub rate_limiter: Arc<crate::rate_limit::RateLimiter>,
+    pub per_sender_rate_limiter: Arc<crate::rate_limit::PerSenderRateLimiter>,
+    pub admin_challenges: Arc<crate::admin_challenge::AdminChallengeStore>,
+    pub relayer_lifecycle_locks: Arc<crate::relayer_lifecycle::RelayerLifecycleLocks>,
     state_override_smoke: Arc<RwLock<StateOverrideSmokeStatus>>,
     pub transport: TransportInfo,
     #[cfg(test)]
@@ -57,6 +60,11 @@ impl DaemonState {
                 .unwrap_or_else(crate::bundler_keys::default_bundler_key_store),
             raw_submitter,
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::default()),
+            per_sender_rate_limiter: Arc::new(crate::rate_limit::PerSenderRateLimiter::default()),
+            admin_challenges: Arc::new(crate::admin_challenge::AdminChallengeStore::default()),
+            relayer_lifecycle_locks: Arc::new(
+                crate::relayer_lifecycle::RelayerLifecycleLocks::default(),
+            ),
             state_override_smoke: Arc::new(RwLock::new(StateOverrideSmokeStatus::Pending)),
             transport: init.transport,
             #[cfg(test)]
@@ -91,6 +99,11 @@ impl DaemonState {
             bundler_keys: Arc::new(crate::bundler_keys::MemoryBundlerKeyStore::new()),
             raw_submitter: Arc::new(TestRawTransactionSubmitter),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::default()),
+            per_sender_rate_limiter: Arc::new(crate::rate_limit::PerSenderRateLimiter::default()),
+            admin_challenges: Arc::new(crate::admin_challenge::AdminChallengeStore::default()),
+            relayer_lifecycle_locks: Arc::new(
+                crate::relayer_lifecycle::RelayerLifecycleLocks::default(),
+            ),
             state_override_smoke: Arc::new(RwLock::new(StateOverrideSmokeStatus::Pending)),
             transport: TransportInfo::http(),
             health_uses_chain: true,
@@ -134,6 +147,9 @@ impl std::fmt::Debug for DaemonState {
             .field("bundler_keys", &"<BundlerKeyStore>")
             .field("raw_submitter", &"<RawTransactionSubmitter>")
             .field("rate_limiter", &"<RateLimiter>")
+            .field("per_sender_rate_limiter", &"<PerSenderRateLimiter>")
+            .field("admin_challenges", &"<AdminChallengeStore>")
+            .field("relayer_lifecycle_locks", &"<RelayerLifecycleLocks>")
             .field("state_override_smoke", &self.state_override_smoke_status())
             .field("transport", &self.transport)
             .field("health_uses_chain", &{
@@ -242,6 +258,34 @@ impl From<(TransportInfo, Arc<dyn wallet_chain::ChainAdapter>)> for DaemonStateI
             bundler_keys: None,
             raw_submitter: None,
             transport,
+            health_uses_chain: true,
+        }
+    }
+}
+
+impl
+    From<(
+        TransportInfo,
+        wallet_node_store::StoreHandle,
+        Arc<dyn wallet_chain::ChainAdapter>,
+        Arc<dyn BundlerKeyStore>,
+    )> for DaemonStateInit
+{
+    fn from(
+        (transport, store, chain, bundler_keys): (
+            TransportInfo,
+            wallet_node_store::StoreHandle,
+            Arc<dyn wallet_chain::ChainAdapter>,
+            Arc<dyn BundlerKeyStore>,
+        ),
+    ) -> Self {
+        Self {
+            store,
+            chain,
+            bundler_keys: Some(bundler_keys),
+            raw_submitter: None,
+            transport,
+            #[cfg(test)]
             health_uses_chain: true,
         }
     }

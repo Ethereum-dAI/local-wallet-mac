@@ -134,6 +134,24 @@ impl ChainAdapter for OfflineChainAdapter {
         Box::pin(async { Err(offline_error()) })
     }
 
+    fn current_gas_price<'life0, 'async_trait>(&'life0 self) -> ChainFuture<'async_trait, U256>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Err(offline_error()) })
+    }
+
+    fn current_max_priority_fee_per_gas<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> ChainFuture<'async_trait, U256>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Err(offline_error()) })
+    }
+
     fn is_synced<'life0, 'async_trait>(&'life0 self) -> BoolFuture<'async_trait>
     where
         'life0: 'async_trait,

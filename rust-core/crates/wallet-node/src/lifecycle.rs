@@ -173,7 +173,7 @@ pub async fn deliver_ready_event_to_fd(
 
     tokio::task::spawn_blocking(move || crate::ready::write_to_fd(&event, ready_fd))
         .await
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?
+        .map_err(std::io::Error::other)?
 }
 
 #[cfg(test)]

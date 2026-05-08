@@ -17,14 +17,9 @@ impl StoreActor {
         let join = tokio::spawn(async move {
             let mut actor = StoreActor { conn };
 
-            loop {
-                match rx.recv().await {
-                    Some(cmd) => {
-                        if actor.handle(cmd) {
-                            break;
-                        }
-                    }
-                    None => break,
+            while let Some(cmd) = rx.recv().await {
+                if actor.handle(cmd) {
+                    break;
                 }
             }
 
@@ -58,38 +53,132 @@ impl StoreActor {
                 false
             }
             StoreCommand::BundlerAccountInsert {
+                owner_scope,
                 chain_id,
                 address,
                 key_ref,
+                lifecycle,
                 reply,
             } => {
-                let _ = reply.send(crate::repos::bundler_accounts::bundler_account_insert(
-                    &self.conn, chain_id, &address, &key_ref,
-                ));
+                let _ = reply.send(
+                    crate::repos::bundler_accounts::bundler_account_insert_for_owner(
+                        &self.conn,
+                        &owner_scope,
+                        chain_id,
+                        &address,
+                        &key_ref,
+                        lifecycle,
+                    ),
+                );
                 false
             }
-            StoreCommand::BundlerAccountActive { chain_id, reply } => {
-                let _ = reply.send(crate::repos::bundler_accounts::bundler_account_active(
-                    &self.conn, chain_id,
-                ));
+            StoreCommand::BundlerAccountActive {
+                owner_scope,
+                chain_id,
+                reply,
+            } => {
+                let _ = reply.send(
+                    crate::repos::bundler_accounts::bundler_account_active_for_owner(
+                        &self.conn,
+                        &owner_scope,
+                        chain_id,
+                    ),
+                );
+                false
+            }
+            StoreCommand::BundlerAccountPendingFunding {
+                owner_scope,
+                chain_id,
+                reply,
+            } => {
+                let _ = reply.send(
+                    crate::repos::bundler_accounts::bundler_account_pending_funding(
+                        &self.conn,
+                        &owner_scope,
+                        chain_id,
+                    ),
+                );
+                false
+            }
+            StoreCommand::BundlerAccountActivatePending {
+                owner_scope,
+                chain_id,
+                pending_address,
+                reply,
+            } => {
+                let _ = reply.send(
+                    crate::repos::bundler_accounts::bundler_account_activate_pending(
+                        &mut self.conn,
+                        &owner_scope,
+                        chain_id,
+                        &pending_address,
+                    ),
+                );
                 false
             }
             StoreCommand::BundlerAccountSetLifecycle {
+                owner_scope,
                 chain_id,
                 address,
                 new_state,
                 reply,
             } => {
                 let _ = reply.send(
-                    crate::repos::bundler_accounts::bundler_account_set_lifecycle(
-                        &self.conn, chain_id, &address, new_state,
+                    crate::repos::bundler_accounts::bundler_account_set_lifecycle_for_owner(
+                        &self.conn,
+                        &owner_scope,
+                        chain_id,
+                        &address,
+                        new_state,
                     ),
                 );
                 false
             }
-            StoreCommand::BundlerAccountList { chain_id, reply } => {
-                let _ = reply.send(crate::repos::bundler_accounts::bundler_account_list(
-                    &self.conn, chain_id,
+            StoreCommand::BundlerAccountList {
+                owner_scope,
+                chain_id,
+                reply,
+            } => {
+                let _ = reply.send(
+                    crate::repos::bundler_accounts::bundler_account_list_for_owner(
+                        &self.conn,
+                        &owner_scope,
+                        chain_id,
+                    ),
+                );
+                false
+            }
+            StoreCommand::BundlerAccountMarkUsed {
+                owner_scope,
+                chain_id,
+                address,
+                reply,
+            } => {
+                let _ = reply.send(crate::repos::bundler_accounts::bundler_account_mark_used(
+                    &self.conn,
+                    &owner_scope,
+                    chain_id,
+                    &address,
+                ));
+                false
+            }
+            StoreCommand::RelayerKeyAuditInsert { event, reply } => {
+                let _ = reply.send(crate::repos::relayer_key_audit_events::insert(
+                    &self.conn, &event,
+                ));
+                false
+            }
+            StoreCommand::RelayerKeyAuditList {
+                owner_scope,
+                chain_id,
+                limit,
+                reply,
+            } => {
+                let _ = reply.send(crate::repos::relayer_key_audit_events::list(
+                    &self.conn,
+                    &owner_scope,
+                    chain_id,
+                    limit,
                 ));
                 false
             }
@@ -158,6 +247,24 @@ impl StoreActor {
                 ));
                 false
             }
+            StoreCommand::UserOpInsertAbandonNonceOnExists {
+                op,
+                nonce_chain_id,
+                nonce_bundler_address,
+                nonce,
+                reply,
+            } => {
+                let _ = reply.send(
+                    crate::repos::user_operations::user_op_insert_abandon_nonce_on_exists(
+                        &mut self.conn,
+                        op,
+                        nonce_chain_id,
+                        &nonce_bundler_address,
+                        nonce,
+                    ),
+                );
+                false
+            }
             StoreCommand::UserOpGet {
                 user_op_hash,
                 reply,
@@ -216,6 +323,25 @@ impl StoreActor {
                 );
                 false
             }
+            StoreCommand::SubmittedTxsListAll { reply } => {
+                let _ = reply
+                    .send(crate::repos::submitted_transactions::submitted_txs_list_all(&self.conn));
+                false
+            }
+            StoreCommand::SubmittedTxsAbandonForBundler {
+                chain_id,
+                bundler_address,
+                reply,
+            } => {
+                let _ = reply.send(
+                    crate::repos::submitted_transactions::submitted_txs_abandon_for_bundler(
+                        &mut self.conn,
+                        chain_id,
+                        &bundler_address,
+                    ),
+                );
+                false
+            }
             StoreCommand::SubmittedTxsReplace {
                 old_tx_hash,
                 new_tx,
@@ -234,6 +360,12 @@ impl StoreActor {
                 ));
                 false
             }
+            StoreCommand::ReceiptUpsert { receipt, reply } => {
+                let _ = reply.send(crate::repos::user_operation_receipts::receipt_upsert(
+                    &self.conn, receipt,
+                ));
+                false
+            }
             StoreCommand::ReceiptGet {
                 user_op_hash,
                 reply,
@@ -244,10 +376,120 @@ impl StoreActor {
                 ));
                 false
             }
+            StoreCommand::ReceiptsListCanonical { reply } => {
+                let _ = reply.send(
+                    crate::repos::user_operation_receipts::receipts_list_canonical(&self.conn),
+                );
+                false
+            }
             StoreCommand::ReceiptsClearTentative { reply } => {
                 let _ = reply.send(
                     crate::repos::user_operation_receipts::receipts_clear_tentative(&self.conn),
                 );
+                false
+            }
+            StoreCommand::ReceiptMarkTentative {
+                user_op_hash,
+                reply,
+            } => {
+                let _ = reply.send(
+                    crate::repos::user_operation_receipts::receipt_mark_tentative(
+                        &self.conn,
+                        &user_op_hash,
+                    ),
+                );
+                false
+            }
+            StoreCommand::ReceiptMarkInvalidated {
+                user_op_hash,
+                reply,
+            } => {
+                let _ = reply.send(
+                    crate::repos::user_operation_receipts::receipt_mark_invalidated(
+                        &self.conn,
+                        &user_op_hash,
+                    ),
+                );
+                false
+            }
+            StoreCommand::ReceiptDeleteTentative {
+                user_op_hash,
+                reply,
+            } => {
+                let _ = reply.send(
+                    crate::repos::user_operation_receipts::receipt_delete_tentative(
+                        &self.conn,
+                        &user_op_hash,
+                    ),
+                );
+                false
+            }
+            StoreCommand::AuditStore { reply } => {
+                let _ = reply.send(crate::audit::audit_store(&self.conn));
+                false
+            }
+            StoreCommand::AuditReportPersist {
+                chain_id,
+                synced,
+                report,
+                reply,
+            } => {
+                let _ = reply.send(crate::repos::audit_history::audit_report_persist(
+                    &mut self.conn,
+                    chain_id,
+                    synced,
+                    &report,
+                ));
+                false
+            }
+            StoreCommand::AuditHistoryList { limit, reply } => {
+                let _ = reply.send(crate::repos::audit_history::audit_history_list(
+                    &self.conn, limit,
+                ));
+                false
+            }
+            StoreCommand::AuditReportGet { run_id, reply } => {
+                let _ = reply.send(crate::repos::audit_history::audit_report_get(
+                    &self.conn, run_id,
+                ));
+                false
+            }
+            StoreCommand::DiagnosticSet {
+                subject_type,
+                subject_id,
+                last_error,
+                reply,
+            } => {
+                let _ = reply.send(crate::repos::operation_diagnostics::diagnostic_set(
+                    &self.conn,
+                    &subject_type,
+                    &subject_id,
+                    &last_error,
+                ));
+                false
+            }
+            StoreCommand::DiagnosticClear {
+                subject_type,
+                subject_id,
+                reply,
+            } => {
+                let _ = reply.send(crate::repos::operation_diagnostics::diagnostic_clear(
+                    &self.conn,
+                    &subject_type,
+                    &subject_id,
+                ));
+                false
+            }
+            StoreCommand::DiagnosticGet {
+                subject_type,
+                subject_id,
+                reply,
+            } => {
+                let _ = reply.send(crate::repos::operation_diagnostics::diagnostic_get(
+                    &self.conn,
+                    &subject_type,
+                    &subject_id,
+                ));
                 false
             }
             StoreCommand::Shutdown { reply } => {
@@ -286,6 +528,7 @@ mod tests {
             revert_reason: None,
             receipt_json: format!(r#"{{"userOpHash":"{user_op_hash}","txHash":"{tx_hash}"}}"#),
             tentative,
+            invalidated: false,
             created_at: 1,
         }
     }
@@ -296,6 +539,73 @@ mod tests {
         let handle = StoreActor::start(conn);
 
         assert_eq!(handle.ping().await.unwrap(), ());
+        handle.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn audit_store_round_trips_through_actor() {
+        let conn = migrated_in_memory_conn();
+        conn.execute(
+            "INSERT INTO submitted_transactions (tx_hash, user_op_hash, chain_id, bundler_address, nonce, raw_tx, max_fee_per_gas, max_priority_fee_per_gas, status, replacement_of, submitted_at_block, created_at, updated_at) VALUES ('0xtx', '0xmissing', 1, '0xbeef', 1, '0x02', '0x64', '0x1', 'submitted', NULL, 100, 1, 1)",
+            [],
+        )
+        .unwrap();
+        let handle = StoreActor::start(conn);
+
+        let report = handle.audit_store().await.unwrap();
+
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "submitted_tx_missing_user_op"));
+        handle.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn audit_history_round_trips_through_actor() {
+        let conn = migrated_in_memory_conn();
+        let handle = StoreActor::start(conn);
+        let report = handle.audit_store().await.unwrap();
+
+        let run_id = handle.audit_report_persist(1, true, report).await.unwrap();
+        let history = handle.audit_history_list(10).await.unwrap();
+        let stored = handle.audit_report_get(run_id).await.unwrap().unwrap();
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, run_id);
+        assert_eq!(stored.audit_run_id, Some(run_id));
+        handle.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn diagnostics_round_trip_through_actor() {
+        let conn = migrated_in_memory_conn();
+        let handle = StoreActor::start(conn);
+
+        handle
+            .diagnostic_set("user_operation", "0xop", "receipt_lookup_failed")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            handle
+                .diagnostic_get("user_operation", "0xop")
+                .await
+                .unwrap(),
+            Some("receipt_lookup_failed".to_string())
+        );
+
+        handle
+            .diagnostic_clear("user_operation", "0xop")
+            .await
+            .unwrap();
+        assert_eq!(
+            handle
+                .diagnostic_get("user_operation", "0xop")
+                .await
+                .unwrap(),
+            None
+        );
         handle.shutdown_and_wait().await.unwrap();
     }
 

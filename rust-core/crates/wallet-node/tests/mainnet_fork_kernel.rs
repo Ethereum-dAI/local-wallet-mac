@@ -7,9 +7,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use wallet_bundler::{
     erc1967_implementation_address, validate_counterfactual_kernel_account,
-    validate_kernel_factory_code, validate_kernel_implementation_code,
-    validate_kernel_root_validator, validate_webauthn_validator_code, ERC1967_IMPLEMENTATION_SLOT,
-    PINNED_KERNEL_FACTORY_ADDRESS, PINNED_KERNEL_IMPLEMENTATION_ADDRESS,
+    validate_daimo_p256_verifier_code, validate_kernel_factory_code,
+    validate_kernel_implementation_code, validate_kernel_root_validator,
+    validate_webauthn_validator_code, DAIMO_P256_VERIFIER_ADDRESS, ERC1967_IMPLEMENTATION_SLOT,
+    MAINNET_CHAIN_ID, PINNED_KERNEL_FACTORY_ADDRESS, PINNED_KERNEL_IMPLEMENTATION_ADDRESS,
     PINNED_WEBAUTHN_VALIDATOR_ADDRESS, SOLADY_ERC1967_PROXY_RUNTIME_HASH,
 };
 
@@ -39,7 +40,7 @@ sol! {
 
 const ANVIL_DEFAULT_SENDER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 const FORK_BUNDLER_EOA: &str = "0xB000000000000000000000000000000000000001";
-const DAIMO_P256_VERIFIER: &str = "0xc2b78104907F722DABAc4C69f826a522B2754De4";
+const FORK_ROTATED_BUNDLER_EOA: &str = "0xB000000000000000000000000000000000000002";
 const TRANSFER_RECIPIENT: &str = "0x1000000000000000000000000000000000000001";
 const FLATNESS_SEND_COUNT: u64 = 50;
 const FLATNESS_MAX_FEE_PER_GAS: u64 = 10_000_000_000;
@@ -59,16 +60,28 @@ async fn pinned_kernel_factory_path_validates_on_mainnet_fork() {
     let client = reqwest::Client::new();
 
     let factory_code = eth_get_code(&client, &rpc_url, PINNED_KERNEL_FACTORY_ADDRESS).await;
-    validate_kernel_factory_code(PINNED_KERNEL_FACTORY_ADDRESS, &factory_code).unwrap();
+    validate_kernel_factory_code(
+        MAINNET_CHAIN_ID,
+        PINNED_KERNEL_FACTORY_ADDRESS,
+        &factory_code,
+    )
+    .unwrap();
 
     let implementation_code =
         eth_get_code(&client, &rpc_url, PINNED_KERNEL_IMPLEMENTATION_ADDRESS).await;
-    validate_kernel_implementation_code(PINNED_KERNEL_IMPLEMENTATION_ADDRESS, &implementation_code)
-        .unwrap();
+    validate_kernel_implementation_code(
+        MAINNET_CHAIN_ID,
+        PINNED_KERNEL_IMPLEMENTATION_ADDRESS,
+        &implementation_code,
+    )
+    .unwrap();
 
     let webauthn_validator_code =
         eth_get_code(&client, &rpc_url, PINNED_WEBAUTHN_VALIDATOR_ADDRESS).await;
-    validate_webauthn_validator_code(&webauthn_validator_code).unwrap();
+    validate_webauthn_validator_code(MAINNET_CHAIN_ID, &webauthn_validator_code).unwrap();
+
+    let daimo_verifier_code = eth_get_code(&client, &rpc_url, DAIMO_P256_VERIFIER_ADDRESS).await;
+    validate_daimo_p256_verifier_code(MAINNET_CHAIN_ID, &daimo_verifier_code).unwrap();
 
     let salt = B256::ZERO;
     let init_data = wallet_kernel::encode_initialize_call(
@@ -94,6 +107,7 @@ async fn pinned_kernel_factory_path_validates_on_mainnet_fork() {
     );
 
     validate_counterfactual_kernel_account(
+        MAINNET_CHAIN_ID,
         predicted_sender,
         U256::ZERO,
         Some(PINNED_KERNEL_FACTORY_ADDRESS),
@@ -230,6 +244,7 @@ async fn pinned_kernel_factory_path_validates_on_mainnet_fork() {
         init_code_hash,
     );
     validate_counterfactual_kernel_account(
+        MAINNET_CHAIN_ID,
         signed_sender,
         U256::ZERO,
         Some(PINNED_KERNEL_FACTORY_ADDRESS),
@@ -320,7 +335,15 @@ async fn pinned_kernel_factory_path_validates_on_mainnet_fork() {
     .await;
     let validation = wallet_bundler::decode_validation_result(&raw_validation).unwrap();
     assert!(!validation.sig_failed);
-    wallet_bundler::validate_validation_result(&validation, 0, 0, 0, u64::MAX, false).unwrap();
+    wallet_bundler::validate_validation_result(
+        &validation,
+        0,
+        0,
+        0,
+        u64::MAX,
+        wallet_bundler::SimulationMode::Submit,
+    )
+    .unwrap();
 
     let transfer_recipient: Address = TRANSFER_RECIPIENT.parse().unwrap();
     let transfer_amount = U256::from(12_345_u64);
@@ -486,6 +509,109 @@ async fn pinned_kernel_factory_path_validates_on_mainnet_fork() {
     assert_eq!(
         account_total_debit,
         total_user_op_actual_gas_cost + total_transfer_value + account_total_credit
+    );
+
+    let rotated_bundler_eoa: Address = FORK_ROTATED_BUNDLER_EOA.parse().unwrap();
+    assert!(
+        eth_get_code(&client, &rpc_url, rotated_bundler_eoa)
+            .await
+            .is_empty(),
+        "rotated fork bundler EOA must not have mainnet code"
+    );
+    anvil_impersonate_account(&client, &rpc_url, FORK_ROTATED_BUNDLER_EOA).await;
+    anvil_set_balance(
+        &client,
+        &rpc_url,
+        rotated_bundler_eoa,
+        U256::from(1_000_000_000_000_000_000_u64),
+    )
+    .await;
+
+    let pending_old_nonce = U256::from(FLATNESS_SEND_COUNT + 1);
+    let pending_new_nonce = U256::from(FLATNESS_SEND_COUNT + 2);
+    let old_relayer_op = realistic_transfer_user_op_with_fees(
+        signed_sender,
+        pending_old_nonce,
+        transfer_recipient,
+        U256::from(1_u64),
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+    );
+    let old_relayer_hash = entry_point_user_op_hash(&client, &rpc_url, &old_relayer_op).await;
+    let old_relayer_signed =
+        sign_user_op_for_test(old_relayer_op, old_relayer_hash, &signing_key, false).op;
+    let new_relayer_op = realistic_transfer_user_op_with_fees(
+        signed_sender,
+        pending_new_nonce,
+        transfer_recipient,
+        U256::from(1_u64),
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+    );
+    let new_relayer_hash = entry_point_user_op_hash(&client, &rpc_url, &new_relayer_op).await;
+    let new_relayer_signed =
+        sign_user_op_for_test(new_relayer_op, new_relayer_hash, &signing_key, false).op;
+
+    let old_relayer_before = eth_get_balance(&client, &rpc_url, bundler_eoa).await;
+    let new_relayer_before = eth_get_balance(&client, &rpc_url, rotated_bundler_eoa).await;
+    let rotation_recipient_before = eth_get_balance(&client, &rpc_url, transfer_recipient).await;
+    anvil_set_automine(&client, &rpc_url, false).await;
+    let old_pending_tx = eth_send_transaction_with_fees(
+        &client,
+        &rpc_url,
+        FORK_BUNDLER_EOA,
+        wallet_bundler::ENTRY_POINT_V07,
+        wallet_bundler::encode_handle_ops(&old_relayer_signed, bundler_eoa).unwrap(),
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+    )
+    .await;
+    assert!(
+        eth_get_transaction_receipt(&client, &rpc_url, &old_pending_tx)
+            .await
+            .is_none(),
+        "old relayer transaction should remain pending while automine is off"
+    );
+    let new_pending_tx = eth_send_transaction_with_fees(
+        &client,
+        &rpc_url,
+        FORK_ROTATED_BUNDLER_EOA,
+        wallet_bundler::ENTRY_POINT_V07,
+        wallet_bundler::encode_handle_ops(&new_relayer_signed, rotated_bundler_eoa).unwrap(),
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+    )
+    .await;
+    assert!(
+        eth_get_transaction_receipt(&client, &rpc_url, &new_pending_tx)
+            .await
+            .is_none(),
+        "rotated relayer transaction should also wait for manual mining"
+    );
+    anvil_mine(&client, &rpc_url).await;
+    anvil_set_automine(&client, &rpc_url, true).await;
+
+    let old_receipt = wait_for_successful_receipt(&client, &rpc_url, &old_pending_tx).await;
+    let new_receipt = wait_for_successful_receipt(&client, &rpc_url, &new_pending_tx).await;
+    let old_fee_paid = receipt_fee_paid(&old_receipt);
+    let new_fee_paid = receipt_fee_paid(&new_receipt);
+    let old_loss =
+        old_relayer_before.saturating_sub(eth_get_balance(&client, &rpc_url, bundler_eoa).await);
+    let new_loss = new_relayer_before
+        .saturating_sub(eth_get_balance(&client, &rpc_url, rotated_bundler_eoa).await);
+    assert!(
+        old_loss <= old_fee_paid / U256::from(100_u64),
+        "old relayer loss {} exceeds tolerance after pending rotation settlement",
+        u256_hex(old_loss)
+    );
+    assert!(
+        new_loss <= new_fee_paid / U256::from(100_u64),
+        "rotated relayer loss {} exceeds tolerance after activation send",
+        u256_hex(new_loss)
+    );
+    assert_eq!(
+        eth_get_balance(&client, &rpc_url, transfer_recipient).await,
+        rotation_recipient_before + U256::from(2_u64)
     );
 }
 
@@ -727,11 +853,10 @@ async fn daimo_p256_verify(
     x: U256,
     y: U256,
 ) -> U256 {
-    let verifier: Address = DAIMO_P256_VERIFIER.parse().unwrap();
     let raw = eth_call(
         client,
         rpc_url,
-        verifier,
+        DAIMO_P256_VERIFIER_ADDRESS,
         Bytes::from((message_hash, r, s, x, y).abi_encode()),
     )
     .await;
@@ -793,13 +918,7 @@ async fn wait_for_successful_receipt(
     tx_hash: &str,
 ) -> Value {
     for _ in 0..60 {
-        let receipt: Option<Value> = rpc(
-            client,
-            rpc_url,
-            "eth_getTransactionReceipt",
-            json!([tx_hash]),
-        )
-        .await;
+        let receipt = eth_get_transaction_receipt(client, rpc_url, tx_hash).await;
         if let Some(receipt) = receipt {
             assert_eq!(receipt.get("status"), Some(&json!("0x1")));
             return receipt;
@@ -808,6 +927,20 @@ async fn wait_for_successful_receipt(
     }
 
     panic!("timed out waiting for transaction receipt {tx_hash}");
+}
+
+async fn eth_get_transaction_receipt(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    tx_hash: &str,
+) -> Option<Value> {
+    rpc(
+        client,
+        rpc_url,
+        "eth_getTransactionReceipt",
+        json!([tx_hash]),
+    )
+    .await
 }
 
 async fn anvil_impersonate_account(client: &reqwest::Client, rpc_url: &str, address: &str) {
@@ -833,6 +966,14 @@ async fn anvil_set_balance(
         json!([address_hex(address), u256_hex(balance)]),
     )
     .await;
+}
+
+async fn anvil_set_automine(client: &reqwest::Client, rpc_url: &str, enabled: bool) {
+    let _: Value = rpc(client, rpc_url, "evm_setAutomine", json!([enabled])).await;
+}
+
+async fn anvil_mine(client: &reqwest::Client, rpc_url: &str) {
+    let _: Value = rpc(client, rpc_url, "evm_mine", json!([])).await;
 }
 
 async fn rpc<T: DeserializeOwned>(

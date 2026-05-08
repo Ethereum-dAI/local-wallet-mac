@@ -14,3 +14,4 @@ alloy-sol-types = { workspace = true }
 
 [dev-dependencies]
 hex-literal = { workspace = true }
+wallet-addresses = { path = "../wallet-addresses" }

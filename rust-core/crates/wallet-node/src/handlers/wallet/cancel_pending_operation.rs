@@ -1,5 +1,5 @@
 use serde_json::Value;
-use wallet_node_store::{SubmittedTransaction, SubmittedTxStatus, UserOpStatus};
+use wallet_node_store::{BundlerLifecycle, SubmittedTransaction, SubmittedTxStatus, UserOpStatus};
 
 use crate::state::DaemonState;
 
@@ -119,6 +119,13 @@ async fn sign_submit_cancel_replacement(
     candidate: &SubmittedTransaction,
     user_op_json: &str,
 ) -> Result<SubmittedTransaction, wallet_node_api::JsonRpcError> {
+    let relayer_lifecycle_guard = state
+        .relayer_lifecycle_locks
+        .acquire(
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            state.config.network.chain_id,
+        )
+        .await;
     let entry_point = state
         .config
         .bundler
@@ -153,6 +160,18 @@ async fn sign_submit_cancel_replacement(
                 }),
             )
         })?;
+    if matches!(
+        account.lifecycle,
+        BundlerLifecycle::PendingFunding | BundlerLifecycle::Retired | BundlerLifecycle::Deleted
+    ) {
+        return Err(replacement_not_possible(
+            &candidate.user_op_hash,
+            serde_json::json!({
+                "reason": "bundler_account_lifecycle_not_signable",
+                "lifecycle": account.lifecycle.as_str()
+            }),
+        ));
+    }
     let bundler_address = account
         .address
         .parse()
@@ -163,11 +182,11 @@ async fn sign_submit_cancel_replacement(
         .map_err(crate::handlers::bundler::map_bundler_error)?;
     let previous_fees = wallet_bundler::BundlerTxFees {
         max_fee_per_gas: super::replacement::parse_stored_u256(&candidate.max_fee_per_gas)
-            .ok_or_else(|| wallet_node_api::JsonRpcError::internal())?,
+            .ok_or_else(wallet_node_api::JsonRpcError::internal)?,
         max_priority_fee_per_gas: super::replacement::parse_stored_u256(
             &candidate.max_priority_fee_per_gas,
         )
-        .ok_or_else(|| wallet_node_api::JsonRpcError::internal())?,
+        .ok_or_else(wallet_node_api::JsonRpcError::internal)?,
     };
     let gas_limit = handle_ops_gas_limit(&op)?;
     let tx = wallet_bundler::build_cancel_handle_ops_tx_request(
@@ -181,12 +200,24 @@ async fn sign_submit_cancel_replacement(
         state.config.policy.min_replacement_bump_pct,
     )
     .map_err(crate::handlers::bundler::map_bundler_error)?;
-    let signing_payload = wallet_bundler::encode_eip1559_payload_for_signing(&tx)
-        .map_err(crate::handlers::bundler::map_bundler_error)?;
-    let signature = state
-        .bundler_keys
-        .sign_eip1559_payload(&account.key_ref, &signing_payload)
-        .map_err(super::bundler_account::map_key_error)?;
+    let signature = crate::relayer_signer::sign_validated_empty_handle_ops_transaction(
+        state.bundler_keys.as_ref(),
+        &account.key_ref,
+        &tx,
+        state.config.network.chain_id,
+        bundler_address,
+        &op,
+    )
+    .map_err(super::bundler_account::map_key_error)?;
+    state
+        .store
+        .bundler_account_mark_used_for_owner(
+            &account.owner_scope,
+            state.config.network.chain_id,
+            &account.address,
+        )
+        .await
+        .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
     let raw_tx = wallet_bundler::encode_signed_eip1559_tx(&tx, &signature)
         .map_err(crate::handlers::bundler::map_bundler_error)?;
     let tx_hash = wallet_bundler::signed_eip1559_tx_hash(&tx, &signature)
@@ -224,6 +255,7 @@ async fn sign_submit_cancel_replacement(
         )
         .await
         .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
+    drop(relayer_lifecycle_guard);
 
     match state
         .raw_submitter

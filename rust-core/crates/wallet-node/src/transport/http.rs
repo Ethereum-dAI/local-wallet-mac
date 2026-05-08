@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
 use http_body_util::Full;
@@ -9,15 +9,19 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{oneshot, watch, Semaphore};
 use tokio::task::JoinSet;
+use tokio::{io::AsyncWriteExt, time::timeout};
 
 use super::handler::{
-    body_too_large_response, drain_with_deadline, read_body_limited, DrainResult, Handler,
+    body_too_large_response, can_accept_connection, drain_with_deadline, read_body_limited,
+    with_connection_deadline, DrainResult, Handler, REQUEST_DEADLINE,
 };
 use super::TransportError;
 
 const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const CONNECTION_CAP_RETRY_AFTER_SECONDS: u64 = 1;
+const MAX_REJECTION_WRITERS: usize = 16;
 
 pub async fn serve(
     bind_addr: SocketAddr,
@@ -30,6 +34,7 @@ pub async fn serve(
         .map_err(TransportError::BindFailed)?;
     let local_addr = listener.local_addr()?;
     let mut connections = JoinSet::new();
+    let rejection_writers = Arc::new(Semaphore::new(MAX_REJECTION_WRITERS));
 
     if let Some(tx) = ready_addr_tx {
         let _ = tx.send(local_addr);
@@ -49,6 +54,20 @@ pub async fn serve(
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
+                if !can_accept_connection(connections.len()) {
+                    tracing::warn!(
+                        event = "wallet_node_http_connection_limit_reached",
+                        active_connections = connections.len(),
+                        "dropping HTTP connection because the active connection cap was reached"
+                    );
+                    if let Ok(permit) = rejection_writers.clone().try_acquire_owned() {
+                        tokio::spawn(async move {
+                            reject_connection_cap(stream).await;
+                            drop(permit);
+                        });
+                    }
+                    continue;
+                }
                 let connection_handler = handler.clone();
 
                 connections.spawn(async move {
@@ -57,12 +76,21 @@ pub async fn serve(
                         handle_request(request, connection_handler.clone())
                     });
 
-                    if let Err(err) = http1::Builder::new()
+                    match with_connection_deadline(
+                        REQUEST_DEADLINE,
+                        http1::Builder::new()
                         .keep_alive(false)
-                        .serve_connection(io, service)
-                        .await
+                        .serve_connection(io, service),
+                    )
+                    .await
                     {
-                        eprintln!("wallet-node http connection failed: {err}");
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => eprintln!("wallet-node http connection failed: {err}"),
+                        Err(_) => tracing::warn!(
+                            event = "wallet_node_http_connection_timed_out",
+                            deadline_ms = REQUEST_DEADLINE.as_millis(),
+                            "closing HTTP connection after request deadline"
+                        ),
                     }
                 });
             }
@@ -82,6 +110,24 @@ pub async fn serve(
     }
 
     Ok(())
+}
+
+async fn reject_connection_cap(mut stream: tokio::net::TcpStream) {
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","error":{{"code":{},"message":"Service unavailable: connection cap"}},"id":null}}"#,
+        wallet_node_api::SERVICE_UNAVAILABLE
+    );
+    let response = format!(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        CONNECTION_CAP_RETRY_AFTER_SECONDS,
+        body.len(),
+        body
+    );
+    let _ = timeout(
+        std::time::Duration::from_secs(CONNECTION_CAP_RETRY_AFTER_SECONDS),
+        stream.write_all(response.as_bytes()),
+    )
+    .await;
 }
 
 async fn handle_request(

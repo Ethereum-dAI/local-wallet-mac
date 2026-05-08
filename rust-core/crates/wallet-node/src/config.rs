@@ -10,6 +10,39 @@ use thiserror::Error;
 const DEFAULT_EXECUTION_RPC: &str = "https://ethereum-rpc.publicnode.com";
 const DEFAULT_CONSENSUS_RPC: &str = "https://lodestar-mainnet.chainsafe.io";
 const DEFAULT_ENTRY_POINT: &str = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
+pub const MAINNET_CHAIN_ID: u64 = 1;
+pub const SEPOLIA_CHAIN_ID: u64 = 11_155_111;
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkProfile {
+    Mainnet,
+    Sepolia,
+}
+
+impl NetworkProfile {
+    pub fn from_chain_id(chain_id: u64) -> Result<Self, ConfigError> {
+        match chain_id {
+            MAINNET_CHAIN_ID => Ok(Self::Mainnet),
+            SEPOLIA_CHAIN_ID => Ok(Self::Sepolia),
+            _ => Err(ConfigError::UnsupportedChainId { chain_id }),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mainnet => "mainnet",
+            Self::Sepolia => "sepolia",
+        }
+    }
+
+    pub fn chain_id(self) -> u64 {
+        match self {
+            Self::Mainnet => MAINNET_CHAIN_ID,
+            Self::Sepolia => SEPOLIA_CHAIN_ID,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -28,7 +61,7 @@ pub struct BundlerConfig {
     pub beneficiary: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct ChainSection {
     pub chain_id: Option<u64>,
@@ -53,6 +86,8 @@ pub struct PolicyConfig {
     pub max_priority_fee_per_gas: String,
     pub min_replacement_bump_pct: f64,
     pub max_request_body_bytes: u64,
+    pub max_user_ops_per_sender_per_minute: u32,
+    pub max_gas_wei_per_sender_per_hour: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -82,12 +117,15 @@ pub enum ConfigError {
         field: &'static str,
         reason: &'static str,
     },
+
+    #[error("unsupported chain id {chain_id}; only Ethereum mainnet (1) and Sepolia (11155111) are supported")]
+    UnsupportedChainId { chain_id: u64 },
 }
 
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            chain_id: 1,
+            chain_id: MAINNET_CHAIN_ID,
             execution_rpc: DEFAULT_EXECUTION_RPC.to_owned(),
             consensus_rpc: DEFAULT_CONSENSUS_RPC.to_owned(),
         }
@@ -105,16 +143,6 @@ impl Default for BundlerConfig {
     }
 }
 
-impl Default for ChainSection {
-    fn default() -> Self {
-        Self {
-            chain_id: None,
-            execution_rpc: None,
-            consensus_rpc: None,
-        }
-    }
-}
-
 impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
@@ -126,6 +154,8 @@ impl Default for PolicyConfig {
             max_priority_fee_per_gas: "0x3b9aca00".to_owned(),
             min_replacement_bump_pct: 12.5,
             max_request_body_bytes: 262_144,
+            max_user_ops_per_sender_per_minute: 10,
+            max_gas_wei_per_sender_per_hour: "0x0".to_owned(),
         }
     }
 }
@@ -169,6 +199,10 @@ impl Config {
             "policy.max_priority_fee_per_gas",
             &self.policy.max_priority_fee_per_gas,
         )?;
+        validate_hex(
+            "policy.max_gas_wei_per_sender_per_hour",
+            &self.policy.max_gas_wei_per_sender_per_hour,
+        )?;
 
         if self
             .bundler
@@ -196,7 +230,23 @@ impl Config {
             });
         }
 
+        let profile = NetworkProfile::from_chain_id(self.network.chain_id)?;
+        if let Some(chain_id) = self.chain.chain_id {
+            NetworkProfile::from_chain_id(chain_id)?;
+            if chain_id != profile.chain_id() {
+                return Err(ConfigError::OutOfRange {
+                    field: "chain.chain_id",
+                    reason: "must match network.chain_id for the selected profile",
+                });
+            }
+        }
+
         Ok(())
+    }
+
+    pub fn network_profile(&self) -> NetworkProfile {
+        NetworkProfile::from_chain_id(self.network.chain_id)
+            .expect("config validation should reject unsupported network.chain_id")
     }
 
     pub fn chain_id_for_helios(&self) -> u64 {
@@ -255,7 +305,10 @@ fn validate_hex(field: &'static str, value: &str) -> Result<(), ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ConfigError, DEFAULT_CONSENSUS_RPC, DEFAULT_ENTRY_POINT};
+    use super::{
+        Config, ConfigError, NetworkProfile, DEFAULT_CONSENSUS_RPC, DEFAULT_ENTRY_POINT,
+        MAINNET_CHAIN_ID, SEPOLIA_CHAIN_ID,
+    };
 
     #[test]
     fn parses_complete_config() {
@@ -281,6 +334,8 @@ max_fee_per_gas = "0x4"
 max_priority_fee_per_gas = "0x5"
 min_replacement_bump_pct = 15.0
 max_request_body_bytes = 4096
+max_user_ops_per_sender_per_minute = 7
+max_gas_wei_per_sender_per_hour = "0x100"
 
 [rate_limits.eth_sendUserOperation]
 refill_per_sec = 0.5
@@ -297,7 +352,7 @@ burst = 30
         )
         .expect("complete config should parse");
 
-        assert_eq!(config.network.chain_id, 11155111);
+        assert_eq!(config.network.chain_id, SEPOLIA_CHAIN_ID);
         assert_eq!(
             config.network.execution_rpc,
             "https://example.invalid/execution"
@@ -306,7 +361,8 @@ burst = 30
             config.network.consensus_rpc,
             "https://example.invalid/consensus"
         );
-        assert_eq!(config.chain_id_for_helios(), 11155111);
+        assert_eq!(config.chain_id_for_helios(), SEPOLIA_CHAIN_ID);
+        assert_eq!(config.network_profile(), NetworkProfile::Sepolia);
         assert_eq!(
             config.execution_rpc_for_helios(),
             "https://example.invalid/execution"
@@ -332,6 +388,8 @@ burst = 30
         assert_eq!(config.policy.max_fee_per_gas, "0x4");
         assert_eq!(config.policy.max_priority_fee_per_gas, "0x5");
         assert_eq!(config.policy.min_replacement_bump_pct, 15.0);
+        assert_eq!(config.policy.max_user_ops_per_sender_per_minute, 7);
+        assert_eq!(config.policy.max_gas_wei_per_sender_per_hour, "0x100");
         assert_eq!(config.policy.max_request_body_bytes, 4096);
         assert_eq!(
             config.rate_limits["eth_sendUserOperation"].refill_per_sec,
@@ -344,7 +402,8 @@ burst = 30
     fn parses_empty_config_with_defaults() {
         let config: Config = toml::from_str("").expect("empty config should parse");
 
-        assert_eq!(config.network.chain_id, 1);
+        assert_eq!(config.network.chain_id, MAINNET_CHAIN_ID);
+        assert_eq!(config.network_profile(), NetworkProfile::Mainnet);
         assert_eq!(
             config.network.execution_rpc,
             "https://ethereum-rpc.publicnode.com"
@@ -446,7 +505,48 @@ beneficiary = "0x1111111111111111111111111111111111111111"
     }
 
     #[test]
-    fn optional_chain_section_overrides_network_for_helios() {
+    fn rejects_unsupported_network_chain_id() {
+        let config: Config = toml::from_str(
+            r#"
+[network]
+chain_id = 8453
+"#,
+        )
+        .expect("config should parse before semantic validation");
+
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::UnsupportedChainId { chain_id }) if chain_id == 8453
+        ));
+    }
+
+    #[test]
+    fn accepts_mainnet_and_sepolia_chain_ids_only() {
+        let mainnet: Config = toml::from_str(
+            r#"
+[network]
+chain_id = 1
+"#,
+        )
+        .expect("mainnet config should parse");
+        mainnet.validate().expect("mainnet should be supported");
+        assert_eq!(mainnet.network_profile(), NetworkProfile::Mainnet);
+
+        let sepolia: Config = toml::from_str(
+            r#"
+[network]
+chain_id = 11155111
+execution_rpc = "https://example.invalid/sepolia-execution"
+consensus_rpc = "https://example.invalid/sepolia-consensus"
+"#,
+        )
+        .expect("sepolia config should parse");
+        sepolia.validate().expect("sepolia should be supported");
+        assert_eq!(sepolia.network_profile(), NetworkProfile::Sepolia);
+    }
+
+    #[test]
+    fn optional_chain_section_can_override_rpc_but_not_chain_profile() {
         let config: Config = toml::from_str(
             r#"
 [network]
@@ -455,14 +555,17 @@ execution_rpc = "https://example.invalid/network-execution"
 consensus_rpc = "https://example.invalid/network-consensus"
 
 [chain]
-chain_id = 11155111
+chain_id = 1
 execution_rpc = "https://example.invalid/chain-execution"
 consensus_rpc = "https://example.invalid/chain-consensus"
 "#,
         )
         .expect("config should parse");
 
-        assert_eq!(config.chain_id_for_helios(), 11155111);
+        config
+            .validate()
+            .expect("matching chain override should validate");
+        assert_eq!(config.chain_id_for_helios(), MAINNET_CHAIN_ID);
         assert_eq!(
             config.execution_rpc_for_helios(),
             "https://example.invalid/chain-execution"
@@ -471,6 +574,28 @@ consensus_rpc = "https://example.invalid/chain-consensus"
             config.consensus_rpc_for_helios(),
             "https://example.invalid/chain-consensus"
         );
+    }
+
+    #[test]
+    fn rejects_chain_section_that_changes_network_profile() {
+        let config: Config = toml::from_str(
+            r#"
+[network]
+chain_id = 1
+
+[chain]
+chain_id = 11155111
+"#,
+        )
+        .expect("config should parse before semantic validation");
+
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::OutOfRange {
+                field: "chain.chain_id",
+                ..
+            })
+        ));
     }
 
     #[test]

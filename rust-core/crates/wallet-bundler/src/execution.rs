@@ -166,12 +166,13 @@ fn is_single_call_mode(mode: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::address;
+    use wallet_addresses::ENTRY_POINT_V07;
 
     use super::*;
 
     #[test]
     fn decodes_erc7579_single_execution() {
-        let target = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
+        let target = ENTRY_POINT_V07;
         let inner = Bytes::from_static(&[0x20, 0x5c, 0x28, 0x78]);
         let call_data = encode_erc7579_single_execution(target, U256::from(7), inner.clone());
 
@@ -184,7 +185,7 @@ mod tests {
 
     #[test]
     fn rejects_batch_or_delegate_modes() {
-        let target = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
+        let target = ENTRY_POINT_V07;
         let mut mode = [0u8; 32];
         mode[0] = 0x01;
         let mut execution_calldata = Vec::new();
@@ -225,7 +226,7 @@ mod tests {
     #[test]
     fn validates_bounded_entry_point_reclaim_break_glass() {
         let sender = address!("d73c7780b1c1da1586a8332d5499f36b7cbb33c2");
-        let entry_point = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
+        let entry_point = ENTRY_POINT_V07;
         let withdraw_call = encode_entry_point_withdraw_to(sender, U256::from(7));
         let call_data = encode_erc7579_single_execution(entry_point, U256::ZERO, withdraw_call);
 
@@ -247,7 +248,7 @@ mod tests {
     #[test]
     fn reclaim_break_glass_rejects_non_single_account_execution() {
         let sender = address!("d73c7780b1c1da1586a8332d5499f36b7cbb33c2");
-        let entry_point = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
+        let entry_point = ENTRY_POINT_V07;
 
         let error = validate_entry_point_reclaim_break_glass(
             &encode_entry_point_withdraw_to(sender, U256::from(1)),
@@ -265,7 +266,7 @@ mod tests {
     #[test]
     fn reclaim_break_glass_requires_canonical_entry_point_zero_value_and_sender_withdraw() {
         let sender = address!("d73c7780b1c1da1586a8332d5499f36b7cbb33c2");
-        let entry_point = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
+        let entry_point = ENTRY_POINT_V07;
         let other = address!("1111111111111111111111111111111111111111");
         let withdraw_call = encode_entry_point_withdraw_to(sender, U256::from(1));
 
@@ -310,7 +311,7 @@ mod tests {
     #[test]
     fn reclaim_break_glass_rejects_amount_above_reclaimable() {
         let sender = address!("d73c7780b1c1da1586a8332d5499f36b7cbb33c2");
-        let entry_point = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
+        let entry_point = ENTRY_POINT_V07;
         let call_data = encode_erc7579_single_execution(
             entry_point,
             U256::ZERO,

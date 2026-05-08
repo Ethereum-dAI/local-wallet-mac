@@ -24,6 +24,7 @@ pub struct Eip1559Signature {
     pub s: U256,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_handle_ops_tx_request(
     chain_id: u64,
     bundler_nonce: u64,
@@ -46,6 +47,7 @@ pub fn build_handle_ops_tx_request(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_replacement_handle_ops_tx_request(
     chain_id: u64,
     bundler_nonce: u64,
@@ -70,6 +72,7 @@ pub fn build_replacement_handle_ops_tx_request(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_cancel_handle_ops_tx_request(
     chain_id: u64,
     bundler_nonce: u64,
@@ -315,7 +318,7 @@ mod tests {
             "signature": "0xab"
         }))
         .unwrap();
-        let entry_point = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
+        let entry_point = wallet_addresses::ENTRY_POINT_V07;
         let beneficiary = address!("2000000000000000000000000000000000000000");
 
         let tx = build_handle_ops_tx_request(
@@ -351,7 +354,7 @@ mod tests {
             "signature": "0xab"
         }))
         .unwrap();
-        let entry_point = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
+        let entry_point = wallet_addresses::ENTRY_POINT_V07;
         let beneficiary = address!("2000000000000000000000000000000000000000");
 
         let tx = build_replacement_handle_ops_tx_request(
@@ -389,7 +392,7 @@ mod tests {
             "signature": "0xab"
         }))
         .unwrap();
-        let entry_point = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
+        let entry_point = wallet_addresses::ENTRY_POINT_V07;
         let beneficiary = address!("2000000000000000000000000000000000000000");
 
         let tx = build_cancel_handle_ops_tx_request(
@@ -432,7 +435,7 @@ mod tests {
         let err = build_cancel_handle_ops_tx_request(
             1,
             7,
-            address!("0000000071727De22E5E9d8BAf0edAc6f37da032"),
+            wallet_addresses::ENTRY_POINT_V07,
             address!("2000000000000000000000000000000000000000"),
             &op,
             50_000,

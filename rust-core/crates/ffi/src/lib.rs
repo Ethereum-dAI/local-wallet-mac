@@ -1,12 +1,15 @@
 use alloy_primitives::{Address, Bytes, FixedBytes, B256, U256};
+use secp256k1::rand::Rng;
 use sha2::{Digest, Sha256};
 use std::panic::catch_unwind;
 use wallet_kernel::{encode_initialize_call, predict_kernel_account_address};
 use wallet_signature::{
+    abi_encode_dummy_signature as signature_abi_encode_dummy_signature,
     abi_encode_webauthn_signature, build_signature, compute_userop_hash, normalise_low_s,
     webauthn::{build_authenticator_data, build_client_data_json},
     PackedUserOperation,
 };
+use zeroize::Zeroizing;
 
 /// Result codes for FFI functions.
 #[repr(i32)]
@@ -14,6 +17,42 @@ pub enum WalletResult {
     Ok = 0,
     InvalidInput = -1,
     InternalError = -2,
+}
+
+fn fixed_32(slice: &[u8]) -> Result<[u8; 32], WalletResult> {
+    <[u8; 32]>::try_from(slice).map_err(|_| WalletResult::InvalidInput)
+}
+
+/// # Safety
+/// `out_secret` must point to 32 writable bytes and `out_address` to 20 writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wallet_generate_bundler_secret(
+    out_secret: *mut u8,
+    out_address: *mut u8,
+) -> i32 {
+    let result = catch_unwind(|| {
+        if out_secret.is_null() || out_address.is_null() {
+            return WalletResult::InvalidInput as i32;
+        }
+
+        let secp = secp256k1::Secp256k1::signing_only();
+        let mut rng = secp256k1::rand::thread_rng();
+        let mut secret_bytes = Zeroizing::new([0u8; 32]);
+        let public = loop {
+            rng.fill(&mut secret_bytes[..]);
+            if let Ok(secret) = secp256k1::SecretKey::from_byte_array(&secret_bytes) {
+                break secp256k1::PublicKey::from_secret_key(&secp, &secret);
+            }
+        };
+        let uncompressed = public.serialize_uncompressed();
+        let hash = alloy_primitives::keccak256(&uncompressed[1..]);
+
+        std::ptr::copy_nonoverlapping(secret_bytes.as_ptr(), out_secret, 32);
+        std::ptr::copy_nonoverlapping(hash[12..].as_ptr(), out_address, 20);
+        WalletResult::Ok as i32
+    });
+
+    result.unwrap_or(WalletResult::InternalError as i32)
 }
 
 /// # Safety
@@ -69,13 +108,22 @@ pub unsafe extern "C" fn wallet_compute_userop_hash(
         };
         let ep_slice = std::slice::from_raw_parts(entry_point, 20);
 
+        let nonce = match fixed_32(nonce_slice) {
+            Ok(value) => value,
+            Err(result) => return result as i32,
+        };
+        let pre_verification_gas = match fixed_32(pvg_slice) {
+            Ok(value) => value,
+            Err(result) => return result as i32,
+        };
+
         let userop = PackedUserOperation {
             sender: Address::from_slice(sender_slice),
-            nonce: U256::from_be_bytes::<32>(nonce_slice.try_into().unwrap()),
+            nonce: U256::from_be_bytes::<32>(nonce),
             init_code: Bytes::from(init_code_slice.to_vec()),
             call_data: Bytes::from(call_data_slice.to_vec()),
             account_gas_limits: FixedBytes::from_slice(agl_slice),
-            pre_verification_gas: U256::from_be_bytes::<32>(pvg_slice.try_into().unwrap()),
+            pre_verification_gas: U256::from_be_bytes::<32>(pre_verification_gas),
             gas_fees: FixedBytes::from_slice(gf_slice),
             paymaster_and_data: Bytes::from(pm_slice.to_vec()),
         };
@@ -124,7 +172,10 @@ pub unsafe extern "C" fn wallet_normalise_low_s(s_inout: *mut u8) -> i32 {
             return WalletResult::InvalidInput as i32;
         }
         let s_slice = std::slice::from_raw_parts(s_inout, 32);
-        let s: [u8; 32] = s_slice.try_into().unwrap();
+        let s = match fixed_32(s_slice) {
+            Ok(value) => value,
+            Err(result) => return result as i32,
+        };
         let r_dummy = [0u8; 32];
         let (_, new_s) = normalise_low_s(r_dummy, s);
         std::ptr::copy_nonoverlapping(new_s.as_ptr(), s_inout, 32);
@@ -154,8 +205,14 @@ pub unsafe extern "C" fn wallet_abi_encode_signature(
             return WalletResult::InvalidInput as i32;
         }
         let hash: &[u8; 32] = &*(userop_hash as *const [u8; 32]);
-        let r_bytes: [u8; 32] = std::slice::from_raw_parts(r, 32).try_into().unwrap();
-        let s_bytes: [u8; 32] = std::slice::from_raw_parts(s, 32).try_into().unwrap();
+        let r_bytes = match fixed_32(std::slice::from_raw_parts(r, 32)) {
+            Ok(value) => value,
+            Err(result) => return result as i32,
+        };
+        let s_bytes = match fixed_32(std::slice::from_raw_parts(s, 32)) {
+            Ok(value) => value,
+            Err(result) => return result as i32,
+        };
 
         let sig = build_signature(hash, r_bytes, s_bytes, use_precompiled);
         let encoded = abi_encode_webauthn_signature(&sig);
@@ -182,8 +239,7 @@ pub unsafe extern "C" fn wallet_abi_encode_dummy_signature(
             return WalletResult::InvalidInput as i32;
         }
 
-        let sig = build_signature(&[0u8; 32], [0u8; 32], [0u8; 32], use_precompiled);
-        let encoded = abi_encode_webauthn_signature(&sig);
+        let encoded = signature_abi_encode_dummy_signature(use_precompiled);
         let len = encoded.len();
         let boxed = encoded.into_boxed_slice();
         let raw_ptr = Box::into_raw(boxed) as *mut u8;
@@ -220,20 +276,21 @@ pub unsafe extern "C" fn wallet_predict_kernel_account_address(
             return WalletResult::InvalidInput as i32;
         }
 
+        let pub_key_x = match fixed_32(std::slice::from_raw_parts(pub_key_x, 32)) {
+            Ok(value) => value,
+            Err(result) => return result as i32,
+        };
+        let pub_key_y = match fixed_32(std::slice::from_raw_parts(pub_key_y, 32)) {
+            Ok(value) => value,
+            Err(result) => return result as i32,
+        };
+
         let predicted = predict_kernel_account_address(
             Address::from_slice(std::slice::from_raw_parts(factory, 20)),
             Address::from_slice(std::slice::from_raw_parts(implementation, 20)),
             Address::from_slice(std::slice::from_raw_parts(webauthn_validator, 20)),
-            U256::from_be_bytes::<32>(
-                std::slice::from_raw_parts(pub_key_x, 32)
-                    .try_into()
-                    .unwrap(),
-            ),
-            U256::from_be_bytes::<32>(
-                std::slice::from_raw_parts(pub_key_y, 32)
-                    .try_into()
-                    .unwrap(),
-            ),
+            U256::from_be_bytes::<32>(pub_key_x),
+            U256::from_be_bytes::<32>(pub_key_y),
             B256::from_slice(std::slice::from_raw_parts(authenticator_id_hash, 32)),
             B256::from_slice(std::slice::from_raw_parts(salt, 32)),
         );
@@ -268,18 +325,19 @@ pub unsafe extern "C" fn wallet_encode_kernel_initialize_call(
             return WalletResult::InvalidInput as i32;
         }
 
+        let pub_key_x = match fixed_32(std::slice::from_raw_parts(pub_key_x, 32)) {
+            Ok(value) => value,
+            Err(result) => return result as i32,
+        };
+        let pub_key_y = match fixed_32(std::slice::from_raw_parts(pub_key_y, 32)) {
+            Ok(value) => value,
+            Err(result) => return result as i32,
+        };
+
         let encoded = encode_initialize_call(
             Address::from_slice(std::slice::from_raw_parts(webauthn_validator, 20)),
-            U256::from_be_bytes::<32>(
-                std::slice::from_raw_parts(pub_key_x, 32)
-                    .try_into()
-                    .unwrap(),
-            ),
-            U256::from_be_bytes::<32>(
-                std::slice::from_raw_parts(pub_key_y, 32)
-                    .try_into()
-                    .unwrap(),
-            ),
+            U256::from_be_bytes::<32>(pub_key_x),
+            U256::from_be_bytes::<32>(pub_key_y),
             B256::from_slice(std::slice::from_raw_parts(authenticator_id_hash, 32)),
         );
 
@@ -299,7 +357,7 @@ pub unsafe extern "C" fn wallet_encode_kernel_initialize_call(
 #[no_mangle]
 pub unsafe extern "C" fn wallet_free_buffer(ptr: *mut u8, len: u32) {
     if !ptr.is_null() && len > 0 {
-        let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr, len as usize));
+        let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len as usize));
     }
 }
 
@@ -307,6 +365,55 @@ pub unsafe extern "C" fn wallet_free_buffer(ptr: *mut u8, len: u32) {
 mod tests {
     use super::*;
     use hex_literal::hex;
+
+    #[test]
+    fn ffi_generate_bundler_secret_returns_secret_and_address() {
+        let mut secret = [0u8; 32];
+        let mut address = [0u8; 20];
+
+        let result =
+            unsafe { wallet_generate_bundler_secret(secret.as_mut_ptr(), address.as_mut_ptr()) };
+
+        assert_eq!(result, WalletResult::Ok as i32);
+        assert_ne!(secret, [0u8; 32]);
+        assert_ne!(address, [0u8; 20]);
+
+        let secp = secp256k1::Secp256k1::signing_only();
+        let secret_key = secp256k1::SecretKey::from_byte_array(&secret).expect("valid secret key");
+        let public = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let uncompressed = public.serialize_uncompressed();
+        let hash = alloy_primitives::keccak256(&uncompressed[1..]);
+        assert_eq!(address, hash[12..]);
+    }
+
+    #[test]
+    fn ffi_generate_bundler_secret_rejects_null_outputs() {
+        let mut secret = [0u8; 32];
+        let mut address = [0u8; 20];
+
+        let missing_secret =
+            unsafe { wallet_generate_bundler_secret(std::ptr::null_mut(), address.as_mut_ptr()) };
+        let missing_address =
+            unsafe { wallet_generate_bundler_secret(secret.as_mut_ptr(), std::ptr::null_mut()) };
+
+        assert_eq!(missing_secret, WalletResult::InvalidInput as i32);
+        assert_eq!(missing_address, WalletResult::InvalidInput as i32);
+    }
+
+    #[test]
+    fn ffi_generate_bundler_secret_recreates_short_lived_secret_key_from_bytes() {
+        let source = include_str!("lib.rs");
+        let function_start = source
+            .find("pub unsafe extern \"C\" fn wallet_generate_bundler_secret")
+            .expect("bundler secret function exists");
+        let following_function = source[function_start + 1..]
+            .find("pub unsafe extern \"C\" fn ")
+            .expect("following FFI function exists");
+        let function = &source[function_start..function_start + 1 + following_function];
+
+        assert!(function.contains("SecretKey::from_byte_array"));
+        assert!(!function.contains("SecretKey::new"));
+    }
 
     #[test]
     fn ffi_compute_userop_hash_matches_direct() {
@@ -326,7 +433,7 @@ mod tests {
             "b7611ee6edb4fb1153b988ca276ccc833f9ce4dde4d6b4a9283b"
             "8745db82a3b1a8fa2555bd17eee3fb9c4f1c1c"
         );
-        let entry_point_bytes = hex!("0000000071727De22E5E9d8BAf0edAc6f37da032");
+        let entry_point_bytes = wallet_signature::ENTRY_POINT_V07;
 
         let mut out_hash = [0u8; 32];
 
@@ -343,7 +450,7 @@ mod tests {
                 gas_fees.as_ptr(),
                 paymaster_and_data.as_ptr(),
                 paymaster_and_data.len() as u32,
-                entry_point_bytes.as_ptr(),
+                entry_point_bytes.as_slice().as_ptr(),
                 1,
                 out_hash.as_mut_ptr(),
             )
@@ -369,7 +476,7 @@ mod tests {
         assert_eq!(&out[33..37], &[0, 0, 0, 0]); // signCount
 
         // sha256(preimage) must equal what compute_signing_message returns
-        let signing_msg: [u8; 32] = Sha256::digest(&out).into();
+        let signing_msg: [u8; 32] = Sha256::digest(out).into();
         let (expected_msg, _) = wallet_signature::compute_signing_message(&userop_hash);
         assert_eq!(signing_msg, expected_msg);
     }
@@ -452,5 +559,27 @@ mod tests {
         assert!(!encoded.is_empty());
 
         unsafe { wallet_free_buffer(out_ptr as *mut u8, out_len) };
+    }
+
+    #[test]
+    fn ffi_dummy_signature_matches_signature_crate_helper() {
+        for use_precompiled in [false, true] {
+            let mut out_ptr: *const u8 = std::ptr::null();
+            let mut out_len: u32 = 0;
+
+            let result = unsafe {
+                wallet_abi_encode_dummy_signature(use_precompiled, &mut out_ptr, &mut out_len)
+            };
+
+            assert_eq!(result, WalletResult::Ok as i32);
+            assert!(!out_ptr.is_null());
+            let encoded = unsafe { std::slice::from_raw_parts(out_ptr, out_len as usize) };
+            assert_eq!(
+                encoded,
+                wallet_signature::abi_encode_dummy_signature(use_precompiled)
+            );
+
+            unsafe { wallet_free_buffer(out_ptr as *mut u8, out_len) };
+        }
     }
 }

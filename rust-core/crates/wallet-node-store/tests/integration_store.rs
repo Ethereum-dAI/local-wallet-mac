@@ -7,9 +7,9 @@ use std::{
 use std::os::unix::fs::PermissionsExt;
 
 use wallet_node_store::{
-    db, migrations, open_read_only, pending_operations, NonceStatus, StoreActor, StoreError,
-    SubmittedTransaction, SubmittedTxStatus, UserOpInsertOutcome, UserOpStatus, UserOperation,
-    UserOperationReceipt,
+    db, migrations, open_read_only, pending_operations, BundlerLifecycle, NonceStatus, StoreActor,
+    StoreError, SubmittedTransaction, SubmittedTxStatus, UserOpInsertOutcome, UserOpStatus,
+    UserOperation, UserOperationReceipt,
 };
 
 const CHAIN_ID: u64 = 1;
@@ -76,6 +76,7 @@ fn receipt(user_op_hash: &str, tx_hash: &str) -> UserOperationReceipt {
         revert_reason: None,
         receipt_json: format!(r#"{{"userOpHash":"{user_op_hash}","txHash":"{tx_hash}"}}"#),
         tentative: false,
+        invalidated: false,
         created_at: 1,
     }
 }
@@ -212,6 +213,131 @@ async fn end_to_end_submit_lifecycle() {
 }
 
 #[tokio::test]
+async fn relayer_lifecycle_metadata_survives_restart() {
+    let temp = TempStoreDir::new("wallet-store-relayer-restart");
+    let db_path = temp.db_path();
+    migrate_file_db(&db_path);
+
+    let conn = db::open(&db_path).unwrap();
+    let handle = StoreActor::start(conn);
+    handle
+        .bundler_account_insert_for_owner(
+            "default",
+            CHAIN_ID,
+            "0xactive",
+            "bundler-eoa:default:1:1",
+            BundlerLifecycle::Active,
+        )
+        .await
+        .unwrap();
+    handle
+        .bundler_account_insert_for_owner(
+            "default",
+            11_155_111,
+            "0xpending",
+            "bundler-eoa:default:11155111:1",
+            BundlerLifecycle::PendingFunding,
+        )
+        .await
+        .unwrap();
+    handle
+        .bundler_account_insert_for_owner(
+            "default",
+            10,
+            "0xretiring",
+            "bundler-eoa:default:10:1",
+            BundlerLifecycle::Active,
+        )
+        .await
+        .unwrap();
+    handle
+        .bundler_account_set_lifecycle_for_owner(
+            "default",
+            10,
+            "0xretiring",
+            BundlerLifecycle::Retiring,
+        )
+        .await
+        .unwrap();
+    handle
+        .bundler_account_insert_for_owner(
+            "default",
+            8453,
+            "0xretired",
+            "bundler-eoa:default:8453:1",
+            BundlerLifecycle::Active,
+        )
+        .await
+        .unwrap();
+    handle
+        .bundler_account_set_lifecycle_for_owner(
+            "default",
+            8453,
+            "0xretired",
+            BundlerLifecycle::Retired,
+        )
+        .await
+        .unwrap();
+    handle
+        .bundler_account_insert_for_owner(
+            "default",
+            42161,
+            "0xdeleted",
+            "bundler-eoa:default:42161:1",
+            BundlerLifecycle::Active,
+        )
+        .await
+        .unwrap();
+    handle
+        .bundler_account_set_lifecycle_for_owner(
+            "default",
+            42161,
+            "0xdeleted",
+            BundlerLifecycle::Deleted,
+        )
+        .await
+        .unwrap();
+    handle.shutdown_and_wait().await.unwrap();
+
+    let conn = db::open(&db_path).unwrap();
+    let handle = StoreActor::start(conn);
+    assert_eq!(
+        handle
+            .bundler_account_active_for_owner("default", CHAIN_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .lifecycle,
+        BundlerLifecycle::Active
+    );
+    assert_eq!(
+        handle
+            .bundler_account_pending_funding_for_owner("default", 11_155_111)
+            .await
+            .unwrap()
+            .unwrap()
+            .lifecycle,
+        BundlerLifecycle::PendingFunding
+    );
+    let accounts_10 = handle
+        .bundler_account_list_for_owner("default", 10)
+        .await
+        .unwrap();
+    assert_eq!(accounts_10[0].lifecycle, BundlerLifecycle::Retiring);
+    let accounts_8453 = handle
+        .bundler_account_list_for_owner("default", 8453)
+        .await
+        .unwrap();
+    assert_eq!(accounts_8453[0].lifecycle, BundlerLifecycle::Retired);
+    let accounts_42161 = handle
+        .bundler_account_list_for_owner("default", 42161)
+        .await
+        .unwrap();
+    assert_eq!(accounts_42161[0].lifecycle, BundlerLifecycle::Deleted);
+    handle.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test]
 async fn idempotent_send_does_not_consume_second_nonce() {
     let conn = migrated_in_memory_conn();
     let handle = StoreActor::start(conn);
@@ -318,6 +444,96 @@ async fn watcher_startup_query_filters_pending() {
 }
 
 #[tokio::test]
+async fn abandon_submissions_marks_live_rows_and_returns_summaries() {
+    let conn = migrated_in_memory_conn();
+    let handle = StoreActor::start(conn);
+
+    for (hash, user_op_hash, status, nonce, bundler) in [
+        (
+            "0xsubmitting",
+            "0xuserop1",
+            SubmittedTxStatus::Submitting,
+            1,
+            BUNDLER,
+        ),
+        (
+            "0xsubmitted",
+            "0xuserop2",
+            SubmittedTxStatus::Submitted,
+            2,
+            BUNDLER,
+        ),
+        (
+            "0xincluded",
+            "0xuserop3",
+            SubmittedTxStatus::Included,
+            3,
+            BUNDLER,
+        ),
+        (
+            "0xother",
+            "0xuserop4",
+            SubmittedTxStatus::Submitting,
+            4,
+            "0xcccc",
+        ),
+    ] {
+        let mut tx = submitted_tx(hash, user_op_hash, status, nonce, nonce as i64);
+        tx.bundler_address = bundler.to_owned();
+        handle.submitted_tx_insert(tx).await.unwrap();
+    }
+
+    let abandoned = handle
+        .submitted_txs_abandon_for_bundler(CHAIN_ID, BUNDLER)
+        .await
+        .unwrap();
+
+    assert_eq!(abandoned.len(), 2);
+    assert_eq!(abandoned[0].tx_hash, "0xsubmitting");
+    assert_eq!(abandoned[0].nonce, 1);
+    assert_eq!(abandoned[1].tx_hash, "0xsubmitted");
+    assert_eq!(abandoned[1].nonce, 2);
+    assert_eq!(
+        handle
+            .submitted_tx_get("0xsubmitting")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SubmittedTxStatus::Abandoned
+    );
+    assert_eq!(
+        handle
+            .submitted_tx_get("0xsubmitted")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SubmittedTxStatus::Abandoned
+    );
+    assert_eq!(
+        handle
+            .submitted_tx_get("0xincluded")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SubmittedTxStatus::Included
+    );
+    assert_eq!(
+        handle
+            .submitted_tx_get("0xother")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SubmittedTxStatus::Submitting
+    );
+
+    handle.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test]
 async fn migration_idempotent_on_reopen() {
     let mut conn = db::open_in_memory().unwrap();
 
@@ -325,13 +541,13 @@ async fn migration_idempotent_on_reopen() {
     let user_version: u32 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 1);
+    assert_eq!(user_version, migrations::HIGHEST_MIGRATION);
 
     migrations::apply(&mut conn).unwrap();
     let user_version: u32 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 1);
+    assert_eq!(user_version, migrations::HIGHEST_MIGRATION);
 }
 
 #[tokio::test]

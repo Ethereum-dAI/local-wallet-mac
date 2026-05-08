@@ -13,6 +13,7 @@ extern "C" {
 int wallet_node_spawn_helper(const char *exec_path,
                              int ready_write_fd,
                              int alive_read_fd,
+                             int secret_read_fd,
                              pid_t *out_pid);
 
 #ifdef __cplusplus

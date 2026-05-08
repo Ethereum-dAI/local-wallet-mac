@@ -30,9 +30,10 @@ pub struct PendingOperation {
 
 pub fn pending_operations(conn: &Connection) -> Result<Vec<PendingOperation>, StoreError> {
     let mut stmt = conn.prepare(
-        r#"SELECT u.user_op_hash, u.sender, u.nonce, u.status, s.tx_hash, s.submitted_at_block
+        r#"SELECT u.user_op_hash, u.sender, u.nonce, u.status, s.tx_hash, s.submitted_at_block, d.last_error
 FROM user_operations u
 LEFT JOIN submitted_transactions s ON s.user_op_hash = u.user_op_hash
+LEFT JOIN operation_diagnostics d ON d.subject_type = 'user_operation' AND d.subject_id = u.user_op_hash
 WHERE u.status IN ("received","simulated","submitted","pending")
 ORDER BY u.updated_at"#,
     )?;
@@ -44,12 +45,13 @@ ORDER BY u.updated_at"#,
             row.get::<_, String>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<i64>>(5)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     })?;
 
     let mut ops = Vec::new();
     for row in rows {
-        let (user_op_hash, sender, nonce, status, tx_hash, submitted_at_block) = row?;
+        let (user_op_hash, sender, nonce, status, tx_hash, submitted_at_block, last_error) = row?;
         ops.push(PendingOperation {
             user_op_hash,
             sender,
@@ -57,9 +59,7 @@ ORDER BY u.updated_at"#,
             status: UserOpStatus::from_str(&status, USER_OPERATIONS_TABLE)?,
             tx_hash,
             submitted_at_block: submitted_at_block.map(|block| block as u64),
-            // V1 has no persisted per-operation error state; keep the documented
-            // public field present and null.
-            last_error: None,
+            last_error,
         });
     }
 
@@ -251,6 +251,22 @@ mod tests {
             json,
             r#"{"userOpHash":"0xaaa","sender":"0xbbb","nonce":"0x1","status":"submitted","txHash":"0xccc","submittedAtBlock":1234,"lastError":null}"#
         );
+    }
+
+    #[test]
+    fn pending_operations_returns_persisted_last_error() {
+        let conn = migrated_in_memory_conn();
+        insert_user_op(&conn, "0xaaa", "0xbbb", "0x1", UserOpStatus::Submitted, 1);
+        conn.execute(
+            "INSERT INTO operation_diagnostics (subject_type, subject_id, last_error, last_error_at) VALUES ('user_operation', '0xaaa', 'receipt_lookup_failed', 10)",
+            [],
+        )
+        .unwrap();
+
+        let ops = pending_operations(&conn).unwrap();
+
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].last_error, Some("receipt_lookup_failed".to_string()));
     }
 
     #[test]

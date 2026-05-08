@@ -11,6 +11,9 @@ enum AppError: LocalizedError {
     case invalidSignatureFormat
     case missingKeyReference
     case missingEntitlement
+    case localDaemonNotConfigured
+    case localDaemonLaunchFailed(String)
+    case localRelayerKeyMissing
     case metadataKeyMismatch
     case corruptedMetadataStore
     case unsupportedSigningAlgorithm
@@ -37,6 +40,12 @@ enum AppError: LocalizedError {
             return "The Secure Enclave key reference is missing from Keychain."
         case .missingEntitlement:
             return "This Secure Enclave flow needs a signed macOS app bundle with Keychain access entitlements. Use the packaged app release, or open `LocalWallet.xcodeproj`, select a development team for `LocalWalletApp`, and run it from Xcode instead of `swift run`."
+        case .localDaemonNotConfigured:
+            return "The local wallet-node daemon endpoint is not configured."
+        case let .localDaemonLaunchFailed(message):
+            return message
+        case .localRelayerKeyMissing:
+            return "The active local relayer key reference is not available."
         case .metadataKeyMismatch:
             return "Stored wallet metadata does not match the loaded Secure Enclave key."
         case .corruptedMetadataStore:

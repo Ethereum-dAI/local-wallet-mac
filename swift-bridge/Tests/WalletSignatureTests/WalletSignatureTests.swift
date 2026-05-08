@@ -64,6 +64,15 @@ final class WalletSignatureTests: XCTestCase {
         )
     }
 
+    func testGenerateBundlerSecretReturnsSecretAndAddress() throws {
+        let generated = try WalletSignature.generateBundlerSecret()
+
+        XCTAssertEqual(generated.secret.count, 32)
+        XCTAssertEqual(generated.address.count, 20)
+        XCTAssertNotEqual(generated.secret, Data(repeating: 0, count: 32))
+        XCTAssertNotEqual(generated.address, Data(repeating: 0, count: 20))
+    }
+
     func testFullPipeline() throws {
         // 1. Compute hash
         let hash = try WalletSignature.computeUserOpHash(

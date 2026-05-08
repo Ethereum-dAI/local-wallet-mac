@@ -122,6 +122,37 @@ The `usePrecompiled` flag controls whether on-chain verification uses the RIP-72
 | `ENTRY_POINT_V07` | `0x0000000071727De22E5E9d8BAf0edAc6f37da032` | EntryPoint v0.7 address |
 | `DAIMO_P256_VERIFIER` | `0xc2b78104907F722DABAc4C69f826a522B2754De4` | Fallback P-256 verifier |
 | `P256_PRECOMPILE` | `0x0000000000000000000000000000000000000100` | RIP-7212 precompile |
+| `RP_ID` | `"wallet"` | Default WebAuthn relying-party id |
+| `ORIGIN` | `"https://wallet.local"` | Default WebAuthn origin |
+| `RP_ID_HASH` | `sha256("wallet")` | rpIdHash embedded in `authenticatorData` |
+| `CHALLENGE_LOCATION` | `23` | Byte offset of `"challenge":` in `clientDataJSON` (validator-mandated) |
+| `RESPONSE_TYPE_LOCATION` | `1` | Byte offset of `"type":` in `clientDataJSON` (validator-mandated) |
+
+## Default WebAuthn Context
+
+`WebAuthnContext::default()` produces:
+
+| Field | Value |
+|---|---|
+| `rp_id` | `"wallet"` |
+| `origin` | `"https://wallet.local"` |
+| `sign_count` | `0` |
+| `user_presence` (UP) | `true` |
+| `user_verification` (UV) | `true` |
+
+The flag byte in `authenticatorData` is `0x05` (UP + UV). `sign_count = 0` because there is no real authenticator backing the Secure Enclave.
+
+## Public Helpers
+
+The crate re-exports the following helpers at the root:
+
+- `compute_userop_hash` — EntryPoint v0.7 UserOp hash
+- `compute_signing_message` — final 32-byte digest the validator verifies
+- `build_signature` — assembles `WebAuthnSignature`
+- `der_to_raw` — DER → raw `(r, s)` parser for CryptoKit's `derRepresentation`
+- `normalise_low_s` — mandatory low-s normalization
+- `abi_encode_webauthn_signature` — ABI-encodes the 6-field signature struct
+- `abi_encode_dummy_signature` — Kernel/WebAuthn dummy signature for gas estimation
 
 ## Building and testing
 

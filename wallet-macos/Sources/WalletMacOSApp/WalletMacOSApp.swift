@@ -23,8 +23,9 @@ enum WalletMacOSApp {
     private static func resetDemoWalletAndExit() -> Never {
         do {
             try KeyStore().deleteKey()
+            try BundlerKeyStore.shared.deleteAll()
             try WalletMetadataStore().clear()
-            print("Deleted Local Wallet demo key and metadata.")
+            print("Deleted Local Wallet demo key, local relayer keys, and metadata.")
             exit(0)
         } catch {
             fputs("Failed to reset Local Wallet demo wallet: \(error.localizedDescription)\n", stderr)
@@ -178,6 +179,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
     private let heroCard = WalletViewController.makeCard()
     private let accountCard = WalletViewController.makeCard()
     private let composerCard = WalletViewController.makeCard()
+    private let relayerCard = WalletViewController.makeCard()
     private let logsCard = WalletViewController.makeCard()
     private let lowerRow = NSStackView()
 
@@ -218,6 +220,17 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
     private let buildDraftButton = NSButton(title: "Build UserOperation Draft", target: nil, action: nil)
     private let sendUserOperationButton = NSButton(title: "Send UserOperation", target: nil, action: nil)
     private let submissionStatusLabel = NSTextField(labelWithString: "")
+    private let relayerTitleLabel = NSTextField(labelWithString: "Local Relayer Key")
+    private let relayerDetailLabel = NSTextField(labelWithString: "Local daemon not connected")
+    private let relayerAddressLabel = NSTextField(labelWithString: "—")
+    private let relayerBalanceLabel = NSTextField(labelWithString: "—")
+    private let relayerLifecycleLabel = WalletViewController.makeBadge()
+    private let relayerAuditLabel = NSTextField(labelWithString: "")
+    private let relayerHistoryPopup = NSPopUpButton()
+    private let refreshRelayerButton = NSButton(title: "Refresh", target: nil, action: nil)
+    private let rotateRelayerButton = NSButton(title: "Rotate", target: nil, action: nil)
+    private let exportRelayerButton = NSButton(title: "Export", target: nil, action: nil)
+    private let deleteRelayerButton = NSButton(title: "Delete / Reset", target: nil, action: nil)
     private let logsTitleLabel = NSTextField(labelWithString: "Debug Activity")
     private let logsDetailLabel = NSTextField(labelWithString: "Timestamps for bootstrap, inspection, gas estimation, Secure Enclave signing, bundler submission, and receipt polling.")
     private let clearLogsButton = NSButton(title: "Clear Logs", target: nil, action: nil)
@@ -226,7 +239,9 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
     private var heroCardHeightConstraint: NSLayoutConstraint?
     private var accountCardHeightConstraint: NSLayoutConstraint?
     private var composerCardHeightConstraint: NSLayoutConstraint?
+    private var relayerCardHeightConstraint: NSLayoutConstraint?
     private var logsCardHeightConstraint: NSLayoutConstraint?
+    private var selectedRelayerKeyRef: String?
 
     init(model: AppModel) {
         self.model = model
@@ -291,7 +306,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         progressIndicator.isDisplayedWhenStopped = false
         progressIndicator.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        [reloadButton, howItWorksButton, heroCopyAddressButton, accountCopyAddressButton, refreshBalanceButton, buildDraftButton, sendUserOperationButton, clearLogsButton].forEach {
+        [reloadButton, howItWorksButton, heroCopyAddressButton, accountCopyAddressButton, refreshBalanceButton, buildDraftButton, sendUserOperationButton, refreshRelayerButton, rotateRelayerButton, exportRelayerButton, deleteRelayerButton, clearLogsButton].forEach {
             $0.bezelStyle = .rounded
             $0.setButtonType(.momentaryPushIn)
             $0.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
@@ -304,6 +319,10 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         styleButton(refreshBalanceButton, role: .quiet)
         styleButton(buildDraftButton, role: .secondary)
         styleButton(sendUserOperationButton, role: .primary)
+        styleButton(refreshRelayerButton, role: .quiet)
+        styleButton(rotateRelayerButton, role: .secondary)
+        styleButton(exportRelayerButton, role: .secondary)
+        styleButton(deleteRelayerButton, role: .quiet)
         styleButton(clearLogsButton, role: .quiet)
         reloadButton.target = self
         reloadButton.action = #selector(reloadWallet)
@@ -319,8 +338,18 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         buildDraftButton.action = #selector(buildUserOperationDraft)
         sendUserOperationButton.target = self
         sendUserOperationButton.action = #selector(sendUserOperation)
+        refreshRelayerButton.target = self
+        refreshRelayerButton.action = #selector(refreshLocalRelayer)
+        rotateRelayerButton.target = self
+        rotateRelayerButton.action = #selector(rotateLocalRelayer)
+        exportRelayerButton.target = self
+        exportRelayerButton.action = #selector(exportLocalRelayer)
+        deleteRelayerButton.target = self
+        deleteRelayerButton.action = #selector(deleteLocalRelayer)
         clearLogsButton.target = self
         clearLogsButton.action = #selector(clearDebugLog)
+        relayerHistoryPopup.target = self
+        relayerHistoryPopup.action = #selector(selectRelayerHistoryEntry)
 
         testnetButton.target = self
         testnetButton.action = #selector(toggleTestnetMode)
@@ -336,8 +365,12 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         composerTitleLabel.textColor = Palette.text
         configureTitleLabel(composerTitleLabel)
         configureSelectableLabel(composerTitleLabel)
+        relayerTitleLabel.font = NSFont.systemFont(ofSize: 20, weight: .bold)
+        relayerTitleLabel.textColor = Palette.text
+        configureTitleLabel(relayerTitleLabel)
+        configureSelectableLabel(relayerTitleLabel)
 
-        [accountDetailLabel, composerDetailLabel, fundingHintLabel, composerSummaryLabel].forEach {
+        [accountDetailLabel, composerDetailLabel, fundingHintLabel, composerSummaryLabel, relayerDetailLabel, relayerAuditLabel].forEach {
             $0.font = NSFont.systemFont(ofSize: 13, weight: .regular)
             $0.textColor = Palette.mutedText
             configureWrappingLabel($0)
@@ -351,6 +384,13 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         balanceValueLabel.font = NSFont.monospacedSystemFont(ofSize: 20, weight: .bold)
         balanceValueLabel.textColor = Palette.primaryGreen
         configureSelectableLabel(balanceValueLabel)
+
+        [relayerAddressLabel, relayerBalanceLabel].forEach {
+            $0.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold)
+            $0.textColor = Palette.text
+            $0.lineBreakMode = .byTruncatingMiddle
+            configureSelectableLabel($0)
+        }
 
         qrImageView.imageScaling = .scaleProportionallyUpOrDown
         qrImageView.wantsLayer = true
@@ -369,6 +409,9 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         transactionTypePopup.addItems(withTitles: DemoTransactionKind.allCases.map(\.rawValue))
         transactionTypePopup.target = self
         transactionTypePopup.action = #selector(transactionTypeChanged)
+
+        relayerHistoryPopup.addItem(withTitle: "Current key")
+        relayerHistoryPopup.isEnabled = false
 
         recipientField.placeholderString = "Recipient address"
         recipientField.delegate = self
@@ -472,15 +515,18 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
 
         rootStack.addArrangedSubview(heroCard)
         rootStack.addArrangedSubview(lowerRow)
+        rootStack.addArrangedSubview(makeRelayerBlock())
         rootStack.addArrangedSubview(makeLogsBlock())
 
         heroCardHeightConstraint = heroCard.heightAnchor.constraint(greaterThanOrEqualToConstant: 166)
         accountCardHeightConstraint = accountCard.heightAnchor.constraint(equalToConstant: 420)
         composerCardHeightConstraint = composerCard.heightAnchor.constraint(equalToConstant: 420)
+        relayerCardHeightConstraint = relayerCard.heightAnchor.constraint(equalToConstant: 250)
         logsCardHeightConstraint = logsCard.heightAnchor.constraint(equalToConstant: 164)
         heroCardHeightConstraint?.isActive = true
         accountCardHeightConstraint?.isActive = true
         composerCardHeightConstraint?.isActive = true
+        relayerCardHeightConstraint?.isActive = true
         logsCardHeightConstraint?.isActive = true
 
         NSLayoutConstraint.activate([
@@ -502,6 +548,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
 
             heroCard.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
             lowerRow.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
+            relayerCard.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
             logsCard.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
             accountCard.widthAnchor.constraint(equalTo: composerCard.widthAnchor),
         ])
@@ -744,6 +791,87 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         return composerCard
     }
 
+    private func makeRelayerBlock() -> NSView {
+        let addressCaption = NSTextField(labelWithString: "Relayer Address")
+        addressCaption.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        addressCaption.textColor = Palette.faintText
+        configureMetricCaption(addressCaption)
+
+        let balanceCaption = NSTextField(labelWithString: "Balance")
+        balanceCaption.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        balanceCaption.textColor = Palette.faintText
+        configureMetricCaption(balanceCaption)
+
+        let historyCaption = NSTextField(labelWithString: "History Target")
+        historyCaption.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        historyCaption.textColor = Palette.faintText
+        configureMetricCaption(historyCaption)
+
+        let addressStack = NSStackView(views: [addressCaption, relayerAddressLabel])
+        addressStack.orientation = .vertical
+        addressStack.alignment = .leading
+        addressStack.spacing = 5
+
+        let balanceStack = NSStackView(views: [balanceCaption, relayerBalanceLabel])
+        balanceStack.orientation = .vertical
+        balanceStack.alignment = .leading
+        balanceStack.spacing = 5
+
+        let metricsRow = NSStackView(views: [addressStack, balanceStack, relayerLifecycleLabel])
+        metricsRow.orientation = .horizontal
+        metricsRow.alignment = .centerY
+        metricsRow.spacing = 24
+        addressStack.translatesAutoresizingMaskIntoConstraints = false
+        balanceStack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            addressStack.widthAnchor.constraint(greaterThanOrEqualToConstant: 360),
+            balanceStack.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
+        ])
+
+        let historyStack = NSStackView(views: [historyCaption, relayerHistoryPopup])
+        historyStack.orientation = .vertical
+        historyStack.alignment = .leading
+        historyStack.spacing = 5
+        relayerHistoryPopup.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            relayerHistoryPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 260),
+        ])
+
+        let buttonRow = NSStackView(views: [
+            refreshRelayerButton,
+            rotateRelayerButton,
+            exportRelayerButton,
+            deleteRelayerButton,
+        ])
+        buttonRow.orientation = .horizontal
+        buttonRow.alignment = .centerY
+        buttonRow.spacing = 10
+
+        let headerRow = NSStackView(views: [relayerTitleLabel, buttonRow])
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 16
+
+        let stack = NSStackView(views: [
+            headerRow,
+            relayerDetailLabel,
+            metricsRow,
+            historyStack,
+            relayerAuditLabel,
+        ])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        relayerDetailLabel.translatesAutoresizingMaskIntoConstraints = false
+        relayerAuditLabel.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            relayerDetailLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            relayerAuditLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+        installCard(stack, in: relayerCard)
+        return relayerCard
+    }
+
     private func makeLogsBlock() -> NSView {
         let headerRow = NSStackView(views: [logsTitleLabel, clearLogsButton])
         headerRow.orientation = .horizontal
@@ -807,6 +935,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
 
         renderAccountCard()
         renderComposerCard()
+        renderRelayerCard()
         renderDebugLog()
     }
 
@@ -873,6 +1002,127 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         styleButton(sendUserOperationButton, role: canSendUserOperation ? .primary : .disabled)
         submissionStatusLabel.stringValue = makeSubmissionStatusSummary()
         userOpDraftTextView.string = makeUserOperationDraftSummary()
+    }
+
+    private func renderRelayerCard() {
+        relayerDetailLabel.stringValue = model.localRelayerMessage
+
+        if let status = model.localRelayerStatus {
+            populateRelayerHistoryPopup(status)
+            relayerAddressLabel.stringValue = status.eoa
+            relayerBalanceLabel.stringValue = "\(status.balance) / low \(status.thresholdLow)"
+            relayerLifecycleLabel.stringValue = status.lifecycle.uppercased()
+            tintBadge(
+                relayerLifecycleLabel,
+                color: status.ready ? Palette.primaryGreen : (status.needsTopup ? Palette.orange : Palette.blue)
+            )
+            let rotation = status.pendingFundingCount > 0 || status.retiringCount > 0
+                ? "pendingFunding=\(status.pendingFundingCount), retiring=\(status.retiringCount)"
+                : "no rotation in progress"
+            if let pendingFundingAddress = status.pendingFundingAddress {
+                relayerDetailLabel.stringValue = "New relayer key is waiting for top-up: \(pendingFundingAddress)"
+            }
+            relayerAuditLabel.stringValue = status.latestAuditEvent.map {
+                "Latest audit event: \($0). Rotation: \(rotation)."
+            } ?? "Rotation: \(rotation)."
+        } else {
+            selectedRelayerKeyRef = nil
+            relayerHistoryPopup.removeAllItems()
+            relayerHistoryPopup.addItem(withTitle: "No relayer history")
+            relayerHistoryPopup.isEnabled = false
+            relayerAddressLabel.stringValue = "—"
+            relayerBalanceLabel.stringValue = "—"
+            relayerLifecycleLabel.stringValue = model.hasLocalRelayerClient ? "UNKNOWN" : "OFFLINE"
+            tintBadge(relayerLifecycleLabel, color: Palette.faintText)
+            relayerAuditLabel.stringValue = ""
+        }
+
+        let relayerBusy = model.isRefreshingLocalRelayer
+            || model.isRotatingLocalRelayer
+            || model.isExportingLocalRelayer
+            || model.isDeletingLocalRelayer
+        let canUseRelayer = model.hasLocalRelayerClient && !relayerBusy
+        let selectedTarget = selectedRelayerAdminTarget()
+        let canExportSelectedKey = canUseRelayer && selectedTarget?.canExport == true
+        let canDeleteSelectedKey = canUseRelayer && selectedTarget?.canDelete == true
+
+        refreshRelayerButton.isEnabled = canUseRelayer
+        refreshRelayerButton.title = model.isRefreshingLocalRelayer ? "Refreshing…" : "Refresh"
+        styleButton(refreshRelayerButton, role: canUseRelayer ? .quiet : .disabled)
+
+        rotateRelayerButton.isEnabled = canUseRelayer
+        rotateRelayerButton.title = model.isRotatingLocalRelayer ? "Rotating…" : "Rotate"
+        styleButton(rotateRelayerButton, role: canUseRelayer ? .secondary : .disabled)
+
+        exportRelayerButton.isEnabled = canExportSelectedKey
+        exportRelayerButton.title = model.isExportingLocalRelayer ? "Exporting…" : "Export"
+        styleButton(exportRelayerButton, role: canExportSelectedKey ? .secondary : .disabled)
+
+        deleteRelayerButton.isEnabled = canDeleteSelectedKey
+        deleteRelayerButton.title = model.isDeletingLocalRelayer ? "Deleting…" : "Delete / Reset"
+        styleButton(deleteRelayerButton, role: canDeleteSelectedKey ? .quiet : .disabled)
+    }
+
+    private func populateRelayerHistoryPopup(_ status: WalletNodeClient.RelayerStatus) {
+        let previousSelection = selectedRelayerKeyRef
+        relayerHistoryPopup.removeAllItems()
+
+        let entries = status.keyHistory.isEmpty
+            ? status.keyRef.map {
+                [WalletNodeClient.RelayerStatus.KeyHistoryEntry(
+                    eoa: status.eoa,
+                    keyRef: $0,
+                    lifecycle: status.lifecycle,
+                    createdAt: nil,
+                    retiredAt: nil,
+                    deletedAt: nil,
+                    lastExportedAt: nil
+                )]
+            } ?? []
+            : status.keyHistory
+
+        for entry in entries {
+            let prefix = entry.keyRef == status.keyRef ? "Current" : "History"
+            relayerHistoryPopup.addItem(withTitle: "\(prefix): \(entry.displayTitle)")
+            relayerHistoryPopup.lastItem?.representedObject = entry.keyRef
+            relayerHistoryPopup.lastItem?.isEnabled = entry.canExport || entry.canDelete
+        }
+
+        let fallbackSelection = status.keyRef ?? entries.first?.keyRef
+        let nextSelection = entries.contains(where: { $0.keyRef == previousSelection })
+            ? previousSelection
+            : fallbackSelection
+        selectedRelayerKeyRef = nextSelection
+
+        if let nextSelection,
+           let item = relayerHistoryPopup.itemArray.first(where: { $0.representedObject as? String == nextSelection }) {
+            relayerHistoryPopup.select(item)
+        }
+        relayerHistoryPopup.isEnabled = entries.count > 1
+    }
+
+    private func selectedRelayerAdminTarget() -> (keyRef: String, label: String, canExport: Bool, canDelete: Bool)? {
+        guard let status = model.localRelayerStatus else {
+            return nil
+        }
+        let keyRef = selectedRelayerKeyRef ?? status.keyRef
+        guard let keyRef else {
+            return nil
+        }
+        if let entry = status.keyHistory.first(where: { $0.keyRef == keyRef }) {
+            return (
+                keyRef: entry.keyRef,
+                label: entry.eoa.shortAddress,
+                canExport: entry.canExport,
+                canDelete: entry.canDelete
+            )
+        }
+        return (
+            keyRef: keyRef,
+            label: status.eoa.shortAddress,
+            canExport: true,
+            canDelete: true
+        )
     }
 
     private func renderDebugLog() {
@@ -963,6 +1213,114 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
     }
 
     @objc
+    private func refreshLocalRelayer() {
+        model.refreshLocalRelayerStatus()
+    }
+
+    @objc
+    private func selectRelayerHistoryEntry() {
+        selectedRelayerKeyRef = relayerHistoryPopup.selectedItem?.representedObject as? String
+        renderRelayerCard()
+    }
+
+    @objc
+    private func rotateLocalRelayer() {
+        let alert = NSAlert()
+        alert.messageText = "Rotate local relayer key?"
+        alert.informativeText = "A new relayer key will be created and wait for top-up. The current key keeps submitting operations until the new key is funded."
+        alert.addButton(withTitle: "Rotate")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+
+        runConfirmation(alert) { [weak self] in
+            guard let self else { return }
+            Task {
+                do {
+                    try await self.model.rotateLocalRelayerKey()
+                } catch {
+                    self.showError("Rotation failed", error)
+                }
+            }
+        }
+    }
+
+    @objc
+    private func exportLocalRelayer() {
+        guard let target = selectedRelayerAdminTarget() else {
+            showError("Export failed", AppError.localRelayerKeyMissing)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Export local relayer private key?"
+        alert.informativeText = "The exported key for \(target.label) can spend ETH held by that relayer address. It cannot authorize smart-account transfers."
+        alert.addButton(withTitle: "Export")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .critical
+
+        runConfirmation(alert) { [weak self] in
+            guard let self else { return }
+            Task {
+                do {
+                    let privateKey = try await self.model.exportLocalRelayerKey(
+                        keyRef: target.keyRef,
+                        label: target.label
+                    )
+                    self.showExportedRelayerKey(privateKey)
+                } catch {
+                    self.showError("Export failed", error)
+                }
+            }
+        }
+    }
+
+    @objc
+    private func deleteLocalRelayer() {
+        guard let target = selectedRelayerAdminTarget() else {
+            showError("Delete failed", AppError.localRelayerKeyMissing)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Delete or reset local relayer key?"
+        alert.informativeText = "This targets \(target.label). Safe delete is blocked when pending relayer transactions exist. Unsafe reset deletes key material anyway and can orphan pending relay state."
+        alert.addButton(withTitle: "Safe Delete")
+        alert.addButton(withTitle: "Unsafe Reset")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .critical
+
+        let runDelete: (Bool) -> Void = { [weak self] unsafeReset in
+            guard let self else { return }
+            Task {
+                do {
+                    try await self.model.deleteLocalRelayerKey(
+                        keyRef: target.keyRef,
+                        label: target.label,
+                        unsafeReset: unsafeReset
+                    )
+                } catch {
+                    self.showError(unsafeReset ? "Unsafe reset failed" : "Delete failed", error)
+                }
+            }
+        }
+
+        if let window = view.window {
+            alert.beginSheetModal(for: window) { response in
+                if response == .alertFirstButtonReturn {
+                    runDelete(false)
+                } else if response == .alertSecondButtonReturn {
+                    runDelete(true)
+                }
+            }
+        } else {
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                runDelete(false)
+            } else if response == .alertSecondButtonReturn {
+                runDelete(true)
+            }
+        }
+    }
+
+    @objc
     private func clearDebugLog() {
         model.clearDebugLog()
     }
@@ -1020,6 +1378,48 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         }
         pendingCopyResetWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4, execute: workItem)
+    }
+
+    private func runConfirmation(_ alert: NSAlert, confirmed: @escaping () -> Void) {
+        if let window = view.window {
+            alert.beginSheetModal(for: window) { response in
+                if response == .alertFirstButtonReturn {
+                    confirmed()
+                }
+            }
+        } else if alert.runModal() == .alertFirstButtonReturn {
+            confirmed()
+        }
+    }
+
+    private func showError(_ title: String, _ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "Close")
+        alert.alertStyle = .warning
+        if let window = view.window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    private func showExportedRelayerKey(_ privateKey: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(privateKey, forType: .string)
+
+        let alert = NSAlert()
+        alert.messageText = "Relayer private key copied"
+        alert.informativeText = privateKey
+        alert.addButton(withTitle: "Close")
+        alert.alertStyle = .warning
+        if let window = view.window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
     }
 
     private func installCard(_ content: NSView, in card: NSView) {

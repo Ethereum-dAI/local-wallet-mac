@@ -1,3 +1,5 @@
+mod admin;
+mod admin_challenge;
 pub mod auth;
 mod bundler_keys;
 mod cli;
@@ -8,18 +10,25 @@ mod logging;
 mod paths;
 mod rate_limit;
 mod ready;
+mod relayer_lifecycle;
+mod relayer_signer;
 mod state;
 mod transport;
 mod watcher;
 
 use std::net::SocketAddr;
+use std::os::fd::FromRawFd;
 use std::os::unix::io::RawFd;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use cli::Cli;
+use serde::Deserialize;
+use wallet_node_store::BundlerLifecycle;
+
+use crate::bundler_keys::{BundlerKeyStore, InMemoryBundlerKeyStore};
+use cli::{Cli, CliCommand};
 use handlers::offline_chain::OfflineChainAdapter;
 use lifecycle::LifecycleHandles;
 use ready::ReadyEvent;
@@ -34,6 +43,16 @@ async fn main() -> ExitCode {
     if cli.print_api_version {
         println!("{}", wallet_node_api::API_VERSION);
         return ExitCode::SUCCESS;
+    }
+
+    if let Some(CliCommand::Admin(admin_args)) = cli.command.as_ref() {
+        match admin::run(admin_args).await {
+            Ok(()) => return ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::FAILURE;
+            }
+        }
     }
 
     if let Err(err) = cli.validate() {
@@ -83,6 +102,26 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let store = wallet_node_store::StoreActor::start(conn);
+    let bundler_key_store = Arc::new(InMemoryBundlerKeyStore::new());
+    let installed_bundler_keys = match cli.secret_fd {
+        Some(fd) => match load_secrets_from_fd(fd, &bundler_key_store) {
+            Ok(keys) => keys,
+            Err(err) => {
+                eprintln!("failed to load bundler secrets from fd {fd}: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => Vec::new(),
+    };
+    for key in &installed_bundler_keys {
+        if let Err(err) = ensure_bundler_account_for_installed_key(&store, key).await {
+            eprintln!(
+                "failed to register supplied bundler key {}: {err}",
+                key.key_ref
+            );
+            return ExitCode::FAILURE;
+        }
+    }
 
     let chain_config = ChainConfig {
         chain_id: config.chain_id_for_helios(),
@@ -127,7 +166,12 @@ async fn main() -> ExitCode {
         config,
         paths.clone(),
         shutdown_tx.clone(),
-        (transport_info, store, chain),
+        (
+            transport_info,
+            store,
+            chain,
+            bundler_key_store as Arc<dyn BundlerKeyStore>,
+        ),
     ));
     let mut state_override_smoke_task = watcher::spawn_state_override_smoke(
         state.clone(),
@@ -275,4 +319,117 @@ async fn main() -> ExitCode {
     }
 
     exit_code
+}
+
+#[derive(Debug)]
+struct InstalledBundlerKey {
+    key_ref: String,
+    owner_scope: String,
+    chain_id: u64,
+    address: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretFdPayload {
+    #[serde(default)]
+    keys: Vec<SecretFdEntry>,
+    key_ref: Option<String>,
+    secret: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretFdEntry {
+    key_ref: String,
+    secret: String,
+}
+
+fn load_secrets_from_fd(
+    fd: u32,
+    store: &InMemoryBundlerKeyStore,
+) -> Result<Vec<InstalledBundlerKey>, String> {
+    use std::io::Read;
+
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd as RawFd) };
+    let mut body = String::new();
+    file.read_to_string(&mut body)
+        .map_err(|err| format!("read failed: {err}"))?;
+    drop(file);
+
+    let payload: SecretFdPayload =
+        serde_json::from_str(&body).map_err(|err| format!("invalid json: {err}"))?;
+    let entries = if payload.keys.is_empty() {
+        match (payload.key_ref, payload.secret) {
+            (Some(key_ref), Some(secret)) => vec![SecretFdEntry { key_ref, secret }],
+            _ => Vec::new(),
+        }
+    } else {
+        payload.keys
+    };
+    if entries.is_empty() {
+        return Err("payload contains no keys".to_string());
+    }
+
+    let mut installed = Vec::new();
+    for entry in entries {
+        let (owner_scope, chain_id) = parse_bundler_key_ref(&entry.key_ref)?;
+        let bytes = hex::decode(entry.secret.trim_start_matches("0x"))
+            .map_err(|err| format!("invalid secret hex for {}: {err}", entry.key_ref))?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "invalid secret length for {}: expected 32 bytes, got {}",
+                entry.key_ref,
+                bytes.len()
+            ));
+        }
+        let mut secret = [0u8; 32];
+        secret.copy_from_slice(&bytes);
+        let address = store
+            .install_key(&entry.key_ref, secret)
+            .map_err(|err| format!("install failed for {}: {err}", entry.key_ref))?;
+        installed.push(InstalledBundlerKey {
+            key_ref: entry.key_ref,
+            owner_scope,
+            chain_id,
+            address: format!("{address:#x}"),
+        });
+    }
+    Ok(installed)
+}
+
+fn parse_bundler_key_ref(key_ref: &str) -> Result<(String, u64), String> {
+    let parts = key_ref.split(':').collect::<Vec<_>>();
+    if parts.len() != 4 || parts[0] != "bundler-eoa" {
+        return Err(format!(
+            "invalid keyRef {key_ref}; expected bundler-eoa:<ownerScope>:<chainId>:<index>"
+        ));
+    }
+    let chain_id = parts[2]
+        .parse::<u64>()
+        .map_err(|err| format!("invalid chain id in keyRef {key_ref}: {err}"))?;
+    Ok((parts[1].to_string(), chain_id))
+}
+
+async fn ensure_bundler_account_for_installed_key(
+    store: &wallet_node_store::StoreHandle,
+    key: &InstalledBundlerKey,
+) -> Result<(), wallet_node_store::StoreError> {
+    let accounts = store
+        .bundler_account_list_for_owner(&key.owner_scope, key.chain_id)
+        .await?;
+    if accounts.iter().any(|account| {
+        account.key_ref == key.key_ref && account.address.eq_ignore_ascii_case(&key.address)
+    }) {
+        return Ok(());
+    }
+    store
+        .bundler_account_insert_for_owner(
+            &key.owner_scope,
+            key.chain_id,
+            &key.address,
+            &key.key_ref,
+            BundlerLifecycle::Active,
+        )
+        .await
 }

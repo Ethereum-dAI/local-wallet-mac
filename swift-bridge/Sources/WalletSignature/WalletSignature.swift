@@ -15,6 +15,25 @@ private func checkResult(_ code: Int32) throws {
 }
 
 public struct WalletSignature {
+    public struct BundlerSecret {
+        public let secret: Data
+        public let address: Data
+    }
+
+    public static func generateBundlerSecret() throws -> BundlerSecret {
+        var secret = Data(count: 32)
+        var address = Data(count: 20)
+        let result = secret.withUnsafeMutableBytes { secretPtr in
+            address.withUnsafeMutableBytes { addressPtr in
+                wallet_generate_bundler_secret(
+                    secretPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    addressPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                )
+            }
+        }
+        try checkResult(result)
+        return BundlerSecret(secret: secret, address: address)
+    }
 
     public static func computeUserOpHash(
         sender: Data,

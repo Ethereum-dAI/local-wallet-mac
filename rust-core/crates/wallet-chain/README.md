@@ -11,8 +11,10 @@ It provides a trait used by `wallet-node`, a Helios-backed implementation for ve
 - `MockChainAdapter` for tests.
 - shared chain/RPC wire types.
 - `ChainConfig` for chain id, execution RPC, consensus RPC, data directory, and lag thresholds.
-- stateOverride smoke testing.
-- preservation of raw `eth_call` revert bytes when available.
+- `run_smoke_test` (`src/smoke.rs`) — stateOverride smoke that replaces WETH code at a fixed mainnet address and confirms storage behavior, used by the daemon to fail closed on simulation-dependent sends if state-override semantics cannot be trusted.
+- `ChainError` and preservation of raw `eth_call` revert bytes when available.
+
+The public types re-exported from `lib.rs` are: `ChainAdapter`, `HeliosChainAdapter`, `MockChainAdapter`, `ChainConfig`, `ChainError`, `BlockTag`, `CallRequest`, `run_smoke_test`.
 
 ## Current Scope
 
@@ -47,4 +49,4 @@ The real smoke depends on public Ethereum execution/consensus RPC availability a
 
 `wallet-chain` does not expose JSON-RPC itself. `wallet-node` calls it to serve verified read methods and EntryPoint simulation calls.
 
-If Helios cannot start because checkpoint data is too old, `wallet-node` can start with an offline adapter for authenticated control APIs while verified chain reads remain degraded.
+If the bundled Helios checkpoint is too old AND no on-disk Helios database exists locally, `wallet-node` falls back to an offline chain adapter so authenticated control APIs (status, lifecycle, audit/repair) remain available while verified reads and simulation-dependent sends fail closed.

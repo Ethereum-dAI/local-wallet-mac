@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub enum Method {
     #[serde(rename = "wallet_health")]
     WalletHealth,
+    #[serde(rename = "wallet_apiVersion")]
+    WalletApiVersion,
     #[serde(rename = "wallet_networkStatus")]
     WalletNetworkStatus,
     #[serde(rename = "wallet_bundlerStatus")]
@@ -68,6 +70,7 @@ impl Method {
     pub fn parse_wire_name(s: &str) -> Option<Method> {
         match s {
             "wallet_health" => Some(Method::WalletHealth),
+            "wallet_apiVersion" => Some(Method::WalletApiVersion),
             "wallet_networkStatus" => Some(Method::WalletNetworkStatus),
             "wallet_bundlerStatus" => Some(Method::WalletBundlerStatus),
             "wallet_walletStatus" => Some(Method::WalletWalletStatus),
@@ -104,6 +107,7 @@ impl Method {
     pub fn as_str(&self) -> &'static str {
         match self {
             Method::WalletHealth => "wallet_health",
+            Method::WalletApiVersion => "wallet_apiVersion",
             Method::WalletNetworkStatus => "wallet_networkStatus",
             Method::WalletBundlerStatus => "wallet_bundlerStatus",
             Method::WalletWalletStatus => "wallet_walletStatus",
@@ -144,6 +148,7 @@ mod tests {
     fn all_methods() -> Vec<Method> {
         vec![
             Method::WalletHealth,
+            Method::WalletApiVersion,
             Method::WalletNetworkStatus,
             Method::WalletBundlerStatus,
             Method::WalletWalletStatus,

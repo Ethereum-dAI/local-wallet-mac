@@ -21,6 +21,7 @@ It is intentionally small and dependency-light. It centralizes the method names,
 Wallet methods:
 
 - `wallet_health`
+- `wallet_apiVersion`
 - `wallet_networkStatus`
 - `wallet_bundlerStatus`
 - `wallet_walletStatus`

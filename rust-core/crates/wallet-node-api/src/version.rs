@@ -1,4 +1,5 @@
 pub const API_VERSION: u32 = 1;
+pub const SUPPORTED_MINIMUM_API_VERSION: u32 = 1;
 pub const DAEMON_SPAWN_PROTOCOL: u32 = 1;
 
 #[cfg(test)]
@@ -13,6 +14,11 @@ mod tests {
     #[test]
     fn daemon_spawn_protocol_is_one() {
         assert_eq!(DAEMON_SPAWN_PROTOCOL, 1);
+    }
+
+    #[test]
+    fn supported_minimum_is_at_most_current() {
+        assert!(SUPPORTED_MINIMUM_API_VERSION <= API_VERSION);
     }
 
     #[test]

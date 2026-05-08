@@ -170,6 +170,74 @@ async fn daemon_serves_wallet_health_while_real_helios_is_not_ready() {
 
 #[tokio::test]
 #[ignore = "requires TCP loopback bind capability; run with --include-ignored"]
+async fn daemon_serves_wallet_api_version_while_real_helios_is_not_ready() {
+    let (mut guard, ready) = spawn_ready_wallet_node("api-version-chain-not-ready").await;
+
+    let api_version = send_json_rpc(
+        &ready.http_addr,
+        &ready.token,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "wallet_apiVersion",
+            "params": null,
+            "id": 1,
+        }),
+    )
+    .await;
+
+    assert!(api_version.starts_with("HTTP/1.1 200 OK"), "{api_version}");
+    let api_version_body = response_body_json(&api_version);
+    let result = api_version_body["result"]
+        .as_object()
+        .expect("wallet_apiVersion result is an object");
+    assert_eq!(result.len(), 2);
+    assert_eq!(
+        result
+            .get("current")
+            .and_then(Value::as_u64)
+            .expect("current is a number"),
+        u64::from(wallet_node_api::API_VERSION)
+    );
+    assert_eq!(
+        result
+            .get("supportedMinimum")
+            .and_then(Value::as_u64)
+            .expect("supportedMinimum is a number"),
+        u64::from(wallet_node_api::SUPPORTED_MINIMUM_API_VERSION)
+    );
+
+    let shutdown = send_json_rpc(
+        &ready.http_addr,
+        &ready.token,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "wallet_shutdown",
+            "params": null,
+            "id": 2,
+        }),
+    )
+    .await;
+
+    assert!(shutdown.starts_with("HTTP/1.1 200 OK"), "{shutdown}");
+    let shutdown_body = response_body_json(&shutdown);
+    assert_eq!(shutdown_body["result"]["ok"], true);
+
+    let status = timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(status) = guard.child.try_wait().expect("child try_wait succeeds") {
+                break status;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("child exit timeout");
+    assert!(status.success(), "wallet-node exited with {status}");
+}
+
+#[tokio::test]
+#[ignore = "requires TCP loopback bind capability; run with --include-ignored"]
 async fn sigterm_triggers_graceful_shutdown() {
     signal_triggers_graceful_shutdown("sigterm", libc::SIGTERM).await;
 }

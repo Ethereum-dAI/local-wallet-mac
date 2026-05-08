@@ -30,21 +30,22 @@ Not supported in V1:
 
 ## Threat Model
 
-This is the model the daemon's design assumes. If your deployment violates these assumptions, the safety properties below do not hold.
+This is the model the daemon's design assumes. If your deployment violates these assumptions, the safety properties below do not hold. For *why* the daemon is shaped this way, see [`documentation/architecture.md`](../../../documentation/architecture.md) — in particular [What the privacy/security boundary actually defends](../../../documentation/architecture.md#what-the-privacysecurity-boundary-actually-defends).
 
 ### Assumed environment
 
 - Single-user, single-machine.
-- Daemon is spawned by a trusted parent (today: the Local Wallet macOS app).
-- Loopback HTTP transport is for development. Non-loopback binds are unsupported by default and require explicit opt-in (`--allow-public`, see Phase 3).
+- Daemon is spawned by a trusted parent (today: the Local Wallet macOS app). The spawn-with-fd lifecycle is documented in [`wallet-macos/Sources/Spawn/README.md`](../../../wallet-macos/Sources/Spawn/README.md); the rationale is in [Why the spawn-with-fd lifecycle?](../../../documentation/architecture.md#why-the-spawn-with-fd-lifecycle).
+- Loopback HTTP transport is for development. Non-loopback binds are refused by default; pass `--allow-public` to opt in. See `wallet-node/src/transport/http.rs` for the bind validation.
 - The OS process boundary is the security boundary between the daemon and other processes on the same machine.
 
 ### What the daemon protects
 
-- The bundler EOA private key is held only in process RAM after install/rotate.
+- The bundler EOA private key is held only in process RAM after install/rotate. The durable copy lives in the macOS app's Keychain; rationale in [Why bundler-EOA-in-RAM with app-side Keychain durability?](../../../documentation/architecture.md#why-bundler-eoa-in-ram-with-app-side-keychain-durability).
 - Mutating admin RPCs require a single-use challenge from `wallet_beginAdminAction`, bound to `(action, ownerScope, chainId, keyRef)`, with a 60-second TTL.
 - Status and read RPCs never return private key material.
-- The fail-closed simulation rule: if the stateOverride smoke check fails, simulation-dependent sends are rejected.
+- Verified Ethereum reads via Helios — the consensus-layer signed state root constrains what an execution RPC can lie about. Rationale in [Why Helios](../../../documentation/architecture.md#why-helios-not-trusted-rpc-not-a-full-node).
+- The fail-closed simulation rule: if the stateOverride smoke check fails, simulation-dependent sends are rejected. Rationale in [Why fail-closed simulation?](../../../documentation/architecture.md#why-fail-closed-simulation).
 
 ### What the daemon does not protect against
 

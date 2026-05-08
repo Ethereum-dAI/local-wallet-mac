@@ -5,6 +5,11 @@ TODO.md
 ARCHITECTURE.md
 docs/
 
+# Publishable docs go here (NOT under docs/, which is for local planning notes).
+# Whitelist to override case-insensitive ARCHITECTURE.md match on macOS.
+!documentation/
+!documentation/**
+
 # macOS noise
 .DS_Store
 

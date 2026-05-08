@@ -60,6 +60,24 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    let http_addr = match cli.http.as_deref() {
+        Some(addr) => {
+            let addr: SocketAddr = match addr.parse() {
+                Ok(addr) => addr,
+                Err(err) => {
+                    eprintln!("failed to parse --http address: {err}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Err(err) = transport::http::validate_bind_address(addr, cli.allow_public) {
+                eprintln!("{err}");
+                return ExitCode::FAILURE;
+            }
+            Some(addr)
+        }
+        None => None,
+    };
+
     let paths = match paths::Paths::resolve(cli.config.clone()) {
         Ok(paths) => paths,
         Err(err) => {
@@ -184,18 +202,12 @@ async fn main() -> ExitCode {
         state: state.clone(),
     };
 
-    let mut transport_task = if let Some(addr) = cli.http.as_deref() {
-        let addr: SocketAddr = match addr.parse() {
-            Ok(addr) => addr,
-            Err(err) => {
-                eprintln!("failed to parse --http address: {err}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let mut transport_task = if let Some(addr) = http_addr {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let transport_shutdown_rx = shutdown_rx.clone();
         let task = tokio::spawn(transport::http::serve(
             addr,
+            cli.allow_public,
             handler,
             Some(ready_tx),
             transport_shutdown_rx,

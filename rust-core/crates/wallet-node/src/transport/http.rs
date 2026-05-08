@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{io, net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
 use http_body_util::Full;
@@ -8,6 +8,7 @@ use hyper::http::{Request, Response};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
+use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch, Semaphore};
 use tokio::task::JoinSet;
@@ -23,16 +24,40 @@ const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 const CONNECTION_CAP_RETRY_AFTER_SECONDS: u64 = 1;
 const MAX_REJECTION_WRITERS: usize = 16;
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum BindError {
+    #[error("refusing non-loopback HTTP bind address {addr}; pass --allow-public to allow public HTTP binds")]
+    NonLoopbackRequiresAllowPublic { addr: SocketAddr },
+}
+
+pub fn validate_bind_address(bind_addr: SocketAddr, allow_public: bool) -> Result<(), BindError> {
+    if !allow_public && !bind_addr.ip().is_loopback() {
+        return Err(BindError::NonLoopbackRequiresAllowPublic { addr: bind_addr });
+    }
+
+    Ok(())
+}
+
 pub async fn serve(
     bind_addr: SocketAddr,
+    allow_public: bool,
     handler: Handler,
     ready_addr_tx: Option<oneshot::Sender<SocketAddr>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), TransportError> {
+    validate_bind_address(bind_addr, allow_public).map_err(|err| {
+        TransportError::BindFailed(io::Error::new(io::ErrorKind::PermissionDenied, err))
+    })?;
+
     let listener = TcpListener::bind(bind_addr)
         .await
         .map_err(TransportError::BindFailed)?;
     let local_addr = listener.local_addr()?;
+    if allow_public && !local_addr.ip().is_loopback() {
+        eprintln!(
+            "warning: wallet-node HTTP transport is bound to non-loopback address {local_addr}; authenticated local-wallet APIs may be reachable from other hosts"
+        );
+    }
     let mut connections = JoinSet::new();
     let rejection_writers = Arc::new(Semaphore::new(MAX_REJECTION_WRITERS));
 
@@ -164,6 +189,47 @@ mod tests {
     use crate::state::{DaemonState, TransportInfo};
     use crate::transport::handler::DrainResult;
 
+    #[test]
+    fn bind_validation_accepts_loopback_v4_without_allow_public() {
+        let addr = "127.0.0.1:0".parse().expect("parse socket addr");
+
+        assert_eq!(validate_bind_address(addr, false), Ok(()));
+    }
+
+    #[test]
+    fn bind_validation_accepts_loopback_v6_without_allow_public() {
+        let addr = "[::1]:0".parse().expect("parse socket addr");
+
+        assert_eq!(validate_bind_address(addr, false), Ok(()));
+    }
+
+    #[test]
+    fn bind_validation_rejects_non_loopback_without_allow_public() {
+        let addr = "0.0.0.0:0".parse().expect("parse socket addr");
+
+        assert_eq!(
+            validate_bind_address(addr, false),
+            Err(BindError::NonLoopbackRequiresAllowPublic { addr })
+        );
+    }
+
+    #[test]
+    fn bind_validation_accepts_non_loopback_with_allow_public() {
+        let addr = "0.0.0.0:0".parse().expect("parse socket addr");
+
+        assert_eq!(validate_bind_address(addr, true), Ok(()));
+    }
+
+    #[test]
+    fn bind_validation_rejects_lan_without_allow_public() {
+        let addr = "192.168.1.10:0".parse().expect("parse socket addr");
+
+        assert_eq!(
+            validate_bind_address(addr, false),
+            Err(BindError::NonLoopbackRequiresAllowPublic { addr })
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires TCP loopback bind capability; run with --include-ignored"]
     async fn bind_picks_ephemeral_port_when_zero() {
@@ -173,6 +239,7 @@ mod tests {
 
         let server = tokio::spawn(serve(
             "127.0.0.1:0".parse().expect("parse socket addr"),
+            false,
             handler,
             Some(ready_tx),
             shutdown_rx,
@@ -196,6 +263,7 @@ mod tests {
 
         let server = tokio::spawn(serve(
             "127.0.0.1:0".parse().expect("parse socket addr"),
+            false,
             handler,
             Some(ready_tx),
             shutdown_rx,
@@ -230,6 +298,7 @@ mod tests {
 
         let server = tokio::spawn(serve(
             "127.0.0.1:0".parse().expect("parse socket addr"),
+            false,
             handler,
             Some(ready_tx),
             shutdown_rx,
@@ -276,6 +345,7 @@ mod tests {
 
         let server = tokio::spawn(serve(
             "127.0.0.1:0".parse().expect("parse socket addr"),
+            false,
             handler,
             None,
             shutdown_rx,
@@ -299,6 +369,7 @@ mod tests {
 
         let server = tokio::spawn(serve(
             "127.0.0.1:0".parse().expect("parse socket addr"),
+            false,
             handler,
             Some(ready_tx),
             shutdown_rx,

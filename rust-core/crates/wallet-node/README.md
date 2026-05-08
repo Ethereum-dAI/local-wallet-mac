@@ -1,5 +1,7 @@
 # wallet-node
 
+> **Status:** Open source under MIT/Apache-2.0. App-coupled, pre-1.0. The public JSON-RPC surface and stability policy are documented in `rust-core/crates/wallet-node-api/README.md`. Internal types in this crate may move between releases.
+
 `wallet-node` is the Local Wallet daemon. It exposes a small authenticated JSON-RPC surface for wallet health, verified Ethereum reads, ERC-4337 UserOperation estimation/submission, bundler EOA management, pending-operation inspection, cancellation, and shutdown.
 
 The daemon is designed to run locally beside the macOS app. The app owns the durable bundler EOA secret in its Keychain; the daemon only holds app-provided relayer secrets in process RAM while it handles Helios verified reads, policy checks, SQLite persistence, raw `handleOps` submission, and receipt watching.

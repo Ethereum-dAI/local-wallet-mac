@@ -6,6 +6,7 @@ pub mod funding;
 pub mod gas;
 pub mod manifest;
 pub mod policy;
+pub mod profile;
 pub mod receipt;
 pub mod simulations;
 pub mod submit;
@@ -50,8 +51,9 @@ pub use manifest::{
 };
 pub use policy::{
     bumped_replacement_fees, validate_bundler_tx_fee_invariant, validate_user_operation,
-    BundlerPolicy, BundlerTxFees, PolicyError, PolicyMode,
+    BundlerPolicy, BundlerPolicyInvariants, BundlerTxFees, PolicyError, PolicyMode,
 };
+pub use profile::{EntryPointVersion, KernelProfile, SupportedChain, KERNEL_V3_3_0_PROFILE};
 pub use receipt::{extract_user_operation_event, user_operation_event_topic};
 pub use simulations::{
     decode_simulation_revert, decode_validation_result, encode_simulate_validation,

@@ -7,7 +7,7 @@ pub mod supported_entry_points;
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_sol_types::{sol, SolCall};
 use serde_json::{json, Value};
-use wallet_bundler::{BundlerError, BundlerPolicy, PolicyError};
+use wallet_bundler::{BundlerError, BundlerPolicy, BundlerPolicyInvariants, PolicyError};
 use wallet_chain::{BlockTag, CallRequest};
 use wallet_node_api::{
     JsonRpcError, CHAIN_MISMATCH, ENTRYPOINT_NOT_ALLOWLISTED, INSUFFICIENT_SMART_ACCOUNT_BALANCE,
@@ -59,6 +59,7 @@ pub(crate) fn policy_from_state(state: &DaemonState) -> Result<BundlerPolicy, Js
             "max_priority_fee_per_gas",
             &state.config.policy.max_priority_fee_per_gas,
         )?,
+        invariants: BundlerPolicyInvariants::LOCAL_WALLET_V1,
     })
 }
 

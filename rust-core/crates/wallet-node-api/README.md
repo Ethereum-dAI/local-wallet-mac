@@ -58,11 +58,24 @@ Ethereum read methods:
 
 ERC-4337/bundler methods:
 
-- `eth_supportedEntryPoints`
-- `eth_estimateUserOperationGas`
-- `eth_sendUserOperation`
-- `eth_getUserOperationReceipt`
-- `pimlico_getUserOperationGasPrice`
+- `localwallet_supportedEntryPoints`
+- `localwallet_estimateUserOperationGas`
+- `localwallet_sendUserOperation`
+- `localwallet_getUserOperationReceipt`
+- `localwallet_getUserOperationGasPrice`
+
+### Deprecated Aliases
+
+The following legacy bundler-shaped method names remain accepted on the wire for
+one release. New clients should use the `localwallet_*` names above.
+
+| Deprecated alias | Replacement |
+|---|---|
+| `eth_supportedEntryPoints` | `localwallet_supportedEntryPoints` |
+| `eth_estimateUserOperationGas` | `localwallet_estimateUserOperationGas` |
+| `eth_sendUserOperation` | `localwallet_sendUserOperation` |
+| `eth_getUserOperationReceipt` | `localwallet_getUserOperationReceipt` |
+| `pimlico_getUserOperationGasPrice` | `localwallet_getUserOperationGasPrice` |
 
 ## Public Surface And Stability
 

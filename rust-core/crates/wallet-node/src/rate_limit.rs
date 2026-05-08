@@ -220,8 +220,8 @@ impl RateLimiter {
 
 fn rate_limit_key(method: &Method) -> Option<&'static str> {
     match method {
-        Method::EthSendUserOperation => Some("eth_sendUserOperation"),
-        Method::EthEstimateUserOperationGas => Some("eth_estimateUserOperationGas"),
+        Method::LocalWalletSendUserOperation => Some("localwallet_sendUserOperation"),
+        Method::LocalWalletEstimateUserOperationGas => Some("localwallet_estimateUserOperationGas"),
         Method::EthGetBalance
         | Method::EthGetCode
         | Method::EthGetTransactionCount
@@ -240,15 +240,19 @@ mod tests {
     fn burst_is_enforced_per_bucket() {
         let limiter = RateLimiter::default();
         let config = BTreeMap::from([(
-            "eth_sendUserOperation".to_string(),
+            "localwallet_sendUserOperation".to_string(),
             RateLimitConfig {
                 refill_per_sec: 0.1,
                 burst: 1,
             },
         )]);
 
-        assert!(limiter.check(Method::EthSendUserOperation, &config).allowed);
-        let second = limiter.check(Method::EthSendUserOperation, &config);
+        assert!(
+            limiter
+                .check(Method::LocalWalletSendUserOperation, &config)
+                .allowed
+        );
+        let second = limiter.check(Method::LocalWalletSendUserOperation, &config);
         assert!(!second.allowed);
         assert!(second.retry_after_secs > 0.0);
     }

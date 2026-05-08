@@ -323,6 +323,62 @@ async fn unknown_method_returns_minus_32601_over_http() {
     .expect("unknown method e2e timeout");
 }
 
+#[tokio::test]
+#[ignore = "requires TCP loopback bind capability; run with --include-ignored"]
+async fn renamed_methods_respond_on_localwallet_names() {
+    timeout(Duration::from_secs(5), async {
+        let (mut guard, ready) = spawn_ready_wallet_node("renamed-methods").await;
+
+        let response = send_json_rpc(
+            &ready.http_addr,
+            &ready.token,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "localwallet_supportedEntryPoints",
+                "params": [],
+                "id": 1,
+            }),
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        let body = response_body_json(&response);
+        let result = body["result"].as_array().expect("result is JSON array");
+        assert!(!result.is_empty(), "{body}");
+        let _ = guard.child.kill();
+    })
+    .await
+    .expect("renamed methods e2e timeout");
+}
+
+#[tokio::test]
+#[ignore = "requires TCP loopback bind capability; run with --include-ignored"]
+async fn deprecated_aliases_still_dispatch() {
+    timeout(Duration::from_secs(5), async {
+        let (mut guard, ready) = spawn_ready_wallet_node("deprecated-aliases").await;
+
+        let response = send_json_rpc(
+            &ready.http_addr,
+            &ready.token,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "eth_supportedEntryPoints",
+                "params": [],
+                "id": 1,
+            }),
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        let body = response_body_json(&response);
+        let result = body["result"].as_array().expect("result is JSON array");
+        assert!(!result.is_empty(), "{body}");
+        let _ = guard.child.kill();
+    })
+    .await
+    .expect("deprecated aliases e2e timeout");
+}
+
 async fn send_json_rpc(addr: &str, token: &str, body: &Value) -> String {
     let body = serde_json::to_string(body).expect("serialize JSON-RPC body");
     let request = format!(

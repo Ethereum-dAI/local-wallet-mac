@@ -357,7 +357,7 @@ impl Handler {
                     }
                 }
             }
-            Method::EthSupportedEntryPoints => {
+            Method::LocalWalletSupportedEntryPoints => {
                 match crate::handlers::bundler::supported_entry_points::handle(&self.state).await {
                     Ok(value) => {
                         json_response(StatusCode::OK, JsonRpcResponse::ok(request.id, value))
@@ -367,7 +367,7 @@ impl Handler {
                     }
                 }
             }
-            Method::EthEstimateUserOperationGas => {
+            Method::LocalWalletEstimateUserOperationGas => {
                 match crate::handlers::bundler::estimate_user_operation_gas::handle(
                     &self.state,
                     request.params,
@@ -382,7 +382,7 @@ impl Handler {
                     }
                 }
             }
-            Method::EthSendUserOperation => {
+            Method::LocalWalletSendUserOperation => {
                 match crate::handlers::bundler::send_user_operation::handle(
                     &self.state,
                     request.params,
@@ -397,7 +397,7 @@ impl Handler {
                     }
                 }
             }
-            Method::EthGetUserOperationReceipt => {
+            Method::LocalWalletGetUserOperationReceipt => {
                 match crate::handlers::bundler::get_user_operation_receipt::handle(
                     &self.state,
                     request.params,
@@ -412,7 +412,7 @@ impl Handler {
                     }
                 }
             }
-            Method::PimlicoGetUserOperationGasPrice => {
+            Method::LocalWalletGetUserOperationGasPrice => {
                 match crate::handlers::bundler::gas_price::handle(&self.state).await {
                     Ok(value) => {
                         json_response(StatusCode::OK, JsonRpcResponse::ok(request.id, value))
@@ -1731,7 +1731,7 @@ mod tests {
         let send = call_rpc(
             &handler,
             &auth_header,
-            "eth_sendUserOperation",
+            "localwallet_sendUserOperation",
             json!([sample_user_op("0xab"), entry_point_v07_hex()]),
         );
         let rotate = call_rpc(
@@ -2180,7 +2180,7 @@ mod tests {
         let entrypoints = call_rpc(
             &handler,
             &auth_header,
-            "eth_supportedEntryPoints",
+            "localwallet_supportedEntryPoints",
             json!([]),
         )
         .await;
@@ -2192,7 +2192,7 @@ mod tests {
         let gas_price = call_rpc(
             &handler,
             &auth_header,
-            "pimlico_getUserOperationGasPrice",
+            "localwallet_getUserOperationGasPrice",
             json!([]),
         )
         .await;
@@ -2533,7 +2533,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_estimateUserOperationGas",
+            "localwallet_estimateUserOperationGas",
             json!([sample_user_op("0x"), entry_point_v07_hex()]),
         )
         .await;
@@ -2609,7 +2609,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_estimateUserOperationGas",
+            "localwallet_estimateUserOperationGas",
             json!([sample_user_op("0x"), entry_point_v07_hex()]),
         )
         .await;
@@ -2693,7 +2693,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_estimateUserOperationGas",
+            "localwallet_estimateUserOperationGas",
             json!([sample_user_op("0x"), entry_point_v07_hex()]),
         )
         .await;
@@ -2737,7 +2737,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_estimateUserOperationGas",
+            "localwallet_estimateUserOperationGas",
             json!([sample_user_op("0x"), entry_point_v07_hex()]),
         )
         .await;
@@ -2796,7 +2796,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_estimateUserOperationGas",
+            "localwallet_estimateUserOperationGas",
             json!([raw_op, entry_point_v07_hex()]),
         )
         .await;
@@ -2856,7 +2856,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_estimateUserOperationGas",
+            "localwallet_estimateUserOperationGas",
             json!([raw_op, entry_point_v07_hex()]),
         )
         .await;
@@ -2902,7 +2902,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_estimateUserOperationGas",
+            "localwallet_estimateUserOperationGas",
             json!([deployed_sample_user_op("0x"), entry_point_v07_hex()]),
         )
         .await;
@@ -2945,7 +2945,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_estimateUserOperationGas",
+            "localwallet_estimateUserOperationGas",
             json!([deployed_sample_user_op("0x"), entry_point_v07_hex()]),
         )
         .await;
@@ -2996,7 +2996,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_sendUserOperation",
+            "localwallet_sendUserOperation",
             json!([sample_user_op("0xab"), entry_point_v07_hex()]),
         )
         .await;
@@ -3009,7 +3009,7 @@ mod tests {
         let new_value = call_rpc(
             &handler,
             &auth_header,
-            "eth_sendUserOperation",
+            "localwallet_sendUserOperation",
             json!([new_op, entry_point_v07_hex()]),
         )
         .await;
@@ -3065,7 +3065,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_sendUserOperation",
+            "localwallet_sendUserOperation",
             json!([sample_user_op("0xab"), entry_point_v07_hex()]),
         )
         .await;
@@ -3139,7 +3139,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_sendUserOperation",
+            "localwallet_sendUserOperation",
             json!([raw_op, entry_point_v07_hex()]),
         )
         .await;
@@ -3206,7 +3206,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_sendUserOperation",
+            "localwallet_sendUserOperation",
             json!([sample_user_op("0xab"), entry_point_v07_hex()]),
         )
         .await;
@@ -3256,7 +3256,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_sendUserOperation",
+            "localwallet_sendUserOperation",
             json!([sample_user_op("0xab"), entry_point_v07_hex()]),
         )
         .await;
@@ -3304,7 +3304,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_sendUserOperation",
+            "localwallet_sendUserOperation",
             json!([sample_user_op("0xab"), entry_point_v07_hex()]),
         )
         .await;
@@ -3357,7 +3357,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_sendUserOperation",
+            "localwallet_sendUserOperation",
             json!([deployed_sample_user_op("0xab"), entry_point_v07_hex()]),
         )
         .await;
@@ -3415,7 +3415,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_sendUserOperation",
+            "localwallet_sendUserOperation",
             json!([sample_user_op("0xab"), entry_point_v07_hex()]),
         )
         .await;
@@ -3439,7 +3439,7 @@ mod tests {
         let value = call_rpc(
             &handler,
             &auth_header,
-            "eth_sendUserOperation",
+            "localwallet_sendUserOperation",
             json!([op, entry_point_v07_hex()]),
         )
         .await;
@@ -3501,7 +3501,7 @@ mod tests {
         let found = call_rpc(
             &handler,
             &auth_header,
-            "eth_getUserOperationReceipt",
+            "localwallet_getUserOperationReceipt",
             json!(["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]),
         )
         .await;
@@ -3527,7 +3527,7 @@ mod tests {
         let missing = call_rpc(
             &handler,
             &auth_header,
-            "eth_getUserOperationReceipt",
+            "localwallet_getUserOperationReceipt",
             json!(["0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]),
         )
         .await;

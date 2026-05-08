@@ -54,16 +54,16 @@ pub enum Method {
     EthMaxPriorityFeePerGas,
     #[serde(rename = "eth_gasPrice")]
     EthGasPrice,
-    #[serde(rename = "eth_supportedEntryPoints")]
-    EthSupportedEntryPoints,
-    #[serde(rename = "eth_estimateUserOperationGas")]
-    EthEstimateUserOperationGas,
-    #[serde(rename = "eth_sendUserOperation")]
-    EthSendUserOperation,
-    #[serde(rename = "eth_getUserOperationReceipt")]
-    EthGetUserOperationReceipt,
-    #[serde(rename = "pimlico_getUserOperationGasPrice")]
-    PimlicoGetUserOperationGasPrice,
+    #[serde(rename = "localwallet_supportedEntryPoints")]
+    LocalWalletSupportedEntryPoints,
+    #[serde(rename = "localwallet_estimateUserOperationGas")]
+    LocalWalletEstimateUserOperationGas,
+    #[serde(rename = "localwallet_sendUserOperation")]
+    LocalWalletSendUserOperation,
+    #[serde(rename = "localwallet_getUserOperationReceipt")]
+    LocalWalletGetUserOperationReceipt,
+    #[serde(rename = "localwallet_getUserOperationGasPrice")]
+    LocalWalletGetUserOperationGasPrice,
 }
 
 impl Method {
@@ -95,11 +95,21 @@ impl Method {
             "eth_estimateGas" => Some(Method::EthEstimateGas),
             "eth_maxPriorityFeePerGas" => Some(Method::EthMaxPriorityFeePerGas),
             "eth_gasPrice" => Some(Method::EthGasPrice),
-            "eth_supportedEntryPoints" => Some(Method::EthSupportedEntryPoints),
-            "eth_estimateUserOperationGas" => Some(Method::EthEstimateUserOperationGas),
-            "eth_sendUserOperation" => Some(Method::EthSendUserOperation),
-            "eth_getUserOperationReceipt" => Some(Method::EthGetUserOperationReceipt),
-            "pimlico_getUserOperationGasPrice" => Some(Method::PimlicoGetUserOperationGasPrice),
+            "localwallet_supportedEntryPoints" | "eth_supportedEntryPoints" => {
+                Some(Method::LocalWalletSupportedEntryPoints)
+            }
+            "localwallet_estimateUserOperationGas" | "eth_estimateUserOperationGas" => {
+                Some(Method::LocalWalletEstimateUserOperationGas)
+            }
+            "localwallet_sendUserOperation" | "eth_sendUserOperation" => {
+                Some(Method::LocalWalletSendUserOperation)
+            }
+            "localwallet_getUserOperationReceipt" | "eth_getUserOperationReceipt" => {
+                Some(Method::LocalWalletGetUserOperationReceipt)
+            }
+            "localwallet_getUserOperationGasPrice" | "pimlico_getUserOperationGasPrice" => {
+                Some(Method::LocalWalletGetUserOperationGasPrice)
+            }
             _ => None,
         }
     }
@@ -132,11 +142,11 @@ impl Method {
             Method::EthEstimateGas => "eth_estimateGas",
             Method::EthMaxPriorityFeePerGas => "eth_maxPriorityFeePerGas",
             Method::EthGasPrice => "eth_gasPrice",
-            Method::EthSupportedEntryPoints => "eth_supportedEntryPoints",
-            Method::EthEstimateUserOperationGas => "eth_estimateUserOperationGas",
-            Method::EthSendUserOperation => "eth_sendUserOperation",
-            Method::EthGetUserOperationReceipt => "eth_getUserOperationReceipt",
-            Method::PimlicoGetUserOperationGasPrice => "pimlico_getUserOperationGasPrice",
+            Method::LocalWalletSupportedEntryPoints => "localwallet_supportedEntryPoints",
+            Method::LocalWalletEstimateUserOperationGas => "localwallet_estimateUserOperationGas",
+            Method::LocalWalletSendUserOperation => "localwallet_sendUserOperation",
+            Method::LocalWalletGetUserOperationReceipt => "localwallet_getUserOperationReceipt",
+            Method::LocalWalletGetUserOperationGasPrice => "localwallet_getUserOperationGasPrice",
         }
     }
 }
@@ -173,11 +183,11 @@ mod tests {
             Method::EthEstimateGas,
             Method::EthMaxPriorityFeePerGas,
             Method::EthGasPrice,
-            Method::EthSupportedEntryPoints,
-            Method::EthEstimateUserOperationGas,
-            Method::EthSendUserOperation,
-            Method::EthGetUserOperationReceipt,
-            Method::PimlicoGetUserOperationGasPrice,
+            Method::LocalWalletSupportedEntryPoints,
+            Method::LocalWalletEstimateUserOperationGas,
+            Method::LocalWalletSendUserOperation,
+            Method::LocalWalletGetUserOperationReceipt,
+            Method::LocalWalletGetUserOperationGasPrice,
         ]
     }
 
@@ -191,5 +201,53 @@ mod tests {
     #[test]
     fn unknown_method_returns_none() {
         assert_eq!(Method::parse_wire_name("nonsense"), None);
+    }
+
+    #[test]
+    fn old_eth_names_alias_to_new_localwallet_variants() {
+        assert_eq!(
+            Method::parse_wire_name("eth_sendUserOperation"),
+            Some(Method::LocalWalletSendUserOperation)
+        );
+        assert_eq!(
+            Method::parse_wire_name("eth_estimateUserOperationGas"),
+            Some(Method::LocalWalletEstimateUserOperationGas)
+        );
+        assert_eq!(
+            Method::parse_wire_name("eth_getUserOperationReceipt"),
+            Some(Method::LocalWalletGetUserOperationReceipt)
+        );
+        assert_eq!(
+            Method::parse_wire_name("eth_supportedEntryPoints"),
+            Some(Method::LocalWalletSupportedEntryPoints)
+        );
+        assert_eq!(
+            Method::parse_wire_name("pimlico_getUserOperationGasPrice"),
+            Some(Method::LocalWalletGetUserOperationGasPrice)
+        );
+    }
+
+    #[test]
+    fn as_str_returns_new_localwallet_names_only() {
+        assert_eq!(
+            Method::LocalWalletSendUserOperation.as_str(),
+            "localwallet_sendUserOperation"
+        );
+        assert_eq!(
+            Method::LocalWalletEstimateUserOperationGas.as_str(),
+            "localwallet_estimateUserOperationGas"
+        );
+        assert_eq!(
+            Method::LocalWalletGetUserOperationReceipt.as_str(),
+            "localwallet_getUserOperationReceipt"
+        );
+        assert_eq!(
+            Method::LocalWalletSupportedEntryPoints.as_str(),
+            "localwallet_supportedEntryPoints"
+        );
+        assert_eq!(
+            Method::LocalWalletGetUserOperationGasPrice.as_str(),
+            "localwallet_getUserOperationGasPrice"
+        );
     }
 }

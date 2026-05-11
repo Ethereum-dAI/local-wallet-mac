@@ -17,7 +17,7 @@ This is not the final product wallet UX. Treat it as a working implementation an
 |---|---|
 | `local-wallet-protocol` | `wallet-signature`, `wallet-kernel`, `wallet-addresses` — stable, semver-managed SDK crates |
 | `local-wallet-daemon` | `wallet-node`, `wallet-bundler`, `wallet-chain`, `wallet-node-api`, `wallet-node-store` — daemon binary and supporting libraries |
-| `local-wallet` (this repo) | macOS app, `wallet-ffi`, `swift-bridge`, Xcode project, scripts |
+| `local-wallet-mac` (this repo) | macOS app, `wallet-ffi`, `swift-bridge`, Xcode project, scripts |
 
 ## Repository Map
 

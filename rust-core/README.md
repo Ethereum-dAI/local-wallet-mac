@@ -42,9 +42,10 @@ That script builds `wallet-ffi` for `aarch64-apple-darwin`, runs `cbindgen`, and
 The mainnet-fork Kernel fixture (`tests/mainnet_fork_kernel.rs`) now lives in `local-wallet-daemon`. Run it from that repo:
 
 ```bash
+# From this repo's rust-core/, the sibling daemon checkout is two levels up.
 ETH_RPC_URL=https://your-mainnet-rpc.example \
 WALLET_FORK_BLOCK_NUMBER=25001071 \
-local-wallet-daemon/scripts/run-kernel-mainnet-fork-check.sh
+../../local-wallet-daemon/scripts/run-kernel-mainnet-fork-check.sh
 ```
 
 ## Integration With Sibling Repos

@@ -1,10 +1,10 @@
 # wallet-ffi
 
-> **Status:** Open source under MIT/Apache-2.0. App-coupled, pre-1.0. The public JSON-RPC surface and stability policy for the daemon stack are documented in `rust-core/crates/wallet-node-api/README.md`. This crate's C ABI is internal to the Swift bridge and may move between releases.
+> **Status:** Open source under MIT/Apache-2.0. App-coupled, pre-1.0. The public JSON-RPC surface and stability policy for the daemon stack are documented in the [`local-wallet-daemon` wallet-node-api README](https://github.com/Ethereum-dAI/local-wallet-daemon/blob/main/crates/wallet-node-api/README.md). This crate's C ABI is internal to the Swift bridge and may move between releases.
 
 `wallet-ffi` is the C ABI bridge between Rust and the Swift package in `swift-bridge`.
 
-It is not the intended stable public SDK. The public-facing Apple API is the Swift wrapper, and the stable Rust APIs are `wallet-signature` and `wallet-kernel`.
+It is not the intended stable public SDK. The public-facing Apple API is the Swift wrapper, and the stable Rust APIs are `wallet-signature` and `wallet-kernel` (both in `local-wallet-protocol`).
 
 ## Privacy Boundary
 

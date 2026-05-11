@@ -1,147 +1,70 @@
 # rust-core
 
-`rust-core` is the Rust workspace for Local Wallet's protocol, daemon, storage, and FFI layers.
+`rust-core` is the Rust workspace for the macOS app's FFI layer.
 
-All crates are open source under MIT/Apache-2.0. They split into two stability tiers: `wallet-signature` and `wallet-kernel` are stable libraries with semver-managed APIs; the daemon stack is open source but app-coupled and pre-1.0 — its public JSON-RPC surface is documented in `crates/wallet-node-api/README.md`.
-
-## Workspace Crates
+After the repository split, this workspace contains a single crate:
 
 | Crate | Purpose |
 |---|---|
-| `wallet-signature` | EntryPoint v0.7 UserOperation hashing, WebAuthn message construction, P-256 low-s normalization, and Kernel WebAuthn signature encoding. |
-| `wallet-kernel` | Kernel WebAuthn account initialization, CREATE2 salt derivation, Solady ERC-1967 init-code hashing, and counterfactual address prediction. |
-| `wallet-ffi` | Internal C ABI bridge for Swift consumers. |
-| `wallet-chain` | Helios-backed verified chain adapter, JSON-RPC wire types, stateOverride smoke test, and mock chain adapter. |
-| `wallet-bundler` | ERC-4337 UserOperation parsing, policy, gas, EntryPoint v0.7 helpers, Kernel allowlist, simulations, raw tx helpers, and watcher logic. |
-| `wallet-node-api` | JSON-RPC method names, error codes, request body parsing, and generated API version header. |
-| `wallet-node-store` | SQLite schema, migrations, typed repositories, and async store actor. |
-| `wallet-node` | Local daemon binary combining chain reads, bundler policy, signing, persistence, transports, and watchers. |
+| `wallet-ffi` | C ABI bridge consumed by `swift-bridge` and the macOS app. |
+
+The other crates that were previously here have moved to sibling repositories:
+
+- **`local-wallet-protocol`** — `wallet-signature`, `wallet-kernel`, `wallet-addresses`. Stable, semver-managed libraries. No networking, no secrets, no FFI.
+- **`local-wallet-daemon`** — `wallet-node`, `wallet-bundler`, `wallet-chain`, `wallet-node-api`, `wallet-node-store`. App-coupled daemon stack, pre-1.0.
+
+`wallet-ffi` depends on `wallet-signature` and `wallet-kernel` via git deps (with optional path overrides for local development). See `Cargo.toml` for the pinned revisions.
 
 ## Build And Test
 
-Run the full default Rust test suite:
+Run the full default test suite (currently only `wallet-ffi`):
 
 ```bash
 cargo test --workspace
 ```
 
-Build the daemon as it would be shipped locally:
+Or focused:
 
 ```bash
-cargo build -p wallet-node --release --locked
+cargo test -p wallet-ffi
 ```
 
-Run focused crate tests:
-
-```bash
-cargo test -p wallet-signature
-cargo test -p wallet-kernel
-cargo test -p wallet-bundler
-cargo test -p wallet-chain
-cargo test -p wallet-node-store
-cargo test -p wallet-node-api
-cargo test -p wallet-node
-```
-
-Some host/socket and fork tests are ignored by default. Run them intentionally:
-
-```bash
-cargo test -p wallet-node-store -p wallet-node -- --include-ignored
-```
-
-The mainnet-fork Kernel fixture is normally run through the repository script:
-
-```bash
-cd ..
-ETH_RPC_URL=https://your-mainnet-rpc.example \
-WALLET_FORK_BLOCK_NUMBER=25001071 \
-scripts/run-kernel-mainnet-fork-check.sh
-```
-
-## Helios Pin
-
-`helios-ethereum` and `helios-core` are pinned in `Cargo.toml` to:
-
-```text
-204c998a927348e1c000a664f08d5b37b1b0d924
-```
-
-Policy: keep the current working pin fixed. Do not routine-bump Helios. Only update it for an explicit security, correctness, or required-compatibility reason, and re-run the real stateOverride smoke plus deterministic mainnet-fork fixture before merging.
-
-## Generated Swift Bridge
-
-The Swift bridge consumes `wallet-ffi` through a generated header and static library. From the repository root:
+Build the static library for Swift consumption:
 
 ```bash
 ./scripts/build-ffi.sh
 ```
 
-That builds `wallet-ffi` for `aarch64-apple-darwin`, runs `cbindgen`, copies the generated `wallet-node-api` version header, and stages the static library under `swift-bridge/`.
+That script builds `wallet-ffi` for `aarch64-apple-darwin`, runs `cbindgen`, and stages the header and `.a` under `swift-bridge/`. The generated artifacts are not committed.
+
+## Mainnet-Fork Fixture
+
+The mainnet-fork Kernel fixture (`tests/mainnet_fork_kernel.rs`) now lives in `local-wallet-daemon`. Run it from that repo:
+
+```bash
+ETH_RPC_URL=https://your-mainnet-rpc.example \
+WALLET_FORK_BLOCK_NUMBER=25001071 \
+local-wallet-daemon/scripts/run-kernel-mainnet-fork-check.sh
+```
+
+## Integration With Sibling Repos
+
+```
+local-wallet-protocol          local-wallet-daemon
+  wallet-signature  ──────────►  wallet-bundler
+  wallet-kernel     ──────────►  wallet-node
+                                 wallet-node-api
+                    ──────────►  wallet-ffi (this repo)
+                                     │
+                                     ▼ C ABI
+                                 swift-bridge
+                                     │
+                                     ▼
+                                 macOS app
+```
+
+Path overrides in `rust-core/.cargo/config.toml` (not committed) let you point `wallet-ffi`'s git deps at local checkouts of `local-wallet-protocol` during development.
 
 ## Boundaries
 
-Stable library surface (semver):
-
-- `wallet-signature`
-- `wallet-kernel`
-
-App-coupled surface (open source, pre-1.0):
-
-- `wallet-node`
-- `wallet-bundler`
-- `wallet-chain`
-- `wallet-node-api`
-- `wallet-node-store`
-- `wallet-ffi`
-
-The daemon is scoped to Ethereum mainnet/Sepolia, EntryPoint v0.7, and the app's fixed Kernel/WebAuthn account path for now. Its public JSON-RPC surface and stability policy are documented in `crates/wallet-node-api/README.md`.
-
-## Workspace Layering
-
-How the crates compose across the Apple, FFI, and daemon layers (structural, not a runtime sequence):
-
-```mermaid
-flowchart TD
-    subgraph Apple["Apple platform"]
-        App[macOS app]
-        SB[swift-bridge]
-        Spawn[wallet-macos/Spawn]
-    end
-
-    subgraph Reusable["Reusable libraries"]
-        Sig[wallet-signature]
-        Krn[wallet-kernel]
-    end
-
-    subgraph FFI["FFI boundary"]
-        Ffi[wallet-ffi C ABI]
-        ApiHdr[wallet-node-api version header]
-    end
-
-    subgraph Daemon["wallet-node daemon"]
-        Node[wallet-node]
-        Api[wallet-node-api]
-        Bundler[wallet-bundler]
-        Chain[wallet-chain + Helios]
-        Store[wallet-node-store + SQLite]
-    end
-
-    subgraph External["External"]
-        RPC[Execution + consensus RPC]
-    end
-
-    App --> SB
-    App --> Spawn
-    Spawn --> Node
-    SB --> Ffi
-    SB --> ApiHdr
-    Ffi --> Sig
-    Ffi --> Krn
-    Api --> Node
-    App -. JSON-RPC over loopback/UDS .-> Node
-    Node --> Bundler
-    Node --> Chain
-    Node --> Store
-    Bundler --> Sig
-    Chain --> RPC
-```
+`wallet-ffi` is open source under MIT/Apache-2.0, app-coupled, and pre-1.0. Its C ABI is internal to the Swift bridge and may move between releases. Private-key material never crosses the FFI — Rust only sees public coordinates, hashes, and signatures.

@@ -1,9 +1,14 @@
 # Local assistant / planning files
 .claude/
 .codex/
+.commandcode/
+CLAUDE.md
 TODO.md
 ARCHITECTURE.md
 docs/
+
+# GitHub issue templates kept local-only
+.github/ISSUE_TEMPLATE/
 
 # Publishable docs go here (NOT under docs/, which is for local planning notes).
 # Whitelist to override case-insensitive ARCHITECTURE.md match on macOS.
@@ -34,16 +39,18 @@ swift-bridge/Sources/WalletFFI/wallet_node_api_version.h
 # Website dependencies / build outputs
 node_modules/
 
-# Xcode user-specific state
-LocalWallet.xcodeproj/xcuserdata/
+# Xcode user-specific state (catches xcuserdata at any depth)
+xcuserdata/
 *.xcuserstate
 DerivedData/
 
 # Editor / shell noise
 .idea/
+.vscode/
 *.swp
 *.swo
 *.log
+*.bak
 
 # Environment / secrets
 .env

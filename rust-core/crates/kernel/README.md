@@ -1,5 +1,7 @@
 # wallet-kernel
 
+> **Status:** Open source under MIT/Apache-2.0. Stable public API; breaking changes ship as a major version per semver.
+
 Kernel-specific helpers for WebAuthn-root smart accounts.
 
 This crate is intentionally narrower than a wallet SDK and more specific than

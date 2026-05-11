@@ -1,5 +1,7 @@
 # wallet-signature
 
+> **Status:** Open source under MIT/Apache-2.0. Stable public API; breaking changes ship as a major version per semver.
+
 Cryptographic foundation for WebAuthn/P-256 signing flows used with ERC-4337 smart accounts.
 
 This crate takes known inputs and produces known outputs. It is purely synchronous, has no FFI, no networking, and handles no secret key material. The Secure Enclave private key never enters Rust.

@@ -9,6 +9,8 @@ Security reports are currently in scope for:
 - Secure Enclave and Keychain usage in the macOS demo app
 - ERC-4337 UserOperation hashing and signing helpers
 - Kernel/WebAuthn account prediction and signature encoding
+- Self-relayed bundler EOA handling, JSON-RPC authentication, and admin challenge flows in `wallet-node`
+- Transport binding behavior in `wallet-node` (loopback HTTP, Unix socket, fd-3/fd-4 spawn contract)
 - release packaging scripts and documented developer workflows
 
 Out of scope for now:

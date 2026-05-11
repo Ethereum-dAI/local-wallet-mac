@@ -1,5 +1,7 @@
 # wallet-chain
 
+> **Status:** Open source under MIT/Apache-2.0. App-coupled, pre-1.0. The public JSON-RPC surface and stability policy for the daemon stack are documented in `rust-core/crates/wallet-node-api/README.md`. Internal types in this crate may move between releases.
+
 `wallet-chain` is the daemon's chain-access abstraction.
 
 It provides a trait used by `wallet-node`, a Helios-backed implementation for verified Ethereum reads, and a mock implementation for deterministic daemon tests.

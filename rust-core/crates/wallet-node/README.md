@@ -1,5 +1,7 @@
 # wallet-node
 
+> **Status:** Open source under MIT/Apache-2.0. App-coupled, pre-1.0. The public JSON-RPC surface and stability policy are documented in `rust-core/crates/wallet-node-api/README.md`. Internal types in this crate may move between releases.
+
 `wallet-node` is the Local Wallet daemon. It exposes a small authenticated JSON-RPC surface for wallet health, verified Ethereum reads, ERC-4337 UserOperation estimation/submission, bundler EOA management, pending-operation inspection, cancellation, and shutdown.
 
 The daemon is designed to run locally beside the macOS app. The app owns the durable bundler EOA secret in its Keychain; the daemon only holds app-provided relayer secrets in process RAM while it handles Helios verified reads, policy checks, SQLite persistence, raw `handleOps` submission, and receipt watching.
@@ -25,6 +27,41 @@ Not supported in V1:
 - recovery after Secure Enclave/WebAuthn key loss
 - live signed-manifest promotion
 - generic Kernel permission/hook/executor/fallback module enumeration
+
+## Threat Model
+
+This is the model the daemon's design assumes. If your deployment violates these assumptions, the safety properties below do not hold. For *why* the daemon is shaped this way, see [`documentation/architecture.md`](../../../documentation/architecture.md) — in particular [What the privacy/security boundary actually defends](../../../documentation/architecture.md#what-the-privacysecurity-boundary-actually-defends).
+
+### Assumed environment
+
+- Single-user, single-machine.
+- Daemon is spawned by a trusted parent (today: the Local Wallet macOS app). The spawn-with-fd lifecycle is documented in [`wallet-macos/Sources/Spawn/README.md`](../../../wallet-macos/Sources/Spawn/README.md); the rationale is in [Why the spawn-with-fd lifecycle?](../../../documentation/architecture.md#why-the-spawn-with-fd-lifecycle).
+- Loopback HTTP transport is for development. Non-loopback binds are refused by default; pass `--allow-public` to opt in. See `wallet-node/src/transport/http.rs` for the bind validation.
+- The OS process boundary is the security boundary between the daemon and other processes on the same machine.
+
+### What the daemon protects
+
+- The bundler EOA private key is held only in process RAM after install/rotate. The durable copy lives in the macOS app's Keychain; rationale in [Why bundler-EOA-in-RAM with app-side Keychain durability?](../../../documentation/architecture.md#why-bundler-eoa-in-ram-with-app-side-keychain-durability).
+- Mutating admin RPCs require a single-use challenge from `wallet_beginAdminAction`, bound to `(action, ownerScope, chainId, keyRef)`, with a 60-second TTL.
+- Status and read RPCs never return private key material.
+- Verified Ethereum reads via Helios — the consensus-layer signed state root constrains what an execution RPC can lie about. Rationale in [Why Helios](../../../documentation/architecture.md#why-helios-not-trusted-rpc-not-a-full-node).
+- The fail-closed simulation rule: if the stateOverride smoke check fails, simulation-dependent sends are rejected. Rationale in [Why fail-closed simulation?](../../../documentation/architecture.md#why-fail-closed-simulation).
+
+### What the daemon does not protect against
+
+- A compromised macOS app. The app holds the bearer token, the durable Keychain copy of the bundler EOA secret, and the user's biometric gate; if it is compromised, the daemon's authentication does not save you.
+- A compromised parent process more broadly. The daemon's auth is the bearer token the parent receives; anyone who reads that token can call the daemon.
+- A second user on the same machine who reads the bearer token from logs, shell history, or process arguments.
+- A hostile execution or consensus RPC. Helios verifies execution data against consensus signatures; if both providers are colluding and the consensus checkpoint is stale, the daemon may serve stale-but-internally-consistent reads.
+- Tampering with the SQLite store at rest. The store is not encrypted; it carries operational state, no secret material.
+- Long-running persistence of the bundler EOA secret in process memory. The secret is in RAM; a memory snapshot of a running daemon contains it.
+
+### Out of scope
+
+- Multi-tenant deployment.
+- Public network exposure.
+- Recovery after Secure Enclave / WebAuthn key loss.
+- Resistance to a malicious user of their own machine.
 
 ## Run Modes
 

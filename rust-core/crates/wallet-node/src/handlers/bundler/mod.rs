@@ -7,12 +7,11 @@ pub mod supported_entry_points;
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_sol_types::{sol, SolCall};
 use serde_json::{json, Value};
-use wallet_bundler::{BundlerError, BundlerPolicy, PolicyError};
+use wallet_bundler::{BundlerError, BundlerPolicy, BundlerPolicyInvariants, PolicyError};
 use wallet_chain::{BlockTag, CallRequest};
 use wallet_node_api::{
-    JsonRpcError, ACCOUNT_CODE_NOT_ALLOWLISTED, CHAIN_MISMATCH, ENTRYPOINT_NOT_ALLOWLISTED,
-    INSUFFICIENT_SMART_ACCOUNT_BALANCE, INTERNAL_ERROR, POLICY_CAP_EXCEEDED, SIMULATION_FAILED,
-    WITHDRAW_AMOUNT_EXCEEDS_RECLAIMABLE,
+    JsonRpcError, CHAIN_MISMATCH, ENTRYPOINT_NOT_ALLOWLISTED, INSUFFICIENT_SMART_ACCOUNT_BALANCE,
+    INTERNAL_ERROR, WITHDRAW_AMOUNT_EXCEEDS_RECLAIMABLE,
 };
 
 use crate::state::{DaemonState, StateOverrideSmokeStatus};
@@ -60,6 +59,7 @@ pub(crate) fn policy_from_state(state: &DaemonState) -> Result<BundlerPolicy, Js
             "max_priority_fee_per_gas",
             &state.config.policy.max_priority_fee_per_gas,
         )?,
+        invariants: BundlerPolicyInvariants::LOCAL_WALLET_V1,
     })
 }
 
@@ -262,26 +262,16 @@ fn map_policy_error(error: PolicyError) -> JsonRpcError {
             message: "Chain mismatch".to_string(),
             data: None,
         },
-        PolicyError::PaymasterNotSupported => JsonRpcError {
-            code: SIMULATION_FAILED,
-            message: "Simulation failed".to_string(),
-            data: Some(json!({ "reason": "paymaster_not_supported" })),
-        },
-        PolicyError::SignatureMissing => JsonRpcError {
-            code: SIMULATION_FAILED,
-            message: "Simulation failed".to_string(),
-            data: Some(json!({ "reason": "signature_missing" })),
-        },
-        PolicyError::CapExceeded(field) => JsonRpcError {
-            code: POLICY_CAP_EXCEEDED,
-            message: "Policy cap exceeded".to_string(),
-            data: Some(json!({ "field": field })),
-        },
-        PolicyError::ReplacementNotPossible(reason) => JsonRpcError {
-            code: wallet_node_api::REPLACEMENT_NOT_POSSIBLE,
-            message: "Replacement not possible".to_string(),
-            data: Some(json!({ "reason": reason })),
-        },
+        PolicyError::PaymasterNotSupported => {
+            JsonRpcError::simulation_failed("paymaster_not_supported", None)
+        }
+        PolicyError::SignatureMissing => {
+            JsonRpcError::simulation_failed("signature_missing", None)
+        }
+        PolicyError::CapExceeded(field) => JsonRpcError::policy_cap_exceeded(field),
+        PolicyError::ReplacementNotPossible(reason) => {
+            JsonRpcError::replacement_not_possible(reason)
+        }
     }
 }
 
@@ -297,21 +287,11 @@ pub(crate) fn map_bundler_error(error: BundlerError) -> JsonRpcError {
             message: "Chain mismatch".to_string(),
             data: Some(json!({ "expected": expected, "actual": actual })),
         },
-        BundlerError::PolicyCapExceeded { field } => JsonRpcError {
-            code: POLICY_CAP_EXCEEDED,
-            message: "Policy cap exceeded".to_string(),
-            data: Some(json!({ "field": field })),
-        },
-        BundlerError::PaymasterNotSupported => JsonRpcError {
-            code: SIMULATION_FAILED,
-            message: "Simulation failed".to_string(),
-            data: Some(json!({ "reason": "paymaster_not_supported" })),
-        },
-        BundlerError::SignatureMissing => JsonRpcError {
-            code: SIMULATION_FAILED,
-            message: "Simulation failed".to_string(),
-            data: Some(json!({ "reason": "signature_missing" })),
-        },
+        BundlerError::PolicyCapExceeded { field } => JsonRpcError::policy_cap_exceeded(&field),
+        BundlerError::PaymasterNotSupported => {
+            JsonRpcError::simulation_failed("paymaster_not_supported", None)
+        }
+        BundlerError::SignatureMissing => JsonRpcError::simulation_failed("signature_missing", None),
         BundlerError::InvalidUserOperation(reason) => JsonRpcError {
             code: wallet_node_api::INVALID_REQUEST,
             message: "Invalid UserOperation".to_string(),
@@ -322,16 +302,12 @@ pub(crate) fn map_bundler_error(error: BundlerError) -> JsonRpcError {
             message: "Invalid transaction".to_string(),
             data: Some(json!({ "reason": reason })),
         },
-        BundlerError::ReplacementNotPossible { reason } => JsonRpcError {
-            code: wallet_node_api::REPLACEMENT_NOT_POSSIBLE,
-            message: "Replacement not possible".to_string(),
-            data: Some(json!({ "reason": reason })),
-        },
-        BundlerError::SimulationFailed { reason } => JsonRpcError {
-            code: SIMULATION_FAILED,
-            message: "Simulation failed".to_string(),
-            data: Some(json!({ "reason": reason })),
-        },
+        BundlerError::ReplacementNotPossible { reason } => {
+            JsonRpcError::replacement_not_possible(&reason)
+        }
+        BundlerError::SimulationFailed { reason } => {
+            JsonRpcError::simulation_failed(&reason, None)
+        }
         BundlerError::RawTransactionSubmission { .. } => JsonRpcError::internal(),
         BundlerError::InvalidPinnedArtifact { .. } => JsonRpcError::internal(),
         BundlerError::AccountCodeNotAllowlisted {
@@ -339,16 +315,12 @@ pub(crate) fn map_bundler_error(error: BundlerError) -> JsonRpcError {
             module_type,
             address,
             code_hash,
-        } => JsonRpcError {
-            code: ACCOUNT_CODE_NOT_ALLOWLISTED,
-            message: "Account code not allowlisted".to_string(),
-            data: Some(json!({
-                "layer": layer,
-                "moduleType": module_type,
-                "address": format!("{address:#x}"),
-                "codeHash": format!("{code_hash:#x}"),
-            })),
-        },
+        } => JsonRpcError::account_code_not_allowlisted(
+            layer,
+            module_type,
+            &format!("{address:#x}"),
+            &format!("{code_hash:#x}"),
+        ),
         BundlerError::Chain(_) => JsonRpcError::internal(),
         BundlerError::Store(_) => JsonRpcError::internal(),
     }

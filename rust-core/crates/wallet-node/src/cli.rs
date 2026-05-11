@@ -20,6 +20,9 @@ pub struct Cli {
     pub http: Option<String>,
 
     #[arg(long)]
+    pub allow_public: bool,
+
+    #[arg(long)]
     pub print_ready: bool,
 
     #[arg(long)]
@@ -60,6 +63,9 @@ pub enum CliError {
     #[error("--print-ready requires --http")]
     PrintReadyRequiresHttp,
 
+    #[error("--allow-public requires --http")]
+    AllowPublicRequiresHttp,
+
     #[error("--manifest-url requires --debug")]
     ManifestUrlRequiresDebug,
 
@@ -87,6 +93,10 @@ impl Cli {
 
         if self.print_ready && self.http.is_none() {
             return Err(CliError::PrintReadyRequiresHttp);
+        }
+
+        if self.allow_public && self.http.is_none() {
+            return Err(CliError::AllowPublicRequiresHttp);
         }
 
         if self.manifest_url.is_some() && !self.debug {
@@ -161,6 +171,14 @@ mod tests {
     fn validates_http_with_print_ready() {
         let cli = parse(&["wallet-node", "--http", "127.0.0.1:0", "--print-ready"]);
 
+        assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn validates_allow_public_with_http() {
+        let cli = parse(&["wallet-node", "--http", "0.0.0.0:0", "--allow-public"]);
+
+        assert!(cli.allow_public);
         assert!(cli.validate().is_ok());
     }
 
@@ -259,6 +277,16 @@ mod tests {
         assert!(matches!(
             cli.validate(),
             Err(CliError::PrintReadyRequiresHttp)
+        ));
+    }
+
+    #[test]
+    fn rejects_allow_public_without_http() {
+        let cli = parse(&["wallet-node", "--allow-public"]);
+
+        assert!(matches!(
+            cli.validate(),
+            Err(CliError::AllowPublicRequiresHttp)
         ));
     }
 

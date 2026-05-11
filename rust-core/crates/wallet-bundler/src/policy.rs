@@ -8,6 +8,32 @@ pub enum PolicyMode {
     Submit,
 }
 
+/// Hard invariants the daemon enforces on every accepted UserOp, surfaced
+/// as data so a reader can see them in one place.
+///
+/// `LOCAL_WALLET_V1` matches what the daemon shipped before this struct
+/// existed. A fork that wants different invariants replaces the constant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BundlerPolicyInvariants {
+    /// Reject UserOps with non-empty paymaster fields.
+    pub reject_paymaster: bool,
+    /// Maximum number of UserOps per `handleOps` bundle the daemon will pack.
+    /// Informational at the policy layer; the daemon enforces it at submit time.
+    pub max_user_ops_per_bundle: u32,
+    /// Required nonce key for accepted UserOps. `None` = any. Currently the
+    /// nonce-key check lives in the allowlist layer (`validate_kernel_nonce_key`);
+    /// surfacing it here documents the invariant for forks.
+    pub required_nonce_key: Option<U256>,
+}
+
+impl BundlerPolicyInvariants {
+    pub const LOCAL_WALLET_V1: Self = Self {
+        reject_paymaster: true,
+        max_user_ops_per_bundle: 1,
+        required_nonce_key: Some(U256::ZERO),
+    };
+}
+
 #[derive(Clone, Debug)]
 pub struct BundlerPolicy {
     pub chain_id: u64,
@@ -17,6 +43,7 @@ pub struct BundlerPolicy {
     pub max_pre_verification_gas: U256,
     pub max_fee_per_gas: U256,
     pub max_priority_fee_per_gas: U256,
+    pub invariants: BundlerPolicyInvariants,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,10 +75,11 @@ pub fn validate_user_operation(
     if !policy.entry_points.contains(&entry_point) {
         return Err(PolicyError::EntrypointNotAllowlisted);
     }
-    if op.paymaster.is_some()
-        || op.paymaster_verification_gas_limit.is_some()
-        || op.paymaster_post_op_gas_limit.is_some()
-        || !op.paymaster_data.is_empty()
+    if policy.invariants.reject_paymaster
+        && (op.paymaster.is_some()
+            || op.paymaster_verification_gas_limit.is_some()
+            || op.paymaster_post_op_gas_limit.is_some()
+            || !op.paymaster_data.is_empty())
     {
         return Err(PolicyError::PaymasterNotSupported);
     }
@@ -164,6 +192,7 @@ mod tests {
             max_pre_verification_gas: U256::from(100),
             max_fee_per_gas: U256::from(100),
             max_priority_fee_per_gas: U256::from(100),
+            invariants: BundlerPolicyInvariants::LOCAL_WALLET_V1,
         }
     }
 

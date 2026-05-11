@@ -7,7 +7,9 @@ The repository currently contains two active tracks:
 - a signed macOS demo app for Secure Enclave signing and Ethereum mainnet/Sepolia workbench flows
 - a Rust daemon stack for Ethereum mainnet and Sepolia verified reads, local bundling, Kernel allowlisting, EntryPoint simulation, raw `handleOps` submission, and receipt watching
 
-This is not the final product wallet UX yet. Treat it as a working implementation repo with reusable protocol crates and a demo/reference app.
+The whole codebase is open source under MIT/Apache-2.0. The Rust workspace splits into two stability tiers: `wallet-signature` and `wallet-kernel` are the stable libraries with semver-managed APIs intended for outside consumers; the daemon stack (`wallet-node`, `wallet-bundler`, `wallet-chain`, `wallet-node-api`, `wallet-node-store`, `wallet-ffi`) is open source but app-coupled and pre-1.0. Its public JSON-RPC surface is documented in `rust-core/crates/wallet-node-api/README.md`.
+
+This is not the final product wallet UX yet. Treat it as a working implementation repo and a demo/reference app.
 
 ## Repository Map
 

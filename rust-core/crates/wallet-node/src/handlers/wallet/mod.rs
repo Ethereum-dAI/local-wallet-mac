@@ -1,4 +1,5 @@
 pub mod admin_action;
+pub mod api_version;
 pub mod audit_history;
 pub mod audit_report;
 pub mod audit_store;

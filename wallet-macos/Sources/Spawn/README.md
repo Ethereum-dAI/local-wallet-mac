@@ -37,6 +37,13 @@ wallet-node --ready-fd 3 --alive-fd 4
 Fixed fd numbering keeps the Swift side independent from the parent process's
 current descriptor table and matches the daemon's fd lifecycle tests.
 
+## Spawn Protocol Versioning
+
+The daemon writes `daemonSpawnProtocol: <u32>` in its ready JSON. The current
+value is `1`. Future changes to the fd contract (numbering, framing,
+additional pipes) bump this integer. Spawners that don't understand the
+daemon's reported version should refuse to integrate rather than guess.
+
 ## Failure Modes
 
 - `FD_CLOEXEC`: fds duplicated with `adddup2` are available in the child at

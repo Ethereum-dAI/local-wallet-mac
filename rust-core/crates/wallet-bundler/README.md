@@ -1,5 +1,7 @@
 # wallet-bundler
 
+> **Status:** Open source under MIT/Apache-2.0. App-coupled, pre-1.0. The public JSON-RPC surface and stability policy for the daemon stack are documented in `rust-core/crates/wallet-node-api/README.md`. Internal types in this crate may move between releases.
+
 `wallet-bundler` is the daemon's ERC-4337 policy and transaction library.
 
 It does not run a server and does not own secrets. It provides deterministic helpers used by `wallet-node` for parsing UserOperations, enforcing local policy, validating the app-pinned Kernel account path, simulating EntryPoint validation, building raw `handleOps` transactions, decoding receipts, and deciding replacement/cancel behavior.

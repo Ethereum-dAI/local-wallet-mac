@@ -1,6 +1,21 @@
 #!/bin/bash
 set -euo pipefail
 
+# TODO(post-split): This script does NOT embed the wallet-node daemon binary.
+#
+# Pre-split (monorepo era), the daemon was built in-tree at
+# rust-core/target/<profile>/wallet-node and the running app fell back to
+# that path. After the 2026-05-11 multi-repo split, the daemon lives at
+# https://github.com/Ethereum-dAI/local-wallet-daemon and this script does
+# NOT yet fetch or embed it into the .app bundle.
+#
+# A signed/notarized .app produced by this script today will fail at
+# launch with AppError.localDaemonLaunchFailed unless the end user has
+# set WALLET_NODE_BIN (or LOCAL_WALLET_NODE_BIN) to an external
+# wallet-node binary on their machine.
+#
+# See OPEN-POINTS.md for the planned fix.
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT="$REPO_ROOT/LocalWallet.xcodeproj"
 SCHEME="LocalWalletApp"

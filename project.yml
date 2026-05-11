@@ -37,8 +37,8 @@ targets:
         MACOSX_DEPLOYMENT_TARGET: 14.0
         ARCHS: arm64
         EXCLUDED_ARCHS: x86_64
-        MARKETING_VERSION: 0.1.0
-        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 0.2.0
+        CURRENT_PROJECT_VERSION: 2
     dependencies:
       - package: WalletBridge
         product: WalletSignature

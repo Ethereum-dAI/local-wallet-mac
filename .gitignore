@@ -22,8 +22,7 @@ docs/
 
 # Rust build outputs
 rust-core/target/
-rust-core/crates/*/target/
-rust-core/crates/wallet-chain/helios/
+rust-core/crates/ffi/target/
 tools/keychain-spike/target/
 tools/keychain-spike/build-stage/
 build/

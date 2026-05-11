@@ -10,8 +10,9 @@ publish = false
 crate-type = ["staticlib", "lib"]
 
 [dependencies]
-wallet-signature  = { path = "../signature" }
-wallet-kernel     = { path = "../kernel" }
+wallet-signature  = { workspace = true }
+wallet-kernel     = { workspace = true }
+wallet-node-api   = { workspace = true }
 alloy-primitives  = { workspace = true }
 sha2              = { workspace = true }
 secp256k1         = { version = "0.30", features = ["rand"] }

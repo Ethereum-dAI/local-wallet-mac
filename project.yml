@@ -51,5 +51,7 @@ schemes:
         LocalWalletApp: all
     run:
       config: Debug
+      environmentVariables:
+        WALLET_NODE_BIN: $(SRCROOT)/../../local-wallet-daemon/target/debug/wallet-node
     archive:
       config: Release

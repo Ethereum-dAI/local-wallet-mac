@@ -6,23 +6,23 @@ pipes, so the app launches the daemon through `posix_spawn`.
 
 ## Integration Path
 
-1. Build the daemon:
+1. Build the daemon from the sibling `local-wallet-daemon` repo:
 
    ```sh
-   cd rust-core
+   cd ../local-wallet-daemon
    cargo build -p wallet-node
    ```
 
-2. Run the Swift shim test:
+2. Run the Swift shim test from this repo:
 
    ```sh
    cd wallet-macos
    swift test --filter SpawnHelperTests
    ```
 
-The test resolves `../rust-core/target/debug/wallet-node` relative to
+The test resolves `../local-wallet-daemon/target/debug/wallet-node` relative to
 `wallet-macos/Package.swift`. Set `WALLET_NODE_BIN=/absolute/path/to/wallet-node`
-to test another binary.
+to test a non-default binary path.
 
 ## Design
 

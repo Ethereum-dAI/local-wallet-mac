@@ -420,7 +420,7 @@ mod tests {
         let sender = hex!("d73c7780b1c1da1586a8332d5499f36b7cbb33c2");
         let nonce = hex!("0000baac0ddb0000000000000000000000000000000000000000000000000001");
         let init_code: &[u8] = &[];
-        let call_data = include_bytes!("../../signature/testdata/neKodex_calldata.bin");
+        let call_data = include_bytes!("../testdata/neKodex_calldata.bin");
         let account_gas_limits =
             hex!("00000000000000000000000000098a2100000000000000000000000000023dad");
         let pre_verification_gas = U256::from(70952u64).to_be_bytes::<32>();

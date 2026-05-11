@@ -5,7 +5,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_DIR="$REPO_ROOT/rust-core"
 BRIDGE_DIR="$REPO_ROOT/swift-bridge"
 
-echo "=== Building wallet-ffi (release, aarch64-apple-darwin) ==="
+echo "=== Building wallet-ffi (transitively materializes wallet-node-api) ==="
 cd "$RUST_DIR"
 cargo build -p wallet-ffi --release --target aarch64-apple-darwin
 
@@ -15,20 +15,17 @@ cbindgen --config crates/ffi/cbindgen.toml \
          --crate wallet-ffi \
          --output "$BRIDGE_DIR/Sources/WalletFFI/wallet_ffi.h"
 
-echo "=== Copying wallet-node-api version header ==="
-cargo build -p wallet-node-api --release
-
+echo "=== Locating wallet-node-api OUT_DIR (post-split: it's a transitive git dep) ==="
 TARGET_DIR="target"
 
-OUT_DIR=""
-if command -v jq >/dev/null 2>&1; then
-    OUT_DIR="$(cargo build -p wallet-node-api --release --message-format=json | jq -r 'select(.reason=="build-script-executed" and (.package_id | contains("wallet-node-api"))) | .out_dir' | tail -n 1)"
-fi
-if [[ -z "$OUT_DIR" && -d "$TARGET_DIR/release/build" ]]; then
+OUT_DIR="$(find "$TARGET_DIR/aarch64-apple-darwin/release/build" -path '*wallet-node-api-*/out/wallet_node_api_version.h' -print -quit | xargs -I{} dirname {})"
+if [[ -z "$OUT_DIR" ]]; then
     OUT_DIR="$(find "$TARGET_DIR/release/build" -path '*wallet-node-api-*/out/wallet_node_api_version.h' -print -quit | xargs -I{} dirname {})"
 fi
 if [[ -z "$OUT_DIR" ]]; then
-    echo "ERROR: Could not determine OUT_DIR for wallet-node-api" >&2
+    echo "ERROR: Could not locate wallet-node-api build output." >&2
+    echo "  Expected: $TARGET_DIR/aarch64-apple-darwin/release/build/wallet-node-api-*/out/" >&2
+    echo "  Did 'cargo build -p wallet-ffi' run? wallet-node-api is a transitive git dep." >&2
     exit 1
 fi
 

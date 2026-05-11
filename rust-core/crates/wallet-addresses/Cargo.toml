@@ -1,9 +1,0 @@
-[package]
-name = "wallet-addresses"
-version = "0.1.0"
-edition.workspace = true
-license.workspace = true
-description = "Shared pinned Ethereum addresses and bytecode hashes for the local wallet Rust crates."
-
-[dependencies]
-alloy-primitives = { workspace = true }

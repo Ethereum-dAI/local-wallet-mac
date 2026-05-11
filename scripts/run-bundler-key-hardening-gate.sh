@@ -1,49 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# After the multi-repo split (2026-05-11), daemon-side cargo invocations
+# resolve to the sibling local-wallet-daemon checkout. Override the default
+# location by setting LW_DAEMON_DIR=/path/to/local-wallet-daemon.
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "=== Rust format ==="
-(
-  cd "${ROOT_DIR}/rust-core"
-  cargo fmt --check
-)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo fmt --check)
 
 echo "=== Rust workspace tests ==="
-(
-  cd "${ROOT_DIR}/rust-core"
-  cargo test --workspace
-)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo test --workspace)
 
 echo "=== Rust clippy ==="
-(
-  cd "${ROOT_DIR}/rust-core"
-  cargo clippy --workspace -- -D warnings
-)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo clippy --workspace -- -D warnings)
 
 echo "=== wallet-node release build ==="
-(
-  cd "${ROOT_DIR}/rust-core"
-  cargo build -p wallet-node --release
-)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo build -p wallet-node --release)
 
 echo "=== wallet-node fd integration ==="
-(
-  cd "${ROOT_DIR}/rust-core"
-  cargo test -p wallet-node --test integration_fd_e2e -- --include-ignored
-)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo test -p wallet-node --test integration_fd_e2e -- --include-ignored)
 
 echo "=== wallet-node Unix transport integration ==="
-(
-  cd "${ROOT_DIR}/rust-core"
-  cargo test -p wallet-node --test integration_unix_e2e -- --include-ignored
-)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo test -p wallet-node --test integration_unix_e2e -- --include-ignored)
 
 echo "=== wallet-node HTTP integration ==="
-(
-  cd "${ROOT_DIR}/rust-core"
-  cargo test -p wallet-node --test integration_e2e -- --include-ignored
-)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo test -p wallet-node --test integration_e2e -- --include-ignored)
 
 echo "=== Swift bridge tests ==="
 (

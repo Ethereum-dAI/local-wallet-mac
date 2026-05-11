@@ -1,15 +1,5 @@
 [workspace]
-members = [
-    "crates/wallet-addresses",
-    "crates/signature",
-    "crates/kernel",
-    "crates/ffi",
-    "crates/wallet-chain",
-    "crates/wallet-bundler",
-    "crates/wallet-node-api",
-    "crates/wallet-node",
-    "crates/wallet-node-store",
-]
+members = ["crates/ffi"]
 resolver = "2"
 
 [workspace.package]
@@ -18,24 +8,17 @@ rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+# Protocol crates (git deps, rev pinned from Phase 1)
+wallet-signature = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "ed7b87f1097799be503c07d9b9c01d846579f6fb" }
+wallet-kernel    = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "ed7b87f1097799be503c07d9b9c01d846579f6fb" }
+wallet-addresses = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "ed7b87f1097799be503c07d9b9c01d846579f6fb" }
+
+# wallet-node-api from daemon (forces cbindgen materialization in build-ffi.sh).
+wallet-node-api  = { git = "https://github.com/Ethereum-dAI/local-wallet-daemon.git", rev = "3cc56ea091a81f91e8a4dcecbda96bb461caf7f1" }
+
+# Other deps used by wallet-ffi (subset of monorepo):
 alloy-primitives = { version = "1.5", features = ["serde"] }
-alloy-sol-types  = "1.5"
-alloy            = "1.8"
-helios-ethereum = { git = "https://github.com/a16z/helios", rev = "204c998a927348e1c000a664f08d5b37b1b0d924" }
-helios-core     = { git = "https://github.com/a16z/helios", rev = "204c998a927348e1c000a664f08d5b37b1b0d924" }
-async-trait     = "0.1"
 sha2             = "0.10"
-p256             = { version = "0.13", features = ["ecdsa"] }
-hex-literal      = "0.4"
-tokio            = { version = "1", features = ["full"] }
-serde            = { version = "1", features = ["derive"] }
-serde_json       = "1"
-tracing          = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-thiserror        = "1"
-anyhow           = "1"
-rusqlite         = { version = "0.32", features = ["bundled"] }
-rusqlite_migration = "1"
-tracing-appender = "0.2"
-hex              = "0.4"
 zeroize          = "1"
+hex-literal      = "0.4"
+p256             = { version = "0.13", features = ["ecdsa"] }

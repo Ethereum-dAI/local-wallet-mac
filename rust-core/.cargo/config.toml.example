@@ -1,0 +1,8 @@
+# Copy this file to rust-core/.cargo/config.toml (gitignored) to use local
+# sibling checkouts of local-wallet-protocol and local-wallet-daemon for
+# development. Paths are resolved relative to the parent of .cargo/.
+
+paths = [
+    "../../local-wallet-protocol",
+    "../../local-wallet-daemon",
+]

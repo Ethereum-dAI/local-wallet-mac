@@ -39,12 +39,15 @@ swift test
 
 It is built on top of:
 
-- `rust-core/crates/signature`
-- `rust-core/crates/kernel`
-- `rust-core/crates/wallet-node-api` for the generated API version header
-- `rust-core/crates/ffi` (internal bridge only)
+- `rust-core/crates/ffi` (local — internal C ABI bridge)
+- `wallet-signature` and `wallet-kernel` — protocol SDK crates that resolve via git dependency from [`local-wallet-protocol`](https://github.com/Ethereum-dAI/local-wallet-protocol)
+- `wallet-node-api` — version header only; resolves via git dependency from [`local-wallet-daemon`](https://github.com/Ethereum-dAI/local-wallet-daemon)
 
 It does not launch or manage the daemon directly. Daemon process spawning lives in `wallet-macos/Sources/Spawn` and `wallet-macos/Sources/SpawnHelper`.
+
+## Local Development
+
+For monorepo-style local development, copy `rust-core/.cargo/config.toml.example` to `rust-core/.cargo/config.toml` and ensure `local-wallet-protocol` and `local-wallet-daemon` are checked out as siblings of this repo. The example config file contains `[patch.crates-io]` overrides that redirect the git dependencies to your local checkouts.
 
 ## Call Flow
 

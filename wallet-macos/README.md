@@ -40,7 +40,7 @@ xcodegen generate
 - `wallet-macos/Sources/SpawnHelper` contains the Swift wrapper around that shim.
 - `wallet-macos/Tests/SpawnHelperTests` verifies daemon launch, ready-event delivery, and alive-pipe shutdown.
 - `swift-bridge` is the Swift package that calls the Rust FFI layer.
-- `rust-core` contains the UserOperation, WebAuthn, Kernel, daemon, bundler, chain, store, and FFI logic.
+- `rust-core/crates/ffi/` is the local wallet-ffi crate (C ABI bridge); protocol and daemon crates resolve from sibling repos.
 
 ## App Module Map
 
@@ -88,21 +88,21 @@ xcodegen generate
 
 ## Daemon Spawn Test
 
-Build the daemon first:
+The daemon binary comes from the sibling `local-wallet-daemon` repo. Build it first:
 
 ```bash
-cd ../rust-core
+cd ../local-wallet-daemon
 cargo build -p wallet-node
 ```
 
-Then run the Swift spawn helper test:
+Then run the Swift spawn helper test from this repo:
 
 ```bash
-cd ../wallet-macos
+cd wallet-macos
 swift test --filter SpawnHelperTests
 ```
 
-Set `WALLET_NODE_BIN=/absolute/path/to/wallet-node` to test a non-default daemon binary. The fd-3 ready / fd-4 alive contract used by the spawn helper is documented in [`Sources/Spawn/README.md`](Sources/Spawn/README.md).
+Set `WALLET_NODE_BIN=/absolute/path/to/wallet-node` to point at a non-default daemon binary location. The fd-3 ready / fd-4 alive contract used by the spawn helper is documented in [`Sources/Spawn/README.md`](Sources/Spawn/README.md).
 
 ## Hosted Bundler Configuration
 

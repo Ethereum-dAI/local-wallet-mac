@@ -6849,6 +6849,7 @@ dependencies = [
 name = "wallet-node-api"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

@@ -130,10 +130,12 @@ public final class LlamaRuntime: @unchecked Sendable {
         lock.unlock()
     }
 
+    @available(*, deprecated, message: "Use chat(messages:tools:options:) which returns an AsyncThrowingStream<ChatEvent, Error>. The new path supports the model's chat template, tools, sampler params, grammar, stop sequences, and cancellation.")
     public func generate(_ prompt: String) throws -> String {
         try generateWithStats(prompt).text
     }
 
+    @available(*, deprecated, message: "Use chat(messages:tools:options:) and consume the final .done event for GenerationStats.")
     public func generateWithStats(_ prompt: String) throws -> LocalLLMGeneration {
         lock.lock()
         let currentHandle = handle
@@ -187,6 +189,7 @@ public final class LlamaRuntime: @unchecked Sendable {
         )
     }
 
+    @available(*, deprecated, message: "Use chat(messages:tools:options:) for real token-level streaming.")
     public func generateStream(_ prompt: String) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             Task.detached(priority: .userInitiated) {

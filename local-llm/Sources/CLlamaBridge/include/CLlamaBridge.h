@@ -27,6 +27,7 @@ int32_t lllm_runtime_context_size(lllm_runtime * runtime);
 // The pointer is owned by the runtime and valid until lllm_runtime_destroy.
 const char * lllm_runtime_chat_template(lllm_runtime * runtime);
 
+__attribute__((deprecated("Use lllm_count_tokens which does not wrap the input in a turn template.")))
 int32_t lllm_runtime_count_prompt_tokens(
     lllm_runtime * runtime,
     const char * prompt,
@@ -34,6 +35,7 @@ int32_t lllm_runtime_count_prompt_tokens(
     int32_t error_buffer_length
 );
 
+__attribute__((deprecated("Use lllm_runtime_generate_v2 with lllm_sampler_params and lllm_token_callback_v2 for the full sampler / grammar / stop / cancellation surface.")))
 int32_t lllm_runtime_generate(
     lllm_runtime * runtime,
     const char * prompt,

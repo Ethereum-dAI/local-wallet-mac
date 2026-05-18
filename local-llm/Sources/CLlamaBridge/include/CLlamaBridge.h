@@ -23,6 +23,10 @@ void lllm_runtime_destroy(lllm_runtime * runtime);
 
 int32_t lllm_runtime_context_size(lllm_runtime * runtime);
 
+// Returns a pointer to the model tokenizer.chat_template metadata value, or NULL if the GGUF does not carry one.
+// The pointer is owned by the runtime and valid until lllm_runtime_destroy.
+const char * lllm_runtime_chat_template(lllm_runtime * runtime);
+
 int32_t lllm_runtime_count_prompt_tokens(
     lllm_runtime * runtime,
     const char * prompt,

@@ -15,6 +15,7 @@ struct lllm_runtime {
     llama_context * context = nullptr;
     const llama_vocab * vocab = nullptr;
     int32_t context_size = 0;
+    std::string chat_template;
     std::mutex mutex;
 };
 
@@ -181,6 +182,21 @@ lllm_runtime * lllm_runtime_create(
     }
 
     runtime->context_size = static_cast<int32_t>(context_params.n_ctx);
+
+    const int32_t needed = llama_model_meta_val_str(runtime->model, "tokenizer.chat_template", nullptr, 0);
+    if (needed > 0) {
+        runtime->chat_template.resize(static_cast<size_t>(needed));
+        const int32_t written = llama_model_meta_val_str(
+            runtime->model,
+            "tokenizer.chat_template",
+            runtime->chat_template.data(),
+            static_cast<size_t>(runtime->chat_template.size())
+        );
+        if (written > 0 && written < needed) {
+            runtime->chat_template.resize(static_cast<size_t>(written));
+        }
+    }
+
     return runtime;
 }
 
@@ -204,6 +220,14 @@ int32_t lllm_runtime_context_size(lllm_runtime * runtime) {
     }
 
     return runtime->context_size;
+}
+
+const char * lllm_runtime_chat_template(lllm_runtime * runtime) {
+    if (runtime == nullptr || runtime->chat_template.empty()) {
+        return nullptr;
+    }
+
+    return runtime->chat_template.c_str();
 }
 
 int32_t lllm_runtime_count_prompt_tokens(

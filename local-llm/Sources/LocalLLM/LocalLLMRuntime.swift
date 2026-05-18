@@ -61,7 +61,7 @@ public struct LocalLLMGeneration: Sendable, Equatable {
 public final class LlamaRuntime: @unchecked Sendable {
     private let configuration: LocalLLMConfiguration
     private let lock = NSLock()
-    private var handle: OpaquePointer?
+    internal var handle: OpaquePointer?
 
     public init(configuration: LocalLLMConfiguration = LocalLLMConfiguration()) {
         self.configuration = configuration
@@ -75,6 +75,21 @@ public final class LlamaRuntime: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return handle != nil
+    }
+
+    internal var embeddedChatTemplate: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle, let templatePointer = lllm_runtime_chat_template(handle) else {
+            return nil
+        }
+        return String(cString: templatePointer)
+    }
+
+    internal var bridgeHandle: OpaquePointer? {
+        lock.lock()
+        defer { lock.unlock() }
+        return handle
     }
 
     public var configuredContextSize: Int {

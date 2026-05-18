@@ -45,6 +45,21 @@ int32_t lllm_runtime_generate(
     int32_t error_buffer_length
 );
 
+// SPIKE-ONLY: render a chat using the model's embedded template.
+// messages_json: JSON array of {role, content, ...} (OpenAI-compat).
+// tools_json:    JSON array of OpenAI-compat tool defs, or NULL/"".
+// Returns malloc'd UTF-8; caller frees with lllm_string_free. NULL on error,
+// error_buf populated. This entry point will be replaced by lllm_chat_render
+// in Task 1.1.
+char * lllm_spike_render(
+    lllm_runtime * rt,
+    const char *   messages_json,
+    const char *   tools_json,
+    char *         error_buf, int32_t error_buf_length);
+
+// Frees memory returned by malloc'd C-string entry points (e.g. lllm_spike_render).
+void lllm_string_free(char * s);
+
 #ifdef __cplusplus
 }
 #endif

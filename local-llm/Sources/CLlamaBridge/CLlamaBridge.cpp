@@ -1,9 +1,12 @@
 #include "CLlamaBridge.h"
 
 #include <llama.h>
+#include "chat.h"
+#include "nlohmann/json.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -322,4 +325,73 @@ int32_t lllm_runtime_generate(
 
     llama_sampler_free(sampler);
     return produced;
+}
+
+char * lllm_spike_render(
+    lllm_runtime * rt,
+    const char *   messages_json,
+    const char *   tools_json,
+    char *         error_buf,
+    int32_t        error_buf_length
+) {
+    if (rt == nullptr || rt->model == nullptr) {
+        set_error(error_buf, error_buf_length, "Runtime is not loaded.");
+        return nullptr;
+    }
+    if (messages_json == nullptr) {
+        set_error(error_buf, error_buf_length, "messages_json: NULL");
+        return nullptr;
+    }
+
+    nlohmann::ordered_json msgs_json;
+    try {
+        msgs_json = nlohmann::ordered_json::parse(messages_json);
+    } catch (const std::exception & e) {
+        set_error(error_buf, error_buf_length, std::string("messages_json: ") + e.what());
+        return nullptr;
+    }
+    nlohmann::ordered_json tools_json_value = nlohmann::ordered_json::array();
+    if (tools_json != nullptr && tools_json[0] != '\0') {
+        try {
+            tools_json_value = nlohmann::ordered_json::parse(tools_json);
+        } catch (const std::exception & e) {
+            set_error(error_buf, error_buf_length, std::string("tools_json: ") + e.what());
+            return nullptr;
+        }
+    }
+
+    try {
+        common_chat_templates_ptr tmpls = common_chat_templates_init(rt->model, std::string());
+        if (tmpls == nullptr) {
+            set_error(error_buf, error_buf_length, "common_chat_templates_init returned null");
+            return nullptr;
+        }
+        common_chat_templates_inputs inputs;
+        inputs.messages = common_chat_msgs_parse_oaicompat(msgs_json);
+        inputs.tools = common_chat_tools_parse_oaicompat(tools_json_value);
+        inputs.add_generation_prompt = true;
+        inputs.use_jinja = true;
+
+        common_chat_params params = common_chat_templates_apply(tmpls.get(), inputs);
+        const std::string & rendered = params.prompt;
+
+        char * result = static_cast<char *>(std::malloc(rendered.size() + 1));
+        if (result == nullptr) {
+            set_error(error_buf, error_buf_length, "out of memory");
+            return nullptr;
+        }
+        std::memcpy(result, rendered.data(), rendered.size());
+        result[rendered.size()] = '\0';
+        return result;
+    } catch (const std::exception & e) {
+        set_error(error_buf, error_buf_length,
+                  std::string("Spike render failed: ") + e.what());
+        return nullptr;
+    }
+}
+
+void lllm_string_free(char * s) {
+    if (s != nullptr) {
+        std::free(s);
+    }
 }

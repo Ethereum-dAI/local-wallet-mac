@@ -501,6 +501,28 @@ char * lllm_parse_assistant_turn(
     }
 }
 
+int32_t lllm_count_tokens(lllm_runtime* rt, const char* text, char* error_buf, int32_t error_buf_length) {
+    if (rt == nullptr || rt->vocab == nullptr) {
+        set_error(error_buf, error_buf_length, "Runtime is not loaded.");
+        return -1;
+    }
+    if (text == nullptr) {
+        set_error(error_buf, error_buf_length, "text: NULL");
+        return -2;
+    }
+
+    std::lock_guard<std::mutex> guard(rt->mutex);
+
+    std::vector<llama_token> tokens;
+    std::string error;
+    if (!tokenize(rt->vocab, std::string(text), tokens, error)) {
+        set_error(error_buf, error_buf_length, error);
+        return -3;
+    }
+
+    return static_cast<int32_t>(tokens.size());
+}
+
 void lllm_string_free(char * s) {
     if (s != nullptr) {
         std::free(s);

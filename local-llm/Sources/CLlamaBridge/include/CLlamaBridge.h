@@ -64,6 +64,8 @@ char * lllm_parse_assistant_turn(
     const char *   assistant_output,
     char *         error_buf, int32_t error_buf_length);
 
+int32_t lllm_count_tokens(lllm_runtime* rt, const char* text, char* error_buf, int32_t error_buf_length);
+
 // Frees memory returned by malloc'd C-string entry points.
 void lllm_string_free(char * s);
 

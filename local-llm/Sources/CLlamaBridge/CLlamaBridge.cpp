@@ -523,6 +523,108 @@ int32_t lllm_count_tokens(lllm_runtime* rt, const char* text, char* error_buf, i
     return static_cast<int32_t>(tokens.size());
 }
 
+int32_t lllm_runtime_generate_v2(
+    lllm_runtime *           rt,
+    const char *             prompt,
+    lllm_sampler_params      params,
+    const char *             grammar_gbnf,
+    const char * const *     stop_sequences,
+    lllm_token_callback_v2   callback,
+    void *                   user_data,
+    char *                   error_buf, int32_t error_buf_length
+) {
+    if (rt == nullptr || rt->context == nullptr || rt->vocab == nullptr) {
+        set_error(error_buf, error_buf_length, "Runtime is not loaded.");
+        return -1;
+    }
+    std::lock_guard<std::mutex> guard(rt->mutex);
+    llama_memory_clear(llama_get_memory(rt->context), true);
+
+    std::vector<llama_token> tokens;
+    std::string err;
+    if (!tokenize(rt->vocab, std::string(prompt == nullptr ? "" : prompt), tokens, err)) {
+        set_error(error_buf, error_buf_length, err);
+        return -2;
+    }
+
+    llama_batch batch = llama_batch_get_one(tokens.data(), static_cast<int32_t>(tokens.size()));
+    if (llama_decode(rt->context, batch) != 0) {
+        set_error(error_buf, error_buf_length, "Failed to decode prompt.");
+        return -3;
+    }
+
+    llama_sampler_chain_params sp = llama_sampler_chain_default_params();
+    sp.no_perf = true;
+    llama_sampler * sampler = llama_sampler_chain_init(sp);
+
+    int32_t  top_k   = params.top_k > 0 ? params.top_k : 64;
+    float    top_p   = params.top_p > 0.0f ? params.top_p : 0.95f;
+    float    min_p   = params.min_p >= 0.0f ? params.min_p : 0.05f;
+    float    temp    = params.temperature > 0.0f ? params.temperature : 0.7f;
+    float    rep_pen = params.repeat_penalty > 0.0f ? params.repeat_penalty : 1.0f;
+    uint32_t seed    = params.seed != 0 ? params.seed : LLAMA_DEFAULT_SEED;
+    int32_t  limit   = params.max_tokens > 0 ? params.max_tokens : 512;
+
+    if (rep_pen != 1.0f) {
+        llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, rep_pen, 0.0f, 0.0f));
+    }
+    llama_sampler_chain_add(sampler, llama_sampler_init_top_k(top_k));
+    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(top_p, 1));
+    llama_sampler_chain_add(sampler, llama_sampler_init_min_p(min_p, 1));
+    llama_sampler_chain_add(sampler, llama_sampler_init_temp(temp));
+    if (grammar_gbnf != nullptr && grammar_gbnf[0] != '\0') {
+        llama_sampler * g = llama_sampler_init_grammar(rt->vocab, grammar_gbnf, "root");
+        if (g == nullptr) {
+            llama_sampler_free(sampler);
+            set_error(error_buf, error_buf_length, "Grammar parse failed");
+            return -5;
+        }
+        llama_sampler_chain_add(sampler, g);
+    }
+    llama_sampler_chain_add(sampler, llama_sampler_init_dist(seed));
+
+    std::vector<std::string> stops;
+    if (stop_sequences != nullptr) {
+        for (const char * const * p = stop_sequences; *p != nullptr; ++p) {
+            std::string s = *p;
+            if (!s.empty()) stops.push_back(std::move(s));
+        }
+    }
+    std::string emitted;
+
+    int32_t produced = 0;
+    for (; produced < limit; produced += 1) {
+        llama_token next_token = llama_sampler_sample(sampler, rt->context, -1);
+        if (llama_vocab_is_eog(rt->vocab, next_token)) break;
+        std::string piece = token_to_string(rt->vocab, next_token);
+
+        bool cancelled = false;
+        if (callback != nullptr && !piece.empty()) {
+            if (callback(piece.c_str(), user_data) != 0) cancelled = true;
+        }
+        if (cancelled) { produced += 1; break; }
+
+        emitted.append(piece);
+        bool stop_matched = false;
+        for (auto const & s : stops) {
+            size_t look = std::min(emitted.size(), s.size() + piece.size());
+            size_t from = emitted.size() - look;
+            if (emitted.find(s, from) != std::string::npos) { stop_matched = true; break; }
+        }
+        if (stop_matched) { if (produced < limit) produced += 1; break; }
+
+        llama_batch nb = llama_batch_get_one(&next_token, 1);
+        if (llama_decode(rt->context, nb) != 0) {
+            llama_sampler_free(sampler);
+            set_error(error_buf, error_buf_length, "Failed while generating response.");
+            return -4;
+        }
+    }
+
+    llama_sampler_free(sampler);
+    return produced;
+}
+
 void lllm_string_free(char * s) {
     if (s != nullptr) {
         std::free(s);

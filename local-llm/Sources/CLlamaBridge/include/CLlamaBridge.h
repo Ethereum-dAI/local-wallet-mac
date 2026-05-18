@@ -66,6 +66,29 @@ char * lllm_parse_assistant_turn(
 
 int32_t lllm_count_tokens(lllm_runtime* rt, const char* text, char* error_buf, int32_t error_buf_length);
 
+typedef struct {
+    int32_t  max_tokens;
+    float    temperature;
+    float    top_p;
+    int32_t  top_k;
+    float    min_p;
+    float    repeat_penalty;
+    uint32_t seed;
+} lllm_sampler_params;
+
+// Callback returns 0 to continue, non-zero to stop cooperatively.
+typedef int (*lllm_token_callback_v2)(const char * token_utf8, void * user_data);
+
+int32_t lllm_runtime_generate_v2(
+    lllm_runtime *            rt,
+    const char *              prompt,
+    lllm_sampler_params       params,
+    const char *              grammar_gbnf,
+    const char * const *      stop_sequences,
+    lllm_token_callback_v2    callback,
+    void *                    user_data,
+    char *                    error_buf, int32_t error_buf_length);
+
 // Frees memory returned by malloc'd C-string entry points.
 void lllm_string_free(char * s);
 

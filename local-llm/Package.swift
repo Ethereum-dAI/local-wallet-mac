@@ -8,6 +8,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "LocalLLM", targets: ["LocalLLM"]),
+        .executable(name: "llm-bench", targets: ["llm-bench"]),
     ],
     targets: [
         .target(
@@ -35,6 +36,11 @@ let package = Package(
             name: "LocalLLM",
             dependencies: ["CLlamaBridge"],
             path: "Sources/LocalLLM"
+        ),
+        .executableTarget(
+            name: "llm-bench",
+            dependencies: ["LocalLLM"],
+            path: "Sources/llm-bench"
         ),
         .testTarget(
             name: "LocalLLMTests",

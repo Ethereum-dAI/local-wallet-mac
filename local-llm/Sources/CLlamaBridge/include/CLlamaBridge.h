@@ -55,6 +55,15 @@ char * lllm_chat_render(
     int            enable_thinking,
     char *         error_buf, int32_t error_buf_length);
 
+// Parse a complete assistant-turn string into OpenAI-compatible JSON of shape
+// {"content": "...", "reasoning": "..." or null, "tool_calls": [...]}.
+// Format is detected from the model's chat template via common_chat_parse.
+// Returns malloc'd UTF-8; NULL on error, error_buf populated.
+char * lllm_parse_assistant_turn(
+    lllm_runtime * rt,
+    const char *   assistant_output,
+    char *         error_buf, int32_t error_buf_length);
+
 // Frees memory returned by malloc'd C-string entry points.
 void lllm_string_free(char * s);
 

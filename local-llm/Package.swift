@@ -39,7 +39,8 @@ let package = Package(
         .testTarget(
             name: "LocalLLMTests",
             dependencies: ["LocalLLM"],
-            path: "Tests/LocalLLMTests"
+            path: "Tests/LocalLLMTests",
+            resources: [.copy("Fixtures")]
         ),
     ],
     cxxLanguageStandard: .cxx17

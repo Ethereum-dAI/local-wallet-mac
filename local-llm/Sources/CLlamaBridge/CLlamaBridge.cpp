@@ -130,6 +130,45 @@ llama_batch single_token_batch(llama_token * token) {
     return llama_batch_get_one(token, 1);
 }
 
+common_reasoning_format default_reasoning_format() {
+    return COMMON_REASONING_FORMAT_AUTO;
+}
+
+char * serialize_parsed_to_c_string(
+    const common_chat_msg & parsed,
+    char * error_buf,
+    int32_t error_buf_length
+) {
+    try {
+        nlohmann::ordered_json parsed_json = parsed.to_json_oaicompat();
+        nlohmann::ordered_json output = nlohmann::ordered_json::object();
+
+        output["content"] = parsed_json.contains("content")
+            ? parsed_json["content"]
+            : nlohmann::ordered_json("");
+        output["reasoning"] = parsed_json.contains("reasoning_content") && !parsed_json["reasoning_content"].is_null()
+            ? parsed_json["reasoning_content"]
+            : nlohmann::ordered_json(nullptr);
+        output["tool_calls"] = parsed_json.contains("tool_calls") && parsed_json["tool_calls"].is_array()
+            ? parsed_json["tool_calls"]
+            : nlohmann::ordered_json::array();
+
+        const std::string serialized = output.dump();
+        char * result = static_cast<char *>(std::malloc(serialized.size() + 1));
+        if (result == nullptr) {
+            set_error(error_buf, error_buf_length, "out of memory");
+            return nullptr;
+        }
+
+        std::memcpy(result, serialized.data(), serialized.size());
+        result[serialized.size()] = '\0';
+        return result;
+    } catch (const std::exception & e) {
+        set_error(error_buf, error_buf_length, std::string("Assistant turn serialization failed: ") + e.what());
+        return nullptr;
+    }
+}
+
 } // namespace
 
 lllm_runtime * lllm_runtime_create(
@@ -392,6 +431,72 @@ char * lllm_chat_render(
     } catch (const std::exception & e) {
         set_error(error_buf, error_buf_length,
                   std::string("Chat template render failed: ") + e.what());
+        return nullptr;
+    }
+}
+
+char * lllm_parse_assistant_turn(
+    lllm_runtime * rt,
+    const char *   assistant_output,
+    char *         error_buf,
+    int32_t        error_buf_length
+) {
+    if (rt == nullptr || rt->model == nullptr) {
+        set_error(error_buf, error_buf_length, "Runtime is not loaded.");
+        return nullptr;
+    }
+    if (assistant_output == nullptr) {
+        set_error(error_buf, error_buf_length, "assistant_output: NULL");
+        return nullptr;
+    }
+    if (rt->chat_template.empty()) {
+        set_error(error_buf, error_buf_length, "Model is missing chat template metadata");
+        return nullptr;
+    }
+
+    try {
+        common_chat_templates_ptr tmpls = common_chat_templates_init(rt->model, std::string());
+        if (tmpls == nullptr) {
+            set_error(error_buf, error_buf_length, "Chat template parse failed: templates_init returned null");
+            return nullptr;
+        }
+
+        // common_chat_templates_apply runs the model's Jinja template; Gemma 4's
+        // template dereferences messages[0]['role'] unconditionally, so a fully
+        // empty inputs.messages crashes. We also pass a placeholder tool so
+        // the format detector picks the PEG variant instead of CONTENT_ONLY
+        // (without tools the template emits plain prose and the parser falls
+        // back to content-only). The resulting `chat_params.prompt` is discarded.
+        common_chat_templates_inputs inputs;
+        inputs.messages = common_chat_msgs_parse_oaicompat(
+            nlohmann::ordered_json::parse(R"([{"role":"user","content":""}])"));
+        inputs.tools = common_chat_tools_parse_oaicompat(
+            nlohmann::ordered_json::parse(
+                R"([{"type":"function","function":{"name":"_lllm_format_probe","description":"format detection probe","parameters":{"type":"object","properties":{}}}}])"));
+        inputs.add_generation_prompt = true;
+        inputs.use_jinja = true;
+        common_chat_params chat_params = common_chat_templates_apply(tmpls.get(), inputs);
+
+        // common_chat_parser_params(const common_chat_params&) copies only
+        // `format` and `generation_prompt`. For PEG formats the parse path
+        // dispatches through common_chat_peg_parse, which takes the arena as
+        // a separate argument — common_chat_params.parser is the serialized
+        // arena (produced by common_peg_arena::save).
+        common_chat_parser_params parser_params(chat_params);
+        parser_params.parse_tool_calls = true;
+        parser_params.reasoning_format = default_reasoning_format();
+
+        common_chat_msg parsed;
+        if (chat_params.format == COMMON_CHAT_FORMAT_CONTENT_ONLY || chat_params.parser.empty()) {
+            parsed = common_chat_parse(std::string(assistant_output), false, parser_params);
+        } else {
+            common_peg_arena arena = common_peg_arena::from_json(
+                nlohmann::json::parse(chat_params.parser));
+            parsed = common_chat_peg_parse(arena, std::string(assistant_output), false, parser_params);
+        }
+        return serialize_parsed_to_c_string(parsed, error_buf, error_buf_length);
+    } catch (const std::exception & e) {
+        set_error(error_buf, error_buf_length, std::string("Assistant turn parse failed: ") + e.what());
         return nullptr;
     }
 }

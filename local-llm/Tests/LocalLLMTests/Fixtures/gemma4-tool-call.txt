@@ -1,0 +1,1 @@
+<|tool_call>call:transfer{to:<|"|>vitalik.eth<|"|>,amount:<|"|>0.1<|"|>,token:<|"|>ETH<|"|>}<tool_call|>

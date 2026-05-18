@@ -6,5 +6,27 @@
 # Implementations live in libllama-common (Homebrew dylib). We vendor only
 # the headers needed to consume the chat/template/PEG API from CLlamaBridge.
 # Must come from the exact commit recorded above so that the C++ ABI matches
-# the Homebrew-installed libllama-common. Re-vendor whenever Homebrew bumps
-# llama.cpp.
+# the Homebrew-installed libllama-common.
+#
+# Re-vendor procedure (when Homebrew bumps llama.cpp, e.g. to b9201):
+#
+#   # 1. Identify the new commit SHA matching the new Homebrew bottle:
+#   gh api repos/ggml-org/llama.cpp/git/refs/tags/b9201 --jq '.object.sha'
+#
+#   # 2. Clone at that SHA:
+#   rm -rf /tmp/llama-cpp-pinned
+#   git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama-cpp-pinned
+#   cd /tmp/llama-cpp-pinned
+#   git fetch --depth 1 origin <NEW_SHA> && git checkout <NEW_SHA>
+#
+#   # 3. Refresh the headers (DEST is the directory containing this file):
+#   DEST=Sources/CLlamaBridge/third_party/llama_cpp_common
+#   cp /tmp/llama-cpp-pinned/common/{chat,common,log,peg-parser,regex-partial}.h "$DEST/"
+#   cp /tmp/llama-cpp-pinned/common/{chat-peg-parser,chat-auto-parser,chat-auto-parser-helpers}.h "$DEST/"
+#   cp /tmp/llama-cpp-pinned/common/{json-schema-to-grammar,unicode}.h "$DEST/"
+#   cp /tmp/llama-cpp-pinned/common/jinja/*.h "$DEST/jinja/"
+#   cp /tmp/llama-cpp-pinned/vendor/nlohmann/{json,json_fwd}.hpp "$DEST/nlohmann/"
+#
+#   # 4. Update this file (the SHA and bottle number above).
+#   # 5. Update local-llm/README.md (same).
+#   # 6. swift build && swift test  — catches ABI drift early.

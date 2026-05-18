@@ -8,6 +8,7 @@ guard let sub = args.first else {
 }
 
 let opts = parseSharedOptions(Array(args.dropFirst()))
+setJSONOutputPath(opts.jsonPath)
 
 do {
     switch sub {

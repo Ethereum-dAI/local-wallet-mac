@@ -86,7 +86,8 @@ public final class LlamaRuntime: @unchecked Sendable {
         return String(cString: templatePointer)
     }
 
-    internal var bridgeHandle: OpaquePointer? {
+    // Unsafe by design - for tests and llm-bench only.
+    public var bridgeHandle: OpaquePointer? {
         lock.lock()
         defer { lock.unlock() }
         return handle

@@ -79,9 +79,115 @@ func runLoad(options: BenchOptions) async throws {
     print(String(format: "cold load: %.2fs +/- %.2fs (mean of %d runs)", s.mean, s.stddev, samples.count))
 }
 
-func runPrefill(options _: BenchOptions) async throws { print("== llm-bench prefill ==\nTODO: implemented in Task 3.2") }
-func runDecode(options _: BenchOptions) async throws { print("== llm-bench decode ==\nTODO: implemented in Task 3.2") }
-func runTimeToFirstToken(options _: BenchOptions) async throws { print("== llm-bench ttft ==\nTODO: implemented in Task 3.2") }
+func runPrefill(options: BenchOptions) async throws {
+    print("== llm-bench prefill ==")
+    print("config: repeats=\(options.repeats) warmup=\(options.warmup) seed=0x\(String(options.seed, radix: 16))")
+
+    let runtime = LlamaRuntime()
+    try runtime.loadModel(at: URL(fileURLWithPath: options.modelPath))
+    defer { runtime.unload() }
+
+    for name in ["prefill-short", "prefill-med", "prefill-long"] {
+        guard let url = Bundle.module.url(forResource: name, withExtension: "txt", subdirectory: "Fixtures") else {
+            print("\(name): fixture missing - skipping")
+            continue
+        }
+        let text = try String(contentsOf: url, encoding: .utf8)
+        let messages: [ChatMessage] = [.init(role: .user, content: text)]
+
+        var perRun: [Double] = []
+        var promptTokens = 0
+        for i in 0..<(options.repeats + options.warmup) {
+            var opts = SamplerOptions()
+            opts.maxTokens = 1
+            opts.seed = options.seed
+            opts.temperature = 0.2
+
+            let t0 = Date()
+            var done = false
+            for try await event in runtime.chat(messages: messages, tools: [], options: opts) {
+                if case .done(let stats, _) = event {
+                    if i >= options.warmup { perRun.append(Date().timeIntervalSince(t0)) }
+                    promptTokens = stats.promptTokens
+                    done = true
+                    break
+                }
+            }
+            if !done && i >= options.warmup { perRun.append(Date().timeIntervalSince(t0)) }
+        }
+        let s = summaryStats(perRun)
+        print("\(name): prompt=\(promptTokens) tokens · prefill+1 = \(String(format: "%.2fs ± %.2fs", s.mean, s.stddev)) (mean of \(perRun.count) runs)")
+    }
+}
+
+func runDecode(options: BenchOptions) async throws {
+    print("== llm-bench decode ==")
+    print("config: repeats=\(options.repeats) warmup=\(options.warmup) seed=0x\(String(options.seed, radix: 16))")
+
+    let runtime = LlamaRuntime()
+    try runtime.loadModel(at: URL(fileURLWithPath: options.modelPath))
+    defer { runtime.unload() }
+    guard let seedURL = Bundle.module.url(forResource: "decode-seed", withExtension: "txt", subdirectory: "Fixtures") else {
+        print("decode-seed fixture missing - aborting subcommand")
+        return
+    }
+    let text = try String(contentsOf: seedURL, encoding: .utf8)
+    let messages: [ChatMessage] = [.init(role: .user, content: text)]
+
+    var samples: [Double] = []
+    for i in 0..<(options.repeats + options.warmup) {
+        var opts = SamplerOptions()
+        opts.maxTokens = 256
+        opts.seed = options.seed
+        opts.temperature = 0.2
+
+        var firstTokenAt: Date? = nil
+        var generated = 0
+        for try await event in runtime.chat(messages: messages, tools: [], options: opts) {
+            switch event {
+            case .textToken:
+                if firstTokenAt == nil { firstTokenAt = Date() }
+                generated += 1
+            case .done:
+                let elapsed = firstTokenAt.map { Date().timeIntervalSince($0) } ?? 0
+                let throughput = elapsed > 0 ? Double(generated) / elapsed : 0
+                if i >= options.warmup { samples.append(throughput) }
+            @unknown default:
+                break
+            }
+        }
+    }
+    let s = summaryStats(samples)
+    print("decode: \(String(format: "%.1f tok/s ± %.1f", s.mean, s.stddev)) (mean of \(samples.count) runs over 256 generated tokens)")
+}
+
+func runTimeToFirstToken(options: BenchOptions) async throws {
+    print("== llm-bench ttft ==")
+    print("config: repeats=\(options.repeats) warmup=\(options.warmup) seed=0x\(String(options.seed, radix: 16))")
+
+    let runtime = LlamaRuntime()
+    try runtime.loadModel(at: URL(fileURLWithPath: options.modelPath))
+    defer { runtime.unload() }
+    let messages: [ChatMessage] = [.init(role: .user, content: "Hi.")]
+
+    var samples: [Double] = []
+    for i in 0..<(options.repeats + options.warmup) {
+        var opts = SamplerOptions()
+        opts.maxTokens = 1
+        opts.seed = options.seed
+        opts.temperature = 0.2
+
+        let t0 = Date()
+        for try await event in runtime.chat(messages: messages, tools: [], options: opts) {
+            if case .textToken = event {
+                if i >= options.warmup { samples.append(Date().timeIntervalSince(t0)) }
+                break
+            }
+        }
+    }
+    let s = summaryStats(samples)
+    print("ttft: \(String(format: "%.0f ms ± %.0f", s.mean * 1000, s.stddev * 1000)) (mean of \(samples.count) runs)")
+}
 func runRender(options _: BenchOptions) async throws { print("== llm-bench render ==\nTODO: implemented in Task 3.3") }
 func runGrammar(options _: BenchOptions) async throws { print("== llm-bench grammar ==\nTODO: implemented in Task 3.3") }
 

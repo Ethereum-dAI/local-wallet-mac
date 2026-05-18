@@ -1,0 +1,5 @@
+Ethereum is a shared computing network that lets people run programs without relying on one operator. Its basic unit of work is a transaction, which can move ether, call a contract, or deploy new contract code.
+
+Contracts live on the Ethereum Virtual Machine. They keep state, read transaction data, and update balances or storage only when a valid transaction pays for the work it asks the network to perform.
+
+Gas measures that work. Users choose fee settings, validators include transactions in blocks, and clients agree on the resulting state after each block is checked by the protocol rules.

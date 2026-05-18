@@ -1,0 +1,81 @@
+Ethereum began as a proposal for a general purpose blockchain that could run small programs as well as transfer value. The aim was to make application logic part of the shared ledger, not only the balances. That broader design made the chain useful for agreements, registries, and markets with shared rules.
+
+The first public network launched with proof of work consensus. Miners built blocks, users paid fees, and smart contracts offered a common execution layer for experiments in finance, identity, games, and coordination. The same base protocol let many teams deploy applications without asking for network specific permission.
+
+Early applications showed that programmable settlement could be useful, but they also exposed limits. Block space was scarce, contracts were hard to upgrade safely, and users needed better tools for keys and fees. These constraints shaped later work on wallets, scaling, standards, and safer contract development.
+
+Ethereum's design separates consensus from execution. Consensus decides which blocks are canonical. Execution checks transactions, runs contract code, charges gas, and computes the new state root for each accepted block. This separation helps clients specialize while still agreeing on one shared history.
+
+The Ethereum Virtual Machine is the execution engine for contracts. It is stack based, deterministic, and intentionally constrained so every node can verify the same result from the same input data. Determinism matters because independent nodes must reach identical outputs without private coordination.
+
+Contract code is stored as bytecode. Developers usually write higher level languages that compile to this bytecode, then deploy it through a transaction that pays gas for code publication. Once deployed, users interact with the code through calls that follow its exposed interface.
+
+Accounts are either externally owned accounts or contract accounts. Externally owned accounts are controlled by private keys. Contract accounts are controlled by code and can react only when a transaction or call reaches them.
+
+A transaction can transfer ether, call a contract, deploy a contract, or combine these effects through nested calls. Each transaction includes a nonce so account activity has a clear sequence. Ordering also lets clients reject duplicates and reason about replacement transactions.
+
+Gas accounting protects the network from unbounded computation. Every operation has a cost, and the sender sets a gas limit that caps how much work the transaction may consume. This converts execution into a metered resource rather than an open ended obligation for nodes.
+
+Some operations are cheap because they only touch memory or simple arithmetic. Others are expensive because they read storage, write storage, create contracts, or increase the burden on future nodes. The schedule is adjusted over time when protocol research finds costs that need better alignment.
+
+If execution runs out of gas, the transaction fails and state changes are reverted. Gas already spent remains charged because validators and nodes still performed the attempted computation.
+
+Before EIP-1559, users mainly bid a gas price. Wallets had to estimate what price would clear soon, and sudden demand could make fee selection confusing and volatile.
+
+EIP-1559 introduced a base fee that moves with demand. The base fee is burned by the protocol, while a separate priority fee can reward the block producer for inclusion. Wallets can use the current base fee as an anchor for fee estimation.
+
+Users can set a maximum fee per gas and a maximum priority fee. The effective charge depends on the current base fee, the chosen tip, and the maximum the user agreed to pay.
+
+The gas market prices access to block space. It does not guarantee that a transaction is valuable, fair, or profitable. It only allocates scarce execution capacity under the protocol rules. Users still need to understand the action they are signing and the application they are using.
+
+ERC-20 created a common interface for fungible tokens. A wallet or application can read balances, request transfers, and observe transfer events without custom integration for every token contract. The standard does not define economic value; it only defines a common technical shape.
+
+ERC-721 created a common interface for non-fungible tokens. Each token has a distinct identifier, so contracts can represent unique items, memberships, licenses, or other individually tracked records. Metadata and rights can vary widely, so applications often add their own display logic.
+
+Standards help applications compose. A lending protocol, marketplace, wallet, or indexer can support many contracts when those contracts expose familiar functions and event shapes.
+
+Wallets are the user's main interface to Ethereum. They store keys or coordinate signing, display transaction details, estimate fees, and help users understand which contract actions they are approving. Good wallet design reduces ambiguity at the moment a signature would authorize state changes.
+
+A wallet cannot make a bad contract safe by itself. It can present clearer warnings, simulate expected effects, restrict permissions, and help users manage approvals, but contract risk remains important.
+
+The Beacon Chain introduced proof of stake consensus. Validators lock stake, run consensus clients, propose blocks when selected, and attest to blocks proposed by others. It first ran alongside the execution chain before taking responsibility for live block consensus.
+
+The Merge connected the proof of stake consensus layer to Ethereum execution. Mining ended, validators replaced miners for block production, and the existing application state continued without a reset. Existing contracts, balances, logs, and account nonces remained part of the same execution history.
+
+Finality comes from validator votes across epochs. When enough stake attests according to consensus rules, a checkpoint becomes finalised, making reorganisation of that history extremely costly.
+
+Validators are incentivised to stay online and follow the protocol. Correct proposals and attestations earn rewards, while missed duties lose rewards and serious equivocation can lead to slashing.
+
+Maximal extractable value describes profit from transaction ordering, inclusion, or exclusion. It can come from arbitrage, liquidations, sandwich attacks, or other interactions between block production and on chain markets.
+
+MEV is not one single behavior. Some forms improve market efficiency, some harm users, and some create centralising pressure because searchers and builders compete for privileged ordering opportunities. Research focuses on reducing harmful extraction while preserving transparent and competitive block construction.
+
+Rollups move much execution away from layer one while using layer one for settlement and data availability. This can lower user costs while keeping a connection to Ethereum security assumptions. Users gain cheaper execution, while layer one remains the place where rollup claims are ultimately checked.
+
+An optimistic rollup posts transaction data and assumes state transitions are valid unless challenged during a dispute window. Fraud proofs can correct invalid claims when challengers detect them in time. The challenge period affects withdrawal timing and the operational model for bridges.
+
+A validity rollup posts data and cryptographic proofs. The proof shows that the new state follows from the previous state and the submitted transactions, reducing reliance on a long challenge period. The proving system may be complex, but verification on layer one can be compact.
+
+Rollups still have trust assumptions. Users should understand upgrade keys, sequencer control, proof maturity, data availability, bridge design, and the process for exiting back to layer one.
+
+The rollup-centric roadmap treats layer one as a settlement, consensus, and data availability base for many execution environments. The goal is more throughput without making normal validators too costly to run. Keeping verification accessible supports decentralisation while scaling user facing activity elsewhere.
+
+Data availability improvements help rollups publish enough information for users and nodes to reconstruct rollup state. Without available data, a proof or claim may not be enough for independent recovery. This is why throughput upgrades often focus on data capacity rather than only computation.
+
+Bridges connect assets and messages between layer one and layer two systems. A bridge may rely on native rollup proofs, validator sets, multisignature controls, light clients, or other mechanisms. The bridge design determines how quickly messages settle and what failures users must consider.
+
+Layer one trust is rooted in Ethereum consensus, execution clients, and broad validator participation. Layer two trust depends on the rollup design plus any additional governance, sequencer, or bridge controls.
+
+Account abstraction aims to make accounts more flexible. Instead of every user account following the same signature and nonce pattern, smart accounts can define custom validation and payment logic. This moves more account behavior into auditable code while keeping protocol verification precise.
+
+Smart accounts can support session keys, spending limits, social recovery, sponsored fees, batched actions, and alternative signature schemes. These features can improve usability when implemented with careful safeguards. The tradeoff is additional contract logic that must be secured and clearly explained to users.
+
+The EVM remains important even as scaling improves. Its compatibility lets contracts, wallets, developer tools, and audits move across many networks with less friction than a completely new execution model.
+
+Ethereum clients are diverse by design. Multiple execution clients and consensus clients reduce the risk that one software bug can halt or corrupt the whole network. Operators can choose different client combinations, which helps avoid complete dependence on one implementation.
+
+Nodes verify blocks independently. They check signatures, gas limits, state transitions, consensus messages, and finality updates, which keeps the network from depending only on trusted block producers.
+
+Ethereum keeps changing through public proposals, client releases, testing, and staged upgrades. The network balances new features with caution because many users and applications rely on its state. Changes need broad review because protocol behavior becomes infrastructure for many independent systems.
+
+At its core, Ethereum is a settlement system for deterministic programs. Its history, EVM, gas accounting, tokens, wallets, rollups, MEV research, account abstraction, and Beacon Chain all serve that shared goal.

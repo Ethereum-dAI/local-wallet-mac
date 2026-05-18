@@ -40,7 +40,8 @@ let package = Package(
         .executableTarget(
             name: "llm-bench",
             dependencies: ["LocalLLM"],
-            path: "Sources/llm-bench"
+            path: "Sources/llm-bench",
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "LocalLLMTests",

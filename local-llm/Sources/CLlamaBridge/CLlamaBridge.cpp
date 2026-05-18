@@ -327,15 +327,20 @@ int32_t lllm_runtime_generate(
     return produced;
 }
 
-char * lllm_spike_render(
+char * lllm_chat_render(
     lllm_runtime * rt,
     const char *   messages_json,
     const char *   tools_json,
+    int            enable_thinking,
     char *         error_buf,
     int32_t        error_buf_length
 ) {
     if (rt == nullptr || rt->model == nullptr) {
         set_error(error_buf, error_buf_length, "Runtime is not loaded.");
+        return nullptr;
+    }
+    if (rt->chat_template.empty()) {
+        set_error(error_buf, error_buf_length, "Model is missing chat template metadata");
         return nullptr;
     }
     if (messages_json == nullptr) {
@@ -363,7 +368,7 @@ char * lllm_spike_render(
     try {
         common_chat_templates_ptr tmpls = common_chat_templates_init(rt->model, std::string());
         if (tmpls == nullptr) {
-            set_error(error_buf, error_buf_length, "common_chat_templates_init returned null");
+            set_error(error_buf, error_buf_length, "Chat template parse failed: templates_init returned null");
             return nullptr;
         }
         common_chat_templates_inputs inputs;
@@ -371,6 +376,7 @@ char * lllm_spike_render(
         inputs.tools = common_chat_tools_parse_oaicompat(tools_json_value);
         inputs.add_generation_prompt = true;
         inputs.use_jinja = true;
+        inputs.enable_thinking = (enable_thinking != 0);
 
         common_chat_params params = common_chat_templates_apply(tmpls.get(), inputs);
         const std::string & rendered = params.prompt;
@@ -385,7 +391,7 @@ char * lllm_spike_render(
         return result;
     } catch (const std::exception & e) {
         set_error(error_buf, error_buf_length,
-                  std::string("Spike render failed: ") + e.what());
+                  std::string("Chat template render failed: ") + e.what());
         return nullptr;
     }
 }

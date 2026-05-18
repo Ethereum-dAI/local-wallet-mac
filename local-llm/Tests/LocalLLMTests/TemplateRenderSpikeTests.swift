@@ -12,10 +12,11 @@ private func loadedRuntime() throws -> LlamaRuntime? {
     return rt
 }
 
-private func spikeRender(_ rt: LlamaRuntime, messages: String, tools: String?) -> String? {
+private func chatRender(_ rt: LlamaRuntime, messages: String, tools: String?) -> String? {
     var buf = [CChar](repeating: 0, count: 1024)
     let result = buf.withUnsafeMutableBufferPointer { ptr -> UnsafeMutablePointer<CChar>? in
-        return lllm_spike_render(rt.bridgeHandle, messages, tools, ptr.baseAddress, Int32(ptr.count))
+        return lllm_chat_render(rt.bridgeHandle, messages, tools, /*enable_thinking=*/0,
+                                 ptr.baseAddress, Int32(ptr.count))
     }
     guard let result else { return nil }
     defer { lllm_string_free(result) }
@@ -30,7 +31,7 @@ private func spikeRender(_ rt: LlamaRuntime, messages: String, tools: String?) -
     [{"role":"system","content":"You are a wallet assistant."},
      {"role":"user","content":"Hello."}]
     """#
-    let rendered = spikeRender(rt, messages: messages, tools: nil)
+    let rendered = chatRender(rt, messages: messages, tools: nil)
     #expect(rendered != nil)
     let r = rendered ?? ""
     #expect(r.contains("<|turn>system"))
@@ -55,7 +56,7 @@ private func spikeRender(_ rt: LlamaRuntime, messages: String, tools: String?) -
         "properties":{"to":{"type":"string"},"amount":{"type":"string"}},
         "required":["to","amount"]}}}]
     """#
-    let rendered = spikeRender(rt, messages: messages, tools: tools)
+    let rendered = chatRender(rt, messages: messages, tools: tools)
     #expect(rendered != nil)
     let r = rendered ?? ""
     #expect(r.contains("<|tool>declaration:transfer"))

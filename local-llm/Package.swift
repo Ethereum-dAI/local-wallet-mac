@@ -13,13 +13,17 @@ let package = Package(
         .target(
             name: "CLlamaBridge",
             path: "Sources/CLlamaBridge",
+            exclude: [],
             publicHeadersPath: "include",
             cxxSettings: [
                 .unsafeFlags(["-I\(homebrewPrefix)/include", "-std=c++17"]),
+                .headerSearchPath("third_party/llama_cpp_common"),
+                .define("LLAMA_USE_CURL", to: "0"),
             ],
             linkerSettings: [
                 .unsafeFlags(["-L\(homebrewPrefix)/lib"]),
                 .linkedLibrary("llama"),
+                .linkedLibrary("llama-common"),
                 .linkedLibrary("ggml"),
                 .linkedLibrary("ggml-base"),
             ]

@@ -1,0 +1,10 @@
+# Vendored subset of llama.cpp common/ — HEADERS ONLY
+# Upstream: https://github.com/ggml-org/llama.cpp
+# Pinned commit: 3e12fbdea5c1ac4225c7dcf79506d30950283fc3
+# Bottled by Homebrew as llama.cpp b9200
+#
+# Implementations live in libllama-common (Homebrew dylib). We vendor only
+# the headers needed to consume the chat/template/PEG API from CLlamaBridge.
+# Must come from the exact commit recorded above so that the C++ ABI matches
+# the Homebrew-installed libllama-common. Re-vendor whenever Homebrew bumps
+# llama.cpp.

@@ -49,6 +49,8 @@ targets:
         product: LocalLLM
       - package: WalletMacOS
         product: SpawnHelper
+      - package: WalletMacOS
+        product: WalletToolLayer
 schemes:
   LocalWalletApp:
     build:

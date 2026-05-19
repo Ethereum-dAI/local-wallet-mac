@@ -10,6 +10,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     enum Kind: String, Codable {
         case userText
         case assistantText
+        case assistantError
         case toolIntent
         case toolResponse
     }
@@ -313,7 +314,14 @@ private final class ChatDashboardModel: ObservableObject {
                 }
                 runtimeStatus = inferenceService.runtimeStatus
             } catch {
-                appendMessage(.assistantText(error.localizedDescription), to: conversationID)
+                appendMessage(
+                    ChatMessage(
+                        kind: .assistantError,
+                        role: .assistant,
+                        text: error.localizedDescription
+                    ),
+                    to: conversationID
+                )
                 runtimeStatus = "Needs attention"
             }
             isGenerating = false
@@ -731,6 +739,13 @@ struct LocalWalletChatDashboardView: View {
                                     message: message,
                                     canRegenerate: message.role == .assistant && !model.isGenerating,
                                     onRegenerate: { model.regenerate(from: message) }
+                                )
+                                .id(message.id)
+                            case .assistantError:
+                                AssistantErrorBubble(
+                                    message: message,
+                                    canRetry: !model.isGenerating,
+                                    onRetry: { model.regenerate(from: message) }
                                 )
                                 .id(message.id)
                             case .toolIntent:
@@ -1723,6 +1738,58 @@ private extension ChatGenerationStats {
     var formattedSummary: String {
         let seconds = duration.formatted(.number.precision(.fractionLength(1)))
         return "\(seconds)s · \(generatedTokens) generated tokens · context \(usedContextTokens)/\(contextSize) · \(contextTokensLeft) left"
+    }
+}
+
+private struct AssistantErrorBubble: View {
+    let message: ChatMessage
+    let canRetry: Bool
+    let onRetry: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 13, weight: .black))
+                        .foregroundStyle(Color.orange)
+                    Text("Generation failed")
+                        .font(.system(size: 13, weight: .heavy))
+                        .foregroundStyle(ChatPalette.primaryText)
+                }
+                Text(message.text ?? "Unknown error")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(ChatPalette.secondaryText)
+                    .textSelection(.enabled)
+                if canRetry {
+                    Button(action: onRetry) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11, weight: .black))
+                            Text("Retry")
+                                .font(.system(size: 12, weight: .heavy))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(ChatPalette.accent.opacity(0.9)))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Re-run the last prompt")
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.orange.opacity(0.10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Color.orange.opacity(0.45), lineWidth: 1)
+                    )
+            )
+            Spacer(minLength: 90)
+        }
     }
 }
 

@@ -352,6 +352,37 @@ private final class ChatDashboardModel: ObservableObject {
         generationTask?.cancel()
     }
 
+    func editAndResend(_ userMessage: ChatMessage, newText: String) {
+        guard !isGenerating else {
+            return
+        }
+        let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == activeConversationID }) else {
+            return
+        }
+        let messages = conversations[conversationIndex].messages
+        guard let userIndex = messages.firstIndex(where: { $0.id == userMessage.id }) else {
+            return
+        }
+        guard messages[userIndex].kind == .userText else {
+            return
+        }
+
+        let conversationID = conversations[conversationIndex].id
+        let toRemove = Array(messages[userIndex...])
+        for message in toRemove {
+            try? chatStore.deleteMessage(message.id, from: conversationID)
+        }
+        conversations[conversationIndex].messages.removeSubrange(userIndex...)
+        conversations[conversationIndex].updatedAt = Date()
+        try? chatStore.updateConversationMetadata(conversations[conversationIndex])
+
+        send(trimmed)
+    }
+
     func regenerate(from assistantMessage: ChatMessage) {
         guard !isGenerating else {
             return
@@ -771,7 +802,11 @@ struct LocalWalletChatDashboardView: View {
                                     ChatBubble(
                                         message: message,
                                         canRegenerate: message.role == .assistant && !model.isGenerating,
-                                        onRegenerate: { model.regenerate(from: message) }
+                                        onRegenerate: { model.regenerate(from: message) },
+                                        canEdit: message.kind == .userText && !model.isGenerating,
+                                        onEdit: { newText in
+                                            model.editAndResend(message, newText: newText)
+                                        }
                                     )
                                     .id(message.id)
                                 case .assistantError:
@@ -1329,9 +1364,14 @@ private struct ChatBubble: View {
     let message: ChatMessage
     var canRegenerate: Bool = false
     var onRegenerate: (() -> Void)? = nil
+    var canEdit: Bool = false
+    var onEdit: ((String) -> Void)? = nil
     @State private var isThinkingExpanded = false
     @State private var isHovered = false
     @State private var justCopied = false
+    @State private var isEditing = false
+    @State private var editText = ""
+    @FocusState private var editorFocused: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -1340,31 +1380,41 @@ private struct ChatBubble: View {
             }
             ZStack(alignment: .topTrailing) {
                 bubbleContent
-                if isHovered {
+                if isHovered, !isEditing {
                     hoverActions
                         .padding(8)
                         .transition(.opacity)
                 }
             }
             .contextMenu {
-                Button {
-                    copyPlainText()
-                } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
-                }
-                if message.stats != nil, message.role == .assistant {
+                if !isEditing {
                     Button {
-                        copyWithStats()
+                        copyPlainText()
                     } label: {
-                        Label("Copy with stats", systemImage: "doc.on.doc.fill")
+                        Label("Copy", systemImage: "doc.on.doc")
                     }
-                }
-                if canRegenerate, let onRegenerate {
-                    Divider()
-                    Button {
-                        onRegenerate()
-                    } label: {
-                        Label("Regenerate response", systemImage: "arrow.clockwise")
+                    if message.stats != nil, message.role == .assistant {
+                        Button {
+                            copyWithStats()
+                        } label: {
+                            Label("Copy with stats", systemImage: "doc.on.doc.fill")
+                        }
+                    }
+                    if canEdit, onEdit != nil {
+                        Divider()
+                        Button {
+                            beginEditing()
+                        } label: {
+                            Label("Edit message", systemImage: "pencil")
+                        }
+                    }
+                    if canRegenerate, let onRegenerate {
+                        Divider()
+                        Button {
+                            onRegenerate()
+                        } label: {
+                            Label("Regenerate response", systemImage: "arrow.clockwise")
+                        }
                     }
                 }
             }
@@ -1381,11 +1431,36 @@ private struct ChatBubble: View {
 
     private var hoverActions: some View {
         HStack(spacing: 6) {
+            if canEdit, onEdit != nil {
+                bubbleActionButton(systemImage: "pencil", help: "Edit and resend", action: beginEditing)
+            }
             if canRegenerate, let onRegenerate {
                 bubbleActionButton(systemImage: "arrow.clockwise", help: "Regenerate response", action: onRegenerate)
             }
             copyButton
         }
+    }
+
+    private func beginEditing() {
+        editText = message.text ?? ""
+        isEditing = true
+        DispatchQueue.main.async {
+            editorFocused = true
+        }
+    }
+
+    private func submitEdit() {
+        let trimmed = editText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        isEditing = false
+        onEdit?(trimmed)
+    }
+
+    private func cancelEdit() {
+        editText = message.text ?? ""
+        isEditing = false
     }
 
     private func bubbleActionButton(systemImage: String, help: String, action: @escaping () -> Void) -> some View {
@@ -1431,6 +1506,8 @@ private struct ChatBubble: View {
 
             if message.role == .assistant {
                 MarkdownMessageText(markdown: message.text ?? "", fontSize: 16, color: ChatPalette.primaryText)
+            } else if isEditing {
+                editingView
             } else {
                 Text(message.text ?? "")
                     .font(.system(size: 16, weight: .medium))
@@ -1455,6 +1532,59 @@ private struct ChatBubble: View {
                         .stroke(ChatPalette.border, lineWidth: 1)
                 )
         )
+    }
+
+    private var editingView: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            TextEditor(text: $editText)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(ChatPalette.primaryText)
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
+                .focused($editorFocused)
+                .frame(minHeight: 60, maxHeight: 220)
+                .onExitCommand {
+                    cancelEdit()
+                }
+
+            HStack(spacing: 8) {
+                Button(action: cancelEdit) {
+                    Text("Cancel")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(ChatPalette.buttonCircle)
+                                .overlay(Capsule().stroke(ChatPalette.border, lineWidth: 0.8))
+                        )
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+
+                Button(action: submitEdit) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "paperplane.fill")
+                            .font(.system(size: 10, weight: .black))
+                        Text("Save & send")
+                            .font(.system(size: 12, weight: .heavy))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(ChatPalette.accent.opacity(canSubmitEdit ? 0.95 : 0.4)))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSubmitEdit)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .frame(minWidth: 280, alignment: .trailing)
+    }
+
+    private var canSubmitEdit: Bool {
+        !editText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var copyButton: some View {

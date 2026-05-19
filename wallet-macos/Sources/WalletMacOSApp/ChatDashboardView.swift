@@ -159,6 +159,23 @@ private final class ChatDashboardModel: ObservableObject {
         preferencesStore.activeConversationID = conversation.id
     }
 
+    func renameConversation(_ conversationID: UUID, to newTitle: String) {
+        let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
+            return
+        }
+        guard conversations[index].title != trimmed else {
+            return
+        }
+        conversations[index].title = String(trimmed.prefix(120))
+        conversations[index].updatedAt = Date()
+        try? chatStore.updateConversationMetadata(conversations[index])
+        sortConversationsKeepingActive()
+    }
+
     func deleteConversation(_ conversationID: UUID) {
         guard !isGenerating else {
             return
@@ -482,7 +499,10 @@ struct LocalWalletChatDashboardView: View {
                             conversation: conversation,
                             isSelected: conversation.id == model.activeConversationID,
                             onSelect: { model.selectConversation(conversation) },
-                            onDelete: { conversationPendingDeletion = conversation }
+                            onDelete: { conversationPendingDeletion = conversation },
+                            onRename: { newTitle in
+                                model.renameConversation(conversation.id, to: newTitle)
+                            }
                         )
                     }
                 }
@@ -827,39 +847,38 @@ private struct ChatConversationRow: View {
     let isSelected: Bool
     let onSelect: () -> Void
     let onDelete: () -> Void
+    let onRename: (String) -> Void
     @State private var isHovered = false
+    @State private var isRenaming = false
+    @State private var editingTitle = ""
+    @FocusState private var renameFocused: Bool
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            Button(action: onSelect) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(conversation.title)
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(ChatPalette.primaryText)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    HStack(spacing: 6) {
-                        Text("\(conversation.messages.count) messages")
-                        Text("·")
-                        Text(conversation.updatedAt, style: .relative)
-                    }
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(ChatPalette.mutedText)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 11)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(isSelected ? ChatPalette.selectedPanel : Color.clear)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(isSelected ? ChatPalette.accent.opacity(0.65) : ChatPalette.border.opacity(0.45), lineWidth: 1)
-                        )
-                )
+            Button(action: { if !isRenaming { onSelect() } }) {
+                rowContent
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 11)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(isSelected ? ChatPalette.selectedPanel : Color.clear)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(isSelected ? ChatPalette.accent.opacity(0.65) : ChatPalette.border.opacity(0.45), lineWidth: 1)
+                            )
+                    )
             }
             .buttonStyle(.plain)
+            .simultaneousGesture(
+                TapGesture(count: 2).onEnded { startRenaming() }
+            )
             .contextMenu {
+                Button {
+                    startRenaming()
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
                 Button(role: .destructive) {
                     onDelete()
                 } label: {
@@ -867,7 +886,7 @@ private struct ChatConversationRow: View {
                 }
             }
 
-            if isHovered {
+            if isHovered, !isRenaming {
                 Button(action: onDelete) {
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .black))
@@ -890,6 +909,60 @@ private struct ChatConversationRow: View {
                 isHovered = hovering
             }
         }
+    }
+
+    private var rowContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if isRenaming {
+                TextField("Conversation title", text: $editingTitle)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(ChatPalette.primaryText)
+                    .focused($renameFocused)
+                    .onSubmit { commitRename() }
+                    .onExitCommand { cancelRename() }
+                    .onChange(of: renameFocused) { _, focused in
+                        if !focused && isRenaming {
+                            commitRename()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text(conversation.title)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(ChatPalette.primaryText)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack(spacing: 6) {
+                Text("\(conversation.messages.count) messages")
+                Text("·")
+                Text(conversation.updatedAt, style: .relative)
+            }
+            .font(.system(size: 11, weight: .bold))
+            .foregroundStyle(ChatPalette.mutedText)
+        }
+    }
+
+    private func startRenaming() {
+        editingTitle = conversation.title
+        isRenaming = true
+        DispatchQueue.main.async {
+            renameFocused = true
+        }
+    }
+
+    private func commitRename() {
+        let trimmed = editingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        isRenaming = false
+        guard !trimmed.isEmpty, trimmed != conversation.title else {
+            return
+        }
+        onRename(trimmed)
+    }
+
+    private func cancelRename() {
+        isRenaming = false
     }
 }
 

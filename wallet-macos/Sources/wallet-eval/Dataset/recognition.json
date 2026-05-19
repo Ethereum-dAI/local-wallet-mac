@@ -1,0 +1,366 @@
+{
+  "schema": "wallet-eval/recognition/v1",
+  "cases": [
+    {
+      "id": "transfer-en-001",
+      "user_message": "Send 0.1 ETH to vitalik.eth",
+      "category": "truePositiveTransfer",
+      "language": "english",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "vitalik.eth" },
+        "amount": { "kind": "exact", "value": "0.1" },
+        "token": { "kind": "exact", "value": "ETH" }
+      },
+      "notes": null
+    },
+    {
+      "id": "transfer-en-002",
+      "user_message": "Please transfer 25 USDC to bob.eth",
+      "category": "truePositiveTransfer",
+      "language": "english",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "bob.eth" },
+        "amount": { "kind": "exact", "value": "25" },
+        "token": { "kind": "exact", "value": "USDC" }
+      },
+      "notes": null
+    },
+    {
+      "id": "transfer-en-003",
+      "user_message": "Pay alice.eth 5 DAI from my wallet",
+      "category": "truePositiveTransfer",
+      "language": "english",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "alice.eth" },
+        "amount": { "kind": "exact", "value": "5" },
+        "token": { "kind": "exact", "value": "DAI" }
+      },
+      "notes": null
+    },
+    {
+      "id": "transfer-en-004",
+      "user_message": "Move 1.25 ETH to 0x1111111111111111111111111111111111111111",
+      "category": "truePositiveTransfer",
+      "language": "english",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "0x1111111111111111111111111111111111111111" },
+        "amount": { "kind": "exact", "value": "1.25" },
+        "token": { "kind": "exact", "value": "ETH" }
+      },
+      "notes": null
+    },
+    {
+      "id": "transfer-en-005",
+      "user_message": "Could you send 0.02 ETH over to 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045?",
+      "category": "truePositiveTransfer",
+      "language": "english",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045" },
+        "amount": { "kind": "exact", "value": "0.02" },
+        "token": { "kind": "exact", "value": "ETH" }
+      },
+      "notes": null
+    },
+    {
+      "id": "transfer-en-006",
+      "user_message": "Send all ETH to alice.eth",
+      "category": "truePositiveTransfer",
+      "language": "english",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "alice.eth" },
+        "amount": { "kind": "exact", "value": "all" },
+        "token": { "kind": "exact", "value": "ETH" }
+      },
+      "notes": null
+    },
+    {
+      "id": "transfer-en-007",
+      "user_message": "Transfer 100 WETH to bob.eth",
+      "category": "truePositiveTransfer",
+      "language": "english",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "bob.eth" },
+        "amount": { "kind": "exact", "value": "100" },
+        "token": { "kind": "exact", "value": "WETH" }
+      },
+      "notes": null
+    },
+    {
+      "id": "transfer-en-008",
+      "user_message": "I want to send 3 USDC to 0x2222222222222222222222222222222222222222 now",
+      "category": "truePositiveTransfer",
+      "language": "english",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "0x2222222222222222222222222222222222222222" },
+        "amount": { "kind": "exact", "value": "3" },
+        "token": { "kind": "exact", "value": "USDC" }
+      },
+      "notes": null
+    },
+    {
+      "id": "swap-en-001",
+      "user_message": "Swap 100 USDC for ETH",
+      "category": "truePositiveSwap",
+      "language": "english",
+      "expected_tool": "swap",
+      "expected_args": {
+        "from_token": { "kind": "exact", "value": "USDC" },
+        "to_token": { "kind": "exact", "value": "ETH" },
+        "amount": { "kind": "exact", "value": "100" },
+        "amount_side": { "kind": "exact", "value": "input" }
+      },
+      "notes": null
+    },
+    {
+      "id": "swap-en-002",
+      "user_message": "Convert 0.5 ETH to USDC",
+      "category": "truePositiveSwap",
+      "language": "english",
+      "expected_tool": "swap",
+      "expected_args": {
+        "from_token": { "kind": "exact", "value": "ETH" },
+        "to_token": { "kind": "exact", "value": "USDC" },
+        "amount": { "kind": "exact", "value": "0.5" },
+        "amount_side": { "kind": "exact", "value": "input" }
+      },
+      "notes": null
+    },
+    {
+      "id": "swap-en-003",
+      "user_message": "Trade 250 DAI into WETH",
+      "category": "truePositiveSwap",
+      "language": "english",
+      "expected_tool": "swap",
+      "expected_args": {
+        "from_token": { "kind": "exact", "value": "DAI" },
+        "to_token": { "kind": "exact", "value": "WETH" },
+        "amount": { "kind": "exact", "value": "250" },
+        "amount_side": { "kind": "exact", "value": "input" }
+      },
+      "notes": null
+    },
+    {
+      "id": "swap-en-004",
+      "user_message": "Buy me 1 ETH with USDC",
+      "category": "truePositiveSwap",
+      "language": "english",
+      "expected_tool": "swap",
+      "expected_args": {
+        "from_token": { "kind": "exact", "value": "USDC" },
+        "to_token": { "kind": "exact", "value": "ETH" },
+        "amount": { "kind": "exact", "value": "1" },
+        "amount_side": { "kind": "exact", "value": "output" }
+      },
+      "notes": null
+    },
+    {
+      "id": "swap-en-005",
+      "user_message": "Exchange 40 USDC into DAI",
+      "category": "truePositiveSwap",
+      "language": "english",
+      "expected_tool": "swap",
+      "expected_args": {
+        "from_token": { "kind": "exact", "value": "USDC" },
+        "to_token": { "kind": "exact", "value": "DAI" },
+        "amount": { "kind": "exact", "value": "40" },
+        "amount_side": { "kind": "exact", "value": "input" }
+      },
+      "notes": null
+    },
+    {
+      "id": "swap-en-006",
+      "user_message": "Swap all my ETH to DAI",
+      "category": "truePositiveSwap",
+      "language": "english",
+      "expected_tool": "swap",
+      "expected_args": {
+        "from_token": { "kind": "exact", "value": "ETH" },
+        "to_token": { "kind": "exact", "value": "DAI" },
+        "amount": { "kind": "exact", "value": "all" },
+        "amount_side": { "kind": "exact", "value": "input" }
+      },
+      "notes": null
+    },
+    {
+      "id": "false-positive-001",
+      "user_message": "What is an Ethereum transfer?",
+      "category": "falsePositiveExpected",
+      "language": "english",
+      "expected_tool": null,
+      "expected_args": null,
+      "notes": null
+    },
+    {
+      "id": "false-positive-002",
+      "user_message": "Explain the difference between ETH and WETH",
+      "category": "falsePositiveExpected",
+      "language": "english",
+      "expected_tool": null,
+      "expected_args": null,
+      "notes": null
+    },
+    {
+      "id": "false-positive-003",
+      "user_message": "How much gas does a token swap usually cost?",
+      "category": "falsePositiveExpected",
+      "language": "english",
+      "expected_tool": null,
+      "expected_args": null,
+      "notes": null
+    },
+    {
+      "id": "false-positive-004",
+      "user_message": "Can you tell me what vitalik.eth means?",
+      "category": "falsePositiveExpected",
+      "language": "english",
+      "expected_tool": null,
+      "expected_args": null,
+      "notes": null
+    },
+    {
+      "id": "false-positive-005",
+      "user_message": "Show me an example of a swap command without running it",
+      "category": "falsePositiveExpected",
+      "language": "english",
+      "expected_tool": null,
+      "expected_args": null,
+      "notes": null
+    },
+    {
+      "id": "false-positive-006",
+      "user_message": "What address format does Ethereum use?",
+      "category": "falsePositiveExpected",
+      "language": "english",
+      "expected_tool": null,
+      "expected_args": null,
+      "notes": null
+    },
+    {
+      "id": "ambiguous-001",
+      "user_message": "Send ETH to bob.eth",
+      "category": "ambiguous",
+      "language": "english",
+      "expected_tool": null,
+      "expected_args": null,
+      "notes": null
+    },
+    {
+      "id": "ambiguous-002",
+      "user_message": "Swap USDC for ETH",
+      "category": "ambiguous",
+      "language": "english",
+      "expected_tool": null,
+      "expected_args": null,
+      "notes": null
+    },
+    {
+      "id": "ambiguous-003",
+      "user_message": "Send 0.3 ETH",
+      "category": "ambiguous",
+      "language": "english",
+      "expected_tool": null,
+      "expected_args": null,
+      "notes": null
+    },
+    {
+      "id": "transfer-it-001",
+      "user_message": "Invia 0.1 ETH a vitalik.eth",
+      "category": "multilingualTransfer",
+      "language": "italian",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "vitalik.eth" },
+        "amount": { "kind": "exact", "value": "0.1" },
+        "token": { "kind": "exact", "value": "ETH" }
+      },
+      "notes": null
+    },
+    {
+      "id": "transfer-it-002",
+      "user_message": "Manda 12 USDC a bob.eth",
+      "category": "multilingualTransfer",
+      "language": "italian",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "bob.eth" },
+        "amount": { "kind": "exact", "value": "12" },
+        "token": { "kind": "exact", "value": "USDC" }
+      },
+      "notes": null
+    },
+    {
+      "id": "transfer-es-001",
+      "user_message": "Envia 2 DAI a alice.eth",
+      "category": "multilingualTransfer",
+      "language": "spanish",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "alice.eth" },
+        "amount": { "kind": "exact", "value": "2" },
+        "token": { "kind": "exact", "value": "DAI" }
+      },
+      "notes": null
+    },
+    {
+      "id": "transfer-fr-001",
+      "user_message": "Envoie 0.05 ETH a 0x3333333333333333333333333333333333333333",
+      "category": "multilingualTransfer",
+      "language": "french",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "0x3333333333333333333333333333333333333333" },
+        "amount": { "kind": "exact", "value": "0.05" },
+        "token": { "kind": "exact", "value": "ETH" }
+      },
+      "notes": null
+    },
+    {
+      "id": "slash-001",
+      "user_message": "/transfer 0.1 ETH to vitalik.eth",
+      "category": "slashCommand",
+      "language": "english",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "vitalik.eth" },
+        "amount": { "kind": "exact", "value": "0.1" },
+        "token": { "kind": "exact", "value": "ETH" }
+      },
+      "notes": null
+    },
+    {
+      "id": "slash-002",
+      "user_message": "/transfer to=bob.eth amount=3 token=USDC",
+      "category": "slashCommand",
+      "language": "english",
+      "expected_tool": "transfer",
+      "expected_args": {
+        "to": { "kind": "exact", "value": "bob.eth" },
+        "amount": { "kind": "exact", "value": "3" },
+        "token": { "kind": "exact", "value": "USDC" }
+      },
+      "notes": null
+    },
+    {
+      "id": "slash-003",
+      "user_message": "/swap 50 USDC to ETH",
+      "category": "slashCommand",
+      "language": "english",
+      "expected_tool": "swap",
+      "expected_args": {
+        "from_token": { "kind": "exact", "value": "USDC" },
+        "to_token": { "kind": "exact", "value": "ETH" },
+        "amount": { "kind": "exact", "value": "50" },
+        "amount_side": { "kind": "exact", "value": "input" }
+      },
+      "notes": null
+    }
+  ]
+}

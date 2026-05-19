@@ -24,11 +24,6 @@ do {
     exit(1)
 }
 
-func runRecognition(options _: EvalOptions) async throws {
-    print("== wallet-eval recognition ==")
-    print("Implemented in Task 6.2 dispatch. See RecognitionRunner.swift (not yet created).")
-}
-
 func runAll(options: EvalOptions) async throws {
     try await runRecognition(options: options); print("")
     try await runRoundTrip(options: options);   print("")

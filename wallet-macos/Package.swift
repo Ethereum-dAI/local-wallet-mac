@@ -65,7 +65,8 @@ let package = Package(
                 "WalletToolLayer",
                 .product(name: "LocalLLM", package: "local-llm"),
             ],
-            path: "Sources/wallet-eval"
+            path: "Sources/wallet-eval",
+            resources: [.copy("Dataset")]
         ),
         .testTarget(
             name: "WalletToolLayerTests",

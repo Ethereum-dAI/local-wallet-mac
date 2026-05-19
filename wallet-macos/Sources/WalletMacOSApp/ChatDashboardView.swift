@@ -898,66 +898,149 @@ private struct AddressPill: View {
 private struct ChatBubble: View {
     let message: ChatMessage
     @State private var isThinkingExpanded = false
+    @State private var isHovered = false
+    @State private var justCopied = false
 
     var body: some View {
-        HStack {
+        HStack(alignment: .top, spacing: 0) {
             if message.role == .user {
                 Spacer(minLength: 90)
             }
-            VStack(alignment: .leading, spacing: 10) {
-                if let thinking = message.thinking, message.role == .assistant {
-                    DisclosureGroup(isExpanded: $isThinkingExpanded) {
-                        MarkdownMessageText(markdown: thinking, fontSize: 14, color: ChatPalette.secondaryText)
-                            .padding(.top, 6)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "brain")
-                                .font(.system(size: 12, weight: .bold))
-                            Text("Thinking")
-                                .font(.system(size: 13, weight: .bold))
-                        }
-                        .foregroundStyle(ChatPalette.secondaryText)
-                    }
-                    .tint(ChatPalette.secondaryText)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(ChatPalette.input)
-                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(ChatPalette.border, lineWidth: 0.8))
-                    )
-                }
-
-                if message.role == .assistant {
-                    MarkdownMessageText(markdown: message.text ?? "", fontSize: 16, color: ChatPalette.primaryText)
-                } else {
-                    Text(message.text ?? "")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(ChatPalette.primaryText)
-                        .textSelection(.enabled)
-                }
-
-                if let stats = message.stats, message.role == .assistant {
-                    Text(stats.formattedSummary)
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(ChatPalette.mutedText)
-                        .textSelection(.enabled)
+            ZStack(alignment: .topTrailing) {
+                bubbleContent
+                if isHovered {
+                    copyButton
+                        .padding(8)
+                        .transition(.opacity)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(message.role == .user ? ChatPalette.userBubble : ChatPalette.assistantBubble)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(ChatPalette.border, lineWidth: 1)
-                    )
-            )
+            .contextMenu {
+                Button {
+                    copyPlainText()
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                }
+                if message.stats != nil, message.role == .assistant {
+                    Button {
+                        copyWithStats()
+                    } label: {
+                        Label("Copy with stats", systemImage: "doc.on.doc.fill")
+                    }
+                }
+            }
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.12)) {
+                    isHovered = hovering
+                }
+            }
             if message.role == .assistant {
                 Spacer(minLength: 90)
             }
         }
+    }
+
+    private var bubbleContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let thinking = message.thinking, message.role == .assistant {
+                DisclosureGroup(isExpanded: $isThinkingExpanded) {
+                    MarkdownMessageText(markdown: thinking, fontSize: 14, color: ChatPalette.secondaryText)
+                        .padding(.top, 6)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "brain")
+                            .font(.system(size: 12, weight: .bold))
+                        Text("Thinking")
+                            .font(.system(size: 13, weight: .bold))
+                    }
+                    .foregroundStyle(ChatPalette.secondaryText)
+                }
+                .tint(ChatPalette.secondaryText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(ChatPalette.input)
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(ChatPalette.border, lineWidth: 0.8))
+                )
+            }
+
+            if message.role == .assistant {
+                MarkdownMessageText(markdown: message.text ?? "", fontSize: 16, color: ChatPalette.primaryText)
+            } else {
+                Text(message.text ?? "")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(ChatPalette.primaryText)
+                    .textSelection(.enabled)
+            }
+
+            if let stats = message.stats, message.role == .assistant {
+                Text(stats.formattedSummary)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(ChatPalette.mutedText)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(message.role == .user ? ChatPalette.userBubble : ChatPalette.assistantBubble)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(ChatPalette.border, lineWidth: 1)
+                )
+        )
+    }
+
+    private var copyButton: some View {
+        Button(action: copyPlainText) {
+            Image(systemName: justCopied ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 10, weight: .black))
+                .foregroundStyle(justCopied ? ChatPalette.success : ChatPalette.secondaryText)
+                .frame(width: 24, height: 24)
+                .background(
+                    Circle()
+                        .fill(ChatPalette.buttonCircle)
+                        .overlay(Circle().stroke(ChatPalette.border, lineWidth: 0.8))
+                )
+        }
+        .buttonStyle(.plain)
+        .help(justCopied ? "Copied" : "Copy message")
+    }
+
+    private func copyPlainText() {
+        ChatClipboard.copy(message.text ?? "")
+        flashCopied()
+    }
+
+    private func copyWithStats() {
+        var pieces: [String] = [message.text ?? ""]
+        if let stats = message.stats {
+            pieces.append("")
+            pieces.append("— \(stats.formattedSummary)")
+        }
+        ChatClipboard.copy(pieces.joined(separator: "\n"))
+        flashCopied()
+    }
+
+    private func flashCopied() {
+        withAnimation(.easeInOut(duration: 0.12)) {
+            justCopied = true
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
+            withAnimation(.easeInOut(duration: 0.2)) {
+                justCopied = false
+            }
+        }
+    }
+}
+
+private enum ChatClipboard {
+    static func copy(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 }
 

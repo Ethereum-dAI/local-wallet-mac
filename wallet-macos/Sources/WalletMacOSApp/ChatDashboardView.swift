@@ -103,7 +103,10 @@ private final class ChatDashboardModel: ObservableObject {
     @Published var thinkingEnabled = true
     @Published var isSidebarVisible = true
     @Published private(set) var accountIdentity: ChatAccountIdentity
+    @Published private(set) var streamingText: String = ""
+    @Published private(set) var streamingMessageID: UUID? = nil
 
+    private var generationTask: Task<Void, Never>? = nil
     private let inferenceService: EmbeddedLlamaInferenceService
     private let chatStore: ChatSQLiteStore
     private let preferencesStore: ChatPreferencesStore
@@ -279,42 +282,56 @@ private final class ChatDashboardModel: ObservableObject {
         }
 
         isGenerating = true
+        streamingText = ""
+        streamingMessageID = UUID()
         runtimeStatus = thinkingEnabled ? "Gemma is thinking" : "Gemma is generating"
 
-        Task {
+        let stream = inferenceService.stream(
+            prompt: prompt,
+            history: history,
+            thinkingEnabled: thinkingEnabled
+        )
+
+        generationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
-                let response = try await inferenceService.generate(
-                    prompt: prompt,
-                    history: history,
-                    thinkingEnabled: thinkingEnabled
-                )
-                let stats = ChatGenerationStats(
-                    duration: response.duration,
-                    promptTokens: response.promptTokens,
-                    generatedTokens: response.generatedTokens,
-                    contextSize: response.contextSize
-                )
-                if let firstToolCall = response.toolCalls.first,
-                   let tool = ToolIntent.Tool(rawValue: firstToolCall.name) {
-                    let intent = ToolIntent(
-                        tool: tool,
-                        args: firstToolCall.arguments,
-                        rawDSL: nil,
-                        source: .model
-                    )
-                    appendMessage(
-                        ChatMessage(kind: .toolIntent, role: .assistant, stats: stats, toolIntent: intent),
-                        to: conversationID
-                    )
-                } else if let firstToolCall = response.toolCalls.first {
-                    let warning = "[warn] unknown tool: \(firstToolCall.name)\n\n\(response.response)"
-                    appendMessage(.assistantText(warning, thinking: response.thinking, stats: stats), to: conversationID)
-                } else {
-                    appendMessage(.assistantText(response.response, thinking: response.thinking, stats: stats), to: conversationID)
+                for try await event in stream {
+                    try Task.checkCancellation()
+                    switch event {
+                    case .token(let token):
+                        self.streamingText += token
+                    case .completed(let response):
+                        let stats = ChatGenerationStats(
+                            duration: response.duration,
+                            promptTokens: response.promptTokens,
+                            generatedTokens: response.generatedTokens,
+                            contextSize: response.contextSize
+                        )
+                        if let firstToolCall = response.toolCalls.first,
+                           let tool = ToolIntent.Tool(rawValue: firstToolCall.name) {
+                            let intent = ToolIntent(
+                                tool: tool,
+                                args: firstToolCall.arguments,
+                                rawDSL: nil,
+                                source: .model
+                            )
+                            self.appendMessage(
+                                ChatMessage(kind: .toolIntent, role: .assistant, stats: stats, toolIntent: intent),
+                                to: conversationID
+                            )
+                        } else if let firstToolCall = response.toolCalls.first {
+                            let warning = "[warn] unknown tool: \(firstToolCall.name)\n\n\(response.response)"
+                            self.appendMessage(.assistantText(warning, thinking: response.thinking, stats: stats), to: conversationID)
+                        } else {
+                            self.appendMessage(.assistantText(response.response, thinking: response.thinking, stats: stats), to: conversationID)
+                        }
+                    }
                 }
-                runtimeStatus = inferenceService.runtimeStatus
+                self.runtimeStatus = self.inferenceService.runtimeStatus
+            } catch is CancellationError {
+                self.runtimeStatus = "Stopped"
             } catch {
-                appendMessage(
+                self.appendMessage(
                     ChatMessage(
                         kind: .assistantError,
                         role: .assistant,
@@ -322,10 +339,17 @@ private final class ChatDashboardModel: ObservableObject {
                     ),
                     to: conversationID
                 )
-                runtimeStatus = "Needs attention"
+                self.runtimeStatus = "Needs attention"
             }
-            isGenerating = false
+            self.streamingText = ""
+            self.streamingMessageID = nil
+            self.isGenerating = false
+            self.generationTask = nil
         }
+    }
+
+    func stop() {
+        generationTask?.cancel()
     }
 
     func regenerate(from assistantMessage: ChatMessage) {
@@ -768,9 +792,12 @@ struct LocalWalletChatDashboardView: View {
                                 EmptyView()
                             }
                         }
-                        if model.isGenerating {
-                            ThinkingBubble()
-                                .id("thinking")
+                        if let streamingID = model.streamingMessageID {
+                            StreamingAssistantBubble(
+                                text: model.streamingText,
+                                onStop: { model.stop() }
+                            )
+                            .id(streamingID)
                         }
                     }
                     .padding(.vertical, 28)
@@ -782,6 +809,18 @@ struct LocalWalletChatDashboardView: View {
                         withAnimation(.easeOut(duration: 0.22)) {
                             proxy.scrollTo(last.id, anchor: .bottom)
                         }
+                    }
+                }
+                .onChange(of: model.streamingMessageID) { _, newID in
+                    if let newID {
+                        withAnimation(.easeOut(duration: 0.22)) {
+                            proxy.scrollTo(newID, anchor: .bottom)
+                        }
+                    }
+                }
+                .onChange(of: model.streamingText) { _, _ in
+                    if let id = model.streamingMessageID {
+                        proxy.scrollTo(id, anchor: .bottom)
                     }
                 }
             }
@@ -1793,19 +1832,61 @@ private struct AssistantErrorBubble: View {
     }
 }
 
-private struct ThinkingBubble: View {
+private struct StreamingAssistantBubble: View {
+    let text: String
+    let onStop: () -> Void
+
     var body: some View {
-        HStack {
-            HStack(spacing: 10) {
-                ProgressView()
-                    .scaleEffect(0.75)
-                Text("Thinking with Gemma 4 E4B...")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(ChatPalette.secondaryText)
+        HStack(alignment: .top, spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
+                if text.isEmpty {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .scaleEffect(0.75)
+                        Text("Thinking with Gemma 4 E4B…")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(ChatPalette.secondaryText)
+                    }
+                } else {
+                    MarkdownMessageText(
+                        markdown: text,
+                        fontSize: 16,
+                        color: ChatPalette.primaryText
+                    )
+                }
+                HStack {
+                    Spacer()
+                    Button(action: onStop) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 10, weight: .black))
+                            Text("Stop")
+                                .font(.system(size: 11, weight: .heavy))
+                        }
+                        .foregroundStyle(ChatPalette.primaryText)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(ChatPalette.buttonCircle)
+                                .overlay(Capsule().stroke(ChatPalette.border, lineWidth: 0.8))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.escape, modifiers: [])
+                    .help("Stop generation")
+                }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(ChatPalette.assistantBubble))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(ChatPalette.assistantBubble)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(ChatPalette.border, lineWidth: 1)
+                    )
+            )
             Spacer(minLength: 90)
         }
     }

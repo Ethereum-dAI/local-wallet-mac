@@ -30,6 +30,11 @@ struct EmbeddedLlamaChatTurn: Equatable {
     let text: String
 }
 
+enum EmbeddedLlamaStreamEvent {
+    case token(String)
+    case completed(EmbeddedLlamaGenerationResult)
+}
+
 final class EmbeddedLlamaInferenceService: @unchecked Sendable {
     private let settingsStore: OnboardingSettingsStore
     private let downloadManager: LocalAIModelDownloadManager
@@ -53,70 +58,85 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
         runtime.configuredContextSize
     }
 
-    func generate(
+    func stream(
         prompt: String,
         history: [EmbeddedLlamaChatTurn],
         thinkingEnabled: Bool
-    ) async throws -> EmbeddedLlamaGenerationResult {
-        let modelURL = try installedModelURL()
-        if !runtime.isLoaded {
-            try runtime.loadModel(at: modelURL)
-        }
+    ) -> AsyncThrowingStream<EmbeddedLlamaStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task { [self] in
+                do {
+                    let modelURL = try installedModelURL()
+                    if !runtime.isLoaded {
+                        try runtime.loadModel(at: modelURL)
+                    }
 
-        var messages: [LocalLLM.ChatMessage] = [
-            LocalLLM.ChatMessage(
-                role: LocalLLM.ChatMessage.Role.system,
-                content: "\(personaSystemPrompt())\n\n\(ToolDefinitions.systemNudge)"
-            )
-        ]
-        messages.append(contentsOf: history.map { turn in
-            switch turn.role {
-            case .user:
-                return LocalLLM.ChatMessage(role: LocalLLM.ChatMessage.Role.user, content: turn.text)
-            case .assistant:
-                return LocalLLM.ChatMessage(role: LocalLLM.ChatMessage.Role.assistant, content: turn.text)
+                    var messages: [LocalLLM.ChatMessage] = [
+                        LocalLLM.ChatMessage(
+                            role: LocalLLM.ChatMessage.Role.system,
+                            content: "\(personaSystemPrompt())\n\n\(ToolDefinitions.systemNudge)"
+                        )
+                    ]
+                    messages.append(contentsOf: history.map { turn in
+                        switch turn.role {
+                        case .user:
+                            return LocalLLM.ChatMessage(role: LocalLLM.ChatMessage.Role.user, content: turn.text)
+                        case .assistant:
+                            return LocalLLM.ChatMessage(role: LocalLLM.ChatMessage.Role.assistant, content: turn.text)
+                        }
+                    })
+                    messages.append(LocalLLM.ChatMessage(role: LocalLLM.ChatMessage.Role.user, content: prompt))
+
+                    var options = SamplerOptions()
+                    options.maxTokens = 384
+                    options.temperature = thinkingEnabled ? 0.7 : 0.3
+                    options.enableThinking = thinkingEnabled
+
+                    var accumulated = ""
+                    var stats: GenerationStats?
+                    for try await event in runtime.chat(messages: messages, tools: ToolDefinitions.phase1, options: options) {
+                        try Task.checkCancellation()
+                        switch event {
+                        case .textToken(let token):
+                            accumulated += token
+                            continuation.yield(.token(token))
+                        case .done(let generationStats, stopReason: _):
+                            stats = generationStats
+                        }
+                    }
+
+                    let parsed: ParsedAssistantTurnFlat
+                    do {
+                        parsed = try BridgePEGExtractor(runtime: runtime).extract(from: accumulated)
+                    } catch {
+                        parsed = ParsedAssistantTurnFlat(content: accumulated, reasoning: nil, toolCalls: [])
+                    }
+                    let generationStats = stats ?? GenerationStats(
+                        promptTokens: 0,
+                        generatedTokens: 0,
+                        contextSize: runtime.configuredContextSize,
+                        duration: 0
+                    )
+
+                    let result = EmbeddedLlamaGenerationResult(
+                        response: (parsed.content ?? accumulated).trimmingCharacters(in: .whitespacesAndNewlines),
+                        thinking: parsed.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
+                        duration: generationStats.duration,
+                        promptTokens: generationStats.promptTokens,
+                        generatedTokens: generationStats.generatedTokens,
+                        contextSize: generationStats.contextSize,
+                        toolCalls: parsed.toolCalls
+                    )
+                    continuation.yield(.completed(result))
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
             }
-        })
-        messages.append(LocalLLM.ChatMessage(role: LocalLLM.ChatMessage.Role.user, content: prompt))
-
-        var options = SamplerOptions()
-        options.maxTokens = 384
-        options.temperature = thinkingEnabled ? 0.7 : 0.3
-        options.enableThinking = thinkingEnabled
-
-        var accumulated = ""
-        var stats: GenerationStats?
-        for try await event in runtime.chat(messages: messages, tools: ToolDefinitions.phase1, options: options) {
-            switch event {
-            case .textToken(let token):
-                accumulated += token
-            case .done(let generationStats, stopReason: _):
-                stats = generationStats
+            continuation.onTermination = { _ in
+                task.cancel()
             }
         }
-
-        let parsed: ParsedAssistantTurnFlat
-        do {
-            parsed = try BridgePEGExtractor(runtime: runtime).extract(from: accumulated)
-        } catch {
-            parsed = ParsedAssistantTurnFlat(content: accumulated, reasoning: nil, toolCalls: [])
-        }
-        let generationStats = stats ?? GenerationStats(
-            promptTokens: 0,
-            generatedTokens: 0,
-            contextSize: runtime.configuredContextSize,
-            duration: 0
-        )
-
-        return EmbeddedLlamaGenerationResult(
-            response: (parsed.content ?? accumulated).trimmingCharacters(in: .whitespacesAndNewlines),
-            thinking: parsed.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
-            duration: generationStats.duration,
-            promptTokens: generationStats.promptTokens,
-            generatedTokens: generationStats.generatedTokens,
-            contextSize: generationStats.contextSize,
-            toolCalls: parsed.toolCalls
-        )
     }
 
     private func installedModelURL() throws -> URL {

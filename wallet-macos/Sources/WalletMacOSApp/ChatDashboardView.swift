@@ -2,6 +2,10 @@ import AppKit
 import SwiftUI
 import WalletToolLayer
 
+extension Notification.Name {
+    static let chatComposerFocusRequested = Notification.Name("com.localwallet.chat.composer.focus")
+}
+
 struct ChatMessage: Identifiable, Equatable, Codable {
     enum Kind: String, Codable {
         case userText
@@ -446,6 +450,7 @@ struct LocalWalletChatDashboardView: View {
             }
         }
         .frame(minWidth: 980, minHeight: 720)
+        .background(keyboardShortcutLayer)
         .alert(
             "Delete chat?",
             isPresented: deletionAlertBinding,
@@ -458,6 +463,29 @@ struct LocalWalletChatDashboardView: View {
         } message: { conversation in
             Text("“\(conversation.title)” will be removed from this device. This cannot be undone.")
         }
+    }
+
+    @ViewBuilder
+    private var keyboardShortcutLayer: some View {
+        ZStack {
+            Button("New chat") {
+                model.createNewChat()
+            }
+            .keyboardShortcut("n", modifiers: .command)
+            Button("Focus composer") {
+                NotificationCenter.default.post(name: .chatComposerFocusRequested, object: nil)
+            }
+            .keyboardShortcut("k", modifiers: .command)
+            Button("Delete current chat") {
+                if let active = model.activeConversation {
+                    conversationPendingDeletion = active
+                }
+            }
+            .keyboardShortcut(.delete, modifiers: .command)
+        }
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
     }
 
     private var deletionAlertBinding: Binding<Bool> {
@@ -697,7 +725,7 @@ struct LocalWalletChatDashboardView: View {
                 .disabled(model.isGenerating)
                     .frame(minHeight: 78, maxHeight: 96)
                 if model.inputText.isEmpty {
-                    Text("Message Gemma...")
+                    Text("Message Gemma — describe what you want, or type / for tools")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(ChatPalette.mutedText)
                         .padding(.horizontal, 17)
@@ -715,7 +743,7 @@ struct LocalWalletChatDashboardView: View {
                         model.inputText.append("\n\(scaffold)")
                     }
                 })
-                Text("↩ to send")
+                Text("↩ to send · ⌘K to focus")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(ChatPalette.mutedText)
                 Button {
@@ -791,6 +819,7 @@ private struct PromptTextEditor: NSViewRepresentable {
         textView.autoresizingMask = [.width]
 
         scrollView.documentView = textView
+        context.coordinator.attach(textView: textView)
         return scrollView
     }
 
@@ -811,13 +840,34 @@ private struct PromptTextEditor: NSViewRepresentable {
         textView.font = .systemFont(ofSize: 16, weight: .medium)
     }
 
+    @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
         var onSubmit: () -> Void
+        private weak var textView: NSTextView?
 
         init(text: Binding<String>, onSubmit: @escaping () -> Void) {
             self.text = text
             self.onSubmit = onSubmit
+            super.init()
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleFocusRequest),
+                name: .chatComposerFocusRequested,
+                object: nil
+            )
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+
+        func attach(textView: NSTextView) {
+            self.textView = textView
+        }
+
+        @objc private func handleFocusRequest() {
+            textView?.window?.makeFirstResponder(textView)
         }
 
         func textDidChange(_ notification: Notification) {

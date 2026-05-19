@@ -72,18 +72,12 @@ private func loadedRuntime() throws -> LlamaRuntime? {
         print("[P1.A-probe]   toolCalls[\(i)]: name=\(call.name) args=\(call.arguments)")
     }
 
-    // We assert structure, not correctness. Either branch is acceptable
-    // for *this* test - the controller reads the printed summary to make
-    // the call on P1.A.
-    if parsed.toolCalls.isEmpty {
-        // P1.A still open: the model emitted text or the parser failed.
-        // The print log above is the diagnostic.
-        #expect(parsed.toolCalls.isEmpty)
-    } else {
-        // P1.A potentially closed: a tool call surfaced.
-        let first = parsed.toolCalls[0]
-        #expect(["transfer", "swap"].contains(first.name))
-    }
+    // With the Gemma4 fallback parser, we now expect at least one tool call.
+    #expect(parsed.toolCalls.count >= 1)
+    let first = parsed.toolCalls[0]
+    #expect(first.name == "transfer")
+    #expect(first.arguments["to"] == "vitalik.eth")
+    #expect(first.arguments["amount"] == "0.1")
 }
 
 } // end EndToEndToolCallSuite

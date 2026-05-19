@@ -49,15 +49,33 @@ public struct BridgePEGExtractor: ToolCallExtractor {
             throw ToolExtractionError.parseFailed(message: error.localizedDescription)
         }
 
-        let flat: [ParsedToolCall] = parsed.toolCalls.enumerated().map { idx, call in
+        let upstreamFlat: [ParsedToolCall] = parsed.toolCalls.enumerated().map { idx, call in
             let id = call.id.isEmpty ? "call_\(idx)" : call.id
             let args = Self.flattenArgs(call.function.arguments)
             return ParsedToolCall(id: id, name: call.function.name, arguments: args)
         }
+
+        // OPEN-POINTS P1.A: upstream common_chat_parse currently misses Gemma 4
+        // DSL tool calls on the pinned llama.cpp commit. When that happens we
+        // see no upstream tool calls + likely-empty content + a <|tool_call>
+        // marker in the raw input. Fall through to the Swift fallback parser.
+        if upstreamFlat.isEmpty,
+           assistantOutput.contains("<|tool_call>")
+        {
+            let fallback = Gemma4FallbackParser.parse(assistantOutput)
+            if !fallback.isEmpty {
+                return ParsedAssistantTurnFlat(
+                    content: nil,
+                    reasoning: parsed.reasoning,
+                    toolCalls: fallback
+                )
+            }
+        }
+
         return ParsedAssistantTurnFlat(
             content: parsed.content,
             reasoning: parsed.reasoning,
-            toolCalls: flat
+            toolCalls: upstreamFlat
         )
     }
 

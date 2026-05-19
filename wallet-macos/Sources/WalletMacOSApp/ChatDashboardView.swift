@@ -499,10 +499,18 @@ private final class ChatDashboardModel: ObservableObject {
     }
 }
 
+private struct ChatBottomDistanceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct LocalWalletChatDashboardView: View {
     @StateObject private var model = ChatDashboardModel()
     @State private var conversationPendingDeletion: ChatConversation?
     @State private var isToolsPopoverPresented = false
+    @State private var isAtBottomOfChat = true
 
     var body: some View {
         ZStack {
@@ -753,75 +761,126 @@ struct LocalWalletChatDashboardView: View {
             emptyState
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 16) {
-                        ForEach(model.messages) { message in
-                            switch message.kind {
-                            case .userText, .assistantText:
-                                ChatBubble(
-                                    message: message,
-                                    canRegenerate: message.role == .assistant && !model.isGenerating,
-                                    onRegenerate: { model.regenerate(from: message) }
-                                )
-                                .id(message.id)
-                            case .assistantError:
-                                AssistantErrorBubble(
-                                    message: message,
-                                    canRetry: !model.isGenerating,
-                                    onRetry: { model.regenerate(from: message) }
-                                )
-                                .id(message.id)
-                            case .toolIntent:
-                                if let intent = message.toolIntent {
-                                    HStack {
-                                        ToolIntentCardView(
-                                            intent: intent,
-                                            onConfirm: { model.confirmIntent(message) },
-                                            onReject: { model.rejectIntent(message) },
-                                            onEdit: { editedIntent in
-                                                model.editIntent(message, with: editedIntent)
-                                            }
-                                        )
-                                        Spacer(minLength: 0)
-                                    }
-                                    .padding(.horizontal)
+            GeometryReader { outer in
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 16) {
+                            ForEach(model.messages) { message in
+                                switch message.kind {
+                                case .userText, .assistantText:
+                                    ChatBubble(
+                                        message: message,
+                                        canRegenerate: message.role == .assistant && !model.isGenerating,
+                                        onRegenerate: { model.regenerate(from: message) }
+                                    )
                                     .id(message.id)
+                                case .assistantError:
+                                    AssistantErrorBubble(
+                                        message: message,
+                                        canRetry: !model.isGenerating,
+                                        onRetry: { model.regenerate(from: message) }
+                                    )
+                                    .id(message.id)
+                                case .toolIntent:
+                                    if let intent = message.toolIntent {
+                                        HStack {
+                                            ToolIntentCardView(
+                                                intent: intent,
+                                                onConfirm: { model.confirmIntent(message) },
+                                                onReject: { model.rejectIntent(message) },
+                                                onEdit: { editedIntent in
+                                                    model.editIntent(message, with: editedIntent)
+                                                }
+                                            )
+                                            Spacer(minLength: 0)
+                                        }
+                                        .padding(.horizontal)
+                                        .id(message.id)
+                                    }
+                                case .toolResponse:
+                                    EmptyView()
                                 }
-                            case .toolResponse:
-                                EmptyView()
                             }
+                            if let streamingID = model.streamingMessageID {
+                                StreamingAssistantBubble(
+                                    text: model.streamingText,
+                                    onStop: { model.stop() }
+                                )
+                                .id(streamingID)
+                            }
+                            Color.clear
+                                .frame(height: 1)
+                                .background(
+                                    GeometryReader { inner in
+                                        Color.clear.preference(
+                                            key: ChatBottomDistanceKey.self,
+                                            value: inner.frame(in: .global).minY - outer.frame(in: .global).maxY
+                                        )
+                                    }
+                                )
+                                .id("bottom-sentinel")
                         }
-                        if let streamingID = model.streamingMessageID {
-                            StreamingAssistantBubble(
-                                text: model.streamingText,
-                                onStop: { model.stop() }
-                            )
-                            .id(streamingID)
+                        .padding(.vertical, 28)
+                        .frame(maxWidth: 780)
+                        .frame(maxWidth: .infinity)
+                    }
+                    .onPreferenceChange(ChatBottomDistanceKey.self) { distance in
+                        let nearBottom = distance <= 80
+                        if nearBottom != isAtBottomOfChat {
+                            isAtBottomOfChat = nearBottom
                         }
                     }
-                    .padding(.vertical, 28)
-                    .frame(maxWidth: 780)
-                    .frame(maxWidth: .infinity)
-                }
-                .onChange(of: model.messages) { _, messages in
-                    if let last = messages.last {
+                    .onChange(of: model.messages) { _, messages in
+                        guard isAtBottomOfChat, let last = messages.last else { return }
                         withAnimation(.easeOut(duration: 0.22)) {
                             proxy.scrollTo(last.id, anchor: .bottom)
                         }
                     }
-                }
-                .onChange(of: model.streamingMessageID) { _, newID in
-                    if let newID {
+                    .onChange(of: model.streamingMessageID) { _, newID in
+                        guard let newID else { return }
+                        isAtBottomOfChat = true
                         withAnimation(.easeOut(duration: 0.22)) {
                             proxy.scrollTo(newID, anchor: .bottom)
                         }
                     }
-                }
-                .onChange(of: model.streamingText) { _, _ in
-                    if let id = model.streamingMessageID {
+                    .onChange(of: model.streamingText) { _, _ in
+                        guard isAtBottomOfChat, let id = model.streamingMessageID else { return }
                         proxy.scrollTo(id, anchor: .bottom)
                     }
+                    .overlay(alignment: .bottomTrailing) {
+                        if !isAtBottomOfChat {
+                            Button {
+                                let targetID: AnyHashable
+                                if let id = model.streamingMessageID {
+                                    targetID = id
+                                } else if let last = model.messages.last {
+                                    targetID = last.id
+                                } else {
+                                    return
+                                }
+                                withAnimation(.easeOut(duration: 0.22)) {
+                                    proxy.scrollTo(targetID, anchor: .bottom)
+                                }
+                                isAtBottomOfChat = true
+                            } label: {
+                                Image(systemName: "arrow.down")
+                                    .font(.system(size: 13, weight: .black))
+                                    .foregroundStyle(ChatPalette.primaryText)
+                                    .frame(width: 34, height: 34)
+                                    .background(
+                                        Circle()
+                                            .fill(ChatPalette.buttonCircle)
+                                            .overlay(Circle().stroke(ChatPalette.border, lineWidth: 1))
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .help("Jump to latest")
+                            .padding(.bottom, 12)
+                            .padding(.trailing, 12)
+                            .transition(.opacity)
+                        }
+                    }
+                    .animation(.easeInOut(duration: 0.15), value: isAtBottomOfChat)
                 }
             }
         }

@@ -59,6 +59,39 @@ private struct ChatAccountIdentity: Equatable {
     let bundlerAddress: String
 }
 
+private enum ChatSidebarBucket: String, CaseIterable {
+    case today = "Today"
+    case yesterday = "Yesterday"
+    case lastSevenDays = "Last 7 days"
+    case lastThirtyDays = "Last 30 days"
+    case older = "Older"
+
+    static func bucket(
+        for date: Date,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> ChatSidebarBucket {
+        if calendar.isDateInToday(date) {
+            return .today
+        }
+        if calendar.isDateInYesterday(date) {
+            return .yesterday
+        }
+        let days = calendar.dateComponents(
+            [.day],
+            from: calendar.startOfDay(for: date),
+            to: calendar.startOfDay(for: now)
+        ).day ?? 0
+        if days <= 7 {
+            return .lastSevenDays
+        }
+        if days <= 30 {
+            return .lastThirtyDays
+        }
+        return .older
+    }
+}
+
 @MainActor
 private final class ChatDashboardModel: ObservableObject {
     @Published var inputText = ""
@@ -531,20 +564,24 @@ struct LocalWalletChatDashboardView: View {
             .padding(.horizontal, 16)
 
             ScrollView {
-                LazyVStack(spacing: 8) {
-                    ForEach(model.conversations) { conversation in
-                        ChatConversationRow(
-                            conversation: conversation,
-                            isSelected: conversation.id == model.activeConversationID,
-                            onSelect: { model.selectConversation(conversation) },
-                            onDelete: { conversationPendingDeletion = conversation },
-                            onRename: { newTitle in
-                                model.renameConversation(conversation.id, to: newTitle)
-                            }
-                        )
+                LazyVStack(spacing: 8, pinnedViews: []) {
+                    ForEach(groupedConversations, id: \.0) { bucket, conversations in
+                        sidebarBucketHeader(bucket)
+                        ForEach(conversations) { conversation in
+                            ChatConversationRow(
+                                conversation: conversation,
+                                isSelected: conversation.id == model.activeConversationID,
+                                onSelect: { model.selectConversation(conversation) },
+                                onDelete: { conversationPendingDeletion = conversation },
+                                onRename: { newTitle in
+                                    model.renameConversation(conversation.id, to: newTitle)
+                                }
+                            )
+                        }
                     }
                 }
                 .padding(.horizontal, 10)
+                .padding(.bottom, 12)
             }
 
             Spacer(minLength: 0)
@@ -556,6 +593,34 @@ struct LocalWalletChatDashboardView: View {
                 .fill(ChatPalette.border.opacity(0.75))
                 .frame(width: 1)
         }
+    }
+
+    private var groupedConversations: [(ChatSidebarBucket, [ChatConversation])] {
+        var groups: [ChatSidebarBucket: [ChatConversation]] = [:]
+        for conversation in model.conversations {
+            let bucket = ChatSidebarBucket.bucket(for: conversation.updatedAt)
+            groups[bucket, default: []].append(conversation)
+        }
+        return ChatSidebarBucket.allCases.compactMap { bucket in
+            guard let conversations = groups[bucket], !conversations.isEmpty else {
+                return nil
+            }
+            return (bucket, conversations)
+        }
+    }
+
+    private func sidebarBucketHeader(_ bucket: ChatSidebarBucket) -> some View {
+        HStack {
+            Text(bucket.rawValue)
+                .font(.system(size: 10, weight: .heavy))
+                .foregroundStyle(ChatPalette.mutedText)
+                .textCase(.uppercase)
+                .tracking(0.6)
+            Spacer()
+        }
+        .padding(.horizontal, 6)
+        .padding(.top, 10)
+        .padding(.bottom, 2)
     }
 
     private var toolbar: some View {

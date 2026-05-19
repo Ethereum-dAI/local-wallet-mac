@@ -60,6 +60,11 @@ private struct ChatAccountIdentity: Equatable {
     let bundlerAddress: String
 }
 
+enum ContextUsageLevel {
+    case warning
+    case critical
+}
+
 private enum ChatSidebarBucket: String, CaseIterable {
     case today = "Today"
     case yesterday = "Yesterday"
@@ -169,6 +174,27 @@ private final class ChatDashboardModel: ObservableObject {
     func insertSlashCommand(_ command: SlashCommand) {
         inputText = command.scaffold
         NotificationCenter.default.post(name: .chatComposerFocusRequested, object: nil)
+    }
+
+    var contextUsageLevel: ContextUsageLevel? {
+        guard let stats = messages.last(where: { $0.stats != nil })?.stats else {
+            return nil
+        }
+        let ratio = Double(stats.usedContextTokens) / Double(max(stats.contextSize, 1))
+        if ratio >= 0.92 {
+            return .critical
+        }
+        if ratio >= 0.75 {
+            return .warning
+        }
+        return nil
+    }
+
+    var contextUsageSnapshot: (used: Int, total: Int)? {
+        guard let stats = messages.last(where: { $0.stats != nil })?.stats else {
+            return nil
+        }
+        return (stats.usedContextTokens, stats.contextSize)
     }
 
     var contextStatsText: String {
@@ -555,10 +581,22 @@ struct LocalWalletChatDashboardView: View {
                 VStack(spacing: 0) {
                     toolbar
                     accountHeader
+                    if let level = model.contextUsageLevel,
+                       let snapshot = model.contextUsageSnapshot {
+                        ContextUsageBanner(
+                            level: level,
+                            used: snapshot.used,
+                            total: snapshot.total,
+                            onNewChat: { model.createNewChat() }
+                        )
+                        .padding(.bottom, 8)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                     chatBody
                     footerControls
                     composer
                 }
+                .animation(.easeInOut(duration: 0.18), value: model.contextUsageLevel)
                 .padding(.horizontal, 22)
                 .padding(.vertical, 16)
             }
@@ -2078,6 +2116,85 @@ private struct StreamingAssistantBubble: View {
             )
             Spacer(minLength: 90)
         }
+    }
+}
+
+private struct ContextUsageBanner: View {
+    let level: ContextUsageLevel
+    let used: Int
+    let total: Int
+    let onNewChat: () -> Void
+
+    private var tint: Color {
+        switch level {
+        case .warning: return Color.yellow
+        case .critical: return Color.orange
+        }
+    }
+
+    private var icon: String {
+        switch level {
+        case .warning: return "exclamationmark.triangle.fill"
+        case .critical: return "exclamationmark.octagon.fill"
+        }
+    }
+
+    private var title: String {
+        switch level {
+        case .warning: return "Context running low"
+        case .critical: return "Context almost full"
+        }
+    }
+
+    private var detail: String {
+        let percent = Int((Double(used) / Double(max(total, 1))) * 100)
+        switch level {
+        case .warning:
+            return "Used \(used) of \(total) tokens (\(percent)%). A fresh chat keeps responses crisp."
+        case .critical:
+            return "Used \(used) of \(total) tokens (\(percent)%). Gemma may start truncating earlier turns — start a new chat."
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .black))
+                .foregroundStyle(tint)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .heavy))
+                    .foregroundStyle(ChatPalette.primaryText)
+                Text(detail)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(ChatPalette.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button(action: onNewChat) {
+                HStack(spacing: 5) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .black))
+                    Text("New chat")
+                        .font(.system(size: 12, weight: .heavy))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Capsule().fill(tint.opacity(0.85)))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(tint.opacity(0.10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(tint.opacity(0.45), lineWidth: 1)
+                )
+        )
     }
 }
 

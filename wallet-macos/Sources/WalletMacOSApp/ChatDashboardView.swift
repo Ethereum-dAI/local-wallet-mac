@@ -745,35 +745,9 @@ struct LocalWalletChatDashboardView: View {
                         .background(Circle().fill(ChatPalette.buttonCircle.opacity(model.isSidebarVisible ? 0.75 : 1)))
                 }
                 .buttonStyle(.plain)
-
-                Button {
-                    isToolsPopoverPresented.toggle()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "slash.circle.fill")
-                            .font(.system(size: 12, weight: .black))
-                            .foregroundStyle(ChatPalette.accent)
-                        Text("Tools")
-                            .font(.system(size: 12, weight: .heavy))
-                            .foregroundStyle(ChatPalette.primaryText)
-                    }
-                    .padding(.horizontal, 12)
-                    .frame(height: 34)
-                    .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1)))
-                }
-                .buttonStyle(.plain)
-                .popover(isPresented: $isToolsPopoverPresented, arrowEdge: .bottom) {
-                    SlashCommandPalette { command in
-                        model.insertSlashCommand(command)
-                        isToolsPopoverPresented = false
-                    }
-                    .frame(width: 420)
-                }
-                .help("Browse slash commands")
-
                 Spacer()
             }
-            .frame(width: 220)
+            .frame(width: 180)
 
             Spacer()
 
@@ -802,7 +776,7 @@ struct LocalWalletChatDashboardView: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .frame(width: 220, alignment: .trailing)
+            .frame(width: 180, alignment: .trailing)
         }
         .frame(height: 42)
     }
@@ -1034,6 +1008,30 @@ struct LocalWalletChatDashboardView: View {
             }
             .buttonStyle(.plain)
             StatusPill(icon: "slider.horizontal.3", text: model.runtimeStatus)
+            Button {
+                isToolsPopoverPresented.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "slash.circle.fill")
+                        .font(.system(size: 11, weight: .black))
+                        .foregroundStyle(ChatPalette.accent)
+                    Text("Tools")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                }
+                .padding(.horizontal, 11)
+                .frame(height: 32)
+                .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 0.8)))
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $isToolsPopoverPresented, arrowEdge: .top) {
+                SlashCommandPalette { command in
+                    model.insertSlashCommand(command)
+                    isToolsPopoverPresented = false
+                }
+                .frame(width: 420)
+            }
+            .help("Browse slash commands")
             Spacer()
             Text(model.contextStatsText)
                 .font(.system(size: 12, weight: .bold))
@@ -1253,6 +1251,7 @@ private struct ChatConversationRow: View {
                                     .stroke(isSelected ? ChatPalette.accent.opacity(0.65) : ChatPalette.border.opacity(0.45), lineWidth: 1)
                             )
                     )
+                    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(.plain)
             .simultaneousGesture(
@@ -2062,6 +2061,11 @@ private struct AssistantErrorBubble: View {
 private struct StreamingAssistantBubble: View {
     let text: String
     let onStop: () -> Void
+    @State private var isThinkingExpanded = false
+
+    private var split: GemmaStreamingSplit {
+        GemmaChannelFallback.streamingSplit(of: text)
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -2075,11 +2079,45 @@ private struct StreamingAssistantBubble: View {
                             .foregroundStyle(ChatPalette.secondaryText)
                     }
                 } else {
-                    MarkdownMessageText(
-                        markdown: text,
-                        fontSize: 16,
-                        color: ChatPalette.primaryText
-                    )
+                    let parts = split
+                    if let reasoning = parts.reasoning {
+                        DisclosureGroup(isExpanded: $isThinkingExpanded) {
+                            MarkdownMessageText(
+                                markdown: reasoning,
+                                fontSize: 14,
+                                color: ChatPalette.secondaryText
+                            )
+                            .padding(.top, 6)
+                        } label: {
+                            HStack(spacing: 8) {
+                                if parts.content.isEmpty {
+                                    ProgressView()
+                                        .scaleEffect(0.6)
+                                } else {
+                                    Image(systemName: "brain")
+                                        .font(.system(size: 12, weight: .bold))
+                                }
+                                Text(parts.content.isEmpty ? "Thinking…" : "Thinking")
+                                    .font(.system(size: 13, weight: .bold))
+                            }
+                            .foregroundStyle(ChatPalette.secondaryText)
+                        }
+                        .tint(ChatPalette.secondaryText)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(ChatPalette.input)
+                                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(ChatPalette.border, lineWidth: 0.8))
+                        )
+                    }
+                    if !parts.content.isEmpty {
+                        MarkdownMessageText(
+                            markdown: parts.content,
+                            fontSize: 16,
+                            color: ChatPalette.primaryText
+                        )
+                    }
                 }
                 HStack {
                     Spacer()

@@ -35,6 +35,82 @@ enum EmbeddedLlamaStreamEvent {
     case completed(EmbeddedLlamaGenerationResult)
 }
 
+/// Some Gemma 4 builds leak the reasoning channel into the content stream as
+/// literal `<|channel>thought ... <channel|>` markers that the upstream
+/// common_chat_parse does not currently split. Re-extract them here so the
+/// dashboard can still render reasoning in its own disclosure.
+struct GemmaStreamingSplit {
+    let reasoning: String?
+    let content: String
+}
+
+enum GemmaChannelFallback {
+    static let openMarker = "<|channel>"
+    static let closeMarker = "<channel|>"
+
+    static func streamingSplit(of text: String) -> GemmaStreamingSplit {
+        guard let openRange = text.range(of: openMarker) else {
+            return GemmaStreamingSplit(reasoning: nil, content: text)
+        }
+        let prefix = String(text[..<openRange.lowerBound])
+        if let closeRange = text.range(of: closeMarker, range: openRange.upperBound..<text.endIndex) {
+            let inner = String(text[openRange.upperBound..<closeRange.lowerBound])
+            let reasoning = stripChannelName(inner)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let suffix = String(text[closeRange.upperBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedPrefix = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+            let body: String
+            if trimmedPrefix.isEmpty {
+                body = suffix
+            } else if suffix.isEmpty {
+                body = trimmedPrefix
+            } else {
+                body = trimmedPrefix + "\n\n" + suffix
+            }
+            return GemmaStreamingSplit(
+                reasoning: reasoning.isEmpty ? nil : reasoning,
+                content: body
+            )
+        }
+        let inner = String(text[openRange.upperBound...])
+        let reasoning = stripChannelName(inner)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return GemmaStreamingSplit(
+            reasoning: reasoning.isEmpty ? nil : reasoning,
+            content: prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    static func normalise(_ parsed: ParsedAssistantTurnFlat) -> ParsedAssistantTurnFlat {
+        let trimmedReasoning = parsed.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard trimmedReasoning.isEmpty,
+              let content = parsed.content,
+              content.contains(openMarker)
+        else {
+            return parsed
+        }
+        let split = streamingSplit(of: content)
+        return ParsedAssistantTurnFlat(
+            content: split.content.isEmpty ? nil : split.content,
+            reasoning: split.reasoning,
+            toolCalls: parsed.toolCalls
+        )
+    }
+
+    private static func stripChannelName(_ text: String) -> String {
+        var iterator = text.unicodeScalars.makeIterator()
+        var nameLength = 0
+        while let scalar = iterator.next(), CharacterSet.letters.contains(scalar) {
+            nameLength += 1
+        }
+        if nameLength == 0 {
+            return text
+        }
+        return String(text.dropFirst(nameLength))
+    }
+}
+
 final class EmbeddedLlamaInferenceService: @unchecked Sendable {
     private let settingsStore: OnboardingSettingsStore
     private let downloadManager: LocalAIModelDownloadManager
@@ -105,12 +181,13 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
                         }
                     }
 
-                    let parsed: ParsedAssistantTurnFlat
+                    let extracted: ParsedAssistantTurnFlat
                     do {
-                        parsed = try BridgePEGExtractor(runtime: runtime).extract(from: accumulated)
+                        extracted = try BridgePEGExtractor(runtime: runtime).extract(from: accumulated)
                     } catch {
-                        parsed = ParsedAssistantTurnFlat(content: accumulated, reasoning: nil, toolCalls: [])
+                        extracted = ParsedAssistantTurnFlat(content: accumulated, reasoning: nil, toolCalls: [])
                     }
+                    let parsed = GemmaChannelFallback.normalise(extracted)
                     let generationStats = stats ?? GenerationStats(
                         promptTokens: 0,
                         generatedTokens: 0,

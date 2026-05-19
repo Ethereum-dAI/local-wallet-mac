@@ -35,10 +35,36 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
     private let downloadManager: LocalAIModelDownloadManager
     private let runtime: LlamaRuntime
 
+    /// Set `WALLET_LLM_GPU_LAYERS=0` (or any value <0) in the environment to
+    /// force CPU-only inference. Default behaviour follows upstream defaults
+    /// (Metal-accelerated, all layers on GPU). The signed wallet app currently
+    /// hits a `llama_decode` SIGABRT inside ggml-metal on prefill that the
+    /// command-line eval target does NOT reproduce — same model, same prompt,
+    /// same runtime config — so this provides a fallback while we diagnose
+    /// (OPEN-POINTS P5.A).
+    private static func defaultRuntime() -> LlamaRuntime {
+        let env = ProcessInfo.processInfo.environment["WALLET_LLM_GPU_LAYERS"]
+        let gpuLayers: Int32
+        if let env, let parsed = Int32(env) {
+            gpuLayers = parsed
+        } else {
+            // App default: CPU-only until P5.A is resolved. The eval CLI builds
+            // its own LlamaRuntime() directly (Metal), unaffected by this default.
+            gpuLayers = 0
+        }
+        return LlamaRuntime(configuration: LocalLLMConfiguration(
+            contextSize: 4096,
+            gpuLayers: gpuLayers,
+            threads: 0,
+            maxTokens: 512,
+            temperature: 0.7
+        ))
+    }
+
     init(
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
         downloadManager: LocalAIModelDownloadManager = LocalAIModelDownloadManager(),
-        runtime: LlamaRuntime = LlamaRuntime()
+        runtime: LlamaRuntime = EmbeddedLlamaInferenceService.defaultRuntime()
     ) {
         self.settingsStore = settingsStore
         self.downloadManager = downloadManager

@@ -176,6 +176,20 @@ private final class ChatDashboardModel: ObservableObject {
         inputText = ""
         appendMessage(.userText(prompt), to: conversationID)
         updateTitleIfNeeded(for: conversationID, prompt: prompt)
+
+        if prompt.hasPrefix("/") {
+            do {
+                let intent = try SlashCommandParser().parse(prompt)
+                appendMessage(
+                    ChatMessage(kind: .toolIntent, role: .assistant, toolIntent: intent),
+                    to: conversationID
+                )
+                return
+            } catch {
+                // Let the model clarify malformed slash commands in the normal chat flow.
+            }
+        }
+
         isGenerating = true
         runtimeStatus = thinkingEnabled ? "Gemma is thinking" : "Gemma is generating"
 
@@ -219,6 +233,18 @@ private final class ChatDashboardModel: ObservableObject {
         }
     }
 
+    func confirmIntent(_ message: ChatMessage) {
+        updateIntent(message, disposition: .confirmed, args: nil)
+    }
+
+    func rejectIntent(_ message: ChatMessage) {
+        updateIntent(message, disposition: .rejected, args: nil)
+    }
+
+    func editIntent(_ message: ChatMessage, with args: [String: String]) {
+        updateIntent(message, disposition: .edited, args: args)
+    }
+
     private func appendMessage(_ message: ChatMessage, to conversationID: UUID) {
         guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
             return
@@ -229,6 +255,68 @@ private final class ChatDashboardModel: ObservableObject {
         try? chatStore.appendMessage(message, to: conversationID)
         try? chatStore.updateConversationMetadata(updatedConversation)
         sortConversationsKeepingActive()
+    }
+
+    private func updateIntent(_ message: ChatMessage, disposition: ToolIntent.Disposition, args: [String: String]?) {
+        guard
+            let conversationIndex = conversations.firstIndex(where: { $0.id == activeConversationID }),
+            let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == message.id }),
+            var intent = conversations[conversationIndex].messages[messageIndex].toolIntent
+        else {
+            return
+        }
+
+        if let args {
+            intent.args = args
+        }
+        intent.disposition = disposition
+        intent.updatedAt = Date()
+
+        conversations[conversationIndex].messages[messageIndex].toolIntent = intent
+        conversations[conversationIndex].updatedAt = Date()
+        let updatedConversation = conversations[conversationIndex]
+        try? chatStore.updateMessage(conversations[conversationIndex].messages[messageIndex], in: updatedConversation.id)
+        try? chatStore.updateConversationMetadata(updatedConversation)
+
+        let responseText: String
+        switch disposition {
+        case .confirmed:
+            responseText = #"{"status":"acknowledged","intent_id":"\#(intent.id.uuidString)"}"#
+        case .edited:
+            responseText = editedIntentResponseText(for: intent)
+        case .rejected:
+            responseText = #"{"status":"rejected","intent_id":"\#(intent.id.uuidString)"}"#
+        case .pending:
+            return
+        }
+
+        appendMessage(
+            ChatMessage(
+                kind: .toolResponse,
+                role: .tool,
+                text: responseText,
+                toolCallId: intent.id.uuidString
+            ),
+            to: updatedConversation.id
+        )
+    }
+
+    private func editedIntentResponseText(for intent: ToolIntent) -> String {
+        let payload: [String: Any] = [
+            "status": "acknowledged",
+            "intent_id": intent.id.uuidString,
+            "edited": "true",
+            "args": intent.args
+        ]
+
+        guard
+            let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+            let json = String(data: data, encoding: .utf8)
+        else {
+            return #"{"status":"acknowledged","intent_id":"\#(intent.id.uuidString)","edited":"true","args":{}}"#
+        }
+
+        return json
     }
 
     private func updateTitleIfNeeded(for conversationID: UUID, prompt: String) {
@@ -399,8 +487,29 @@ struct LocalWalletChatDashboardView: View {
                 ScrollView {
                     LazyVStack(spacing: 16) {
                         ForEach(model.messages) { message in
-                            ChatBubble(message: message)
-                                .id(message.id)
+                            switch message.kind {
+                            case .userText, .assistantText:
+                                ChatBubble(message: message)
+                                    .id(message.id)
+                            case .toolIntent:
+                                if let intent = message.toolIntent {
+                                    HStack {
+                                        ToolIntentCardView(
+                                            intent: intent,
+                                            onConfirm: { model.confirmIntent(message) },
+                                            onReject: { model.rejectIntent(message) },
+                                            onEdit: { editedIntent in
+                                                model.editIntent(message, with: editedIntent)
+                                            }
+                                        )
+                                        Spacer(minLength: 0)
+                                    }
+                                    .padding(.horizontal)
+                                    .id(message.id)
+                                }
+                            case .toolResponse:
+                                EmptyView()
+                            }
                         }
                         if model.isGenerating {
                             ThinkingBubble()
@@ -486,6 +595,13 @@ struct LocalWalletChatDashboardView: View {
 
             HStack(spacing: 10) {
                 Spacer()
+                SlashMenuButton(onInsert: { scaffold in
+                    if model.inputText.isEmpty {
+                        model.inputText = scaffold
+                    } else {
+                        model.inputText.append("\n\(scaffold)")
+                    }
+                })
                 Text("↩ to send")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(ChatPalette.mutedText)

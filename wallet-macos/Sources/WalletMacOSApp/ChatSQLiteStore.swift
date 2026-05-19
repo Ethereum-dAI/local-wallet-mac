@@ -115,6 +115,56 @@ final class ChatSQLiteStore {
         try insertMessage(message, conversationID: conversationID, createdAt: Date(), in: database)
     }
 
+    func updateMessage(_ message: ChatMessage, in conversationID: UUID) throws {
+        let database = try openDatabase()
+        defer {
+            sqlite3_close(database)
+        }
+
+        try createSchema(in: database)
+        let statement = try prepare("""
+        UPDATE chat_messages
+        SET role = ?, kind = ?, text = ?, thinking = ?, duration = ?, prompt_tokens = ?, generated_tokens = ?, context_size = ?, tool_intent_json = ?, tool_call_id = ?
+        WHERE id = ? AND conversation_id = ?
+        """, in: database)
+        defer {
+            sqlite3_finalize(statement)
+        }
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let toolIntentJSON: String?
+        if let toolIntent = message.toolIntent {
+            let data = try encoder.encode(toolIntent)
+            toolIntentJSON = String(data: data, encoding: .utf8)
+        } else {
+            toolIntentJSON = nil
+        }
+
+        try bind(message.role.rawValue, at: 1, in: statement)
+        try bind(message.kind.rawValue, at: 2, in: statement)
+        try bindNullable(message.text, at: 3, in: statement)
+        try bindOptional(message.thinking, at: 4, in: statement)
+
+        if let stats = message.stats {
+            sqlite3_bind_double(statement, 5, stats.duration)
+            sqlite3_bind_int64(statement, 6, sqlite3_int64(stats.promptTokens))
+            sqlite3_bind_int64(statement, 7, sqlite3_int64(stats.generatedTokens))
+            sqlite3_bind_int64(statement, 8, sqlite3_int64(stats.contextSize))
+        } else {
+            sqlite3_bind_null(statement, 5)
+            sqlite3_bind_null(statement, 6)
+            sqlite3_bind_null(statement, 7)
+            sqlite3_bind_null(statement, 8)
+        }
+
+        try bindNullable(toolIntentJSON, at: 9, in: statement)
+        try bindNullable(message.toolCallId, at: 10, in: statement)
+        try bind(message.id.uuidString, at: 11, in: statement)
+        try bind(conversationID.uuidString, at: 12, in: statement)
+        try stepDone(statement, database: database)
+    }
+
     func replaceConversations(_ conversations: [ChatConversation]) throws {
         let database = try openDatabase()
         defer {

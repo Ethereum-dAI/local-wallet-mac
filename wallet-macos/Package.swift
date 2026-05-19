@@ -14,12 +14,14 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../swift-bridge"),
+        .package(path: "../local-llm"),
     ],
     targets: [
         .executableTarget(
             name: "WalletMacOSApp",
             dependencies: [
                 .product(name: "WalletSignature", package: "swift-bridge"),
+                .product(name: "LocalLLM", package: "local-llm"),
                 "SpawnHelper",
             ],
             path: "Sources/WalletMacOSApp",
@@ -27,6 +29,7 @@ let package = Package(
                 .copy("Resources"),
             ],
             linkerSettings: [
+                .linkedLibrary("sqlite3"),
                 .unsafeFlags(["-L", bridgeLibraryPath]),
             ]
         ),

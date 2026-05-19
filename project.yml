@@ -8,6 +8,8 @@ packages:
     path: swift-bridge
   WalletMacOS:
     path: wallet-macos
+  LocalLLM:
+    path: local-llm
 targets:
   LocalWalletApp:
     type: application
@@ -39,9 +41,12 @@ targets:
         EXCLUDED_ARCHS: x86_64
         MARKETING_VERSION: 0.2.0
         CURRENT_PROJECT_VERSION: 2
+        OTHER_LDFLAGS: "$(inherited) -lsqlite3"
     dependencies:
       - package: WalletBridge
         product: WalletSignature
+      - package: LocalLLM
+        product: LocalLLM
       - package: WalletMacOS
         product: SpawnHelper
 schemes:

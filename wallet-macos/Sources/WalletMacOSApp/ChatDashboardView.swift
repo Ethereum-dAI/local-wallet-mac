@@ -855,21 +855,22 @@ struct LocalWalletChatDashboardView: View {
                                 )
                                 .id(streamingID)
                             }
-                            Color.clear
-                                .frame(height: 1)
-                                .background(
-                                    GeometryReader { inner in
-                                        Color.clear.preference(
-                                            key: ChatBottomDistanceKey.self,
-                                            value: inner.frame(in: .global).minY - outer.frame(in: .global).maxY
-                                        )
-                                    }
-                                )
-                                .id("bottom-sentinel")
                         }
                         .padding(.vertical, 28)
                         .frame(maxWidth: 780)
                         .frame(maxWidth: .infinity)
+
+                        Color.clear
+                            .frame(height: 1)
+                            .background(
+                                GeometryReader { inner in
+                                    Color.clear.preference(
+                                        key: ChatBottomDistanceKey.self,
+                                        value: inner.frame(in: .global).minY - outer.frame(in: .global).maxY
+                                    )
+                                }
+                            )
+                            .id("bottom-sentinel")
                     }
                     .onPreferenceChange(ChatBottomDistanceKey.self) { distance in
                         let nearBottom = distance <= 80

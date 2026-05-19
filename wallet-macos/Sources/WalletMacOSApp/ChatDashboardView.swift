@@ -192,7 +192,24 @@ private final class ChatDashboardModel: ObservableObject {
                     generatedTokens: response.generatedTokens,
                     contextSize: response.contextSize
                 )
-                appendMessage(.assistantText(response.response, thinking: response.thinking, stats: stats), to: conversationID)
+                if let firstToolCall = response.toolCalls.first,
+                   let tool = ToolIntent.Tool(rawValue: firstToolCall.name) {
+                    let intent = ToolIntent(
+                        tool: tool,
+                        args: firstToolCall.arguments,
+                        rawDSL: nil,
+                        source: .model
+                    )
+                    appendMessage(
+                        ChatMessage(kind: .toolIntent, role: .assistant, stats: stats, toolIntent: intent),
+                        to: conversationID
+                    )
+                } else if let firstToolCall = response.toolCalls.first {
+                    let warning = "[warn] unknown tool: \(firstToolCall.name)\n\n\(response.response)"
+                    appendMessage(.assistantText(warning, thinking: response.thinking, stats: stats), to: conversationID)
+                } else {
+                    appendMessage(.assistantText(response.response, thinking: response.thinking, stats: stats), to: conversationID)
+                }
                 runtimeStatus = inferenceService.runtimeStatus
             } catch {
                 appendMessage(.assistantText(error.localizedDescription), to: conversationID)

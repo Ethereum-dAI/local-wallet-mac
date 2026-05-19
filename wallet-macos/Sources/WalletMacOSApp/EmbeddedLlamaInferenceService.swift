@@ -1,5 +1,6 @@
 import Foundation
 import LocalLLM
+import WalletToolLayer
 
 struct EmbeddedLlamaGenerationResult: Equatable {
     let response: String
@@ -8,6 +9,7 @@ struct EmbeddedLlamaGenerationResult: Equatable {
     let promptTokens: Int
     let generatedTokens: Int
     let contextSize: Int
+    let toolCalls: [ParsedToolCall]
 
     var usedContextTokens: Int {
         promptTokens + generatedTokens
@@ -61,18 +63,59 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
             try runtime.loadModel(at: modelURL)
         }
 
-        let requestPrompt = buildRequestPrompt(prompt, history: history, thinkingEnabled: thinkingEnabled)
-        let startedAt = Date()
-        let generation = try runtime.generateWithStats(requestPrompt)
-        let parsed = parseResponse(generation.text, thinkingEnabled: thinkingEnabled)
+        var messages: [LocalLLM.ChatMessage] = [
+            LocalLLM.ChatMessage(
+                role: LocalLLM.ChatMessage.Role.system,
+                content: "\(personaSystemPrompt())\n\n\(ToolDefinitions.systemNudge)"
+            )
+        ]
+        messages.append(contentsOf: history.map { turn in
+            switch turn.role {
+            case .user:
+                return LocalLLM.ChatMessage(role: LocalLLM.ChatMessage.Role.user, content: turn.text)
+            case .assistant:
+                return LocalLLM.ChatMessage(role: LocalLLM.ChatMessage.Role.assistant, content: turn.text)
+            }
+        })
+        messages.append(LocalLLM.ChatMessage(role: LocalLLM.ChatMessage.Role.user, content: prompt))
+
+        var options = SamplerOptions()
+        options.maxTokens = 384
+        options.temperature = thinkingEnabled ? 0.7 : 0.3
+        options.enableThinking = thinkingEnabled
+
+        var accumulated = ""
+        var stats: GenerationStats?
+        for try await event in runtime.chat(messages: messages, tools: ToolDefinitions.phase1, options: options) {
+            switch event {
+            case .textToken(let token):
+                accumulated += token
+            case .done(let generationStats, stopReason: _):
+                stats = generationStats
+            }
+        }
+
+        let parsed: ParsedAssistantTurnFlat
+        do {
+            parsed = try BridgePEGExtractor(runtime: runtime).extract(from: accumulated)
+        } catch {
+            parsed = ParsedAssistantTurnFlat(content: accumulated, reasoning: nil, toolCalls: [])
+        }
+        let generationStats = stats ?? GenerationStats(
+            promptTokens: 0,
+            generatedTokens: 0,
+            contextSize: runtime.configuredContextSize,
+            duration: 0
+        )
 
         return EmbeddedLlamaGenerationResult(
-            response: parsed.answer,
-            thinking: parsed.thinking,
-            duration: Date().timeIntervalSince(startedAt),
-            promptTokens: generation.promptTokens,
-            generatedTokens: generation.generatedTokens,
-            contextSize: generation.contextSize
+            response: (parsed.content ?? accumulated).trimmingCharacters(in: .whitespacesAndNewlines),
+            thinking: parsed.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
+            duration: generationStats.duration,
+            promptTokens: generationStats.promptTokens,
+            generatedTokens: generationStats.generatedTokens,
+            contextSize: generationStats.contextSize,
+            toolCalls: parsed.toolCalls
         )
     }
 
@@ -83,111 +126,13 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
         return try downloadManager.localFileURL(for: .recommended)
     }
 
-    private func buildRequestPrompt(
-        _ prompt: String,
-        history: [EmbeddedLlamaChatTurn],
-        thinkingEnabled: Bool
-    ) -> String {
-        let transcript = history.map { turn in
-            switch turn.role {
-            case .user:
-                return "User: \(turn.text)"
-            case .assistant:
-                return "Assistant: \(turn.text)"
-            }
-        }
-        .joined(separator: "\n\n")
-
-        if thinkingEnabled {
-            return """
-            You are the local AI inside a macOS Ethereum wallet app.
-            Reply in Markdown.
-            Only include <thinking>...</thinking> when the request needs multi-step reasoning, planning, or analysis.
-            For greetings, identity questions, short factual answers, or simple follow-ups, omit thinking entirely.
-            When you do include thinking, make it a brief user-facing reasoning summary.
-            Put the final user-visible answer inside <answer>...</answer>.
-            Keep the thinking summary concise and do not include hidden chain-of-thought.
-
-            Conversation so far:
-            \(transcript.isEmpty ? "No previous messages." : transcript)
-
-            Current user request:
-            \(prompt)
-            """
-        }
-
+    private func personaSystemPrompt() -> String {
         return """
         You are the local AI inside a macOS Ethereum wallet app.
         Reply in Markdown.
-        Do not include <thinking>, <think>, reasoning traces, or hidden chain-of-thought.
-        Answer directly.
-
-        Conversation so far:
-        \(transcript.isEmpty ? "No previous messages." : transcript)
-
-        Current user request:
-        \(prompt)
+        Use the available wallet tools when the user asks to perform an on-chain action.
+        If the request is not a wallet action, answer directly and concisely.
+        Do not expose hidden chain-of-thought.
         """
-    }
-
-    private func parseResponse(_ rawResponse: String, thinkingEnabled: Bool) -> (answer: String, thinking: String?) {
-        var answer = rawResponse.trimmingCharacters(in: .whitespacesAndNewlines)
-        let thinking = thinkingEnabled ? extractTaggedContent(from: answer, tags: ["thinking", "think"]) : nil
-
-        for tag in ["thinking", "think"] {
-            answer = removeTaggedContent(from: answer, tag: tag)
-        }
-
-        if let taggedAnswer = extractTaggedContent(from: answer, tags: ["answer"]) {
-            answer = taggedAnswer
-        } else {
-            answer = removeTagMarkers(from: answer, tags: ["answer"])
-        }
-
-        return (
-            answer.trimmingCharacters(in: .whitespacesAndNewlines),
-            thinking?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-        )
-    }
-
-    private func extractTaggedContent(from text: String, tags: [String]) -> String? {
-        for tag in tags {
-            let pattern = "<\\s*\(tag)\\s*>(.*?)<\\s*/\\s*\(tag)\\s*>"
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
-                continue
-            }
-            let range = NSRange(text.startIndex..<text.endIndex, in: text)
-            guard let match = regex.firstMatch(in: text, range: range), match.numberOfRanges > 1 else {
-                continue
-            }
-            guard let contentRange = Range(match.range(at: 1), in: text) else {
-                continue
-            }
-            return String(text[contentRange])
-        }
-        return nil
-    }
-
-    private func removeTaggedContent(from text: String, tag: String) -> String {
-        let pattern = "<\\s*\(tag)\\s*>.*?<\\s*/\\s*\(tag)\\s*>"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
-            return text
-        }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "")
-    }
-
-    private func removeTagMarkers(from text: String, tags: [String]) -> String {
-        tags.reduce(text) { partial, tag in
-            partial
-                .replacingOccurrences(of: "<\(tag)>", with: "", options: .caseInsensitive)
-                .replacingOccurrences(of: "</\(tag)>", with: "", options: .caseInsensitive)
-        }
-    }
-}
-
-private extension String {
-    var nilIfEmpty: String? {
-        isEmpty ? nil : self
     }
 }

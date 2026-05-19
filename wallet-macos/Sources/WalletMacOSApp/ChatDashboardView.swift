@@ -257,6 +257,47 @@ private final class ChatDashboardModel: ObservableObject {
         }
     }
 
+    func regenerate(from assistantMessage: ChatMessage) {
+        guard !isGenerating else {
+            return
+        }
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == activeConversationID }) else {
+            return
+        }
+        let messages = conversations[conversationIndex].messages
+        guard let assistantIndex = messages.firstIndex(where: { $0.id == assistantMessage.id }) else {
+            return
+        }
+
+        var userIndex: Int?
+        var lookbackIndex = assistantIndex - 1
+        while lookbackIndex >= 0 {
+            if messages[lookbackIndex].role == .user, messages[lookbackIndex].kind == .userText {
+                userIndex = lookbackIndex
+                break
+            }
+            lookbackIndex -= 1
+        }
+        guard let userIndex else {
+            return
+        }
+        let userPrompt = messages[userIndex].text ?? ""
+        guard !userPrompt.isEmpty else {
+            return
+        }
+
+        let conversationID = conversations[conversationIndex].id
+        let removed = Array(messages[userIndex...])
+        for message in removed {
+            try? chatStore.deleteMessage(message.id, from: conversationID)
+        }
+        conversations[conversationIndex].messages.removeSubrange(userIndex...)
+        conversations[conversationIndex].updatedAt = Date()
+        try? chatStore.updateConversationMetadata(conversations[conversationIndex])
+
+        send(userPrompt)
+    }
+
     func confirmIntent(_ message: ChatMessage) {
         updateIntent(message, disposition: .confirmed, args: nil)
     }
@@ -537,8 +578,12 @@ struct LocalWalletChatDashboardView: View {
                         ForEach(model.messages) { message in
                             switch message.kind {
                             case .userText, .assistantText:
-                                ChatBubble(message: message)
-                                    .id(message.id)
+                                ChatBubble(
+                                    message: message,
+                                    canRegenerate: message.role == .assistant && !model.isGenerating,
+                                    onRegenerate: { model.regenerate(from: message) }
+                                )
+                                .id(message.id)
                             case .toolIntent:
                                 if let intent = message.toolIntent {
                                     HStack {
@@ -897,6 +942,8 @@ private struct AddressPill: View {
 
 private struct ChatBubble: View {
     let message: ChatMessage
+    var canRegenerate: Bool = false
+    var onRegenerate: (() -> Void)? = nil
     @State private var isThinkingExpanded = false
     @State private var isHovered = false
     @State private var justCopied = false
@@ -909,7 +956,7 @@ private struct ChatBubble: View {
             ZStack(alignment: .topTrailing) {
                 bubbleContent
                 if isHovered {
-                    copyButton
+                    hoverActions
                         .padding(8)
                         .transition(.opacity)
                 }
@@ -927,6 +974,14 @@ private struct ChatBubble: View {
                         Label("Copy with stats", systemImage: "doc.on.doc.fill")
                     }
                 }
+                if canRegenerate, let onRegenerate {
+                    Divider()
+                    Button {
+                        onRegenerate()
+                    } label: {
+                        Label("Regenerate response", systemImage: "arrow.clockwise")
+                    }
+                }
             }
             .onHover { hovering in
                 withAnimation(.easeInOut(duration: 0.12)) {
@@ -937,6 +992,31 @@ private struct ChatBubble: View {
                 Spacer(minLength: 90)
             }
         }
+    }
+
+    private var hoverActions: some View {
+        HStack(spacing: 6) {
+            if canRegenerate, let onRegenerate {
+                bubbleActionButton(systemImage: "arrow.clockwise", help: "Regenerate response", action: onRegenerate)
+            }
+            copyButton
+        }
+    }
+
+    private func bubbleActionButton(systemImage: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 10, weight: .black))
+                .foregroundStyle(ChatPalette.secondaryText)
+                .frame(width: 24, height: 24)
+                .background(
+                    Circle()
+                        .fill(ChatPalette.buttonCircle)
+                        .overlay(Circle().stroke(ChatPalette.border, lineWidth: 0.8))
+                )
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     private var bubbleContent: some View {

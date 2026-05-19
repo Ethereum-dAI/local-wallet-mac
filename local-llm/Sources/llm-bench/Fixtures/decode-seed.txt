@@ -1,0 +1,1 @@
+Explain how Ethereum gas pricing works, step by step. Include the role of the base fee, the priority fee, and how block producers are incentivised. Be thorough.

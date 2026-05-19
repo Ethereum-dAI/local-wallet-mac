@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import SwiftUI
 
 // This file owns the macOS demo shell for the project. The UI is meant to be a
 // reference workbench for testing Secure Enclave, Kernel account derivation,
@@ -80,7 +81,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let model = AppModel()
         self.model = model
-        let viewController = WalletViewController(model: model)
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 740),
@@ -89,12 +89,35 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = "Local Wallet"
-        window.minSize = NSSize(width: 1020, height: 660)
+        window.minSize = NSSize(width: 1080, height: 700)
         window.center()
-        window.contentViewController = viewController
         window.makeKeyAndOrderFront(nil)
 
         self.window = window
+        if OnboardingSettingsStore().isCompleted {
+            showDashboard()
+        } else {
+            showOnboarding()
+        }
+    }
+
+    private func showOnboarding() {
+        window?.contentViewController = NSHostingController(
+            rootView: LocalWalletOnboardingView { [weak self] in
+                self?.showDashboard()
+            }
+        )
+    }
+
+    private func showDashboard() {
+        window?.contentViewController = NSHostingController(rootView: LocalWalletChatDashboardView())
+    }
+
+    private func showLegacyDashboard() {
+        guard let model else {
+            return
+        }
+        window?.contentViewController = WalletViewController(model: model)
         model.bootstrap()
     }
 

@@ -35,6 +35,24 @@ public struct WalletSignature {
         return BundlerSecret(secret: secret, address: address)
     }
 
+    public static func bundlerAddress(fromSecret secret: Data) throws -> Data {
+        guard secret.count == 32 else {
+            throw WalletError.invalidInput
+        }
+
+        var address = Data(count: 20)
+        let result = secret.withUnsafeBytes { secretPtr in
+            address.withUnsafeMutableBytes { addressPtr in
+                wallet_bundler_address_from_secret(
+                    secretPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    addressPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                )
+            }
+        }
+        try checkResult(result)
+        return address
+    }
+
     public static func computeUserOpHash(
         sender: Data,
         nonce: Data,

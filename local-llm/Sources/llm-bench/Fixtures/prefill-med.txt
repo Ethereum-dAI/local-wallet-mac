@@ -1,0 +1,23 @@
+An Ethereum transaction is a signed request for the network to change state. It names a sender through the signature, may name a recipient, carries a nonce, and can include ether value plus input data.
+
+The nonce orders transactions from one account and prevents replay within the same chain context. A simple payment sends value to an account, while a contract call sends input data to code already stored on chain.
+
+Deploying a contract is also a transaction. Instead of calling an existing address, it provides creation bytecode that returns runtime code. The new contract can later receive calls and maintain its own storage.
+
+Every transaction has gas settings because execution consumes shared resources. Gas units measure computation, memory growth, storage access, and other protocol costs. The sender must be able to cover the maximum possible fee.
+
+Since EIP-1559, most transactions specify a maximum fee per gas and a maximum priority fee per gas. The protocol sets a base fee for each block according to recent demand for block space.
+
+The base fee is burned rather than paid to the validator. If demand is high, the next base fee rises. If demand is low, it falls. This creates a predictable adjustment around the target block size.
+
+The priority fee is the tip paid to the block producer for including the transaction. A higher tip can improve ordering when many users compete, but the effective payment is still bounded by the user's maximum fee.
+
+The Ethereum Virtual Machine executes contract bytecode deterministically. Every full node can replay the same transaction against the same parent state and verify that the resulting state root matches the proposed block.
+
+Contracts can read their storage, write new values, call other contracts, emit logs, and revert. A revert cancels state changes from that call frame while still charging gas for work already performed.
+
+Validators propose and attest to blocks in the proof of stake protocol. They are selected by consensus rules, earn protocol rewards for correct participation, and face penalties for missed duties or slashable behavior.
+
+Finalisation gives stronger assurance that a block will remain in the canonical chain. Once enough validator stake votes across epochs, reverting finalised history would require severe consensus failure and large penalties.
+
+Applications combine these pieces into wallets, exchanges, games, governance systems, and settlement layers. The same transaction format, gas market, EVM rules, validator set, and finality process protect each state transition.

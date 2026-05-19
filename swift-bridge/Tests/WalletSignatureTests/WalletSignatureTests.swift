@@ -73,6 +73,13 @@ final class WalletSignatureTests: XCTestCase {
         XCTAssertNotEqual(generated.address, Data(repeating: 0, count: 20))
     }
 
+    func testBundlerAddressFromSecretMatchesPinnedVector() throws {
+        let secret = Data(hexString: "4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9cc81287f7cf15d28b1ef")!
+        let address = try WalletSignature.bundlerAddress(fromSecret: secret)
+
+        XCTAssertEqual(address.hexString, "0xbe3f88b31963bedfdf8661eedf605639beaa0c4f")
+    }
+
     func testFullPipeline() throws {
         // 1. Compute hash
         let hash = try WalletSignature.computeUserOpHash(

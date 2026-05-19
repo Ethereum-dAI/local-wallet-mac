@@ -119,3 +119,100 @@ LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..." ./scripts/package-macos-demo.sh
 ```
 
 The package script injects the URL into the built app's `Info.plist` and re-signs that copied app bundle. If the variable is not set, the app still builds and can inspect the account, but bundler submission is disabled.
+
+---
+
+## Tool layer (phase 1)
+
+Phase 1 wires a local **intent recognition** layer over the existing Gemma 4 chat. When the user expresses a clear on-chain action (transfer / swap), the chat thread renders an inline **recognition card** — `ToolIntentCardView` — showing the tool name and structured arguments. The card has three actions: **Looks good**, **Edit**, **Reject**. The card is *informational only*: phase 1 does not sign or broadcast any transaction.
+
+Two ways to surface a card:
+
+1. **Natural language** — type `Send 0.1 ETH to vitalik.eth` in the chat composer. The local model decides whether to emit a `<|tool_call>` block; if it does, `BridgePEGExtractor` (with the Gemma 4 fallback parser, see `OPEN-POINTS.md` P1.A) decodes it into a `ParsedToolCall` and `ChatDashboardModel` appends a `.toolIntent` `ChatMessage`.
+2. **Slash commands** — type `/transfer 0.1 ETH to vitalik.eth` or `/swap 100 USDC to ETH` in the composer. `SlashCommandParser` produces the same `ToolIntent` without invoking the model. The `/⌄` button next to the composer (`SlashMenuButton`) inserts scaffolds for either tool.
+
+When the user acts on the card, a synthetic `.toolResponse` `ChatMessage` (role `.tool`) is appended to the conversation so the *next* model turn sees the disposition (`acknowledged` / `acknowledged + edited` / `rejected`) and continues coherently.
+
+### What's explicitly out of scope for phase 1
+
+- ENS resolution, token-symbol → contract-address lookup
+- Gas estimation, fee preview, balance / allowance checks
+- `UserOperationBuilder`, `BundlerClient`, signing, broadcast
+- DEX quoting / routing for `swap`
+
+The grep guard `grep -rE "UserOperationBuilder|BundlerClient|WalletNodeClient|KernelAccountAddressPredictor|KeyStore" Sources/WalletMacOSApp/ChatDashboardView.swift Sources/WalletMacOSApp/EmbeddedLlamaInferenceService.swift Sources/WalletMacOSApp/ToolIntentCardView.swift Sources/WalletToolLayer/` MUST come back empty. Phase 2 wires those in.
+
+### Where the code lives
+
+- `Sources/WalletToolLayer/` — model-agnostic library (`ToolIntent`, `ToolDefinitions`, `SlashCommandParser`, `BridgePEGExtractor`, `Gemma4FallbackParser`, `ChatSQLiteMigration`).
+- `Sources/WalletMacOSApp/ToolIntentCardView.swift` — the SwiftUI recognition card + edit sheet.
+- `Sources/WalletMacOSApp/SlashMenuButton.swift` — composer-adjacent menu for slash scaffolds.
+- `Sources/WalletMacOSApp/ChatDashboardView.swift` — integrates the above into the chat dashboard.
+- `Sources/WalletMacOSApp/EmbeddedLlamaInferenceService.swift` — calls `LlamaRuntime.chat(...)` with tools + system nudge; surfaces `toolCalls` on `EmbeddedLlamaGenerationResult`.
+
+## wallet-eval
+
+A CLI in `Sources/wallet-eval/` that drives the live local model against a curated dataset and reports recognition metrics. The dataset lives at `Sources/wallet-eval/Dataset/recognition.json` and is bundled as a resource.
+
+Subcommands:
+
+| Command       | Measures                                                  |
+|---------------|-----------------------------------------------------------|
+| `recognition` | Per-category + per-language pass/fail on the dataset      |
+| `round-trip`  | Multi-turn coherence after a tool call is acknowledged    |
+| `latency`     | Time-to-first-token and time-to-done                      |
+| `all`         | Runs all three subcommands in sequence                    |
+
+Shared flags:
+
+| Flag                 | Default                  | Notes                                  |
+|----------------------|--------------------------|----------------------------------------|
+| `--model PATH`       | onboarding-installed GGUF | Path to a Gemma 4 GGUF                 |
+| `--repeats N`        | `3`                      | Per-case repetitions                   |
+| `--seed S`           | `0xC0DEFEED`             | Hex or decimal                         |
+| `--json PATH`        | (none)                   | Structured `EvalEntry[]` report        |
+| `--filter CATEGORY`  | (none)                   | Run only matching category or language |
+| `--verbose`          | off                      | Per-case outcome printing              |
+
+Example invocations:
+
+```bash
+swift run wallet-eval recognition --repeats 3 --json /tmp/wallet-eval.json
+swift run wallet-eval recognition --filter slashCommand
+swift run wallet-eval latency --repeats 5
+swift run wallet-eval all
+```
+
+### Initial baseline (2026-05-19)
+
+The first `swift run wallet-eval recognition --repeats 1` run on the host (Gemma 4 E4B Q4, Apple Silicon Metal, llama.cpp b9200 + Swift fallback parser for P1.A):
+
+- **HEADLINE (English only): 92% (n=26)**
+- truePositiveTransfer: 8/8 (100%)
+- truePositiveSwap: 4/6 (67%) — two "buy X with Y" phrasings missed
+- falsePositiveExpected: 6/6 (100%)
+- ambiguous: 3/3 (100%)
+- slashCommand: 3/3 (100%)
+- multilingual: italian 100%, spanish 100%, french 0% (1 case)
+
+Total wallclock ~210s. The full breakdown is in `OPEN-POINTS.md`.
+
+### Adding cases to the dataset
+
+Edit `Sources/wallet-eval/Dataset/recognition.json`. The schema is:
+
+```json
+{
+  "id": "unique-id",
+  "user_message": "...",
+  "category": "truePositiveTransfer|truePositiveSwap|falsePositiveExpected|ambiguous|slashCommand|multilingualTransfer|roundTrip",
+  "language": "english|italian|spanish|french|german|...",
+  "expected_tool": "transfer|swap|null",
+  "expected_args": {
+    "<arg-name>": { "kind": "exact|regex|oneOf", "value": "..." | ["a","b"] }
+  },
+  "notes": "..."
+}
+```
+
+After editing, rebuild + rerun. Dataset cases ship with the binary via SPM resource copying — no separate install step.

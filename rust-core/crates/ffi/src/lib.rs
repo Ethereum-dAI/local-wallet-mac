@@ -56,6 +56,38 @@ pub unsafe extern "C" fn wallet_generate_bundler_secret(
 }
 
 /// # Safety
+/// `secret` must point to 32 bytes and `out_address` to 20 writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wallet_bundler_address_from_secret(
+    secret: *const u8,
+    out_address: *mut u8,
+) -> i32 {
+    let result = catch_unwind(|| {
+        if secret.is_null() || out_address.is_null() {
+            return WalletResult::InvalidInput as i32;
+        }
+
+        let secret_slice = std::slice::from_raw_parts(secret, 32);
+        let Ok(secret_bytes) = <[u8; 32]>::try_from(secret_slice) else {
+            return WalletResult::InvalidInput as i32;
+        };
+        let Ok(secret_key) = secp256k1::SecretKey::from_byte_array(&secret_bytes) else {
+            return WalletResult::InvalidInput as i32;
+        };
+
+        let secp = secp256k1::Secp256k1::signing_only();
+        let public = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let uncompressed = public.serialize_uncompressed();
+        let hash = alloy_primitives::keccak256(&uncompressed[1..]);
+
+        std::ptr::copy_nonoverlapping(hash[12..].as_ptr(), out_address, 20);
+        WalletResult::Ok as i32
+    });
+
+    result.unwrap_or(WalletResult::InternalError as i32)
+}
+
+/// # Safety
 /// All pointer parameters must be valid and point to buffers of the documented sizes.
 #[no_mangle]
 pub unsafe extern "C" fn wallet_compute_userop_hash(
@@ -387,6 +419,21 @@ mod tests {
     }
 
     #[test]
+    fn ffi_derives_bundler_address_from_secret() {
+        let secret = hex!("4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9cc81287f7cf15d28b1ef");
+        let mut address = [0u8; 20];
+
+        let result =
+            unsafe { wallet_bundler_address_from_secret(secret.as_ptr(), address.as_mut_ptr()) };
+
+        assert_eq!(result, WalletResult::Ok as i32);
+        assert_eq!(
+            address,
+            hex!("be3f88b31963bedfdf8661eedf605639beaa0c4f")
+        );
+    }
+
+    #[test]
     fn ffi_generate_bundler_secret_rejects_null_outputs() {
         let mut secret = [0u8; 32];
         let mut address = [0u8; 20];
@@ -395,6 +442,21 @@ mod tests {
             unsafe { wallet_generate_bundler_secret(std::ptr::null_mut(), address.as_mut_ptr()) };
         let missing_address =
             unsafe { wallet_generate_bundler_secret(secret.as_mut_ptr(), std::ptr::null_mut()) };
+
+        assert_eq!(missing_secret, WalletResult::InvalidInput as i32);
+        assert_eq!(missing_address, WalletResult::InvalidInput as i32);
+    }
+
+    #[test]
+    fn ffi_bundler_address_from_secret_rejects_null_outputs() {
+        let secret = [1u8; 32];
+        let mut address = [0u8; 20];
+
+        let missing_secret = unsafe {
+            wallet_bundler_address_from_secret(std::ptr::null(), address.as_mut_ptr())
+        };
+        let missing_address =
+            unsafe { wallet_bundler_address_from_secret(secret.as_ptr(), std::ptr::null_mut()) };
 
         assert_eq!(missing_secret, WalletResult::InvalidInput as i32);
         assert_eq!(missing_address, WalletResult::InvalidInput as i32);

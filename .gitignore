@@ -33,6 +33,7 @@ swift-bridge/.build/
 swift-bridge/.swiftpm/
 swift-probe/.build/
 wallet-macos/.build/
+local-llm/.build/
 swift-bridge/lib/
 swift-bridge/Sources/WalletFFI/wallet_ffi.h
 swift-bridge/Sources/WalletFFI/wallet_node_api_version.h

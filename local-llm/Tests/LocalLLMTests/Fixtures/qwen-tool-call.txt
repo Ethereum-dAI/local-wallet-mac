@@ -1,0 +1,4 @@
+I'll help with that.
+<tool_call>
+{"name": "transfer", "arguments": {"to": "vitalik.eth", "amount": "0.1", "token": "ETH"}}
+</tool_call>

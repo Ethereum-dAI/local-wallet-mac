@@ -10,23 +10,29 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "WalletMacOSApp", targets: ["WalletMacOSApp"]),
+        .library(name: "WalletToolLayer", targets: ["WalletToolLayer"]),
+        .executable(name: "wallet-eval", targets: ["wallet-eval"]),
         .library(name: "SpawnHelper", targets: ["SpawnHelper"]),
     ],
     dependencies: [
         .package(path: "../swift-bridge"),
+        .package(path: "../local-llm"),
     ],
     targets: [
         .executableTarget(
             name: "WalletMacOSApp",
             dependencies: [
                 .product(name: "WalletSignature", package: "swift-bridge"),
+                .product(name: "LocalLLM", package: "local-llm"),
                 "SpawnHelper",
+                "WalletToolLayer",
             ],
             path: "Sources/WalletMacOSApp",
             resources: [
                 .copy("Resources"),
             ],
             linkerSettings: [
+                .linkedLibrary("sqlite3"),
                 .unsafeFlags(["-L", bridgeLibraryPath]),
             ]
         ),
@@ -44,6 +50,28 @@ let package = Package(
             name: "SpawnHelperTests",
             dependencies: ["SpawnHelper"],
             path: "Tests/SpawnHelperTests"
+        ),
+        .target(
+            name: "WalletToolLayer",
+            dependencies: [
+                .product(name: "LocalLLM", package: "local-llm"),
+            ],
+            path: "Sources/WalletToolLayer",
+            linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
+        .executableTarget(
+            name: "wallet-eval",
+            dependencies: [
+                "WalletToolLayer",
+                .product(name: "LocalLLM", package: "local-llm"),
+            ],
+            path: "Sources/wallet-eval",
+            resources: [.copy("Dataset")]
+        ),
+        .testTarget(
+            name: "WalletToolLayerTests",
+            dependencies: ["WalletToolLayer"],
+            path: "Tests/WalletToolLayerTests"
         ),
     ]
 )

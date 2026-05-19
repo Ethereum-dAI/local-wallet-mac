@@ -125,6 +125,15 @@ private final class ChatDashboardModel: ObservableObject {
         activeConversation?.messages ?? []
     }
 
+    var slashSuggestions: [SlashCommand] {
+        SlashCatalog.suggestions(for: inputText)
+    }
+
+    func insertSlashCommand(_ command: SlashCommand) {
+        inputText = command.scaffold
+        NotificationCenter.default.post(name: .chatComposerFocusRequested, object: nil)
+    }
+
     var contextStatsText: String {
         guard let stats = messages.last(where: { $0.stats != nil })?.stats else {
             return "Context 0 / \(inferenceService.contextSize) · \(inferenceService.contextSize) left"
@@ -428,6 +437,7 @@ private final class ChatDashboardModel: ObservableObject {
 struct LocalWalletChatDashboardView: View {
     @StateObject private var model = ChatDashboardModel()
     @State private var conversationPendingDeletion: ChatConversation?
+    @State private var isToolsPopoverPresented = false
 
     var body: some View {
         ZStack {
@@ -550,7 +560,7 @@ struct LocalWalletChatDashboardView: View {
 
     private var toolbar: some View {
         HStack {
-            HStack(spacing: 14) {
+            HStack(spacing: 10) {
                 Button {
                     model.toggleSidebar()
                 } label: {
@@ -561,9 +571,35 @@ struct LocalWalletChatDashboardView: View {
                         .background(Circle().fill(ChatPalette.buttonCircle.opacity(model.isSidebarVisible ? 0.75 : 1)))
                 }
                 .buttonStyle(.plain)
+
+                Button {
+                    isToolsPopoverPresented.toggle()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "slash.circle.fill")
+                            .font(.system(size: 12, weight: .black))
+                            .foregroundStyle(ChatPalette.accent)
+                        Text("Tools")
+                            .font(.system(size: 12, weight: .heavy))
+                            .foregroundStyle(ChatPalette.primaryText)
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(height: 34)
+                    .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1)))
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $isToolsPopoverPresented, arrowEdge: .bottom) {
+                    SlashCommandPalette { command in
+                        model.insertSlashCommand(command)
+                        isToolsPopoverPresented = false
+                    }
+                    .frame(width: 420)
+                }
+                .help("Browse slash commands")
+
                 Spacer()
             }
-            .frame(width: 180)
+            .frame(width: 220)
 
             Spacer()
 
@@ -592,7 +628,7 @@ struct LocalWalletChatDashboardView: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .frame(width: 180, alignment: .trailing)
+            .frame(width: 220, alignment: .trailing)
         }
         .frame(height: 42)
     }
@@ -715,6 +751,19 @@ struct LocalWalletChatDashboardView: View {
     }
 
     private var composer: some View {
+        VStack(spacing: 8) {
+            if !model.slashSuggestions.isEmpty {
+                SlashSuggestionPanel(commands: model.slashSuggestions) { command in
+                    model.insertSlashCommand(command)
+                }
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+            composerInputBox
+        }
+        .animation(.easeOut(duration: 0.12), value: model.slashSuggestions)
+    }
+
+    private var composerInputBox: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
                 PromptTextEditor(text: $model.inputText) {
@@ -736,13 +785,6 @@ struct LocalWalletChatDashboardView: View {
 
             HStack(spacing: 10) {
                 Spacer()
-                SlashMenuButton(onInsert: { scaffold in
-                    if model.inputText.isEmpty {
-                        model.inputText = scaffold
-                    } else {
-                        model.inputText.append("\n\(scaffold)")
-                    }
-                })
                 Text("↩ to send · ⌘K to focus")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(ChatPalette.mutedText)
@@ -1236,6 +1278,133 @@ private struct ChatBubble: View {
                 justCopied = false
             }
         }
+    }
+}
+
+private struct SlashSuggestionPanel: View {
+    let commands: [SlashCommand]
+    let onSelect: (SlashCommand) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(commands.enumerated()), id: \.element.id) { index, command in
+                Button {
+                    onSelect(command)
+                } label: {
+                    HStack(spacing: 10) {
+                        Text(command.displayName)
+                            .font(.system(size: 13, weight: .heavy, design: .monospaced))
+                            .foregroundStyle(ChatPalette.accent)
+                            .frame(width: 84, alignment: .leading)
+                        Text(command.summary)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(ChatPalette.secondaryText)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text(command.signature)
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(ChatPalette.mutedText)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(SlashSuggestionRowStyle())
+                if index < commands.count - 1 {
+                    Rectangle()
+                        .fill(ChatPalette.border.opacity(0.5))
+                        .frame(height: 0.5)
+                }
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(ChatPalette.panel)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(ChatPalette.border, lineWidth: 1)
+                )
+        )
+    }
+}
+
+private struct SlashSuggestionRowStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                configuration.isPressed
+                    ? ChatPalette.selectedPanel.opacity(0.8)
+                    : Color.clear
+            )
+    }
+}
+
+private struct SlashCommandPalette: View {
+    let onSelect: (SlashCommand) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "slash.circle.fill")
+                    .font(.system(size: 13, weight: .black))
+                    .foregroundStyle(ChatPalette.accent)
+                Text("Slash commands")
+                    .font(.system(size: 13, weight: .heavy))
+                    .foregroundStyle(ChatPalette.primaryText)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 6)
+
+            Text("Click a command to insert a ready-to-edit scaffold into the composer. Replace the placeholders (in <angle brackets>) with your values.")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(ChatPalette.mutedText)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
+
+            Rectangle()
+                .fill(ChatPalette.border.opacity(0.4))
+                .frame(height: 0.5)
+
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(SlashCatalog.all.enumerated()), id: \.element.id) { index, command in
+                    Button {
+                        onSelect(command)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Text(command.displayName)
+                                    .font(.system(size: 13, weight: .heavy, design: .monospaced))
+                                    .foregroundStyle(ChatPalette.accent)
+                                Text(command.signature)
+                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(ChatPalette.mutedText)
+                                Spacer(minLength: 0)
+                            }
+                            Text(command.summary)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(ChatPalette.secondaryText)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(SlashSuggestionRowStyle())
+
+                    if index < SlashCatalog.all.count - 1 {
+                        Rectangle()
+                            .fill(ChatPalette.border.opacity(0.4))
+                            .frame(height: 0.5)
+                    }
+                }
+            }
+        }
+        .padding(.bottom, 6)
     }
 }
 

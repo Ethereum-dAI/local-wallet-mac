@@ -774,26 +774,68 @@ struct LocalWalletChatDashboardView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 22) {
+        VStack(spacing: 18) {
             Spacer()
             ZStack {
                 Circle()
                     .fill(ChatPalette.avatar)
-                    .frame(width: 158, height: 158)
+                    .frame(width: 132, height: 132)
                 Image(systemName: "person.fill")
-                    .font(.system(size: 64, weight: .semibold))
+                    .font(.system(size: 56, weight: .semibold))
                     .foregroundStyle(ChatPalette.secondaryText)
             }
-            VStack(spacing: 7) {
+            VStack(spacing: 6) {
                 Text(greeting)
-                    .font(.system(size: 36, weight: .heavy))
+                    .font(.system(size: 32, weight: .heavy))
                     .foregroundStyle(ChatPalette.primaryText)
-                Text("How can I help you today?")
-                    .font(.system(size: 18, weight: .medium))
+                Text("Pick a starter below or just message Gemma directly.")
+                    .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(ChatPalette.secondaryText)
+                    .multilineTextAlignment(.center)
             }
+
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+                spacing: 12
+            ) {
+                ForEach(welcomeStarters, id: \.title) { starter in
+                    WelcomeStarterChip(starter: starter) {
+                        model.inputText = starter.prompt
+                        NotificationCenter.default.post(name: .chatComposerFocusRequested, object: nil)
+                    }
+                }
+            }
+            .frame(maxWidth: 620)
+            .padding(.top, 6)
+
             Spacer()
         }
+        .padding(.horizontal, 28)
+    }
+
+    private var welcomeStarters: [WelcomeStarter] {
+        [
+            WelcomeStarter(
+                icon: "arrow.up.right.circle.fill",
+                title: "Transfer",
+                prompt: "Send 0.1 ETH to vitalik.eth"
+            ),
+            WelcomeStarter(
+                icon: "arrow.triangle.swap",
+                title: "Swap",
+                prompt: "Swap 100 USDC for ETH"
+            ),
+            WelcomeStarter(
+                icon: "slash.circle.fill",
+                title: "Try a slash command",
+                prompt: "/transfer 0.05 ETH to <recipient>"
+            ),
+            WelcomeStarter(
+                icon: "lock.shield.fill",
+                title: "How keys stay safe",
+                prompt: "How does this wallet keep my private keys safe?"
+            )
+        ]
     }
 
     private var footerControls: some View {
@@ -1341,6 +1383,57 @@ private struct ChatBubble: View {
             try? await Task.sleep(nanoseconds: 1_400_000_000)
             withAnimation(.easeInOut(duration: 0.2)) {
                 justCopied = false
+            }
+        }
+    }
+}
+
+private struct WelcomeStarter: Equatable {
+    let icon: String
+    let title: String
+    let prompt: String
+}
+
+private struct WelcomeStarterChip: View {
+    let starter: WelcomeStarter
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: starter.icon)
+                        .font(.system(size: 11, weight: .black))
+                        .foregroundStyle(ChatPalette.accent)
+                    Text(starter.title)
+                        .font(.system(size: 11, weight: .heavy))
+                        .foregroundStyle(ChatPalette.mutedText)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+                }
+                Text(starter.prompt)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(ChatPalette.primaryText)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(isHovered ? ChatPalette.selectedPanel.opacity(0.8) : ChatPalette.panel)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(isHovered ? ChatPalette.accent.opacity(0.6) : ChatPalette.border, lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovered = hovering
             }
         }
     }

@@ -1580,23 +1580,141 @@ private struct MarkdownMessageText: View {
     let color: Color
 
     var body: some View {
-        Text(attributedMarkdown)
-            .font(.system(size: fontSize, weight: .medium))
-            .foregroundStyle(color)
-            .textSelection(.enabled)
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(ChatMarkdownParser.segments(in: markdown).enumerated()), id: \.offset) { _, segment in
+                switch segment {
+                case .prose(let text):
+                    Text(attributed(text))
+                        .font(.system(size: fontSize, weight: .medium))
+                        .foregroundStyle(color)
+                        .textSelection(.enabled)
+                case .codeBlock(let language, let code):
+                    CodeBlockView(language: language, code: code)
+                }
+            }
+        }
     }
 
-    private var attributedMarkdown: AttributedString {
+    private func attributed(_ text: String) -> AttributedString {
         do {
             return try AttributedString(
-                markdown: markdown,
+                markdown: text,
                 options: AttributedString.MarkdownParsingOptions(
                     interpretedSyntax: .full,
                     failurePolicy: .returnPartiallyParsedIfPossible
                 )
             )
         } catch {
-            return AttributedString(markdown)
+            return AttributedString(text)
+        }
+    }
+}
+
+private enum ChatMarkdownSegment: Equatable {
+    case prose(String)
+    case codeBlock(language: String?, code: String)
+}
+
+private enum ChatMarkdownParser {
+    static func segments(in markdown: String) -> [ChatMarkdownSegment] {
+        var segments: [ChatMarkdownSegment] = []
+        var prose: [String] = []
+        var iterator = markdown.components(separatedBy: "\n").makeIterator()
+        while let line = iterator.next() {
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                if !prose.isEmpty {
+                    segments.append(.prose(prose.joined(separator: "\n")))
+                    prose.removeAll()
+                }
+                let fence = line.trimmingCharacters(in: .whitespaces)
+                let language = String(fence.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                var codeLines: [String] = []
+                var closed = false
+                while let codeLine = iterator.next() {
+                    if codeLine.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                        closed = true
+                        break
+                    }
+                    codeLines.append(codeLine)
+                }
+                let code = codeLines.joined(separator: "\n")
+                if closed || !code.isEmpty {
+                    segments.append(.codeBlock(language: language.isEmpty ? nil : language, code: code))
+                }
+            } else {
+                prose.append(line)
+            }
+        }
+        if !prose.isEmpty {
+            let joined = prose.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !joined.isEmpty {
+                segments.append(.prose(joined))
+            }
+        }
+        return segments
+    }
+}
+
+private struct CodeBlockView: View {
+    let language: String?
+    let code: String
+    @State private var justCopied = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text((language ?? "code").uppercased())
+                    .font(.system(size: 10, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(ChatPalette.mutedText)
+                    .tracking(0.6)
+                Spacer()
+                Button {
+                    ChatClipboard.copy(code)
+                    flashCopied()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: justCopied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 10, weight: .black))
+                        Text(justCopied ? "Copied" : "Copy")
+                            .font(.system(size: 10, weight: .heavy))
+                    }
+                    .foregroundStyle(justCopied ? ChatPalette.success : ChatPalette.secondaryText)
+                }
+                .buttonStyle(.plain)
+                .help("Copy code")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(ChatPalette.background.opacity(0.5))
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(code)
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(ChatPalette.primaryText)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .textSelection(.enabled)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(ChatPalette.input)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(ChatPalette.border, lineWidth: 0.8)
+                )
+        )
+    }
+
+    private func flashCopied() {
+        withAnimation(.easeInOut(duration: 0.12)) {
+            justCopied = true
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
+            withAnimation(.easeInOut(duration: 0.2)) {
+                justCopied = false
+            }
         }
     }
 }

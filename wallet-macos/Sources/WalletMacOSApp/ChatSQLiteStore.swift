@@ -165,6 +165,38 @@ final class ChatSQLiteStore {
         try stepDone(statement, database: database)
     }
 
+    func deleteConversation(_ conversationID: UUID) throws {
+        let database = try openDatabase()
+        defer {
+            sqlite3_close(database)
+        }
+
+        try createSchema(in: database)
+        try execute("BEGIN IMMEDIATE TRANSACTION", in: database)
+        do {
+            let deleteMessages = try prepare(
+                "DELETE FROM chat_messages WHERE conversation_id = ?",
+                in: database
+            )
+            try bind(conversationID.uuidString, at: 1, in: deleteMessages)
+            try stepDone(deleteMessages, database: database)
+            sqlite3_finalize(deleteMessages)
+
+            let deleteConversation = try prepare(
+                "DELETE FROM chat_conversations WHERE id = ?",
+                in: database
+            )
+            try bind(conversationID.uuidString, at: 1, in: deleteConversation)
+            try stepDone(deleteConversation, database: database)
+            sqlite3_finalize(deleteConversation)
+
+            try execute("COMMIT", in: database)
+        } catch {
+            try? execute("ROLLBACK", in: database)
+            throw error
+        }
+    }
+
     func replaceConversations(_ conversations: [ChatConversation]) throws {
         let database = try openDatabase()
         defer {

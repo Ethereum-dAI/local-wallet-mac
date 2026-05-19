@@ -159,6 +159,30 @@ private final class ChatDashboardModel: ObservableObject {
         preferencesStore.activeConversationID = conversation.id
     }
 
+    func deleteConversation(_ conversationID: UUID) {
+        guard !isGenerating else {
+            return
+        }
+        guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
+            return
+        }
+        let wasActive = conversationID == activeConversationID
+        conversations.remove(at: index)
+        try? chatStore.deleteConversation(conversationID)
+
+        if conversations.isEmpty {
+            let replacement = ChatConversation(title: "New chat", messages: [])
+            conversations = [replacement]
+            try? chatStore.createConversation(replacement)
+            activeConversationID = replacement.id
+            preferencesStore.activeConversationID = replacement.id
+        } else if wasActive {
+            let nextID = conversations[0].id
+            activeConversationID = nextID
+            preferencesStore.activeConversationID = nextID
+        }
+    }
+
     func send(_ text: String? = nil) {
         let prompt = (text ?? inputText).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, !isGenerating else {
@@ -341,6 +365,7 @@ private final class ChatDashboardModel: ObservableObject {
 
 struct LocalWalletChatDashboardView: View {
     @StateObject private var model = ChatDashboardModel()
+    @State private var conversationPendingDeletion: ChatConversation?
 
     var body: some View {
         ZStack {
@@ -363,6 +388,29 @@ struct LocalWalletChatDashboardView: View {
             }
         }
         .frame(minWidth: 980, minHeight: 720)
+        .alert(
+            "Delete chat?",
+            isPresented: deletionAlertBinding,
+            presenting: conversationPendingDeletion
+        ) { conversation in
+            Button("Delete", role: .destructive) {
+                model.deleteConversation(conversation.id)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: { conversation in
+            Text("“\(conversation.title)” will be removed from this device. This cannot be undone.")
+        }
+    }
+
+    private var deletionAlertBinding: Binding<Bool> {
+        Binding(
+            get: { conversationPendingDeletion != nil },
+            set: { newValue in
+                if !newValue {
+                    conversationPendingDeletion = nil
+                }
+            }
+        )
     }
 
     private var chatSidebar: some View {
@@ -391,10 +439,10 @@ struct LocalWalletChatDashboardView: View {
                     ForEach(model.conversations) { conversation in
                         ChatConversationRow(
                             conversation: conversation,
-                            isSelected: conversation.id == model.activeConversationID
-                        ) {
-                            model.selectConversation(conversation)
-                        }
+                            isSelected: conversation.id == model.activeConversationID,
+                            onSelect: { model.selectConversation(conversation) },
+                            onDelete: { conversationPendingDeletion = conversation }
+                        )
                     }
                 }
                 .padding(.horizontal, 10)
@@ -732,36 +780,71 @@ private struct PromptTextEditor: NSViewRepresentable {
 private struct ChatConversationRow: View {
     let conversation: ChatConversation
     let isSelected: Bool
-    let action: () -> Void
+    let onSelect: () -> Void
+    let onDelete: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(conversation.title)
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(ChatPalette.primaryText)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: 6) {
-                    Text("\(conversation.messages.count) messages")
-                    Text("·")
-                    Text(conversation.updatedAt, style: .relative)
+        ZStack(alignment: .topTrailing) {
+            Button(action: onSelect) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(conversation.title)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(ChatPalette.primaryText)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: 6) {
+                        Text("\(conversation.messages.count) messages")
+                        Text("·")
+                        Text(conversation.updatedAt, style: .relative)
+                    }
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(ChatPalette.mutedText)
                 }
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(ChatPalette.mutedText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(isSelected ? ChatPalette.selectedPanel : Color.clear)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(isSelected ? ChatPalette.accent.opacity(0.65) : ChatPalette.border.opacity(0.45), lineWidth: 1)
+                        )
+                )
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 11)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(isSelected ? ChatPalette.selectedPanel : Color.clear)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(isSelected ? ChatPalette.accent.opacity(0.65) : ChatPalette.border.opacity(0.45), lineWidth: 1)
-                    )
-            )
+            .buttonStyle(.plain)
+            .contextMenu {
+                Button(role: .destructive) {
+                    onDelete()
+                } label: {
+                    Label("Delete chat", systemImage: "trash")
+                }
+            }
+
+            if isHovered {
+                Button(action: onDelete) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .black))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                        .frame(width: 20, height: 20)
+                        .background(
+                            Circle()
+                                .fill(ChatPalette.buttonCircle)
+                                .overlay(Circle().stroke(ChatPalette.border, lineWidth: 0.8))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Delete chat")
+                .padding(6)
+                .transition(.opacity)
+            }
         }
-        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
     }
 }
 

@@ -1,17 +1,30 @@
 import AppKit
 import SwiftUI
+import WalletToolLayer
 
 struct ChatMessage: Identifiable, Equatable, Codable {
-    enum Role: String, Codable {
-        case user
-        case assistant
+    enum Kind: String, Codable {
+        case userText
+        case assistantText
+        case toolIntent
+        case toolResponse
     }
-
+    enum Role: String, Codable { case user, assistant, tool }
     var id = UUID()
-    let role: Role
-    let text: String
+    var kind: Kind
+    var role: Role
+    var text: String? = nil
     var thinking: String? = nil
     var stats: ChatGenerationStats? = nil
+    var toolIntent: ToolIntent? = nil
+    var toolCallId: String? = nil
+
+    static func userText(_ text: String) -> ChatMessage {
+        ChatMessage(kind: .userText, role: .user, text: text)
+    }
+    static func assistantText(_ text: String, thinking: String? = nil, stats: ChatGenerationStats? = nil) -> ChatMessage {
+        ChatMessage(kind: .assistantText, role: .assistant, text: text, thinking: thinking, stats: stats)
+    }
 }
 
 struct ChatGenerationStats: Equatable, Codable {
@@ -157,11 +170,11 @@ private final class ChatDashboardModel: ObservableObject {
         let history = existingMessages.map { message in
             EmbeddedLlamaChatTurn(
                 role: message.role == .user ? .user : .assistant,
-                text: message.text
+                text: message.text ?? ""
             )
         }
         inputText = ""
-        appendMessage(ChatMessage(role: .user, text: prompt), to: conversationID)
+        appendMessage(.userText(prompt), to: conversationID)
         updateTitleIfNeeded(for: conversationID, prompt: prompt)
         isGenerating = true
         runtimeStatus = thinkingEnabled ? "Gemma is thinking" : "Gemma is generating"
@@ -179,10 +192,10 @@ private final class ChatDashboardModel: ObservableObject {
                     generatedTokens: response.generatedTokens,
                     contextSize: response.contextSize
                 )
-                appendMessage(ChatMessage(role: .assistant, text: response.response, thinking: response.thinking, stats: stats), to: conversationID)
+                appendMessage(.assistantText(response.response, thinking: response.thinking, stats: stats), to: conversationID)
                 runtimeStatus = inferenceService.runtimeStatus
             } catch {
-                appendMessage(ChatMessage(role: .assistant, text: error.localizedDescription), to: conversationID)
+                appendMessage(.assistantText(error.localizedDescription), to: conversationID)
                 runtimeStatus = "Needs attention"
             }
             isGenerating = false
@@ -700,9 +713,9 @@ private struct ChatBubble: View {
                 }
 
                 if message.role == .assistant {
-                    MarkdownMessageText(markdown: message.text, fontSize: 16, color: ChatPalette.primaryText)
+                    MarkdownMessageText(markdown: message.text ?? "", fontSize: 16, color: ChatPalette.primaryText)
                 } else {
-                    Text(message.text)
+                    Text(message.text ?? "")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(ChatPalette.primaryText)
                         .textSelection(.enabled)

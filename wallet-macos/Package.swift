@@ -56,7 +56,8 @@ let package = Package(
             dependencies: [
                 .product(name: "LocalLLM", package: "local-llm"),
             ],
-            path: "Sources/WalletToolLayer"
+            path: "Sources/WalletToolLayer",
+            linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .executableTarget(
             name: "wallet-eval",

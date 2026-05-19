@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import WalletToolLayer
 
 enum ChatStoreError: LocalizedError {
     case openFailed(String)
@@ -152,10 +153,14 @@ final class ChatSQLiteStore {
         }
 
         try execute("PRAGMA foreign_keys = ON", in: database)
+        try createSchema(in: database)
+        try ChatSQLiteMigration.migrate(database: database)
         return database
     }
 
     private func createSchema(in database: OpaquePointer) throws {
+        let hadMessagesTable = try tableExists("chat_messages", in: database)
+
         try execute("""
         CREATE TABLE IF NOT EXISTS chat_conversations (
             id TEXT PRIMARY KEY,
@@ -170,12 +175,15 @@ final class ChatSQLiteStore {
             id TEXT PRIMARY KEY,
             conversation_id TEXT NOT NULL,
             role TEXT NOT NULL,
-            text TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'assistantText',
+            text TEXT,
             thinking TEXT,
             duration REAL,
             prompt_tokens INTEGER,
             generated_tokens INTEGER,
             context_size INTEGER,
+            tool_intent_json TEXT,
+            tool_call_id TEXT,
             created_at REAL NOT NULL,
             FOREIGN KEY(conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE
         )
@@ -190,11 +198,21 @@ final class ChatSQLiteStore {
         CREATE INDEX IF NOT EXISTS idx_chat_conversations_updated
         ON chat_conversations(updated_at)
         """, in: database)
+
+        let hasV1MessagesTable: Bool
+        if hadMessagesTable {
+            hasV1MessagesTable = try tableHasColumn("kind", in: "chat_messages", database: database)
+        } else {
+            hasV1MessagesTable = true
+        }
+        if hasV1MessagesTable {
+            try execute("PRAGMA user_version = 1", in: database)
+        }
     }
 
     private func loadMessages(for conversationID: UUID, in database: OpaquePointer) throws -> [ChatMessage] {
         let statement = try prepare("""
-        SELECT id, role, text, thinking, duration, prompt_tokens, generated_tokens, context_size
+        SELECT id, role, kind, text, thinking, duration, prompt_tokens, generated_tokens, context_size, tool_intent_json, tool_call_id
         FROM chat_messages
         WHERE conversation_id = ?
         ORDER BY created_at ASC
@@ -211,16 +229,17 @@ final class ChatSQLiteStore {
                 let idText = columnText(statement, 0),
                 let id = UUID(uuidString: idText),
                 let roleText = columnText(statement, 1),
-                let role = ChatMessage.Role(rawValue: roleText),
-                let text = columnText(statement, 2)
+                let role = ChatMessage.Role(rawValue: roleText)
             else {
                 continue
             }
 
-            let duration = columnDouble(statement, 4)
-            let promptTokens = columnInt(statement, 5)
-            let generatedTokens = columnInt(statement, 6)
-            let contextSize = columnInt(statement, 7)
+            let kind = columnText(statement, 2)
+                .flatMap(ChatMessage.Kind.init(rawValue:)) ?? .assistantText
+            let duration = columnDouble(statement, 5)
+            let promptTokens = columnInt(statement, 6)
+            let generatedTokens = columnInt(statement, 7)
+            let contextSize = columnInt(statement, 8)
             let stats: ChatGenerationStats?
             if let duration, let promptTokens, let generatedTokens, let contextSize {
                 stats = ChatGenerationStats(
@@ -233,12 +252,21 @@ final class ChatSQLiteStore {
                 stats = nil
             }
 
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let toolIntent = columnText(statement, 9)
+                .flatMap { $0.data(using: .utf8) }
+                .flatMap { try? decoder.decode(ToolIntent.self, from: $0) }
+
             messages.append(ChatMessage(
                 id: id,
+                kind: kind,
                 role: role,
-                text: text,
-                thinking: columnText(statement, 3),
-                stats: stats
+                text: columnText(statement, 3),
+                thinking: columnText(statement, 4),
+                stats: stats,
+                toolIntent: toolIntent,
+                toolCallId: columnText(statement, 10)
             ))
         }
 
@@ -269,33 +297,46 @@ final class ChatSQLiteStore {
     ) throws {
         let statement = try prepare("""
         INSERT OR REPLACE INTO chat_messages (
-            id, conversation_id, role, text, thinking, duration, prompt_tokens, generated_tokens, context_size, created_at
+            id, conversation_id, role, kind, text, thinking, duration, prompt_tokens, generated_tokens, context_size, tool_intent_json, tool_call_id, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, in: database)
         defer {
             sqlite3_finalize(statement)
         }
 
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let toolIntentJSON: String?
+        if let toolIntent = message.toolIntent {
+            let data = try encoder.encode(toolIntent)
+            toolIntentJSON = String(data: data, encoding: .utf8)
+        } else {
+            toolIntentJSON = nil
+        }
+
         try bind(message.id.uuidString, at: 1, in: statement)
         try bind(conversationID.uuidString, at: 2, in: statement)
         try bind(message.role.rawValue, at: 3, in: statement)
-        try bind(message.text, at: 4, in: statement)
-        try bindOptional(message.thinking, at: 5, in: statement)
+        try bind(message.kind.rawValue, at: 4, in: statement)
+        try bindNullable(message.text, at: 5, in: statement)
+        try bindOptional(message.thinking, at: 6, in: statement)
 
         if let stats = message.stats {
-            sqlite3_bind_double(statement, 6, stats.duration)
-            sqlite3_bind_int64(statement, 7, sqlite3_int64(stats.promptTokens))
-            sqlite3_bind_int64(statement, 8, sqlite3_int64(stats.generatedTokens))
-            sqlite3_bind_int64(statement, 9, sqlite3_int64(stats.contextSize))
+            sqlite3_bind_double(statement, 7, stats.duration)
+            sqlite3_bind_int64(statement, 8, sqlite3_int64(stats.promptTokens))
+            sqlite3_bind_int64(statement, 9, sqlite3_int64(stats.generatedTokens))
+            sqlite3_bind_int64(statement, 10, sqlite3_int64(stats.contextSize))
         } else {
-            sqlite3_bind_null(statement, 6)
             sqlite3_bind_null(statement, 7)
             sqlite3_bind_null(statement, 8)
             sqlite3_bind_null(statement, 9)
+            sqlite3_bind_null(statement, 10)
         }
 
-        sqlite3_bind_double(statement, 10, createdAt.timeIntervalSince1970)
+        try bindNullable(toolIntentJSON, at: 11, in: statement)
+        try bindNullable(message.toolCallId, at: 12, in: statement)
+        sqlite3_bind_double(statement, 13, createdAt.timeIntervalSince1970)
         try stepDone(statement, database: database)
     }
 
@@ -337,6 +378,15 @@ final class ChatSQLiteStore {
         try bind(value, at: index, in: statement)
     }
 
+    private func bindNullable(_ value: String?, at index: Int32, in statement: OpaquePointer) throws {
+        guard let value else {
+            sqlite3_bind_null(statement, index)
+            return
+        }
+
+        try bind(value, at: index, in: statement)
+    }
+
     private func columnText(_ statement: OpaquePointer, _ index: Int32) -> String? {
         guard sqlite3_column_type(statement, index) != SQLITE_NULL else {
             return nil
@@ -363,6 +413,34 @@ final class ChatSQLiteStore {
 
     private func sqliteError(_ database: OpaquePointer) -> String {
         sqlite3_errmsg(database).map { String(cString: $0) } ?? "Unknown SQLite error"
+    }
+
+    private func tableExists(_ tableName: String, in database: OpaquePointer) throws -> Bool {
+        let statement = try prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            in: database
+        )
+        defer {
+            sqlite3_finalize(statement)
+        }
+
+        try bind(tableName, at: 1, in: statement)
+        return sqlite3_step(statement) == SQLITE_ROW
+    }
+
+    private func tableHasColumn(_ columnName: String, in tableName: String, database: OpaquePointer) throws -> Bool {
+        let statement = try prepare("PRAGMA table_info(\(tableName))", in: database)
+        defer {
+            sqlite3_finalize(statement)
+        }
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if columnText(statement, 1) == columnName {
+                return true
+            }
+        }
+
+        return false
     }
 }
 

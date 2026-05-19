@@ -10,6 +10,8 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "WalletMacOSApp", targets: ["WalletMacOSApp"]),
+        .library(name: "WalletToolLayer", targets: ["WalletToolLayer"]),
+        .executable(name: "wallet-eval", targets: ["wallet-eval"]),
         .library(name: "SpawnHelper", targets: ["SpawnHelper"]),
     ],
     dependencies: [
@@ -23,6 +25,7 @@ let package = Package(
                 .product(name: "WalletSignature", package: "swift-bridge"),
                 .product(name: "LocalLLM", package: "local-llm"),
                 "SpawnHelper",
+                "WalletToolLayer",
             ],
             path: "Sources/WalletMacOSApp",
             resources: [
@@ -47,6 +50,26 @@ let package = Package(
             name: "SpawnHelperTests",
             dependencies: ["SpawnHelper"],
             path: "Tests/SpawnHelperTests"
+        ),
+        .target(
+            name: "WalletToolLayer",
+            dependencies: [
+                .product(name: "LocalLLM", package: "local-llm"),
+            ],
+            path: "Sources/WalletToolLayer"
+        ),
+        .executableTarget(
+            name: "wallet-eval",
+            dependencies: [
+                "WalletToolLayer",
+                .product(name: "LocalLLM", package: "local-llm"),
+            ],
+            path: "Sources/wallet-eval"
+        ),
+        .testTarget(
+            name: "WalletToolLayerTests",
+            dependencies: ["WalletToolLayer"],
+            path: "Tests/WalletToolLayerTests"
         ),
     ]
 )

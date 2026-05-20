@@ -230,7 +230,7 @@ The first `swift run wallet-eval recognition --repeats 1` run on the host (Gemma
 - slashCommand: 3/3 (100%)
 - multilingual: italian 100%, spanish 100%, french 0% (1 case)
 
-Total wallclock ~210s. The full breakdown is in `OPEN-POINTS.md`.
+Total wallclock ~210s. French/multilingual coverage is tracked in the central, gitignored `docs/OPEN_ITEMS.md`; the Swift Gemma 4 DSL fallback that backstops the P1.A parser gap is tracked there as OPEN-56.
 
 ### Adding cases to the dataset
 

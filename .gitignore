@@ -46,6 +46,9 @@ xcuserdata/
 *.xcuserstate
 DerivedData/
 
+# Local git worktrees created for parallel branch work
+.worktrees/
+
 # Editor / shell noise
 .idea/
 .vscode/

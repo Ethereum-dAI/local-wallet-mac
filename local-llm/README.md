@@ -131,4 +131,4 @@ Phase 0 + Phase 1 + Phase 2 + Phase 3 of the bridge upgrade are landed on `local
 - `ChatMessage / ToolDefinition / SamplerOptions` round-trips (4 tests)
 - Legacy v1 smoke (`gemmaSmokeTestWhenModelExists`) — deprecation warning emitted at call site
 
-Known open points are tracked in `OPEN-POINTS.md` (local, gitignored).
+Known open points (Gemma 4 channel-marker fallback, `<|tool_call>` DSL fallback parser, Task-level vs llama.cpp-level stop semantics, tool-layer phase 2) are tracked in the central, gitignored `docs/OPEN_ITEMS.md` at the repo root — see OPEN-55 / OPEN-56 / OPEN-58 / OPEN-57 respectively.

@@ -2,10 +2,15 @@ import AppKit
 import SwiftUI
 import WalletToolLayer
 
+extension Notification.Name {
+    static let chatComposerFocusRequested = Notification.Name("com.localwallet.chat.composer.focus")
+}
+
 struct ChatMessage: Identifiable, Equatable, Codable {
     enum Kind: String, Codable {
         case userText
         case assistantText
+        case assistantError
         case toolIntent
         case toolResponse
     }
@@ -55,6 +60,44 @@ private struct ChatAccountIdentity: Equatable {
     let bundlerAddress: String
 }
 
+enum ContextUsageLevel {
+    case warning
+    case critical
+}
+
+private enum ChatSidebarBucket: String, CaseIterable {
+    case today = "Today"
+    case yesterday = "Yesterday"
+    case lastSevenDays = "Last 7 days"
+    case lastThirtyDays = "Last 30 days"
+    case older = "Older"
+
+    static func bucket(
+        for date: Date,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> ChatSidebarBucket {
+        if calendar.isDateInToday(date) {
+            return .today
+        }
+        if calendar.isDateInYesterday(date) {
+            return .yesterday
+        }
+        let days = calendar.dateComponents(
+            [.day],
+            from: calendar.startOfDay(for: date),
+            to: calendar.startOfDay(for: now)
+        ).day ?? 0
+        if days <= 7 {
+            return .lastSevenDays
+        }
+        if days <= 30 {
+            return .lastThirtyDays
+        }
+        return .older
+    }
+}
+
 @MainActor
 private final class ChatDashboardModel: ObservableObject {
     @Published var inputText = ""
@@ -65,7 +108,10 @@ private final class ChatDashboardModel: ObservableObject {
     @Published var thinkingEnabled = true
     @Published var isSidebarVisible = true
     @Published private(set) var accountIdentity: ChatAccountIdentity
+    @Published private(set) var streamingText: String = ""
+    @Published private(set) var streamingMessageID: UUID? = nil
 
+    private var generationTask: Task<Void, Never>? = nil
     private let inferenceService: EmbeddedLlamaInferenceService
     private let chatStore: ChatSQLiteStore
     private let preferencesStore: ChatPreferencesStore
@@ -121,6 +167,36 @@ private final class ChatDashboardModel: ObservableObject {
         activeConversation?.messages ?? []
     }
 
+    var slashSuggestions: [SlashCommand] {
+        SlashCatalog.suggestions(for: inputText)
+    }
+
+    func insertSlashCommand(_ command: SlashCommand) {
+        inputText = command.scaffold
+        NotificationCenter.default.post(name: .chatComposerFocusRequested, object: nil)
+    }
+
+    var contextUsageLevel: ContextUsageLevel? {
+        guard let stats = messages.last(where: { $0.stats != nil })?.stats else {
+            return nil
+        }
+        let ratio = Double(stats.usedContextTokens) / Double(max(stats.contextSize, 1))
+        if ratio >= 0.92 {
+            return .critical
+        }
+        if ratio >= 0.75 {
+            return .warning
+        }
+        return nil
+    }
+
+    var contextUsageSnapshot: (used: Int, total: Int)? {
+        guard let stats = messages.last(where: { $0.stats != nil })?.stats else {
+            return nil
+        }
+        return (stats.usedContextTokens, stats.contextSize)
+    }
+
     var contextStatsText: String {
         guard let stats = messages.last(where: { $0.stats != nil })?.stats else {
             return "Context 0 / \(inferenceService.contextSize) · \(inferenceService.contextSize) left"
@@ -159,6 +235,47 @@ private final class ChatDashboardModel: ObservableObject {
         preferencesStore.activeConversationID = conversation.id
     }
 
+    func renameConversation(_ conversationID: UUID, to newTitle: String) {
+        let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
+            return
+        }
+        guard conversations[index].title != trimmed else {
+            return
+        }
+        conversations[index].title = String(trimmed.prefix(120))
+        conversations[index].updatedAt = Date()
+        try? chatStore.updateConversationMetadata(conversations[index])
+        sortConversationsKeepingActive()
+    }
+
+    func deleteConversation(_ conversationID: UUID) {
+        guard !isGenerating else {
+            return
+        }
+        guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
+            return
+        }
+        let wasActive = conversationID == activeConversationID
+        conversations.remove(at: index)
+        try? chatStore.deleteConversation(conversationID)
+
+        if conversations.isEmpty {
+            let replacement = ChatConversation(title: "New chat", messages: [])
+            conversations = [replacement]
+            try? chatStore.createConversation(replacement)
+            activeConversationID = replacement.id
+            preferencesStore.activeConversationID = replacement.id
+        } else if wasActive {
+            let nextID = conversations[0].id
+            activeConversationID = nextID
+            preferencesStore.activeConversationID = nextID
+        }
+    }
+
     func send(_ text: String? = nil) {
         let prompt = (text ?? inputText).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, !isGenerating else {
@@ -191,46 +308,146 @@ private final class ChatDashboardModel: ObservableObject {
         }
 
         isGenerating = true
+        streamingText = ""
+        streamingMessageID = UUID()
         runtimeStatus = thinkingEnabled ? "Gemma is thinking" : "Gemma is generating"
 
-        Task {
+        let stream = inferenceService.stream(
+            prompt: prompt,
+            history: history,
+            thinkingEnabled: thinkingEnabled
+        )
+
+        generationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
-                let response = try await inferenceService.generate(
-                    prompt: prompt,
-                    history: history,
-                    thinkingEnabled: thinkingEnabled
-                )
-                let stats = ChatGenerationStats(
-                    duration: response.duration,
-                    promptTokens: response.promptTokens,
-                    generatedTokens: response.generatedTokens,
-                    contextSize: response.contextSize
-                )
-                if let firstToolCall = response.toolCalls.first,
-                   let tool = ToolIntent.Tool(rawValue: firstToolCall.name) {
-                    let intent = ToolIntent(
-                        tool: tool,
-                        args: firstToolCall.arguments,
-                        rawDSL: nil,
-                        source: .model
-                    )
-                    appendMessage(
-                        ChatMessage(kind: .toolIntent, role: .assistant, stats: stats, toolIntent: intent),
-                        to: conversationID
-                    )
-                } else if let firstToolCall = response.toolCalls.first {
-                    let warning = "[warn] unknown tool: \(firstToolCall.name)\n\n\(response.response)"
-                    appendMessage(.assistantText(warning, thinking: response.thinking, stats: stats), to: conversationID)
-                } else {
-                    appendMessage(.assistantText(response.response, thinking: response.thinking, stats: stats), to: conversationID)
+                for try await event in stream {
+                    try Task.checkCancellation()
+                    switch event {
+                    case .token(let token):
+                        self.streamingText += token
+                    case .completed(let response):
+                        let stats = ChatGenerationStats(
+                            duration: response.duration,
+                            promptTokens: response.promptTokens,
+                            generatedTokens: response.generatedTokens,
+                            contextSize: response.contextSize
+                        )
+                        if let firstToolCall = response.toolCalls.first,
+                           let tool = ToolIntent.Tool(rawValue: firstToolCall.name) {
+                            let intent = ToolIntent(
+                                tool: tool,
+                                args: firstToolCall.arguments,
+                                rawDSL: nil,
+                                source: .model
+                            )
+                            self.appendMessage(
+                                ChatMessage(kind: .toolIntent, role: .assistant, stats: stats, toolIntent: intent),
+                                to: conversationID
+                            )
+                        } else if let firstToolCall = response.toolCalls.first {
+                            let warning = "[warn] unknown tool: \(firstToolCall.name)\n\n\(response.response)"
+                            self.appendMessage(.assistantText(warning, thinking: response.thinking, stats: stats), to: conversationID)
+                        } else {
+                            self.appendMessage(.assistantText(response.response, thinking: response.thinking, stats: stats), to: conversationID)
+                        }
+                    }
                 }
-                runtimeStatus = inferenceService.runtimeStatus
+                self.runtimeStatus = self.inferenceService.runtimeStatus
+            } catch is CancellationError {
+                self.runtimeStatus = "Stopped"
             } catch {
-                appendMessage(.assistantText(error.localizedDescription), to: conversationID)
-                runtimeStatus = "Needs attention"
+                self.appendMessage(
+                    ChatMessage(
+                        kind: .assistantError,
+                        role: .assistant,
+                        text: error.localizedDescription
+                    ),
+                    to: conversationID
+                )
+                self.runtimeStatus = "Needs attention"
             }
-            isGenerating = false
+            self.streamingText = ""
+            self.streamingMessageID = nil
+            self.isGenerating = false
+            self.generationTask = nil
         }
+    }
+
+    func stop() {
+        generationTask?.cancel()
+    }
+
+    func editAndResend(_ userMessage: ChatMessage, newText: String) {
+        guard !isGenerating else {
+            return
+        }
+        let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == activeConversationID }) else {
+            return
+        }
+        let messages = conversations[conversationIndex].messages
+        guard let userIndex = messages.firstIndex(where: { $0.id == userMessage.id }) else {
+            return
+        }
+        guard messages[userIndex].kind == .userText else {
+            return
+        }
+
+        let conversationID = conversations[conversationIndex].id
+        let toRemove = Array(messages[userIndex...])
+        for message in toRemove {
+            try? chatStore.deleteMessage(message.id, from: conversationID)
+        }
+        conversations[conversationIndex].messages.removeSubrange(userIndex...)
+        conversations[conversationIndex].updatedAt = Date()
+        try? chatStore.updateConversationMetadata(conversations[conversationIndex])
+
+        send(trimmed)
+    }
+
+    func regenerate(from assistantMessage: ChatMessage) {
+        guard !isGenerating else {
+            return
+        }
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == activeConversationID }) else {
+            return
+        }
+        let messages = conversations[conversationIndex].messages
+        guard let assistantIndex = messages.firstIndex(where: { $0.id == assistantMessage.id }) else {
+            return
+        }
+
+        var userIndex: Int?
+        var lookbackIndex = assistantIndex - 1
+        while lookbackIndex >= 0 {
+            if messages[lookbackIndex].role == .user, messages[lookbackIndex].kind == .userText {
+                userIndex = lookbackIndex
+                break
+            }
+            lookbackIndex -= 1
+        }
+        guard let userIndex else {
+            return
+        }
+        let userPrompt = messages[userIndex].text ?? ""
+        guard !userPrompt.isEmpty else {
+            return
+        }
+
+        let conversationID = conversations[conversationIndex].id
+        let removed = Array(messages[userIndex...])
+        for message in removed {
+            try? chatStore.deleteMessage(message.id, from: conversationID)
+        }
+        conversations[conversationIndex].messages.removeSubrange(userIndex...)
+        conversations[conversationIndex].updatedAt = Date()
+        try? chatStore.updateConversationMetadata(conversations[conversationIndex])
+
+        send(userPrompt)
     }
 
     func confirmIntent(_ message: ChatMessage) {
@@ -339,8 +556,18 @@ private final class ChatDashboardModel: ObservableObject {
     }
 }
 
+private struct ChatBottomDistanceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct LocalWalletChatDashboardView: View {
     @StateObject private var model = ChatDashboardModel()
+    @State private var conversationPendingDeletion: ChatConversation?
+    @State private var isToolsPopoverPresented = false
+    @State private var isAtBottomOfChat = true
 
     var body: some View {
         ZStack {
@@ -354,15 +581,74 @@ struct LocalWalletChatDashboardView: View {
                 VStack(spacing: 0) {
                     toolbar
                     accountHeader
+                    if let level = model.contextUsageLevel,
+                       let snapshot = model.contextUsageSnapshot {
+                        ContextUsageBanner(
+                            level: level,
+                            used: snapshot.used,
+                            total: snapshot.total,
+                            onNewChat: { model.createNewChat() }
+                        )
+                        .padding(.bottom, 8)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                     chatBody
                     footerControls
                     composer
                 }
+                .animation(.easeInOut(duration: 0.18), value: model.contextUsageLevel)
                 .padding(.horizontal, 22)
                 .padding(.vertical, 16)
             }
         }
         .frame(minWidth: 980, minHeight: 720)
+        .background(keyboardShortcutLayer)
+        .alert(
+            "Delete chat?",
+            isPresented: deletionAlertBinding,
+            presenting: conversationPendingDeletion
+        ) { conversation in
+            Button("Delete", role: .destructive) {
+                model.deleteConversation(conversation.id)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: { conversation in
+            Text("“\(conversation.title)” will be removed from this device. This cannot be undone.")
+        }
+    }
+
+    @ViewBuilder
+    private var keyboardShortcutLayer: some View {
+        ZStack {
+            Button("New chat") {
+                model.createNewChat()
+            }
+            .keyboardShortcut("n", modifiers: .command)
+            Button("Focus composer") {
+                NotificationCenter.default.post(name: .chatComposerFocusRequested, object: nil)
+            }
+            .keyboardShortcut("k", modifiers: .command)
+            Button("Delete current chat") {
+                if let active = model.activeConversation {
+                    conversationPendingDeletion = active
+                }
+            }
+            .keyboardShortcut(.delete, modifiers: .command)
+        }
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
+    }
+
+    private var deletionAlertBinding: Binding<Bool> {
+        Binding(
+            get: { conversationPendingDeletion != nil },
+            set: { newValue in
+                if !newValue {
+                    conversationPendingDeletion = nil
+                }
+            }
+        )
     }
 
     private var chatSidebar: some View {
@@ -387,17 +673,24 @@ struct LocalWalletChatDashboardView: View {
             .padding(.horizontal, 16)
 
             ScrollView {
-                LazyVStack(spacing: 8) {
-                    ForEach(model.conversations) { conversation in
-                        ChatConversationRow(
-                            conversation: conversation,
-                            isSelected: conversation.id == model.activeConversationID
-                        ) {
-                            model.selectConversation(conversation)
+                LazyVStack(spacing: 8, pinnedViews: []) {
+                    ForEach(groupedConversations, id: \.0) { bucket, conversations in
+                        sidebarBucketHeader(bucket)
+                        ForEach(conversations) { conversation in
+                            ChatConversationRow(
+                                conversation: conversation,
+                                isSelected: conversation.id == model.activeConversationID,
+                                onSelect: { model.selectConversation(conversation) },
+                                onDelete: { conversationPendingDeletion = conversation },
+                                onRename: { newTitle in
+                                    model.renameConversation(conversation.id, to: newTitle)
+                                }
+                            )
                         }
                     }
                 }
                 .padding(.horizontal, 10)
+                .padding(.bottom, 12)
             }
 
             Spacer(minLength: 0)
@@ -411,9 +704,37 @@ struct LocalWalletChatDashboardView: View {
         }
     }
 
+    private var groupedConversations: [(ChatSidebarBucket, [ChatConversation])] {
+        var groups: [ChatSidebarBucket: [ChatConversation]] = [:]
+        for conversation in model.conversations {
+            let bucket = ChatSidebarBucket.bucket(for: conversation.updatedAt)
+            groups[bucket, default: []].append(conversation)
+        }
+        return ChatSidebarBucket.allCases.compactMap { bucket in
+            guard let conversations = groups[bucket], !conversations.isEmpty else {
+                return nil
+            }
+            return (bucket, conversations)
+        }
+    }
+
+    private func sidebarBucketHeader(_ bucket: ChatSidebarBucket) -> some View {
+        HStack {
+            Text(bucket.rawValue)
+                .font(.system(size: 10, weight: .heavy))
+                .foregroundStyle(ChatPalette.mutedText)
+                .textCase(.uppercase)
+                .tracking(0.6)
+            Spacer()
+        }
+        .padding(.horizontal, 6)
+        .padding(.top, 10)
+        .padding(.bottom, 2)
+    }
+
     private var toolbar: some View {
         HStack {
-            HStack(spacing: 14) {
+            HStack(spacing: 10) {
                 Button {
                     model.toggleSidebar()
                 } label: {
@@ -483,75 +804,199 @@ struct LocalWalletChatDashboardView: View {
             emptyState
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 16) {
-                        ForEach(model.messages) { message in
-                            switch message.kind {
-                            case .userText, .assistantText:
-                                ChatBubble(message: message)
+            GeometryReader { outer in
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 16) {
+                            ForEach(model.messages) { message in
+                                switch message.kind {
+                                case .userText, .assistantText:
+                                    ChatBubble(
+                                        message: message,
+                                        canRegenerate: message.role == .assistant && !model.isGenerating,
+                                        onRegenerate: { model.regenerate(from: message) },
+                                        canEdit: message.kind == .userText && !model.isGenerating,
+                                        onEdit: { newText in
+                                            model.editAndResend(message, newText: newText)
+                                        }
+                                    )
                                     .id(message.id)
-                            case .toolIntent:
-                                if let intent = message.toolIntent {
-                                    HStack {
-                                        ToolIntentCardView(
-                                            intent: intent,
-                                            onConfirm: { model.confirmIntent(message) },
-                                            onReject: { model.rejectIntent(message) },
-                                            onEdit: { editedIntent in
-                                                model.editIntent(message, with: editedIntent)
-                                            }
-                                        )
-                                        Spacer(minLength: 0)
+                                case .assistantError:
+                                    AssistantErrorBubble(
+                                        message: message,
+                                        canRetry: !model.isGenerating,
+                                        onRetry: { model.regenerate(from: message) }
+                                    )
+                                    .id(message.id)
+                                case .toolIntent:
+                                    if let intent = message.toolIntent {
+                                        HStack {
+                                            ToolIntentCardView(
+                                                intent: intent,
+                                                onConfirm: { model.confirmIntent(message) },
+                                                onReject: { model.rejectIntent(message) },
+                                                onEdit: { editedIntent in
+                                                    model.editIntent(message, with: editedIntent)
+                                                }
+                                            )
+                                            Spacer(minLength: 0)
+                                        }
+                                        .padding(.horizontal)
+                                        .id(message.id)
                                     }
-                                    .padding(.horizontal)
-                                    .id(message.id)
+                                case .toolResponse:
+                                    EmptyView()
                                 }
-                            case .toolResponse:
-                                EmptyView()
+                            }
+                            if let streamingID = model.streamingMessageID {
+                                StreamingAssistantBubble(
+                                    text: model.streamingText,
+                                    onStop: { model.stop() }
+                                )
+                                .id(streamingID)
                             }
                         }
-                        if model.isGenerating {
-                            ThinkingBubble()
-                                .id("thinking")
+                        .padding(.vertical, 28)
+                        .frame(maxWidth: 780)
+                        .frame(maxWidth: .infinity)
+
+                        Color.clear
+                            .frame(height: 1)
+                            .background(
+                                GeometryReader { inner in
+                                    Color.clear.preference(
+                                        key: ChatBottomDistanceKey.self,
+                                        value: inner.frame(in: .global).minY - outer.frame(in: .global).maxY
+                                    )
+                                }
+                            )
+                            .id("bottom-sentinel")
+                    }
+                    .onPreferenceChange(ChatBottomDistanceKey.self) { distance in
+                        let nearBottom = distance <= 80
+                        if nearBottom != isAtBottomOfChat {
+                            isAtBottomOfChat = nearBottom
                         }
                     }
-                    .padding(.vertical, 28)
-                    .frame(maxWidth: 780)
-                    .frame(maxWidth: .infinity)
-                }
-                .onChange(of: model.messages) { _, messages in
-                    if let last = messages.last {
+                    .onChange(of: model.messages) { _, messages in
+                        guard isAtBottomOfChat, let last = messages.last else { return }
                         withAnimation(.easeOut(duration: 0.22)) {
                             proxy.scrollTo(last.id, anchor: .bottom)
                         }
                     }
+                    .onChange(of: model.streamingMessageID) { _, newID in
+                        guard let newID else { return }
+                        isAtBottomOfChat = true
+                        withAnimation(.easeOut(duration: 0.22)) {
+                            proxy.scrollTo(newID, anchor: .bottom)
+                        }
+                    }
+                    .onChange(of: model.streamingText) { _, _ in
+                        guard isAtBottomOfChat, let id = model.streamingMessageID else { return }
+                        proxy.scrollTo(id, anchor: .bottom)
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        if !isAtBottomOfChat {
+                            Button {
+                                let targetID: AnyHashable
+                                if let id = model.streamingMessageID {
+                                    targetID = id
+                                } else if let last = model.messages.last {
+                                    targetID = last.id
+                                } else {
+                                    return
+                                }
+                                withAnimation(.easeOut(duration: 0.22)) {
+                                    proxy.scrollTo(targetID, anchor: .bottom)
+                                }
+                                isAtBottomOfChat = true
+                            } label: {
+                                Image(systemName: "arrow.down")
+                                    .font(.system(size: 13, weight: .black))
+                                    .foregroundStyle(ChatPalette.primaryText)
+                                    .frame(width: 34, height: 34)
+                                    .background(
+                                        Circle()
+                                            .fill(ChatPalette.buttonCircle)
+                                            .overlay(Circle().stroke(ChatPalette.border, lineWidth: 1))
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .help("Jump to latest")
+                            .padding(.bottom, 12)
+                            .padding(.trailing, 12)
+                            .transition(.opacity)
+                        }
+                    }
+                    .animation(.easeInOut(duration: 0.15), value: isAtBottomOfChat)
                 }
             }
         }
     }
 
     private var emptyState: some View {
-        VStack(spacing: 22) {
+        VStack(spacing: 18) {
             Spacer()
             ZStack {
                 Circle()
                     .fill(ChatPalette.avatar)
-                    .frame(width: 158, height: 158)
+                    .frame(width: 132, height: 132)
                 Image(systemName: "person.fill")
-                    .font(.system(size: 64, weight: .semibold))
+                    .font(.system(size: 56, weight: .semibold))
                     .foregroundStyle(ChatPalette.secondaryText)
             }
-            VStack(spacing: 7) {
+            VStack(spacing: 6) {
                 Text(greeting)
-                    .font(.system(size: 36, weight: .heavy))
+                    .font(.system(size: 32, weight: .heavy))
                     .foregroundStyle(ChatPalette.primaryText)
-                Text("How can I help you today?")
-                    .font(.system(size: 18, weight: .medium))
+                Text("Pick a starter below or just message Gemma directly.")
+                    .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(ChatPalette.secondaryText)
+                    .multilineTextAlignment(.center)
             }
+
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+                spacing: 12
+            ) {
+                ForEach(welcomeStarters, id: \.title) { starter in
+                    WelcomeStarterChip(starter: starter) {
+                        model.inputText = starter.prompt
+                        NotificationCenter.default.post(name: .chatComposerFocusRequested, object: nil)
+                    }
+                }
+            }
+            .frame(maxWidth: 620)
+            .padding(.top, 6)
+
             Spacer()
         }
+        .padding(.horizontal, 28)
+    }
+
+    private var welcomeStarters: [WelcomeStarter] {
+        [
+            WelcomeStarter(
+                icon: "arrow.up.right.circle.fill",
+                title: "Transfer",
+                prompt: "Send 0.1 ETH to vitalik.eth"
+            ),
+            WelcomeStarter(
+                icon: "arrow.triangle.swap",
+                title: "Swap",
+                prompt: "Swap 100 USDC for ETH"
+            ),
+            WelcomeStarter(
+                icon: "slash.circle.fill",
+                title: "Try a slash command",
+                prompt: "/transfer 0.05 ETH to <recipient>"
+            ),
+            WelcomeStarter(
+                icon: "lock.shield.fill",
+                title: "How keys stay safe",
+                prompt: "How does this wallet keep my private keys safe?"
+            )
+        ]
     }
 
     private var footerControls: some View {
@@ -564,6 +1009,30 @@ struct LocalWalletChatDashboardView: View {
             }
             .buttonStyle(.plain)
             StatusPill(icon: "slider.horizontal.3", text: model.runtimeStatus)
+            Button {
+                isToolsPopoverPresented.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "slash.circle.fill")
+                        .font(.system(size: 11, weight: .black))
+                        .foregroundStyle(ChatPalette.accent)
+                    Text("Tools")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                }
+                .padding(.horizontal, 11)
+                .frame(height: 32)
+                .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 0.8)))
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $isToolsPopoverPresented, arrowEdge: .top) {
+                SlashCommandPalette { command in
+                    model.insertSlashCommand(command)
+                    isToolsPopoverPresented = false
+                }
+                .frame(width: 420)
+            }
+            .help("Browse slash commands")
             Spacer()
             Text(model.contextStatsText)
                 .font(.system(size: 12, weight: .bold))
@@ -574,6 +1043,19 @@ struct LocalWalletChatDashboardView: View {
     }
 
     private var composer: some View {
+        VStack(spacing: 8) {
+            if !model.slashSuggestions.isEmpty {
+                SlashSuggestionPanel(commands: model.slashSuggestions) { command in
+                    model.insertSlashCommand(command)
+                }
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+            composerInputBox
+        }
+        .animation(.easeOut(duration: 0.12), value: model.slashSuggestions)
+    }
+
+    private var composerInputBox: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
                 PromptTextEditor(text: $model.inputText) {
@@ -584,7 +1066,7 @@ struct LocalWalletChatDashboardView: View {
                 .disabled(model.isGenerating)
                     .frame(minHeight: 78, maxHeight: 96)
                 if model.inputText.isEmpty {
-                    Text("Message Gemma...")
+                    Text("Message Gemma — describe what you want, or type / for tools")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(ChatPalette.mutedText)
                         .padding(.horizontal, 17)
@@ -595,14 +1077,7 @@ struct LocalWalletChatDashboardView: View {
 
             HStack(spacing: 10) {
                 Spacer()
-                SlashMenuButton(onInsert: { scaffold in
-                    if model.inputText.isEmpty {
-                        model.inputText = scaffold
-                    } else {
-                        model.inputText.append("\n\(scaffold)")
-                    }
-                })
-                Text("↩ to send")
+                Text("↩ to send · ⌘K to focus")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(ChatPalette.mutedText)
                 Button {
@@ -678,6 +1153,7 @@ private struct PromptTextEditor: NSViewRepresentable {
         textView.autoresizingMask = [.width]
 
         scrollView.documentView = textView
+        context.coordinator.attach(textView: textView)
         return scrollView
     }
 
@@ -698,13 +1174,34 @@ private struct PromptTextEditor: NSViewRepresentable {
         textView.font = .systemFont(ofSize: 16, weight: .medium)
     }
 
+    @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
         var onSubmit: () -> Void
+        private weak var textView: NSTextView?
 
         init(text: Binding<String>, onSubmit: @escaping () -> Void) {
             self.text = text
             self.onSubmit = onSubmit
+            super.init()
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleFocusRequest),
+                name: .chatComposerFocusRequested,
+                object: nil
+            )
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+
+        func attach(textView: NSTextView) {
+            self.textView = textView
+        }
+
+        @objc private func handleFocusRequest() {
+            textView?.window?.makeFirstResponder(textView)
         }
 
         func textDidChange(_ notification: Notification) {
@@ -732,36 +1229,125 @@ private struct PromptTextEditor: NSViewRepresentable {
 private struct ChatConversationRow: View {
     let conversation: ChatConversation
     let isSelected: Bool
-    let action: () -> Void
+    let onSelect: () -> Void
+    let onDelete: () -> Void
+    let onRename: (String) -> Void
+    @State private var isHovered = false
+    @State private var isRenaming = false
+    @State private var editingTitle = ""
+    @FocusState private var renameFocused: Bool
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 6) {
+        ZStack(alignment: .topTrailing) {
+            Button(action: { if !isRenaming { onSelect() } }) {
+                rowContent
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 11)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(isSelected ? ChatPalette.selectedPanel : Color.clear)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(isSelected ? ChatPalette.accent.opacity(0.65) : ChatPalette.border.opacity(0.45), lineWidth: 1)
+                            )
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .simultaneousGesture(
+                TapGesture(count: 2).onEnded { startRenaming() }
+            )
+            .contextMenu {
+                Button {
+                    startRenaming()
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                Button(role: .destructive) {
+                    onDelete()
+                } label: {
+                    Label("Delete chat", systemImage: "trash")
+                }
+            }
+
+            if isHovered, !isRenaming {
+                Button(action: onDelete) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .black))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                        .frame(width: 20, height: 20)
+                        .background(
+                            Circle()
+                                .fill(ChatPalette.buttonCircle)
+                                .overlay(Circle().stroke(ChatPalette.border, lineWidth: 0.8))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Delete chat")
+                .padding(6)
+                .transition(.opacity)
+            }
+        }
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+    }
+
+    private var rowContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if isRenaming {
+                TextField("Conversation title", text: $editingTitle)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(ChatPalette.primaryText)
+                    .focused($renameFocused)
+                    .onSubmit { commitRename() }
+                    .onExitCommand { cancelRename() }
+                    .onChange(of: renameFocused) { _, focused in
+                        if !focused && isRenaming {
+                            commitRename()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
                 Text(conversation.title)
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(ChatPalette.primaryText)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: 6) {
-                    Text("\(conversation.messages.count) messages")
-                    Text("·")
-                    Text(conversation.updatedAt, style: .relative)
-                }
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(ChatPalette.mutedText)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 11)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(isSelected ? ChatPalette.selectedPanel : Color.clear)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(isSelected ? ChatPalette.accent.opacity(0.65) : ChatPalette.border.opacity(0.45), lineWidth: 1)
-                    )
-            )
+            HStack(spacing: 6) {
+                Text("\(conversation.messages.count) messages")
+                Text("·")
+                Text(conversation.updatedAt, style: .relative)
+            }
+            .font(.system(size: 11, weight: .bold))
+            .foregroundStyle(ChatPalette.mutedText)
         }
-        .buttonStyle(.plain)
+    }
+
+    private func startRenaming() {
+        editingTitle = conversation.title
+        isRenaming = true
+        DispatchQueue.main.async {
+            renameFocused = true
+        }
+    }
+
+    private func commitRename() {
+        let trimmed = editingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        isRenaming = false
+        guard !trimmed.isEmpty, trimmed != conversation.title else {
+            return
+        }
+        onRename(trimmed)
+    }
+
+    private func cancelRename() {
+        isRenaming = false
     }
 }
 
@@ -814,67 +1400,458 @@ private struct AddressPill: View {
 
 private struct ChatBubble: View {
     let message: ChatMessage
+    var canRegenerate: Bool = false
+    var onRegenerate: (() -> Void)? = nil
+    var canEdit: Bool = false
+    var onEdit: ((String) -> Void)? = nil
     @State private var isThinkingExpanded = false
+    @State private var isHovered = false
+    @State private var justCopied = false
+    @State private var isEditing = false
+    @State private var editText = ""
+    @FocusState private var editorFocused: Bool
 
     var body: some View {
-        HStack {
+        HStack(alignment: .top, spacing: 0) {
             if message.role == .user {
                 Spacer(minLength: 90)
             }
-            VStack(alignment: .leading, spacing: 10) {
-                if let thinking = message.thinking, message.role == .assistant {
-                    DisclosureGroup(isExpanded: $isThinkingExpanded) {
-                        MarkdownMessageText(markdown: thinking, fontSize: 14, color: ChatPalette.secondaryText)
-                            .padding(.top, 6)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "brain")
-                                .font(.system(size: 12, weight: .bold))
-                            Text("Thinking")
-                                .font(.system(size: 13, weight: .bold))
-                        }
-                        .foregroundStyle(ChatPalette.secondaryText)
-                    }
-                    .tint(ChatPalette.secondaryText)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(ChatPalette.input)
-                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(ChatPalette.border, lineWidth: 0.8))
-                    )
-                }
-
-                if message.role == .assistant {
-                    MarkdownMessageText(markdown: message.text ?? "", fontSize: 16, color: ChatPalette.primaryText)
-                } else {
-                    Text(message.text ?? "")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(ChatPalette.primaryText)
-                        .textSelection(.enabled)
-                }
-
-                if let stats = message.stats, message.role == .assistant {
-                    Text(stats.formattedSummary)
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(ChatPalette.mutedText)
-                        .textSelection(.enabled)
+            ZStack(alignment: .topTrailing) {
+                bubbleContent
+                if isHovered, !isEditing {
+                    hoverActions
+                        .padding(8)
+                        .transition(.opacity)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(message.role == .user ? ChatPalette.userBubble : ChatPalette.assistantBubble)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(ChatPalette.border, lineWidth: 1)
-                    )
-            )
+            .contextMenu {
+                if !isEditing {
+                    Button {
+                        copyPlainText()
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                    if message.stats != nil, message.role == .assistant {
+                        Button {
+                            copyWithStats()
+                        } label: {
+                            Label("Copy with stats", systemImage: "doc.on.doc.fill")
+                        }
+                    }
+                    if canEdit, onEdit != nil {
+                        Divider()
+                        Button {
+                            beginEditing()
+                        } label: {
+                            Label("Edit message", systemImage: "pencil")
+                        }
+                    }
+                    if canRegenerate, let onRegenerate {
+                        Divider()
+                        Button {
+                            onRegenerate()
+                        } label: {
+                            Label("Regenerate response", systemImage: "arrow.clockwise")
+                        }
+                    }
+                }
+            }
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.12)) {
+                    isHovered = hovering
+                }
+            }
             if message.role == .assistant {
                 Spacer(minLength: 90)
             }
         }
+    }
+
+    private var hoverActions: some View {
+        HStack(spacing: 6) {
+            if canEdit, onEdit != nil {
+                bubbleActionButton(systemImage: "pencil", help: "Edit and resend", action: beginEditing)
+            }
+            if canRegenerate, let onRegenerate {
+                bubbleActionButton(systemImage: "arrow.clockwise", help: "Regenerate response", action: onRegenerate)
+            }
+            copyButton
+        }
+    }
+
+    private func beginEditing() {
+        editText = message.text ?? ""
+        isEditing = true
+        DispatchQueue.main.async {
+            editorFocused = true
+        }
+    }
+
+    private func submitEdit() {
+        let trimmed = editText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        isEditing = false
+        onEdit?(trimmed)
+    }
+
+    private func cancelEdit() {
+        editText = message.text ?? ""
+        isEditing = false
+    }
+
+    private func bubbleActionButton(systemImage: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 10, weight: .black))
+                .foregroundStyle(ChatPalette.secondaryText)
+                .frame(width: 24, height: 24)
+                .background(
+                    Circle()
+                        .fill(ChatPalette.buttonCircle)
+                        .overlay(Circle().stroke(ChatPalette.border, lineWidth: 0.8))
+                )
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    private var bubbleContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let thinking = message.thinking, message.role == .assistant {
+                DisclosureGroup(isExpanded: $isThinkingExpanded) {
+                    MarkdownMessageText(markdown: thinking, fontSize: 14, color: ChatPalette.secondaryText)
+                        .padding(.top, 6)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "brain")
+                            .font(.system(size: 12, weight: .bold))
+                        Text("Thinking")
+                            .font(.system(size: 13, weight: .bold))
+                    }
+                    .foregroundStyle(ChatPalette.secondaryText)
+                }
+                .tint(ChatPalette.secondaryText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(ChatPalette.input)
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(ChatPalette.border, lineWidth: 0.8))
+                )
+            }
+
+            if message.role == .assistant {
+                MarkdownMessageText(markdown: message.text ?? "", fontSize: 16, color: ChatPalette.primaryText)
+            } else if isEditing {
+                editingView
+            } else {
+                Text(message.text ?? "")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(ChatPalette.primaryText)
+                    .textSelection(.enabled)
+            }
+
+            if let stats = message.stats, message.role == .assistant {
+                Text(stats.formattedSummary)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(ChatPalette.mutedText)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(message.role == .user ? ChatPalette.userBubble : ChatPalette.assistantBubble)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(ChatPalette.border, lineWidth: 1)
+                )
+        )
+    }
+
+    private var editingView: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            TextEditor(text: $editText)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(ChatPalette.primaryText)
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
+                .focused($editorFocused)
+                .frame(minHeight: 60, maxHeight: 220)
+                .onExitCommand {
+                    cancelEdit()
+                }
+
+            HStack(spacing: 8) {
+                Button(action: cancelEdit) {
+                    Text("Cancel")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(ChatPalette.buttonCircle)
+                                .overlay(Capsule().stroke(ChatPalette.border, lineWidth: 0.8))
+                        )
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+
+                Button(action: submitEdit) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "paperplane.fill")
+                            .font(.system(size: 10, weight: .black))
+                        Text("Save & send")
+                            .font(.system(size: 12, weight: .heavy))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(ChatPalette.accent.opacity(canSubmitEdit ? 0.95 : 0.4)))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSubmitEdit)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .frame(minWidth: 280, alignment: .trailing)
+    }
+
+    private var canSubmitEdit: Bool {
+        !editText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var copyButton: some View {
+        Button(action: copyPlainText) {
+            Image(systemName: justCopied ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 10, weight: .black))
+                .foregroundStyle(justCopied ? ChatPalette.success : ChatPalette.secondaryText)
+                .frame(width: 24, height: 24)
+                .background(
+                    Circle()
+                        .fill(ChatPalette.buttonCircle)
+                        .overlay(Circle().stroke(ChatPalette.border, lineWidth: 0.8))
+                )
+        }
+        .buttonStyle(.plain)
+        .help(justCopied ? "Copied" : "Copy message")
+    }
+
+    private func copyPlainText() {
+        ChatClipboard.copy(message.text ?? "")
+        flashCopied()
+    }
+
+    private func copyWithStats() {
+        var pieces: [String] = [message.text ?? ""]
+        if let stats = message.stats {
+            pieces.append("")
+            pieces.append("— \(stats.formattedSummary)")
+        }
+        ChatClipboard.copy(pieces.joined(separator: "\n"))
+        flashCopied()
+    }
+
+    private func flashCopied() {
+        withAnimation(.easeInOut(duration: 0.12)) {
+            justCopied = true
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
+            withAnimation(.easeInOut(duration: 0.2)) {
+                justCopied = false
+            }
+        }
+    }
+}
+
+private struct WelcomeStarter: Equatable {
+    let icon: String
+    let title: String
+    let prompt: String
+}
+
+private struct WelcomeStarterChip: View {
+    let starter: WelcomeStarter
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: starter.icon)
+                        .font(.system(size: 11, weight: .black))
+                        .foregroundStyle(ChatPalette.accent)
+                    Text(starter.title)
+                        .font(.system(size: 11, weight: .heavy))
+                        .foregroundStyle(ChatPalette.mutedText)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+                }
+                Text(starter.prompt)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(ChatPalette.primaryText)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(isHovered ? ChatPalette.selectedPanel.opacity(0.8) : ChatPalette.panel)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(isHovered ? ChatPalette.accent.opacity(0.6) : ChatPalette.border, lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+private struct SlashSuggestionPanel: View {
+    let commands: [SlashCommand]
+    let onSelect: (SlashCommand) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(commands.enumerated()), id: \.element.id) { index, command in
+                Button {
+                    onSelect(command)
+                } label: {
+                    HStack(spacing: 10) {
+                        Text(command.displayName)
+                            .font(.system(size: 13, weight: .heavy, design: .monospaced))
+                            .foregroundStyle(ChatPalette.accent)
+                            .frame(width: 84, alignment: .leading)
+                        Text(command.summary)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(ChatPalette.secondaryText)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text(command.signature)
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(ChatPalette.mutedText)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(SlashSuggestionRowStyle())
+                if index < commands.count - 1 {
+                    Rectangle()
+                        .fill(ChatPalette.border.opacity(0.5))
+                        .frame(height: 0.5)
+                }
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(ChatPalette.panel)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(ChatPalette.border, lineWidth: 1)
+                )
+        )
+    }
+}
+
+private struct SlashSuggestionRowStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                configuration.isPressed
+                    ? ChatPalette.selectedPanel.opacity(0.8)
+                    : Color.clear
+            )
+    }
+}
+
+private struct SlashCommandPalette: View {
+    let onSelect: (SlashCommand) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "slash.circle.fill")
+                    .font(.system(size: 13, weight: .black))
+                    .foregroundStyle(ChatPalette.accent)
+                Text("Slash commands")
+                    .font(.system(size: 13, weight: .heavy))
+                    .foregroundStyle(ChatPalette.primaryText)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 6)
+
+            Text("Click a command to insert a ready-to-edit scaffold into the composer. Replace the placeholders (in <angle brackets>) with your values.")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(ChatPalette.mutedText)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
+
+            Rectangle()
+                .fill(ChatPalette.border.opacity(0.4))
+                .frame(height: 0.5)
+
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(SlashCatalog.all.enumerated()), id: \.element.id) { index, command in
+                    Button {
+                        onSelect(command)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Text(command.displayName)
+                                    .font(.system(size: 13, weight: .heavy, design: .monospaced))
+                                    .foregroundStyle(ChatPalette.accent)
+                                Text(command.signature)
+                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(ChatPalette.mutedText)
+                                Spacer(minLength: 0)
+                            }
+                            Text(command.summary)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(ChatPalette.secondaryText)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(SlashSuggestionRowStyle())
+
+                    if index < SlashCatalog.all.count - 1 {
+                        Rectangle()
+                            .fill(ChatPalette.border.opacity(0.4))
+                            .frame(height: 0.5)
+                    }
+                }
+            }
+        }
+        .padding(.bottom, 6)
+    }
+}
+
+private enum ChatClipboard {
+    static func copy(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 }
 
@@ -884,23 +1861,141 @@ private struct MarkdownMessageText: View {
     let color: Color
 
     var body: some View {
-        Text(attributedMarkdown)
-            .font(.system(size: fontSize, weight: .medium))
-            .foregroundStyle(color)
-            .textSelection(.enabled)
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(ChatMarkdownParser.segments(in: markdown).enumerated()), id: \.offset) { _, segment in
+                switch segment {
+                case .prose(let text):
+                    Text(attributed(text))
+                        .font(.system(size: fontSize, weight: .medium))
+                        .foregroundStyle(color)
+                        .textSelection(.enabled)
+                case .codeBlock(let language, let code):
+                    CodeBlockView(language: language, code: code)
+                }
+            }
+        }
     }
 
-    private var attributedMarkdown: AttributedString {
+    private func attributed(_ text: String) -> AttributedString {
         do {
             return try AttributedString(
-                markdown: markdown,
+                markdown: text,
                 options: AttributedString.MarkdownParsingOptions(
                     interpretedSyntax: .full,
                     failurePolicy: .returnPartiallyParsedIfPossible
                 )
             )
         } catch {
-            return AttributedString(markdown)
+            return AttributedString(text)
+        }
+    }
+}
+
+private enum ChatMarkdownSegment: Equatable {
+    case prose(String)
+    case codeBlock(language: String?, code: String)
+}
+
+private enum ChatMarkdownParser {
+    static func segments(in markdown: String) -> [ChatMarkdownSegment] {
+        var segments: [ChatMarkdownSegment] = []
+        var prose: [String] = []
+        var iterator = markdown.components(separatedBy: "\n").makeIterator()
+        while let line = iterator.next() {
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                if !prose.isEmpty {
+                    segments.append(.prose(prose.joined(separator: "\n")))
+                    prose.removeAll()
+                }
+                let fence = line.trimmingCharacters(in: .whitespaces)
+                let language = String(fence.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                var codeLines: [String] = []
+                var closed = false
+                while let codeLine = iterator.next() {
+                    if codeLine.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                        closed = true
+                        break
+                    }
+                    codeLines.append(codeLine)
+                }
+                let code = codeLines.joined(separator: "\n")
+                if closed || !code.isEmpty {
+                    segments.append(.codeBlock(language: language.isEmpty ? nil : language, code: code))
+                }
+            } else {
+                prose.append(line)
+            }
+        }
+        if !prose.isEmpty {
+            let joined = prose.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !joined.isEmpty {
+                segments.append(.prose(joined))
+            }
+        }
+        return segments
+    }
+}
+
+private struct CodeBlockView: View {
+    let language: String?
+    let code: String
+    @State private var justCopied = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text((language ?? "code").uppercased())
+                    .font(.system(size: 10, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(ChatPalette.mutedText)
+                    .tracking(0.6)
+                Spacer()
+                Button {
+                    ChatClipboard.copy(code)
+                    flashCopied()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: justCopied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 10, weight: .black))
+                        Text(justCopied ? "Copied" : "Copy")
+                            .font(.system(size: 10, weight: .heavy))
+                    }
+                    .foregroundStyle(justCopied ? ChatPalette.success : ChatPalette.secondaryText)
+                }
+                .buttonStyle(.plain)
+                .help("Copy code")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(ChatPalette.background.opacity(0.5))
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(code)
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(ChatPalette.primaryText)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .textSelection(.enabled)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(ChatPalette.input)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(ChatPalette.border, lineWidth: 0.8)
+                )
+        )
+    }
+
+    private func flashCopied() {
+        withAnimation(.easeInOut(duration: 0.12)) {
+            justCopied = true
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
+            withAnimation(.easeInOut(duration: 0.2)) {
+                justCopied = false
+            }
         }
     }
 }
@@ -912,21 +2007,233 @@ private extension ChatGenerationStats {
     }
 }
 
-private struct ThinkingBubble: View {
+private struct AssistantErrorBubble: View {
+    let message: ChatMessage
+    let canRetry: Bool
+    let onRetry: () -> Void
+
     var body: some View {
-        HStack {
-            HStack(spacing: 10) {
-                ProgressView()
-                    .scaleEffect(0.75)
-                Text("Thinking with Gemma 4 E4B...")
-                    .font(.system(size: 15, weight: .bold))
+        HStack(alignment: .top, spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 13, weight: .black))
+                        .foregroundStyle(Color.orange)
+                    Text("Generation failed")
+                        .font(.system(size: 13, weight: .heavy))
+                        .foregroundStyle(ChatPalette.primaryText)
+                }
+                Text(message.text ?? "Unknown error")
+                    .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(ChatPalette.secondaryText)
+                    .textSelection(.enabled)
+                if canRetry {
+                    Button(action: onRetry) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11, weight: .black))
+                            Text("Retry")
+                                .font(.system(size: 12, weight: .heavy))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(ChatPalette.accent.opacity(0.9)))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Re-run the last prompt")
+                }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(ChatPalette.assistantBubble))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.orange.opacity(0.10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Color.orange.opacity(0.45), lineWidth: 1)
+                    )
+            )
             Spacer(minLength: 90)
         }
+    }
+}
+
+private struct StreamingAssistantBubble: View {
+    let text: String
+    let onStop: () -> Void
+    @State private var isThinkingExpanded = false
+
+    private var split: GemmaStreamingSplit {
+        GemmaChannelFallback.streamingSplit(of: text)
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
+                if text.isEmpty {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .scaleEffect(0.75)
+                        Text("Thinking with Gemma 4 E4B…")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(ChatPalette.secondaryText)
+                    }
+                } else {
+                    let parts = split
+                    if let reasoning = parts.reasoning {
+                        DisclosureGroup(isExpanded: $isThinkingExpanded) {
+                            MarkdownMessageText(
+                                markdown: reasoning,
+                                fontSize: 14,
+                                color: ChatPalette.secondaryText
+                            )
+                            .padding(.top, 6)
+                        } label: {
+                            HStack(spacing: 8) {
+                                if parts.content.isEmpty {
+                                    ProgressView()
+                                        .scaleEffect(0.6)
+                                } else {
+                                    Image(systemName: "brain")
+                                        .font(.system(size: 12, weight: .bold))
+                                }
+                                Text(parts.content.isEmpty ? "Thinking…" : "Thinking")
+                                    .font(.system(size: 13, weight: .bold))
+                            }
+                            .foregroundStyle(ChatPalette.secondaryText)
+                        }
+                        .tint(ChatPalette.secondaryText)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(ChatPalette.input)
+                                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(ChatPalette.border, lineWidth: 0.8))
+                        )
+                    }
+                    if !parts.content.isEmpty {
+                        MarkdownMessageText(
+                            markdown: parts.content,
+                            fontSize: 16,
+                            color: ChatPalette.primaryText
+                        )
+                    }
+                }
+                HStack {
+                    Spacer()
+                    Button(action: onStop) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 10, weight: .black))
+                            Text("Stop")
+                                .font(.system(size: 11, weight: .heavy))
+                        }
+                        .foregroundStyle(ChatPalette.primaryText)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(ChatPalette.buttonCircle)
+                                .overlay(Capsule().stroke(ChatPalette.border, lineWidth: 0.8))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.escape, modifiers: [])
+                    .help("Stop generation")
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(ChatPalette.assistantBubble)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(ChatPalette.border, lineWidth: 1)
+                    )
+            )
+            Spacer(minLength: 90)
+        }
+    }
+}
+
+private struct ContextUsageBanner: View {
+    let level: ContextUsageLevel
+    let used: Int
+    let total: Int
+    let onNewChat: () -> Void
+
+    private var tint: Color {
+        switch level {
+        case .warning: return Color.yellow
+        case .critical: return Color.orange
+        }
+    }
+
+    private var icon: String {
+        switch level {
+        case .warning: return "exclamationmark.triangle.fill"
+        case .critical: return "exclamationmark.octagon.fill"
+        }
+    }
+
+    private var title: String {
+        switch level {
+        case .warning: return "Context running low"
+        case .critical: return "Context almost full"
+        }
+    }
+
+    private var detail: String {
+        let percent = Int((Double(used) / Double(max(total, 1))) * 100)
+        switch level {
+        case .warning:
+            return "Used \(used) of \(total) tokens (\(percent)%). A fresh chat keeps responses crisp."
+        case .critical:
+            return "Used \(used) of \(total) tokens (\(percent)%). Gemma may start truncating earlier turns — start a new chat."
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .black))
+                .foregroundStyle(tint)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .heavy))
+                    .foregroundStyle(ChatPalette.primaryText)
+                Text(detail)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(ChatPalette.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button(action: onNewChat) {
+                HStack(spacing: 5) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .black))
+                    Text("New chat")
+                        .font(.system(size: 12, weight: .heavy))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Capsule().fill(tint.opacity(0.85)))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(tint.opacity(0.10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(tint.opacity(0.45), lineWidth: 1)
+                )
+        )
     }
 }
 

@@ -50,7 +50,7 @@ private func loadedRuntime() throws -> LlamaRuntime? {
 // which directly exercises the callback-return-stops contract. The Swift
 // `chat(...)` wrapper does not introduce its own cancellation logic — it
 // just routes the AsyncThrowingStream's Task cancellation through the
-// ChatCallbackBox into the same C callback. Tracked as P2.A in
-// OPEN-POINTS.md.
+// ChatCallbackBox into the same C callback. Tracked in the central
+// gitignored docs/OPEN_ITEMS.md at the repo root.
 
 } // end ChatStreamSuite

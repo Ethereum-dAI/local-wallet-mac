@@ -93,7 +93,9 @@ Covers: Helios-verified chain reads, ERC-4337 gas estimation and submission, bun
 
 ## macOS Demo App
 
-The current demo exercises:
+The current demo exercises two complementary layers — wallet plumbing and a local LLM chat layer.
+
+**Wallet plumbing:**
 
 - Secure Enclave + Keychain key lifecycle
 - Kernel smart account address prediction
@@ -101,6 +103,17 @@ The current demo exercises:
 - Local UserOperation building for ETH transfer
 - Hosted Sepolia bundler submission
 - Local daemon integration for bundler EOA admin (rotate/export/delete)
+
+**Local LLM and tool intent layer:**
+
+- On-device Gemma 4 E4B inference via `llama.cpp` (no network at inference time)
+- Streaming chat with thinking/reasoning disclosure, copy / regenerate / edit-and-resend on bubbles, stop button, code-block copy, and a smart auto-scroll that does not yank the user when scrolled up
+- SQLite-backed conversation history (`chat.sqlite` in Application Support), with delete / rename / date-bucketed sidebar
+- Tool intent recognition (transfer, swap) — natural language and `/transfer` / `/swap` slash commands surface an in-chat recognition card; phase 1 is **informational only** (no signing or broadcast yet, see `docs/OPEN_ITEMS.md` OPEN-57)
+- Inline slash autocomplete and a "Tools" popover in the footer with ready-to-edit command scaffolds
+- Onboarding flow for local model download, hardware inspection, and provisioning
+
+A separate `wallet-eval` CLI in `wallet-macos/Sources/wallet-eval/` benchmarks recognition accuracy, multi-turn coherence, and latency against a curated dataset (`wallet-macos/Sources/wallet-eval/Dataset/recognition.json`).
 
 The Sepolia hosted bundler URL is not committed. Provide it as:
 

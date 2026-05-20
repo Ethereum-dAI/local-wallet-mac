@@ -11,6 +11,7 @@ What this demo currently exercises:
 - local ERC-4337 UserOperation building for a simple ETH transfer intent
 - Secure Enclave signing + hosted bundler submission on Ethereum Sepolia
 - debug logging for bootstrap, inspection, gas estimation, signing, submission, and receipt polling
+- on-device Gemma 4 E4B chat with streaming, tool intent recognition (transfer / swap), slash commands, and an in-chat recognition card — the chat layer is documented in [Chat layer](#chat-layer) and [Tool layer (phase 1)](#tool-layer-phase-1) below
 
 The package also contains `SpawnHelper`, the process-launch shim for the local `wallet-node` daemon. The current demo UI uses the hosted Sepolia composer for primary transaction submission, but it also starts/connects to the local daemon for relayer-key admin flows (rotate/export/delete the bundler EOA via admin challenges) and surfaces local relayer status independently of the hosted Sepolia path.
 
@@ -79,6 +80,23 @@ xcodegen generate
 - `EtherAmountParser.swift`, `WeiFormatter.swift`, `HexEncoding.swift`, `QRCodeImageFactory.swift`
   - Small formatting/encoding utilities.
 
+### Chat and local LLM
+
+- `ChatDashboardView.swift`
+  - SwiftUI chat dashboard: sidebar with date-bucketed conversations (delete / rename / context menu), streaming message bubbles with copy / regenerate / edit-and-resend, slash autocomplete, "Tools" footer popover, context-usage banner, keyboard shortcuts (⌘N / ⌘K / ⌘⌫), smart auto-scroll with jump-to-latest pill.
+- `ChatSQLiteStore.swift`
+  - SQLite persistence for conversations + messages + tool intents under `Application Support/LocalWallet/chat.sqlite`. Schema version is gated by `ChatSQLiteMigration` (`WalletToolLayer`).
+- `EmbeddedLlamaInferenceService.swift`
+  - Bridges to `LlamaRuntime.chat(...)` from the `local-llm` package, exposes both a one-shot `generate` and a streaming `stream(...) -> AsyncThrowingStream<EmbeddedLlamaStreamEvent, Error>`, applies `GemmaChannelFallback` to recover reasoning when the upstream chat-template parser leaks `<|channel>thought ... <channel|>` markers into the content stream.
+- `ToolIntentCardView.swift`
+  - In-chat recognition card with **Looks good** / **Edit** / **Reject** actions and the structured-arguments edit sheet.
+- `SlashCatalog.swift`
+  - Single source of truth for slash commands (`/transfer`, `/swap`) shared by the inline composer autocomplete and the footer "Tools" popover. Each entry carries a display name, summary, signature, and ready-to-edit scaffold with angle-bracket placeholders.
+- `OnboardingView.swift`, `OnboardingSettingsStore.swift`, `OnboardingProvisioningService.swift`
+  - First-run flow for local model selection, hardware inspection, and provisioning.
+- `LocalAIModelDownloadManager.swift`, `LocalHardwareInspector.swift`
+  - Local GGUF model download and Apple Silicon / Metal capability inspection used by onboarding.
+
 ## Current Limits
 
 - Sepolia-only demo mode is currently enforced in the app shell.
@@ -122,14 +140,31 @@ The package script injects the URL into the built app's `Info.plist` and re-sign
 
 ---
 
+## Chat layer
+
+The chat dashboard is the primary entry point of the demo app. It runs a streaming conversation against an on-device Gemma 4 E4B GGUF model loaded by the sibling `local-llm` Swift package (`LlamaRuntime`).
+
+Highlights of the current UX:
+
+- **Streaming with stop and resume** — tokens stream into the in-flight bubble; ⎋ or the inline Stop button cancels the consumer Task (the underlying `llama.cpp` loop still runs to its own completion — see `docs/OPEN_ITEMS.md` OPEN-58).
+- **Thinking disclosure** — reasoning content emitted by the model is shown live in a collapsible "Thinking" DisclosureGroup; `GemmaChannelFallback` re-extracts it from raw output when the upstream chat-template parser leaks `<|channel>thought ... <channel|>` markers (see OPEN-55).
+- **Bubble-level actions** — Copy / Copy with stats / Regenerate (on assistant bubbles) / Edit & resend (on user bubbles). Edit truncates the conversation from the edited prompt onward (in-memory and in SQLite) and reissues the prompt through the standard streaming path.
+- **Code blocks** — triple-backtick fences render in their own monospaced block with a per-block Copy button.
+- **Sidebar** — conversations bucket into Today / Yesterday / Last 7 days / Last 30 days / Older. Hover reveals an X for deletion (confirmed via alert); double-click or context-menu lets you rename inline.
+- **Slash discovery** — typing `/` in the composer opens an inline autocomplete listing matching commands from `SlashCatalog`; the same catalog feeds a "Tools" popover in the footer (next to the runtime status pill).
+- **Welcome state** — empty conversations show four clickable starter chips (transfer, swap, slash demo, wallet question) that pre-load the composer.
+- **Context-usage banner** — appears above the chat when the latest stats report ≥75% (warning) or ≥92% (critical) context fill; banner CTA opens a fresh chat.
+- **Keyboard shortcuts** — ⌘N new chat, ⌘K focus composer, ⌘⌫ delete the active chat (with confirmation).
+- **Smart auto-scroll** — auto-follow is only re-engaged when the user is near the bottom; when scrolled up, a small ↓ pill in the bottom-trailing corner jumps back to the latest message or in-flight streaming bubble.
+
 ## Tool layer (phase 1)
 
-Phase 1 wires a local **intent recognition** layer over the existing Gemma 4 chat. When the user expresses a clear on-chain action (transfer / swap), the chat thread renders an inline **recognition card** — `ToolIntentCardView` — showing the tool name and structured arguments. The card has three actions: **Looks good**, **Edit**, **Reject**. The card is *informational only*: phase 1 does not sign or broadcast any transaction.
+Phase 1 wires a local **intent recognition** layer over the chat. When the user expresses a clear on-chain action (transfer / swap), the chat thread renders an inline **recognition card** — `ToolIntentCardView` — showing the tool name and structured arguments. The card has three actions: **Looks good**, **Edit**, **Reject**. The card is *informational only*: phase 1 does not sign or broadcast any transaction (tracked centrally in `docs/OPEN_ITEMS.md` OPEN-57).
 
 Two ways to surface a card:
 
-1. **Natural language** — type `Send 0.1 ETH to vitalik.eth` in the chat composer. The local model decides whether to emit a `<|tool_call>` block; if it does, `BridgePEGExtractor` (with the Gemma 4 fallback parser, see `OPEN-POINTS.md` P1.A) decodes it into a `ParsedToolCall` and `ChatDashboardModel` appends a `.toolIntent` `ChatMessage`.
-2. **Slash commands** — type `/transfer 0.1 ETH to vitalik.eth` or `/swap 100 USDC to ETH` in the composer. `SlashCommandParser` produces the same `ToolIntent` without invoking the model. The `/⌄` button next to the composer (`SlashMenuButton`) inserts scaffolds for either tool.
+1. **Natural language** — type `Send 0.1 ETH to vitalik.eth` in the chat composer. The local model decides whether to emit a `<|tool_call>` block; if it does, `BridgePEGExtractor` (with the Gemma 4 DSL fallback parser, see OPEN-56) decodes it into a `ParsedToolCall` and `ChatDashboardModel` appends a `.toolIntent` `ChatMessage`.
+2. **Slash commands** — type `/transfer 0.1 ETH to <recipient>` or `/swap 100 USDC to ETH` in the composer. `SlashCommandParser` produces the same `ToolIntent` without invoking the model. The inline autocomplete and the footer "Tools" popover both insert scaffolds from `SlashCatalog`.
 
 When the user acts on the card, a synthetic `.toolResponse` `ChatMessage` (role `.tool`) is appended to the conversation so the *next* model turn sees the disposition (`acknowledged` / `acknowledged + edited` / `rejected`) and continues coherently.
 
@@ -146,9 +181,9 @@ The grep guard `grep -rE "UserOperationBuilder|BundlerClient|WalletNodeClient|Ke
 
 - `Sources/WalletToolLayer/` — model-agnostic library (`ToolIntent`, `ToolDefinitions`, `SlashCommandParser`, `BridgePEGExtractor`, `Gemma4FallbackParser`, `ChatSQLiteMigration`).
 - `Sources/WalletMacOSApp/ToolIntentCardView.swift` — the SwiftUI recognition card + edit sheet.
-- `Sources/WalletMacOSApp/SlashMenuButton.swift` — composer-adjacent menu for slash scaffolds.
-- `Sources/WalletMacOSApp/ChatDashboardView.swift` — integrates the above into the chat dashboard.
-- `Sources/WalletMacOSApp/EmbeddedLlamaInferenceService.swift` — calls `LlamaRuntime.chat(...)` with tools + system nudge; surfaces `toolCalls` on `EmbeddedLlamaGenerationResult`.
+- `Sources/WalletMacOSApp/SlashCatalog.swift` — static catalog of slash commands consumed by the inline autocomplete and the footer "Tools" popover.
+- `Sources/WalletMacOSApp/ChatDashboardView.swift` — integrates the above into the chat dashboard, including streaming, edit-and-resend, regenerate, copy actions, and the smart-scroll plumbing.
+- `Sources/WalletMacOSApp/EmbeddedLlamaInferenceService.swift` — calls `LlamaRuntime.chat(...)` with tools + system nudge; surfaces `toolCalls` on `EmbeddedLlamaGenerationResult` and exposes a streaming `stream(...)` variant for token-by-token consumption.
 
 ## wallet-eval
 
@@ -195,7 +230,7 @@ The first `swift run wallet-eval recognition --repeats 1` run on the host (Gemma
 - slashCommand: 3/3 (100%)
 - multilingual: italian 100%, spanish 100%, french 0% (1 case)
 
-Total wallclock ~210s. The full breakdown is in `OPEN-POINTS.md`.
+Total wallclock ~210s. French/multilingual coverage is tracked in the central, gitignored `docs/OPEN_ITEMS.md`; the Swift Gemma 4 DSL fallback that backstops the P1.A parser gap is tracked there as OPEN-56.
 
 ### Adding cases to the dataset
 

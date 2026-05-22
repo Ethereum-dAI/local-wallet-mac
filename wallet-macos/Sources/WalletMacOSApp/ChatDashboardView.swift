@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import WalletToolLayer
 
 extension Notification.Name {
@@ -23,6 +24,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     var stats: ChatGenerationStats? = nil
     var toolIntent: ToolIntent? = nil
     var toolCallId: String? = nil
+    var toolFeedback: ToolIntentFeedback? = nil
 
     static func userText(_ text: String) -> ChatMessage {
         ChatMessage(kind: .userText, role: .user, text: text)
@@ -110,6 +112,7 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var accountIdentity: ChatAccountIdentity
     @Published private(set) var streamingText: String = ""
     @Published private(set) var streamingMessageID: UUID? = nil
+    @Published var feedbackExportMessage: String? = nil
 
     private var generationTask: Task<Void, Never>? = nil
     private let inferenceService: EmbeddedLlamaInferenceService
@@ -462,6 +465,71 @@ private final class ChatDashboardModel: ObservableObject {
         updateIntent(message, disposition: .edited, args: args)
     }
 
+    func submitIntentFeedback(
+        for message: ChatMessage,
+        rating: ToolIntentFeedback.Rating,
+        note: String?
+    ) {
+        guard
+            let conversationIndex = conversations.firstIndex(where: { $0.id == activeConversationID }),
+            let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == message.id }),
+            let intent = conversations[conversationIndex].messages[messageIndex].toolIntent
+        else {
+            return
+        }
+
+        let now = Date()
+        let existingFeedback = conversations[conversationIndex].messages[messageIndex].toolFeedback
+        let trimmedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedNote = trimmedNote?.isEmpty == true ? nil : trimmedNote
+        let feedback = ToolIntentFeedback(
+            id: existingFeedback?.id ?? UUID(),
+            conversationID: conversations[conversationIndex].id,
+            messageID: message.id,
+            intentID: intent.id,
+            tool: intent.tool,
+            prompt: promptBeforeToolIntent(at: messageIndex, in: conversations[conversationIndex].messages),
+            args: intent.args,
+            rating: rating,
+            note: normalizedNote,
+            createdAt: existingFeedback?.createdAt ?? now,
+            updatedAt: now
+        )
+
+        do {
+            try chatStore.saveToolIntentFeedback(feedback)
+            conversations[conversationIndex].messages[messageIndex].toolFeedback = feedback
+        } catch {
+            feedbackExportMessage = "Could not save ranking: \(error.localizedDescription)"
+        }
+    }
+
+    func exportFeedbackRankings() {
+        do {
+            let records = try chatStore.loadToolIntentFeedbackExportRecords()
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(records)
+
+            let panel = NSSavePanel()
+            panel.title = "Download rankings"
+            panel.nameFieldStringValue = "local-wallet-tool-rankings-\(Self.exportDateStamp()).json"
+            panel.allowedContentTypes = [.json]
+            panel.canCreateDirectories = true
+            panel.isExtensionHidden = false
+
+            guard panel.runModal() == .OK, let url = panel.url else {
+                return
+            }
+
+            try data.write(to: url, options: [.atomic])
+            feedbackExportMessage = "Exported \(records.count) ranking\(records.count == 1 ? "" : "s")."
+        } catch {
+            feedbackExportMessage = "Could not export rankings: \(error.localizedDescription)"
+        }
+    }
+
     private func appendMessage(_ message: ChatMessage, to conversationID: UUID) {
         guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
             return
@@ -534,6 +602,26 @@ private final class ChatDashboardModel: ObservableObject {
         }
 
         return json
+    }
+
+    private func promptBeforeToolIntent(at messageIndex: Int, in messages: [ChatMessage]) -> String {
+        var index = messageIndex - 1
+        while index >= 0 {
+            let message = messages[index]
+            if message.kind == .userText, message.role == .user {
+                return message.text ?? ""
+            }
+            index -= 1
+        }
+        return ""
+    }
+
+    private static func exportDateStamp() -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: Date())
     }
 
     private func updateTitleIfNeeded(for conversationID: UUID, prompt: String) {
@@ -615,6 +703,16 @@ struct LocalWalletChatDashboardView: View {
         } message: { conversation in
             Text("“\(conversation.title)” will be removed from this device. This cannot be undone.")
         }
+        .alert(
+            "Rankings export",
+            isPresented: feedbackExportAlertBinding
+        ) {
+            Button("OK") {
+                model.feedbackExportMessage = nil
+            }
+        } message: {
+            Text(model.feedbackExportMessage ?? "")
+        }
     }
 
     @ViewBuilder
@@ -646,6 +744,17 @@ struct LocalWalletChatDashboardView: View {
             set: { newValue in
                 if !newValue {
                     conversationPendingDeletion = nil
+                }
+            }
+        )
+    }
+
+    private var feedbackExportAlertBinding: Binding<Bool> {
+        Binding(
+            get: { model.feedbackExportMessage != nil },
+            set: { newValue in
+                if !newValue {
+                    model.feedbackExportMessage = nil
                 }
             }
         )
@@ -767,6 +876,12 @@ struct LocalWalletChatDashboardView: View {
 
             Menu {
                 Toggle("Show thinking", isOn: $model.thinkingEnabled)
+                Divider()
+                Button {
+                    model.exportFeedbackRankings()
+                } label: {
+                    Label("Download rankings", systemImage: "square.and.arrow.down")
+                }
             } label: {
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 14, weight: .bold))
@@ -833,10 +948,14 @@ struct LocalWalletChatDashboardView: View {
                                         HStack {
                                             ToolIntentCardView(
                                                 intent: intent,
+                                                feedback: message.toolFeedback,
                                                 onConfirm: { model.confirmIntent(message) },
                                                 onReject: { model.rejectIntent(message) },
                                                 onEdit: { editedIntent in
                                                     model.editIntent(message, with: editedIntent)
+                                                },
+                                                onFeedback: { rating, note in
+                                                    model.submitIntentFeedback(for: message, rating: rating, note: note)
                                                 }
                                             )
                                             Spacer(minLength: 0)

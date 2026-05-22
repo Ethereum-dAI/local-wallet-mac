@@ -1,6 +1,36 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Combine
 import Foundation
+
+private final class AudioSampleAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var samples: [Float] = []
+
+    func reset() {
+        lock.lock()
+        samples.removeAll(keepingCapacity: false)
+        lock.unlock()
+    }
+
+    func append(_ newSamples: [Float], limit: Int) -> (count: Int, reachedLimit: Bool) {
+        lock.lock()
+        samples.append(contentsOf: newSamples)
+        if samples.count > limit {
+            samples.removeSubrange(limit..<samples.count)
+        }
+        let count = samples.count
+        lock.unlock()
+        return (count, count >= limit)
+    }
+
+    func snapshotAndClear() -> [Float] {
+        lock.lock()
+        let copy = samples
+        samples.removeAll(keepingCapacity: false)
+        lock.unlock()
+        return copy
+    }
+}
 
 @MainActor
 final class AudioCaptureService: ObservableObject {
@@ -55,7 +85,7 @@ final class AudioCaptureService: ObservableObject {
 
     private let engine = AVAudioEngine()
     private var converter: AVAudioConverter?
-    private var ringBuffer: [Float] = []
+    private let accumulator = AudioSampleAccumulator()
     private var targetSampleRate = 16_000
     private let maxDurationSeconds: TimeInterval = 120
 
@@ -83,7 +113,7 @@ final class AudioCaptureService: ObservableObject {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
 
-        let samples = ringBuffer
+        let samples = accumulator.snapshotAndClear()
         let rate = targetSampleRate
         let recording = await Task.detached(priority: .userInitiated) {
             let bars = WaveformDownsampler.downsample(samples, bars: 40)
@@ -94,7 +124,6 @@ final class AudioCaptureService: ObservableObject {
                              waveformBars: bars)
         }.value
 
-        ringBuffer.removeAll(keepingCapacity: false)
         state = .finished(recording)
     }
 
@@ -103,7 +132,7 @@ final class AudioCaptureService: ObservableObject {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
         }
-        ringBuffer.removeAll(keepingCapacity: false)
+        accumulator.reset()
         state = .idle
         elapsed = 0
     }
@@ -130,19 +159,26 @@ final class AudioCaptureService: ObservableObject {
             throw CaptureError.converterUnavailable
         }
         self.converter = converter
-        ringBuffer = []
+        accumulator.reset()
         elapsed = 0
 
+        let targetRate = targetSampleRate
         let sampleLimit = Int(maxDurationSeconds * Double(targetSampleRate))
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
             guard let self else { return }
-            let outputFrames = AVAudioFrameCount(Double(buffer.frameLength) * Double(self.targetSampleRate) / inputFormat.sampleRate + 8)
+            let outputFrames = AVAudioFrameCount(Double(buffer.frameLength) * Double(targetRate) / inputFormat.sampleRate + 8)
             guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outputFrames) else {
                 return
             }
 
             var error: NSError?
+            var didProvideInput = false
             converter.convert(to: outputBuffer, error: &error) { _, status in
+                if didProvideInput {
+                    status.pointee = .noDataNow
+                    return nil
+                }
+                didProvideInput = true
                 status.pointee = .haveData
                 return buffer
             }
@@ -152,11 +188,11 @@ final class AudioCaptureService: ObservableObject {
 
             let frameLength = Int(outputBuffer.frameLength)
             let samples = Array(UnsafeBufferPointer(start: pointer, count: frameLength))
+            let appendResult = self.accumulator.append(samples, limit: sampleLimit)
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.ringBuffer.append(contentsOf: samples)
-                self.elapsed = Double(self.ringBuffer.count) / Double(self.targetSampleRate)
-                if self.ringBuffer.count >= sampleLimit {
+                self.elapsed = Double(appendResult.count) / Double(targetRate)
+                if appendResult.reachedLimit {
                     await self.stop()
                 }
             }

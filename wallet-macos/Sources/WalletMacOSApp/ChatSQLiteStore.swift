@@ -124,7 +124,7 @@ final class ChatSQLiteStore {
         try createSchema(in: database)
         let statement = try prepare("""
         UPDATE chat_messages
-        SET role = ?, kind = ?, text = ?, thinking = ?, duration = ?, prompt_tokens = ?, generated_tokens = ?, context_size = ?, tool_intent_json = ?, tool_call_id = ?
+        SET role = ?, kind = ?, text = ?, thinking = ?, duration = ?, prompt_tokens = ?, generated_tokens = ?, context_size = ?, tool_intent_json = ?, tool_call_id = ?, audio_path = ?, audio_duration_ms = ?, audio_waveform = ?
         WHERE id = ? AND conversation_id = ?
         """, in: database)
         defer {
@@ -160,8 +160,15 @@ final class ChatSQLiteStore {
 
         try bindNullable(toolIntentJSON, at: 9, in: statement)
         try bindNullable(message.toolCallId, at: 10, in: statement)
-        try bind(message.id.uuidString, at: 11, in: statement)
-        try bind(conversationID.uuidString, at: 12, in: statement)
+        try bindNullable(message.audioPath, at: 11, in: statement)
+        if let audioDurationMs = message.audioDurationMs {
+            sqlite3_bind_int64(statement, 12, sqlite3_int64(audioDurationMs))
+        } else {
+            sqlite3_bind_null(statement, 12)
+        }
+        try bindNullable(message.audioWaveform, at: 13, in: statement)
+        try bind(message.id.uuidString, at: 14, in: statement)
+        try bind(conversationID.uuidString, at: 15, in: statement)
         try stepDone(statement, database: database)
     }
 
@@ -286,6 +293,9 @@ final class ChatSQLiteStore {
             context_size INTEGER,
             tool_intent_json TEXT,
             tool_call_id TEXT,
+            audio_path TEXT,
+            audio_duration_ms INTEGER,
+            audio_waveform TEXT,
             created_at REAL NOT NULL,
             FOREIGN KEY(conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE
         )
@@ -307,14 +317,16 @@ final class ChatSQLiteStore {
         } else {
             hasV1MessagesTable = true
         }
-        if hasV1MessagesTable {
+        if !hadMessagesTable {
+            try execute("PRAGMA user_version = \(ChatSQLiteMigration.currentVersion)", in: database)
+        } else if hasV1MessagesTable, try readUserVersion(in: database) == 0 {
             try execute("PRAGMA user_version = 1", in: database)
         }
     }
 
     private func loadMessages(for conversationID: UUID, in database: OpaquePointer) throws -> [ChatMessage] {
         let statement = try prepare("""
-        SELECT id, role, kind, text, thinking, duration, prompt_tokens, generated_tokens, context_size, tool_intent_json, tool_call_id
+        SELECT id, role, kind, text, thinking, duration, prompt_tokens, generated_tokens, context_size, tool_intent_json, tool_call_id, audio_path, audio_duration_ms, audio_waveform
         FROM chat_messages
         WHERE conversation_id = ?
         ORDER BY created_at ASC
@@ -368,7 +380,10 @@ final class ChatSQLiteStore {
                 thinking: columnText(statement, 4),
                 stats: stats,
                 toolIntent: toolIntent,
-                toolCallId: columnText(statement, 10)
+                toolCallId: columnText(statement, 10),
+                audioPath: columnText(statement, 11),
+                audioDurationMs: columnInt(statement, 12),
+                audioWaveform: columnText(statement, 13)
             ))
         }
 
@@ -399,9 +414,9 @@ final class ChatSQLiteStore {
     ) throws {
         let statement = try prepare("""
         INSERT OR REPLACE INTO chat_messages (
-            id, conversation_id, role, kind, text, thinking, duration, prompt_tokens, generated_tokens, context_size, tool_intent_json, tool_call_id, created_at
+            id, conversation_id, role, kind, text, thinking, duration, prompt_tokens, generated_tokens, context_size, tool_intent_json, tool_call_id, audio_path, audio_duration_ms, audio_waveform, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, in: database)
         defer {
             sqlite3_finalize(statement)
@@ -438,7 +453,14 @@ final class ChatSQLiteStore {
 
         try bindNullable(toolIntentJSON, at: 11, in: statement)
         try bindNullable(message.toolCallId, at: 12, in: statement)
-        sqlite3_bind_double(statement, 13, createdAt.timeIntervalSince1970)
+        try bindNullable(message.audioPath, at: 13, in: statement)
+        if let audioDurationMs = message.audioDurationMs {
+            sqlite3_bind_int64(statement, 14, sqlite3_int64(audioDurationMs))
+        } else {
+            sqlite3_bind_null(statement, 14)
+        }
+        try bindNullable(message.audioWaveform, at: 15, in: statement)
+        sqlite3_bind_double(statement, 16, createdAt.timeIntervalSince1970)
         try stepDone(statement, database: database)
     }
 
@@ -511,6 +533,17 @@ final class ChatSQLiteStore {
             return nil
         }
         return Int(sqlite3_column_int64(statement, index))
+    }
+
+    private func readUserVersion(in database: OpaquePointer) throws -> Int32 {
+        let statement = try prepare("PRAGMA user_version", in: database)
+        defer {
+            sqlite3_finalize(statement)
+        }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            return 0
+        }
+        return sqlite3_column_int(statement, 0)
     }
 
     private func sqliteError(_ database: OpaquePointer) -> String {

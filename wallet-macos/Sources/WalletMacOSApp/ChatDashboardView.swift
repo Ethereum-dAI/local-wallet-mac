@@ -1,4 +1,6 @@
 import AppKit
+import AVFoundation
+import Combine
 import SwiftUI
 import WalletToolLayer
 
@@ -9,6 +11,7 @@ extension Notification.Name {
 struct ChatMessage: Identifiable, Equatable, Codable {
     enum Kind: String, Codable {
         case userText
+        case userAudio
         case assistantText
         case assistantError
         case toolIntent
@@ -23,10 +26,24 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     var stats: ChatGenerationStats? = nil
     var toolIntent: ToolIntent? = nil
     var toolCallId: String? = nil
+    var audioPath: String? = nil
+    var audioDurationMs: Int? = nil
+    var audioWaveform: String? = nil
 
     static func userText(_ text: String) -> ChatMessage {
         ChatMessage(kind: .userText, role: .user, text: text)
     }
+
+    static func userAudio(filename: String, durationMs: Int, waveform: String) -> ChatMessage {
+        ChatMessage(
+            kind: .userAudio,
+            role: .user,
+            audioPath: filename,
+            audioDurationMs: durationMs,
+            audioWaveform: waveform
+        )
+    }
+
     static func assistantText(_ text: String, thinking: String? = nil, stats: ChatGenerationStats? = nil) -> ChatMessage {
         ChatMessage(kind: .assistantText, role: .assistant, text: text, thinking: thinking, stats: stats)
     }
@@ -110,11 +127,18 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var accountIdentity: ChatAccountIdentity
     @Published private(set) var streamingText: String = ""
     @Published private(set) var streamingMessageID: UUID? = nil
+    @Published private(set) var isRecording = false
+    @Published private(set) var recordingElapsed: TimeInterval = 0
+    @Published private(set) var pendingMmprojDownloadPercent: Double? = nil
+    @Published private(set) var mmprojLoaded = false
 
     private var generationTask: Task<Void, Never>? = nil
     private let inferenceService: EmbeddedLlamaInferenceService
     private let chatStore: ChatSQLiteStore
     private let preferencesStore: ChatPreferencesStore
+    let audioCapture = AudioCaptureService()
+    private let audioStore = AudioStore()
+    private var cancellables: Set<AnyCancellable> = []
 
     init(
         inferenceService: EmbeddedLlamaInferenceService = EmbeddedLlamaInferenceService(),
@@ -129,6 +153,7 @@ private final class ChatDashboardModel: ObservableObject {
         self.runtimeStatus = inferenceService.runtimeStatus
         self.thinkingEnabled = preferencesStore.thinkingEnabled
         self.isSidebarVisible = preferencesStore.sidebarVisible
+        self.mmprojLoaded = inferenceService.isMmprojInstalled()
 
         if !preferencesStore.migratedToSQLite {
             let legacyConversations = preferencesStore.loadLegacyConversations()
@@ -157,6 +182,18 @@ private final class ChatDashboardModel: ObservableObject {
             bundlerAddress: settingsStore.bundlerAddress ?? "Not available"
         )
         preferencesStore.activeConversationID = self.activeConversationID
+
+        audioCapture.$elapsed
+            .sink { [weak self] elapsed in
+                self?.recordingElapsed = elapsed
+            }
+            .store(in: &cancellables)
+
+        audioCapture.$state
+            .sink { [weak self] state in
+                self?.handleAudioCaptureState(state)
+            }
+            .store(in: &cancellables)
     }
 
     var activeConversation: ChatConversation? {
@@ -287,7 +324,7 @@ private final class ChatDashboardModel: ObservableObject {
         let history = existingMessages.map { message in
             EmbeddedLlamaChatTurn(
                 role: message.role == .user ? .user : .assistant,
-                text: message.text ?? ""
+                payload: embeddedPayload(for: message)
             )
         }
         inputText = ""
@@ -374,8 +411,102 @@ private final class ChatDashboardModel: ObservableObject {
         }
     }
 
+    func sendAudio(_ recording: AudioCaptureService.Recording) {
+        guard !isGenerating else {
+            return
+        }
+
+        let conversationID = activeConversationID
+        let existingMessages = messages
+        let history = existingMessages.map { message in
+            EmbeddedLlamaChatTurn(
+                role: message.role == .user ? .user : .assistant,
+                payload: embeddedPayload(for: message)
+            )
+        }
+
+        let id = UUID()
+        do {
+            let writeResult = try audioStore.write(recording.samples, sampleRate: recording.sampleRate, id: id)
+            let waveform = WaveformDownsampler.toCommaSeparated(recording.waveformBars)
+            let message = ChatMessage.userAudio(
+                filename: writeResult.filename,
+                durationMs: Int(recording.durationSeconds * 1000),
+                waveform: waveform
+            )
+            appendMessage(message, to: conversationID)
+            updateTitleIfNeeded(for: conversationID, prompt: "Voice message")
+        } catch {
+            appendMessage(ChatMessage(kind: .assistantError, role: .assistant, text: error.localizedDescription), to: conversationID)
+            return
+        }
+
+        isGenerating = true
+        streamingText = ""
+        streamingMessageID = UUID()
+        runtimeStatus = thinkingEnabled ? "Gemma is listening" : "Gemma is generating"
+
+        let stream = inferenceService.streamAudio(
+            samples: recording.samples,
+            durationSeconds: recording.durationSeconds,
+            history: history,
+            thinkingEnabled: thinkingEnabled
+        )
+
+        generationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                for try await event in stream {
+                    try Task.checkCancellation()
+                    switch event {
+                    case .token(let token):
+                        self.streamingText += token
+                    case .completed(let response):
+                        let stats = ChatGenerationStats(
+                            duration: response.duration,
+                            promptTokens: response.promptTokens,
+                            generatedTokens: response.generatedTokens,
+                            contextSize: response.contextSize
+                        )
+                        self.appendMessage(
+                            .assistantText(response.response, thinking: response.thinking, stats: stats),
+                            to: conversationID
+                        )
+                    }
+                }
+                self.runtimeStatus = self.inferenceService.runtimeStatus
+                self.mmprojLoaded = self.inferenceService.isMmprojInstalled()
+            } catch is CancellationError {
+                self.runtimeStatus = "Stopped"
+            } catch {
+                self.appendMessage(
+                    ChatMessage(kind: .assistantError, role: .assistant, text: error.localizedDescription),
+                    to: conversationID
+                )
+                self.runtimeStatus = "Needs attention"
+            }
+            self.streamingText = ""
+            self.streamingMessageID = nil
+            self.isGenerating = false
+            self.generationTask = nil
+        }
+    }
+
     func stop() {
         generationTask?.cancel()
+    }
+
+    func downloadAudioModelIfNeeded() async throws {
+        if inferenceService.isMmprojInstalled() {
+            mmprojLoaded = true
+            return
+        }
+        pendingMmprojDownloadPercent = 0
+        _ = try await inferenceService.downloadMmproj { progress in
+            self.pendingMmprojDownloadPercent = progress
+        }
+        pendingMmprojDownloadPercent = nil
+        mmprojLoaded = true
     }
 
     func editAndResend(_ userMessage: ChatMessage, newText: String) {
@@ -474,6 +605,32 @@ private final class ChatDashboardModel: ObservableObject {
         sortConversationsKeepingActive()
     }
 
+    private func handleAudioCaptureState(_ state: AudioCaptureService.State) {
+        switch state {
+        case .recording:
+            isRecording = true
+        case .finished(let recording):
+            isRecording = false
+            recordingElapsed = 0
+            sendAudio(recording)
+        case .idle, .failed:
+            isRecording = false
+            recordingElapsed = 0
+        case .requestingPermission, .finalizing:
+            break
+        }
+    }
+
+    private func embeddedPayload(for message: ChatMessage) -> EmbeddedLlamaChatTurn.Payload {
+        switch message.kind {
+        case .userAudio:
+            let seconds = Double(message.audioDurationMs ?? 0) / 1000.0
+            return .audioPlaceholder(durationSeconds: seconds)
+        default:
+            return .text(message.text ?? "")
+        }
+    }
+
     private func updateIntent(_ message: ChatMessage, disposition: ToolIntent.Disposition, args: [String: String]?) {
         guard
             let conversationIndex = conversations.firstIndex(where: { $0.id == activeConversationID }),
@@ -568,6 +725,8 @@ struct LocalWalletChatDashboardView: View {
     @State private var conversationPendingDeletion: ChatConversation?
     @State private var isToolsPopoverPresented = false
     @State private var isAtBottomOfChat = true
+    @State private var isMmprojConsentPresented = false
+    @State private var mmprojConsentContinuation: CheckedContinuation<Bool, Never>?
 
     var body: some View {
         ZStack {
@@ -614,6 +773,36 @@ struct LocalWalletChatDashboardView: View {
             Button("Cancel", role: .cancel) { }
         } message: { conversation in
             Text("“\(conversation.title)” will be removed from this device. This cannot be undone.")
+        }
+        .sheet(isPresented: $isMmprojConsentPresented) {
+            VStack(spacing: 18) {
+                Image(systemName: "waveform.circle.fill")
+                    .font(.system(size: 42, weight: .semibold))
+                    .foregroundStyle(ChatPalette.accent)
+                Text("Enable voice input")
+                    .font(.system(size: 24, weight: .heavy))
+                    .foregroundStyle(ChatPalette.primaryText)
+                Text("Downloads the 992 MB Gemma audio model. Audio stays on this Mac.")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(ChatPalette.secondaryText)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 300)
+                HStack(spacing: 10) {
+                    Button("Cancel") {
+                        mmprojConsentContinuation?.resume(returning: false)
+                        mmprojConsentContinuation = nil
+                        isMmprojConsentPresented = false
+                    }
+                    Button("Download") {
+                        mmprojConsentContinuation?.resume(returning: true)
+                        mmprojConsentContinuation = nil
+                        isMmprojConsentPresented = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(30)
+            .frame(width: 380)
         }
     }
 
@@ -821,6 +1010,13 @@ struct LocalWalletChatDashboardView: View {
                                         }
                                     )
                                     .id(message.id)
+                                case .userAudio:
+                                    HStack {
+                                        Spacer(minLength: 90)
+                                        AudioMessageBubble(message: message)
+                                    }
+                                    .padding(.horizontal)
+                                    .id(message.id)
                                 case .assistantError:
                                     AssistantErrorBubble(
                                         message: message,
@@ -1002,6 +1198,11 @@ struct LocalWalletChatDashboardView: View {
     private var footerControls: some View {
         HStack(spacing: 8) {
             StatusPill(icon: "circle.fill", text: "Gemma 4 E4B", tint: ChatPalette.success)
+            if model.mmprojLoaded {
+                StatusPill(icon: "waveform", text: "Audio", tint: ChatPalette.success)
+            } else if let progress = model.pendingMmprojDownloadPercent {
+                StatusPill(icon: "arrow.down.circle", text: "Audio \(Int(progress * 100))%", tint: .orange)
+            }
             Button {
                 model.toggleThinking()
             } label: {
@@ -1057,6 +1258,24 @@ struct LocalWalletChatDashboardView: View {
 
     private var composerInputBox: some View {
         VStack(spacing: 0) {
+            if model.isRecording {
+                recordingStrip
+            } else {
+                editorRow
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(ChatPalette.input)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(ChatPalette.accent.opacity(0.78), lineWidth: 1.4)
+                )
+        )
+    }
+
+    private var editorRow: some View {
+        VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
                 PromptTextEditor(text: $model.inputText) {
                     model.send()
@@ -1064,7 +1283,7 @@ struct LocalWalletChatDashboardView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
                 .disabled(model.isGenerating)
-                    .frame(minHeight: 78, maxHeight: 96)
+                .frame(minHeight: 78, maxHeight: 96)
                 if model.inputText.isEmpty {
                     Text("Message Gemma — describe what you want, or type / for tools")
                         .font(.system(size: 16, weight: .medium))
@@ -1081,6 +1300,19 @@ struct LocalWalletChatDashboardView: View {
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(ChatPalette.mutedText)
                 Button {
+                    handleMicButtonTap()
+                } label: {
+                    Image(systemName: "mic.fill")
+                        .font(.system(size: 16, weight: .black))
+                        .frame(width: 42, height: 42)
+                        .foregroundStyle(.white)
+                        .background(Circle().fill(ChatPalette.accent.opacity(model.isGenerating ? 0.35 : 0.95)))
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isGenerating)
+                .help("Voice message")
+
+                Button {
                     model.send()
                 } label: {
                     Image(systemName: "arrow.up")
@@ -1096,14 +1328,71 @@ struct LocalWalletChatDashboardView: View {
             .padding(.horizontal, 12)
             .padding(.bottom, 12)
         }
-        .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(ChatPalette.input)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(ChatPalette.accent.opacity(0.78), lineWidth: 1.4)
-                )
-        )
+    }
+
+    private var recordingStrip: some View {
+        HStack(spacing: 12) {
+            Circle()
+                .fill(Color.red)
+                .frame(width: 10, height: 10)
+            Text(timerString(model.recordingElapsed))
+                .font(.system(size: 15, weight: .heavy))
+                .foregroundStyle(model.recordingElapsed >= 115 ? Color.red : ChatPalette.primaryText)
+                .monospacedDigit()
+            Spacer()
+            Button {
+                model.audioCapture.cancel()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(ChatPalette.secondaryText)
+            }
+            .buttonStyle(.plain)
+            Button {
+                Task { await model.audioCapture.stop() }
+            } label: {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(ChatPalette.accent)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 16)
+        .frame(minHeight: 86)
+    }
+
+    private func handleMicButtonTap() {
+        Task { @MainActor in
+            do {
+                guard try await ensureMmprojReady() else {
+                    return
+                }
+                await model.audioCapture.start(targetSampleRate: 16_000)
+            } catch {
+                // Keep the composer usable; service-level errors are shown as chat bubbles after capture.
+            }
+        }
+    }
+
+    private func ensureMmprojReady() async throws -> Bool {
+        if model.mmprojLoaded {
+            return true
+        }
+        let granted = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            mmprojConsentContinuation = continuation
+            isMmprojConsentPresented = true
+        }
+        guard granted else {
+            return false
+        }
+        try await model.downloadAudioModelIfNeeded()
+        return true
+    }
+
+    private func timerString(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     private var greeting: String {
@@ -1665,6 +1954,83 @@ private struct ChatBubble: View {
             withAnimation(.easeInOut(duration: 0.2)) {
                 justCopied = false
             }
+        }
+    }
+}
+
+private struct AudioMessageBubble: View {
+    let message: ChatMessage
+    @State private var isPlaying = false
+    @State private var player: AVAudioPlayer?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: togglePlay) {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 15, weight: .black))
+                    .foregroundStyle(.white)
+                    .frame(width: 32, height: 32)
+                    .background(Circle().fill(ChatPalette.accent))
+            }
+            .buttonStyle(.plain)
+
+            WaveformThumbnail(bars: WaveformDownsampler.parse(message.audioWaveform ?? ""))
+                .frame(width: 124, height: 28)
+
+            Text(formattedDuration(message.audioDurationMs ?? 0))
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(ChatPalette.secondaryText)
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(ChatPalette.userBubble)
+                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(ChatPalette.border, lineWidth: 1))
+        )
+        .onDisappear {
+            player?.stop()
+            isPlaying = false
+        }
+    }
+
+    private func togglePlay() {
+        if isPlaying {
+            player?.pause()
+            isPlaying = false
+            return
+        }
+        if player == nil, let filename = message.audioPath {
+            player = try? AVAudioPlayer(contentsOf: AudioStore().url(forFilename: filename))
+            player?.prepareToPlay()
+        }
+        player?.play()
+        isPlaying = true
+    }
+
+    private func formattedDuration(_ milliseconds: Int) -> String {
+        let seconds = milliseconds / 1000
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+}
+
+private struct WaveformThumbnail: View {
+    let bars: [Float]
+
+    var body: some View {
+        GeometryReader { proxy in
+            HStack(alignment: .center, spacing: 1) {
+                ForEach(Array(bars.enumerated()), id: \.offset) { _, bar in
+                    Capsule()
+                        .fill(ChatPalette.accent.opacity(0.75))
+                        .frame(
+                            width: max((proxy.size.width - CGFloat(max(bars.count - 1, 0))) / CGFloat(max(bars.count, 1)), 1),
+                            height: max(CGFloat(bar) * proxy.size.height, 2)
+                        )
+                }
+            }
+            .frame(maxHeight: .infinity)
         }
     }
 }

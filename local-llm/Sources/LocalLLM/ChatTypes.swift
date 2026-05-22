@@ -175,3 +175,13 @@ public struct GenerationStats: Sendable, Equatable {
         self.duration = duration
     }
 }
+
+public struct AudioAttachment: Sendable, Equatable {
+    public let samples: [Float]
+    public let sampleRate: Int
+
+    public init(samples: [Float], sampleRate: Int) {
+        self.samples = samples
+        self.sampleRate = sampleRate
+    }
+}

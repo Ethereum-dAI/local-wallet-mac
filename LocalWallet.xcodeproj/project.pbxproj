@@ -18,11 +18,14 @@
 		3FF118FCF7A80FC444631D4F /* EmbeddedLlamaInferenceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BD8C504DFE574FA718B16B8 /* EmbeddedLlamaInferenceService.swift */; };
 		452F713693CC249455BA1E9F /* SmartAccountConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7EDA7770D91F75143A2D4E /* SmartAccountConfiguration.swift */; };
 		4D68E3171DC04C53AFBF1B08 /* LocalAIModelDownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87B7492C00C0FC4BF364591F /* LocalAIModelDownloadManager.swift */; };
+		55D8DD717B1B165DE33A76F7 /* LocalMmprojDownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D64ED8EE8D1CD7EA061E7678 /* LocalMmprojDownloadManager.swift */; };
 		5A43B2D9426FBAE3A87FC324 /* UserOperationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA6F8962EB73A62EDF82FBDD /* UserOperationModels.swift */; };
+		5F746BEC13C5637E15ED7B48 /* AudioStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39BDB4E8A2AB308C602FC859 /* AudioStore.swift */; };
 		5FAA2DEC9EAAA084756B2579 /* WebAuthnValidator.json in Resources */ = {isa = PBXBuildFile; fileRef = 7FDBD8207805F91A08B2FA8F /* WebAuthnValidator.json */; };
 		615AE4DBE68ECDD43606DDD8 /* OnboardingProvisioningService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80EEACA183C6F7A248A93A62 /* OnboardingProvisioningService.swift */; };
 		668DB43A48A98BDBFDD29B65 /* KernelFactory.json in Resources */ = {isa = PBXBuildFile; fileRef = 1B2090660CAE81D103494C90 /* KernelFactory.json */; };
 		6FC50B3D78A1BEDD7A8AAC56 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E4918C4C23C14A6A28B3460D /* Assets.xcassets */; };
+		7B6F829AAB1E8EC6CB9A49B6 /* AudioCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDC7175DC78DFC42D7F26A08 /* AudioCaptureService.swift */; };
 		82C23E6456D6B25C14A4338E /* EtherAmountParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0565FE58E3D3C819258A03C1 /* EtherAmountParser.swift */; };
 		8A4F334C71F0A61F144B033B /* BundlerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10EF37094DF3BB75ADE15500 /* BundlerClient.swift */; };
 		935E3DB1B1E7F62D951B7FE3 /* SpawnHelper in Frameworks */ = {isa = PBXBuildFile; productRef = 4C0AA8A8621EF14A086C5866 /* SpawnHelper */; };
@@ -45,6 +48,7 @@
 		F090CBF43D86C2A57BC2D110 /* QRCodeImageFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A23DA49317E3EDDFC173857 /* QRCodeImageFactory.swift */; };
 		F1987C5627761B64C579BD75 /* AppError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86145305356A12B55B0C0B52 /* AppError.swift */; };
 		F1CF4DB3F8639BF2395566B0 /* WalletSignature in Frameworks */ = {isa = PBXBuildFile; productRef = 23F0EA007DFFA7126DA580A6 /* WalletSignature */; };
+		F5C33EC90D1CF61DFAD40337 /* WaveformDownsampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B960E7A508701F7A25B0BDD /* WaveformDownsampler.swift */; };
 		F916BD7F05D51CA7EB4824E0 /* OnboardingSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE4F3CE27EE12DD30DC489C5 /* OnboardingSettingsStore.swift */; };
 /* End PBXBuildFile section */
 
@@ -57,6 +61,7 @@
 		1B2090660CAE81D103494C90 /* KernelFactory.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = KernelFactory.json; sourceTree = "<group>"; };
 		2FDD97F68DC79C7A31430C30 /* ChatDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDashboardView.swift; sourceTree = "<group>"; };
 		338C3CE5B2A1B13400716881 /* BundlerKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundlerKeyStore.swift; sourceTree = "<group>"; };
+		39BDB4E8A2AB308C602FC859 /* AudioStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioStore.swift; sourceTree = "<group>"; };
 		46C43E34967044CB6DFF8EEA /* ToolIntentCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolIntentCardView.swift; sourceTree = "<group>"; };
 		5FF9147DC25C40D4A7D8DA39 /* DemoSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoSettingsStore.swift; sourceTree = "<group>"; };
 		611B7A76D937ADC7B38FEDA8 /* WalletMacOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletMacOSApp.swift; sourceTree = "<group>"; };
@@ -65,6 +70,7 @@
 		71F6CC5F8F55F7C5D22BBD6F /* HexEncoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HexEncoding.swift; sourceTree = "<group>"; };
 		7296A0E20202CF12178A7D1F /* UserOperationBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserOperationBuilder.swift; sourceTree = "<group>"; };
 		762567355B5B9F2F1A4B670F /* WalletNodeDaemon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletNodeDaemon.swift; sourceTree = "<group>"; };
+		7B960E7A508701F7A25B0BDD /* WaveformDownsampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaveformDownsampler.swift; sourceTree = "<group>"; };
 		7FDBD8207805F91A08B2FA8F /* WebAuthnValidator.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = WebAuthnValidator.json; sourceTree = "<group>"; };
 		80EEACA183C6F7A248A93A62 /* OnboardingProvisioningService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingProvisioningService.swift; sourceTree = "<group>"; };
 		86145305356A12B55B0C0B52 /* AppError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppError.swift; sourceTree = "<group>"; };
@@ -82,7 +88,9 @@
 		BF4BC97318D96D64FC625767 /* KernelImplementation.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = KernelImplementation.json; sourceTree = "<group>"; };
 		CE4F3CE27EE12DD30DC489C5 /* OnboardingSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingSettingsStore.swift; sourceTree = "<group>"; };
 		D0BC22C212DB57DCEC672193 /* KeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyStore.swift; sourceTree = "<group>"; };
+		D64ED8EE8D1CD7EA061E7678 /* LocalMmprojDownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalMmprojDownloadManager.swift; sourceTree = "<group>"; };
 		DB20A1FAB1133686554EA1F8 /* swift-bridge */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "swift-bridge"; path = "swift-bridge"; sourceTree = SOURCE_ROOT; };
+		DDC7175DC78DFC42D7F26A08 /* AudioCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioCaptureService.swift; sourceTree = "<group>"; };
 		DF0CD621D86FF51807777FFF /* ChatSQLiteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSQLiteStore.swift; sourceTree = "<group>"; };
 		E4918C4C23C14A6A28B3460D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		ED2B1ADEF8D6A75E702D54E0 /* LocalWalletApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LocalWalletApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -165,6 +173,8 @@
 			children = (
 				86145305356A12B55B0C0B52 /* AppError.swift */,
 				F0414C26F11FE88CF6E50E1F /* AppModel.swift */,
+				DDC7175DC78DFC42D7F26A08 /* AudioCaptureService.swift */,
+				39BDB4E8A2AB308C602FC859 /* AudioStore.swift */,
 				10EF37094DF3BB75ADE15500 /* BundlerClient.swift */,
 				338C3CE5B2A1B13400716881 /* BundlerKeyStore.swift */,
 				2FDD97F68DC79C7A31430C30 /* ChatDashboardView.swift */,
@@ -179,6 +189,7 @@
 				D0BC22C212DB57DCEC672193 /* KeyStore.swift */,
 				87B7492C00C0FC4BF364591F /* LocalAIModelDownloadManager.swift */,
 				A65A9349550912C759EED6DC /* LocalHardwareInspector.swift */,
+				D64ED8EE8D1CD7EA061E7678 /* LocalMmprojDownloadManager.swift */,
 				80EEACA183C6F7A248A93A62 /* OnboardingProvisioningService.swift */,
 				CE4F3CE27EE12DD30DC489C5 /* OnboardingSettingsStore.swift */,
 				88B8477E49E875FE72789134 /* OnboardingView.swift */,
@@ -193,6 +204,7 @@
 				923CF6BF725AB85178781926 /* WalletNodeClient.swift */,
 				762567355B5B9F2F1A4B670F /* WalletNodeDaemon.swift */,
 				71035AA789A3F89268A157B9 /* WalletRecord.swift */,
+				7B960E7A508701F7A25B0BDD /* WaveformDownsampler.swift */,
 				71DDE5CB6A4F86F27DE37255 /* WeiFormatter.swift */,
 				B888CE77FC20C7FE9DF6239B /* Resources */,
 			);
@@ -286,6 +298,8 @@
 			files = (
 				F1987C5627761B64C579BD75 /* AppError.swift in Sources */,
 				2FB2FA7472F27D70E6ADBDF3 /* AppModel.swift in Sources */,
+				7B6F829AAB1E8EC6CB9A49B6 /* AudioCaptureService.swift in Sources */,
+				5F746BEC13C5637E15ED7B48 /* AudioStore.swift in Sources */,
 				8A4F334C71F0A61F144B033B /* BundlerClient.swift in Sources */,
 				D720097E3C1CA355A0CB0B69 /* BundlerKeyStore.swift in Sources */,
 				B2656DCF13F49D71F359FC59 /* ChatDashboardView.swift in Sources */,
@@ -300,6 +314,7 @@
 				C3EDF8D9DFBAC3CE779616FB /* KeyStore.swift in Sources */,
 				4D68E3171DC04C53AFBF1B08 /* LocalAIModelDownloadManager.swift in Sources */,
 				E1C3DCD8C60EB9C2062460DB /* LocalHardwareInspector.swift in Sources */,
+				55D8DD717B1B165DE33A76F7 /* LocalMmprojDownloadManager.swift in Sources */,
 				615AE4DBE68ECDD43606DDD8 /* OnboardingProvisioningService.swift in Sources */,
 				F916BD7F05D51CA7EB4824E0 /* OnboardingSettingsStore.swift in Sources */,
 				358609ACFFB38A364EA64D18 /* OnboardingView.swift in Sources */,
@@ -314,6 +329,7 @@
 				C76D43CA4AE90A97B1B8ADA0 /* WalletNodeClient.swift in Sources */,
 				B0F9B69A3FA938E86D0F3B27 /* WalletNodeDaemon.swift in Sources */,
 				274EC1F7AF7D01549E14B740 /* WalletRecord.swift in Sources */,
+				F5C33EC90D1CF61DFAD40337 /* WaveformDownsampler.swift in Sources */,
 				2E17357921E0DF8E3F920EC5 /* WeiFormatter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

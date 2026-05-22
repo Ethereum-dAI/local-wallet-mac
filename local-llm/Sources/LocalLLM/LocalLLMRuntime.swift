@@ -6,6 +6,13 @@ public enum LocalLLMError: LocalizedError, Equatable {
     case loadFailed(String)
     case generationFailed(String)
     case notLoaded
+    case audioNotSupported
+    case mmprojNotLoaded
+    case mmprojLoadFailed(String)
+    case audioSampleRateMismatch(expected: Int, got: Int)
+    case audioMarkerCountMismatch(markers: Int, attachments: Int)
+    case audioContainsNonFinite
+    case audioBufferTooLarge(samples: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -17,6 +24,20 @@ public enum LocalLLMError: LocalizedError, Equatable {
             return message
         case .notLoaded:
             return "The local model is not loaded."
+        case .audioNotSupported:
+            return "The loaded model does not support audio input."
+        case .mmprojNotLoaded:
+            return "The audio model (mmproj) has not been loaded."
+        case .mmprojLoadFailed(let message):
+            return "Failed to load the audio model: \(message)"
+        case .audioSampleRateMismatch(let expected, let got):
+            return "Audio sample rate mismatch: expected \(expected) Hz, got \(got) Hz."
+        case .audioMarkerCountMismatch(let markers, let attachments):
+            return "Audio marker count \(markers) does not match attachments count \(attachments)."
+        case .audioContainsNonFinite:
+            return "Audio buffer contains non-finite samples (NaN or Inf)."
+        case .audioBufferTooLarge(let samples):
+            return "Audio buffer too large: \(samples) samples."
         }
     }
 }
@@ -258,6 +279,53 @@ public final class LlamaRuntime: @unchecked Sendable {
     }
 }
 
+// MARK: - Multimodal audio support
+
+extension LlamaRuntime {
+    public func loadMmproj(at url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw LocalLLMError.modelNotFound(url.path)
+        }
+        let runtimeHandle = try requireRuntimeHandle()
+        var err = [CChar](repeating: 0, count: 1024)
+        let status = err.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            url.path.withCString { pathPtr in
+                lllm_runtime_load_mmproj(runtimeHandle, pathPtr, ptr.baseAddress, Int32(ptr.count))
+            }
+        }
+        if status != 0 {
+            let msg = String(cString: err)
+            switch status {
+            case -1:
+                throw LocalLLMError.mmprojLoadFailed(msg.isEmpty ? "mtmd_init_from_file returned null" : msg)
+            case -2:
+                throw LocalLLMError.audioNotSupported
+            case -3:
+                throw LocalLLMError.modelNotFound(url.path)
+            default:
+                throw LocalLLMError.mmprojLoadFailed(msg.isEmpty ? "load_mmproj failed (\(status))" : msg)
+            }
+        }
+    }
+
+    public var audioSampleRate: Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { return nil }
+        let rate = lllm_runtime_audio_sample_rate(handle)
+        return rate > 0 ? Int(rate) : nil
+    }
+
+    public var mediaMarker: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle, let marker = lllm_runtime_media_marker(handle) else {
+            return nil
+        }
+        return String(cString: marker)
+    }
+}
+
 // MARK: - ParsedAssistantTurn
 
 public struct ParsedAssistantTurn: Codable, Sendable, Equatable {
@@ -292,6 +360,37 @@ extension LlamaRuntime {
                                            tools: tools,
                                            options: options,
                                            continuation: continuation)
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    public func chat(
+        messages: [ChatMessage],
+        tools: [ToolDefinition],
+        options: SamplerOptions,
+        userAudio: AudioAttachment?
+    ) -> AsyncThrowingStream<ChatEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task.detached(priority: .userInitiated) {
+                do {
+                    if let audio = userAudio {
+                        try self.chatBlockingAudio(
+                            messages: messages,
+                            tools: tools,
+                            options: options,
+                            audio: audio,
+                            continuation: continuation)
+                    } else {
+                        try self.chatBlocking(
+                            messages: messages,
+                            tools: tools,
+                            options: options,
+                            continuation: continuation)
+                    }
                 } catch {
                     continuation.finish(throwing: error)
                 }
@@ -423,6 +522,161 @@ extension LlamaRuntime {
         continuation.finish()
     }
 
+    private func chatBlockingAudio(
+        messages: [ChatMessage],
+        tools: [ToolDefinition],
+        options: SamplerOptions,
+        audio: AudioAttachment,
+        continuation: AsyncThrowingStream<ChatEvent, Error>.Continuation
+    ) throws {
+        let runtimeHandle = try requireRuntimeHandle()
+
+        guard let marker = mediaMarker else {
+            throw LocalLLMError.mmprojNotLoaded
+        }
+        guard let expectedRate = audioSampleRate else {
+            throw LocalLLMError.mmprojNotLoaded
+        }
+        guard audio.sampleRate == expectedRate else {
+            throw LocalLLMError.audioSampleRateMismatch(expected: expectedRate, got: audio.sampleRate)
+        }
+
+        guard let lastUser = messages.last(where: { $0.role == .user }),
+              let lastContent = lastUser.content else {
+            throw LocalLLMError.audioMarkerCountMismatch(markers: 0, attachments: 1)
+        }
+        let markerCount = lastContent.components(separatedBy: marker).count - 1
+        guard markerCount == 1 else {
+            throw LocalLLMError.audioMarkerCountMismatch(markers: markerCount, attachments: 1)
+        }
+
+        let maxSamples = 30 * 16_000 * 60
+        guard audio.samples.count <= maxSamples else {
+            throw LocalLLMError.audioBufferTooLarge(samples: audio.samples.count)
+        }
+
+        var clamped = audio.samples
+        for i in 0..<clamped.count {
+            let value = clamped[i]
+            guard value.isFinite else {
+                throw LocalLLMError.audioContainsNonFinite
+            }
+            if value > 1.0 {
+                clamped[i] = 1.0
+            } else if value < -1.0 {
+                clamped[i] = -1.0
+            }
+        }
+
+        let messagesJSON = try encodeMessages(messages)
+        let toolsJSON = ToolDefinition.toOpenAISchemaJSON(tools)
+        let renderedPrompt = try renderChat(handle: runtimeHandle,
+                                            messagesJSON: messagesJSON,
+                                            toolsJSON: toolsJSON,
+                                            enableThinking: options.enableThinking)
+
+        let started = Date()
+        let box = ChatCallbackBox(continuation: continuation, stopSequences: options.stopSequences)
+        let boxPtr = Unmanaged.passRetained(box).toOpaque()
+        defer { Unmanaged<ChatCallbackBox>.fromOpaque(boxPtr).release() }
+
+        let params = lllm_sampler_params(
+            max_tokens: options.maxTokens,
+            temperature: options.temperature,
+            top_p: options.topP,
+            top_k: options.topK,
+            min_p: options.minP,
+            repeat_penalty: options.repeatPenalty,
+            seed: options.seed
+        )
+
+        let stopsCStr: [UnsafeMutablePointer<CChar>?] = options.stopSequences.map { strdup($0) }
+        defer { stopsCStr.forEach { if let p = $0 { free(p) } } }
+        var stopPointers: [UnsafePointer<CChar>?] = stopsCStr.map { UnsafePointer($0) }
+        stopPointers.append(nil)
+
+        var grammarCStr: UnsafeMutablePointer<CChar>? = nil
+        if let grammar = options.grammarGBNF {
+            grammarCStr = strdup(grammar)
+        }
+        defer { if let p = grammarCStr { free(p) } }
+
+        let cCallback: lllm_token_callback_v2 = { tokenPtr, userData in
+            guard let tokenPtr, let userData else { return 0 }
+            let box = Unmanaged<ChatCallbackBox>.fromOpaque(userData).takeUnretainedValue()
+            let piece = String(cString: tokenPtr)
+            box.generated += 1
+            box.accumulated.append(piece)
+
+            if Task.isCancelled {
+                box.cancelled = true
+                return 1
+            }
+
+            box.continuation.yield(.textToken(piece))
+
+            for sequence in box.stopSequences where !sequence.isEmpty && box.matchedStop == nil {
+                if box.accumulated.hasSuffix(sequence) || box.accumulated.contains(sequence) {
+                    box.matchedStop = sequence
+                    return 1
+                }
+            }
+            return 0
+        }
+
+        var outPromptTokens: Int32 = 0
+        var err = [CChar](repeating: 0, count: 1024)
+        let produced: Int32 = clamped.withUnsafeBufferPointer { sampleBuffer in
+            var audioInput = lllm_audio_input(samples: sampleBuffer.baseAddress, n_samples: clamped.count)
+            return withUnsafePointer(to: &audioInput) { audioPtr in
+                err.withUnsafeMutableBufferPointer { errPtr in
+                    renderedPrompt.withCString { promptPtr in
+                        stopPointers.withUnsafeBufferPointer { stopPtr in
+                            lllm_runtime_generate_v2_media(
+                                runtimeHandle,
+                                promptPtr,
+                                params,
+                                grammarCStr,
+                                options.stopSequences.isEmpty ? nil : stopPtr.baseAddress,
+                                audioPtr,
+                                1,
+                                cCallback,
+                                boxPtr,
+                                &outPromptTokens,
+                                errPtr.baseAddress,
+                                Int32(errPtr.count)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if produced < 0 {
+            throw mapMediaStatus(produced, message: String(cString: err))
+        }
+
+        let reason: StopReason
+        if box.cancelled {
+            reason = .cancelled
+        } else if let matched = box.matchedStop {
+            reason = .stopSequence(matched)
+        } else if Int(produced) >= Int(options.maxTokens) {
+            reason = .maxTokens
+        } else {
+            reason = .endOfStream
+        }
+
+        let stats = GenerationStats(
+            promptTokens: Int(outPromptTokens),
+            generatedTokens: Int(produced),
+            contextSize: Int(lllm_runtime_context_size(runtimeHandle)),
+            duration: Date().timeIntervalSince(started)
+        )
+        continuation.yield(.done(stats, stopReason: reason))
+        continuation.finish()
+    }
+
     public func parseAssistantTurn(_ assistantOutput: String) throws -> ParsedAssistantTurn {
         let runtimeHandle = try requireRuntimeHandle()
         var err = [CChar](repeating: 0, count: 1024)
@@ -439,7 +693,32 @@ extension LlamaRuntime {
         return try JSONDecoder().decode(ParsedAssistantTurn.self, from: data)
     }
 
+    internal func renderChatForTesting(messages: [ChatMessage], tools: [ToolDefinition]) throws -> String {
+        let runtimeHandle = try requireRuntimeHandle()
+        let messagesJSON = try encodeMessages(messages)
+        let toolsJSON = ToolDefinition.toOpenAISchemaJSON(tools)
+        return try renderChat(handle: runtimeHandle,
+                              messagesJSON: messagesJSON,
+                              toolsJSON: toolsJSON,
+                              enableThinking: false)
+    }
+
     // MARK: - private helpers
+
+    private func mapMediaStatus(_ status: Int32, message: String) -> LocalLLMError {
+        switch status {
+        case -8:
+            return .mmprojNotLoaded
+        case -5:
+            return .audioMarkerCountMismatch(markers: 0, attachments: 0)
+        case -9:
+            return .generationFailed("audio preprocessing failed: \(message)")
+        case -6, -3, -4, -7:
+            return .generationFailed(message)
+        default:
+            return .generationFailed(message.isEmpty ? "media generation failed (\(status))" : message)
+        }
+    }
 
     private func requireRuntimeHandle() throws -> OpaquePointer {
         lock.lock()

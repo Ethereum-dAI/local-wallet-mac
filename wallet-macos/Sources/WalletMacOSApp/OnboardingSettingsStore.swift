@@ -8,6 +8,7 @@ final class OnboardingSettingsStore {
         static let selectedModelID = "com.localwallet.demo.onboarding.selected-model-id"
         static let installedModelID = "com.localwallet.demo.onboarding.installed-model-id"
         static let installedModelPath = "com.localwallet.demo.onboarding.installed-model-path"
+        static let voiceInputEnabled = "com.localwallet.demo.onboarding.voice-input-enabled"
         static let bundlerKeyRef = "com.localwallet.demo.onboarding.bundler-key-ref"
         static let bundlerAddress = "com.localwallet.demo.onboarding.bundler-address"
     }
@@ -67,6 +68,15 @@ final class OnboardingSettingsStore {
         }
     }
 
+    var voiceInputEnabled: Bool {
+        get {
+            defaults.bool(forKey: Keys.voiceInputEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.voiceInputEnabled)
+        }
+    }
+
     var bundlerKeyRef: String? {
         get {
             defaults.string(forKey: Keys.bundlerKeyRef)
@@ -118,4 +128,20 @@ struct LocalAIModel: Identifiable, Equatable {
     static let available: [LocalAIModel] = [
         recommended,
     ]
+}
+
+struct LocalMmproj: Identifiable, Equatable {
+    let id: String
+    let artifactURL: URL
+    let artifactFileName: String
+    let sha256: String
+    let approximateBytes: Int64
+
+    static let gemma4Audio = LocalMmproj(
+        id: "ggml-org/gemma-4-E4B-mmproj-bf16",
+        artifactURL: URL(string: "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/mmproj-gemma-4-E4B-it-bf16.gguf?download=true")!,
+        artifactFileName: "mmproj-gemma-4-E4B-it-bf16.gguf",
+        sha256: "4c199e460410ba219a8c63930a7121154e1c70cdf66044858f767966332e5a54",
+        approximateBytes: 991_551_968
+    )
 }

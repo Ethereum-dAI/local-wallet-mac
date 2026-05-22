@@ -1,13 +1,23 @@
+// === Gemma 4 audio prefill: non-causal attention handling ===
+// Verified at commit 3e12fbdea5c1ac4225c7dcf79506d30950283fc3 against
+// tools/mtmd/mtmd-helper.cpp:
+//   mtmd_helper_eval_chunks does NOT toggle non-causal for audio chunks.
+//   The audio prefill below uses the manual mtmd_helper_eval_chunk_single
+//   loop with CausalGuard RAII.
+// =============================================================
 #include "CLlamaBridge.h"
 
 #include <llama.h>
 #include "chat.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 #include "nlohmann/json.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -20,6 +30,9 @@ struct lllm_runtime {
     int32_t context_size = 0;
     std::string chat_template;
     std::mutex mutex;
+    int32_t n_batch = 0;
+    mtmd_context * mtmd = nullptr;
+    std::string media_marker;
 };
 
 namespace {
@@ -31,6 +44,7 @@ void silent_log_callback(enum ggml_log_level, const char *, void *) {}
 void ensure_backend() {
     std::call_once(backend_once, [] {
         llama_log_set(silent_log_callback, nullptr);
+        mtmd_log_set(silent_log_callback, nullptr);
         llama_backend_init();
     });
 }
@@ -128,6 +142,121 @@ std::string token_to_string(const llama_vocab * vocab, llama_token token) {
 
 llama_batch single_token_batch(llama_token * token) {
     return llama_batch_get_one(token, 1);
+}
+
+int32_t decode_loop(
+    lllm_runtime * rt,
+    llama_sampler * sampler,
+    const std::vector<std::string> & stops,
+    lllm_token_callback_v2 callback,
+    void * user_data,
+    int32_t limit,
+    char * error_buf,
+    int32_t error_buf_length
+) {
+    std::string emitted;
+    int32_t produced = 0;
+
+    for (; produced < limit; produced += 1) {
+        llama_token next_token = llama_sampler_sample(sampler, rt->context, -1);
+        if (llama_vocab_is_eog(rt->vocab, next_token)) {
+            break;
+        }
+
+        std::string piece = token_to_string(rt->vocab, next_token);
+
+        bool cancelled = false;
+        if (callback != nullptr && !piece.empty()) {
+            if (callback(piece.c_str(), user_data) != 0) {
+                cancelled = true;
+            }
+        }
+        if (cancelled) {
+            produced += 1;
+            break;
+        }
+
+        emitted.append(piece);
+        bool stop_matched = false;
+        for (auto const & s : stops) {
+            size_t look = std::min(emitted.size(), s.size() + piece.size());
+            size_t from = emitted.size() - look;
+            if (emitted.find(s, from) != std::string::npos) {
+                stop_matched = true;
+                break;
+            }
+        }
+        if (stop_matched) {
+            if (produced < limit) {
+                produced += 1;
+            }
+            break;
+        }
+
+        llama_batch nb = llama_batch_get_one(&next_token, 1);
+        if (llama_decode(rt->context, nb) != 0) {
+            set_error(error_buf, error_buf_length, "Failed while generating response.");
+            return -4;
+        }
+    }
+
+    return produced;
+}
+
+llama_sampler * build_sampler(
+    const llama_vocab * vocab,
+    lllm_sampler_params params,
+    const char * grammar_gbnf,
+    int32_t grammar_error_code,
+    char * error_buf,
+    int32_t error_buf_length,
+    int32_t * limit
+) {
+    llama_sampler_chain_params sp = llama_sampler_chain_default_params();
+    sp.no_perf = true;
+    llama_sampler * sampler = llama_sampler_chain_init(sp);
+
+    int32_t top_k = params.top_k > 0 ? params.top_k : 64;
+    float top_p = params.top_p > 0.0f ? params.top_p : 0.95f;
+    float min_p = params.min_p >= 0.0f ? params.min_p : 0.05f;
+    float temp = params.temperature > 0.0f ? params.temperature : 0.7f;
+    float rep_pen = params.repeat_penalty > 0.0f ? params.repeat_penalty : 1.0f;
+    uint32_t seed = params.seed != 0 ? params.seed : LLAMA_DEFAULT_SEED;
+    *limit = params.max_tokens > 0 ? params.max_tokens : 512;
+
+    if (rep_pen != 1.0f) {
+        llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, rep_pen, 0.0f, 0.0f));
+    }
+    llama_sampler_chain_add(sampler, llama_sampler_init_top_k(top_k));
+    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(top_p, 1));
+    llama_sampler_chain_add(sampler, llama_sampler_init_min_p(min_p, 1));
+    llama_sampler_chain_add(sampler, llama_sampler_init_temp(temp));
+    if (grammar_gbnf != nullptr && grammar_gbnf[0] != '\0') {
+        llama_sampler * g = llama_sampler_init_grammar(vocab, grammar_gbnf, "root");
+        if (g == nullptr) {
+            llama_sampler_free(sampler);
+            set_error(error_buf, error_buf_length, "Grammar parse failed");
+            *limit = grammar_error_code;
+            return nullptr;
+        }
+        llama_sampler_chain_add(sampler, g);
+    }
+    llama_sampler_chain_add(sampler, llama_sampler_init_dist(seed));
+
+    return sampler;
+}
+
+std::vector<std::string> collect_stops(const char * const * stop_sequences) {
+    std::vector<std::string> stops;
+    if (stop_sequences != nullptr) {
+        for (const char * const * p = stop_sequences; *p != nullptr; ++p) {
+            std::string s = *p;
+            if (!s.empty()) {
+                stops.push_back(std::move(s));
+            }
+        }
+    }
+    return stops;
 }
 
 common_reasoning_format default_reasoning_format() {
@@ -231,6 +360,7 @@ lllm_runtime * lllm_runtime_create(
     }
 
     runtime->context_size = static_cast<int32_t>(context_params.n_ctx);
+    runtime->n_batch = static_cast<int32_t>(context_params.n_batch);
 
     const int32_t needed = llama_model_meta_val_str(runtime->model, "tokenizer.chat_template", nullptr, 0);
     if (needed > 0) {
@@ -254,6 +384,10 @@ void lllm_runtime_destroy(lllm_runtime * runtime) {
         return;
     }
 
+    if (runtime->mtmd != nullptr) {
+        mtmd_free(runtime->mtmd);
+        runtime->mtmd = nullptr;
+    }
     if (runtime->context != nullptr) {
         llama_free(runtime->context);
     }
@@ -560,74 +694,199 @@ int32_t lllm_runtime_generate_v2(
         return -3;
     }
 
-    llama_sampler_chain_params sp = llama_sampler_chain_default_params();
-    sp.no_perf = true;
-    llama_sampler * sampler = llama_sampler_chain_init(sp);
-
-    int32_t  top_k   = params.top_k > 0 ? params.top_k : 64;
-    float    top_p   = params.top_p > 0.0f ? params.top_p : 0.95f;
-    float    min_p   = params.min_p >= 0.0f ? params.min_p : 0.05f;
-    float    temp    = params.temperature > 0.0f ? params.temperature : 0.7f;
-    float    rep_pen = params.repeat_penalty > 0.0f ? params.repeat_penalty : 1.0f;
-    uint32_t seed    = params.seed != 0 ? params.seed : LLAMA_DEFAULT_SEED;
-    int32_t  limit   = params.max_tokens > 0 ? params.max_tokens : 512;
-
-    if (rep_pen != 1.0f) {
-        llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, rep_pen, 0.0f, 0.0f));
+    int32_t limit = 0;
+    llama_sampler * sampler = build_sampler(
+        rt->vocab, params, grammar_gbnf, -5, error_buf, error_buf_length, &limit);
+    if (sampler == nullptr) {
+        return -5;
     }
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_k(top_k));
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(top_p, 1));
-    llama_sampler_chain_add(sampler, llama_sampler_init_min_p(min_p, 1));
-    llama_sampler_chain_add(sampler, llama_sampler_init_temp(temp));
-    if (grammar_gbnf != nullptr && grammar_gbnf[0] != '\0') {
-        llama_sampler * g = llama_sampler_init_grammar(rt->vocab, grammar_gbnf, "root");
-        if (g == nullptr) {
-            llama_sampler_free(sampler);
-            set_error(error_buf, error_buf_length, "Grammar parse failed");
-            return -5;
-        }
-        llama_sampler_chain_add(sampler, g);
+    const std::vector<std::string> stops = collect_stops(stop_sequences);
+    int32_t produced = decode_loop(rt, sampler, stops, callback, user_data, limit, error_buf, error_buf_length);
+    llama_sampler_free(sampler);
+    return produced;
+}
+
+int32_t lllm_runtime_load_mmproj(
+    lllm_runtime * rt,
+    const char * mmproj_path,
+    char * error_buf,
+    int32_t error_buf_length
+) {
+    if (rt == nullptr || rt->model == nullptr) {
+        set_error(error_buf, error_buf_length, "Runtime is not loaded.");
+        return -1;
     }
-    llama_sampler_chain_add(sampler, llama_sampler_init_dist(seed));
-
-    std::vector<std::string> stops;
-    if (stop_sequences != nullptr) {
-        for (const char * const * p = stop_sequences; *p != nullptr; ++p) {
-            std::string s = *p;
-            if (!s.empty()) stops.push_back(std::move(s));
-        }
-    }
-    std::string emitted;
-
-    int32_t produced = 0;
-    for (; produced < limit; produced += 1) {
-        llama_token next_token = llama_sampler_sample(sampler, rt->context, -1);
-        if (llama_vocab_is_eog(rt->vocab, next_token)) break;
-        std::string piece = token_to_string(rt->vocab, next_token);
-
-        bool cancelled = false;
-        if (callback != nullptr && !piece.empty()) {
-            if (callback(piece.c_str(), user_data) != 0) cancelled = true;
-        }
-        if (cancelled) { produced += 1; break; }
-
-        emitted.append(piece);
-        bool stop_matched = false;
-        for (auto const & s : stops) {
-            size_t look = std::min(emitted.size(), s.size() + piece.size());
-            size_t from = emitted.size() - look;
-            if (emitted.find(s, from) != std::string::npos) { stop_matched = true; break; }
-        }
-        if (stop_matched) { if (produced < limit) produced += 1; break; }
-
-        llama_batch nb = llama_batch_get_one(&next_token, 1);
-        if (llama_decode(rt->context, nb) != 0) {
-            llama_sampler_free(sampler);
-            set_error(error_buf, error_buf_length, "Failed while generating response.");
-            return -4;
-        }
+    if (mmproj_path == nullptr || std::strlen(mmproj_path) == 0) {
+        set_error(error_buf, error_buf_length, "mmproj_path is empty.");
+        return -3;
     }
 
+    std::lock_guard<std::mutex> guard(rt->mutex);
+    if (rt->mtmd != nullptr) {
+        return 0;
+    }
+
+    mtmd_context_params ctx_params = mtmd_context_params_default();
+    ctx_params.use_gpu = true;
+    ctx_params.warmup = true;
+    ctx_params.print_timings = false;
+
+    mtmd_context * ctx = mtmd_init_from_file(mmproj_path, rt->model, ctx_params);
+    if (ctx == nullptr) {
+        set_error(error_buf, error_buf_length, "mtmd_init_from_file returned null");
+        return -1;
+    }
+
+    if (!mtmd_support_audio(ctx)) {
+        mtmd_free(ctx);
+        set_error(error_buf, error_buf_length, "Model does not support audio input");
+        return -2;
+    }
+
+    const char * marker = mtmd_default_marker();
+    rt->media_marker = marker == nullptr ? "<__media__>" : marker;
+    rt->mtmd = ctx;
+    return 0;
+}
+
+int32_t lllm_runtime_audio_sample_rate(lllm_runtime * rt) {
+    if (rt == nullptr || rt->mtmd == nullptr) {
+        return 0;
+    }
+    int rate = mtmd_get_audio_sample_rate(rt->mtmd);
+    return rate > 0 ? static_cast<int32_t>(rate) : 0;
+}
+
+const char * lllm_runtime_media_marker(lllm_runtime * rt) {
+    if (rt == nullptr || rt->mtmd == nullptr || rt->media_marker.empty()) {
+        return nullptr;
+    }
+    return rt->media_marker.c_str();
+}
+
+int32_t lllm_runtime_generate_v2_media(
+    lllm_runtime * rt,
+    const char * prompt,
+    lllm_sampler_params params,
+    const char * grammar_gbnf,
+    const char * const * stop_sequences,
+    const lllm_audio_input * audios,
+    size_t n_audio,
+    lllm_token_callback_v2 callback,
+    void * user_data,
+    int32_t * out_prompt_tokens,
+    char * error_buf,
+    int32_t error_buf_length
+) {
+    if (rt == nullptr || rt->context == nullptr || rt->vocab == nullptr) {
+        set_error(error_buf, error_buf_length, "Runtime is not loaded.");
+        return -1;
+    }
+    if (rt->mtmd == nullptr) {
+        set_error(error_buf, error_buf_length, "mmproj not loaded; call lllm_runtime_load_mmproj first");
+        return -8;
+    }
+    if (n_audio > 0 && audios == nullptr) {
+        set_error(error_buf, error_buf_length, "audios is NULL");
+        return -9;
+    }
+
+    std::lock_guard<std::mutex> guard(rt->mutex);
+    llama_memory_clear(llama_get_memory(rt->context), true);
+
+    // mtmd_bitmap_init_from_audio copies the Float32 buffer into its own
+    // std::vector at the pinned llama.cpp commit. Swift still keeps the sample
+    // array alive for this full call, so the FFI lifetime is safe either way.
+    std::vector<std::unique_ptr<mtmd_bitmap, decltype(&mtmd_bitmap_free)>> owned_bitmaps;
+    std::vector<const mtmd_bitmap *> raw_bitmaps;
+    owned_bitmaps.reserve(n_audio);
+    raw_bitmaps.reserve(n_audio);
+    for (size_t i = 0; i < n_audio; ++i) {
+        mtmd_bitmap * bm = mtmd_bitmap_init_from_audio(audios[i].n_samples, audios[i].samples);
+        if (bm == nullptr) {
+            set_error(error_buf, error_buf_length, "mtmd_bitmap_init_from_audio failed");
+            return -9;
+        }
+        owned_bitmaps.emplace_back(bm, mtmd_bitmap_free);
+        raw_bitmaps.push_back(bm);
+    }
+
+    mtmd_input_chunks * chunks = mtmd_input_chunks_init();
+    if (chunks == nullptr) {
+        set_error(error_buf, error_buf_length, "mtmd_input_chunks_init failed");
+        return -3;
+    }
+    std::unique_ptr<mtmd_input_chunks, decltype(&mtmd_input_chunks_free)>
+        chunks_guard(chunks, mtmd_input_chunks_free);
+
+    mtmd_input_text text_input{};
+    text_input.text = prompt == nullptr ? "" : prompt;
+    text_input.add_special = true;
+    text_input.parse_special = true;
+
+    int32_t tk = mtmd_tokenize(rt->mtmd, chunks, &text_input, raw_bitmaps.data(), raw_bitmaps.size());
+    if (tk == 1) {
+        set_error(error_buf, error_buf_length, "mtmd_tokenize: marker count != bitmap count");
+        return -5;
+    }
+    if (tk == 2) {
+        set_error(error_buf, error_buf_length, "mtmd_tokenize: audio preprocessing error");
+        return -9;
+    }
+    if (tk != 0) {
+        set_error(error_buf, error_buf_length, "mtmd_tokenize: unknown failure");
+        return -5;
+    }
+
+    if (out_prompt_tokens != nullptr) {
+        *out_prompt_tokens = static_cast<int32_t>(mtmd_helper_get_n_tokens(chunks));
+    }
+
+    struct CausalGuard {
+        llama_context * ctx;
+        bool restore;
+        ~CausalGuard() {
+            if (restore) {
+                llama_set_causal_attn(ctx, true);
+            }
+        }
+    };
+
+    llama_pos n_past = 0;
+    const size_t n_chunks = mtmd_input_chunks_size(chunks);
+    for (size_t i = 0; i < n_chunks; ++i) {
+        const mtmd_input_chunk * chunk = mtmd_input_chunks_get(chunks, i);
+        const bool is_last_chunk = i + 1 == n_chunks;
+
+        CausalGuard causal_guard{rt->context, false};
+        if (mtmd_decode_use_non_causal(rt->mtmd, chunk)) {
+            llama_set_causal_attn(rt->context, false);
+            causal_guard.restore = true;
+        }
+
+        llama_pos new_n_past = 0;
+        int32_t rc = mtmd_helper_eval_chunk_single(
+            rt->mtmd, rt->context, chunk,
+            n_past, /*seq_id=*/0, rt->n_batch,
+            /*logits_last=*/is_last_chunk,
+            &new_n_past);
+        if (rc != 0) {
+            std::string msg = "mtmd_helper_eval_chunk_single failed at chunk " +
+                std::to_string(i) + ": code " + std::to_string(rc);
+            set_error(error_buf, error_buf_length, msg);
+            return -6;
+        }
+        n_past = new_n_past;
+    }
+
+    int32_t limit = 0;
+    llama_sampler * sampler = build_sampler(
+        rt->vocab, params, grammar_gbnf, -7, error_buf, error_buf_length, &limit);
+    if (sampler == nullptr) {
+        return -7;
+    }
+    const std::vector<std::string> stops = collect_stops(stop_sequences);
+    int32_t produced = decode_loop(rt, sampler, stops, callback, user_data, limit, error_buf, error_buf_length);
     llama_sampler_free(sampler);
     return produced;
 }

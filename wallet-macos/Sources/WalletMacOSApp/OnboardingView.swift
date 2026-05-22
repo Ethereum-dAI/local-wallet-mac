@@ -41,6 +41,7 @@ private final class OnboardingState: ObservableObject {
     @Published var rpcURL: String
     @Published var archiveNodeURL: String
     @Published var selectedModelID: String
+    @Published var voiceInputEnabled: Bool
     @Published var installState: InstallState = .idle
     @Published var keyState: KeyState = .idle
     @Published var hardwareProfile: LocalHardwareProfile?
@@ -48,26 +49,32 @@ private final class OnboardingState: ObservableObject {
     private let settingsStore: OnboardingSettingsStore
     private let provisioningService: OnboardingProvisioningService
     private let downloadManager: LocalAIModelDownloadManager
+    private let mmprojDownloadManager: LocalMmprojDownloadManager
     private let hardwareInspector: LocalHardwareInspector
 
     init(
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
         provisioningService: OnboardingProvisioningService = OnboardingProvisioningService(),
         downloadManager: LocalAIModelDownloadManager = LocalAIModelDownloadManager(),
+        mmprojDownloadManager: LocalMmprojDownloadManager = LocalMmprojDownloadManager(),
         hardwareInspector: LocalHardwareInspector = LocalHardwareInspector()
     ) {
         self.settingsStore = settingsStore
         self.provisioningService = provisioningService
         self.downloadManager = downloadManager
+        self.mmprojDownloadManager = mmprojDownloadManager
         self.hardwareInspector = hardwareInspector
         self.rpcURL = settingsStore.rpcURL
         self.archiveNodeURL = settingsStore.archiveNodeURL
+        self.voiceInputEnabled = settingsStore.voiceInputEnabled
         let storedModelID = settingsStore.selectedModelID
         self.selectedModelID = LocalAIModel.available.contains { $0.id == storedModelID }
             ? storedModelID
             : LocalAIModel.recommended.id
         let selectedModel = LocalAIModel.available.first { $0.id == self.selectedModelID } ?? .recommended
-        if settingsStore.installedModelID == selectedModel.id && downloadManager.isInstalled(selectedModel) {
+        if settingsStore.installedModelID == selectedModel.id &&
+            downloadManager.isInstalled(selectedModel) &&
+            (!voiceInputEnabled || mmprojDownloadManager.isInstalled(.gemma4Audio)) {
             self.installState = .installed
         }
 
@@ -112,6 +119,7 @@ private final class OnboardingState: ObservableObject {
             persistNetwork()
         case .model:
             settingsStore.selectedModelID = selectedModelID
+            settingsStore.voiceInputEnabled = voiceInputEnabled
         case .welcome, .keys:
             break
         }
@@ -133,11 +141,20 @@ private final class OnboardingState: ObservableObject {
         }
 
         settingsStore.selectedModelID = selectedModelID
+        settingsStore.voiceInputEnabled = voiceInputEnabled
         installState = .installing(0.08)
         Task {
             do {
+                let modelBytes = 5_340_000_000.0
+                let audioBytes = voiceInputEnabled ? Double(LocalMmproj.gemma4Audio.approximateBytes) : 0
+                let totalBytes = modelBytes + audioBytes
                 let fileURL = try await downloadManager.download(selectedModel) { progress in
-                    self.installState = .installing(progress)
+                    self.installState = .installing((progress * modelBytes) / totalBytes)
+                }
+                if voiceInputEnabled {
+                    _ = try await mmprojDownloadManager.download(.gemma4Audio) { progress in
+                        self.installState = .installing((modelBytes + progress * audioBytes) / totalBytes)
+                    }
                 }
                 settingsStore.installedModelID = selectedModelID
                 settingsStore.installedModelPath = fileURL.path
@@ -173,6 +190,7 @@ private final class OnboardingState: ObservableObject {
     func complete() {
         persistNetwork()
         settingsStore.selectedModelID = selectedModelID
+        settingsStore.voiceInputEnabled = voiceInputEnabled
         settingsStore.markCompleted()
     }
 
@@ -507,6 +525,24 @@ private struct ModelStep: View {
                             }
                         }
                     }
+
+                    Toggle(isOn: $state.voiceInputEnabled) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Enable voice input")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(OnboardingPalette.primaryText)
+                            Text("Adds 992 MB for Gemma audio input. Stays on your device.")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(OnboardingPalette.secondaryText)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .padding(14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(OnboardingPalette.panel.opacity(0.72))
+                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(OnboardingPalette.border, lineWidth: 1))
+                    )
                 }
 
                 ModelInstallStatusCard(installState: state.installState, model: state.selectedModel)

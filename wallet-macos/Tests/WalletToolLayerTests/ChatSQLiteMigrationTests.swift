@@ -43,9 +43,9 @@ import Testing
     #expect(sqlite3_step(stmt) == SQLITE_ROW)
     let version = sqlite3_column_int(stmt, 0)
     sqlite3_finalize(stmt)
-    #expect(version == 1)
+    #expect(version == 3)
 
-    let select = "SELECT id, role, kind, text, tool_intent_json, tool_call_id FROM chat_messages ORDER BY created_at"
+    let select = "SELECT id, role, kind, text, tool_intent_json, tool_call_id, audio_path, audio_duration_ms, audio_waveform FROM chat_messages ORDER BY created_at"
     #expect(sqlite3_prepare_v2(db, select, -1, &stmt, nil) == SQLITE_OK)
     var rows: [(id: String, role: String, kind: String, text: String, tij: Int, tci: Int)] = []
     while sqlite3_step(stmt) == SQLITE_ROW {
@@ -86,7 +86,7 @@ import Testing
     sqlite3_step(stmt)
     let v = sqlite3_column_int(stmt, 0)
     sqlite3_finalize(stmt)
-    #expect(v == 1)
+    #expect(v == 3)
 }
 
 @Test func migrateAcceptsFreshDatabase() throws {
@@ -110,4 +110,40 @@ import Testing
     sqlite3_exec(db, v1Create, nil, nil, nil)
 
     try ChatSQLiteMigration.migrate(database: db!)
+
+    var stmt: OpaquePointer? = nil
+    #expect(sqlite3_prepare_v2(db, "SELECT audio_path, audio_duration_ms, audio_waveform FROM chat_messages LIMIT 1", -1, &stmt, nil) == SQLITE_OK)
+    sqlite3_finalize(stmt)
+}
+
+@Test func migrateToV3AddsAudioColumns() throws {
+    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("migration-audio-\(UUID()).sqlite")
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    var db: OpaquePointer? = nil
+    #expect(sqlite3_open(tmp.path, &db) == SQLITE_OK)
+    defer { sqlite3_close(db) }
+
+    let v2Create = """
+    CREATE TABLE chat_conversations(id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL);
+    CREATE TABLE chat_messages(
+        id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'assistantText',
+        text TEXT, thinking TEXT, duration REAL, prompt_tokens INTEGER, generated_tokens INTEGER, context_size INTEGER,
+        tool_intent_json TEXT, tool_call_id TEXT, created_at REAL NOT NULL
+    );
+    PRAGMA user_version = 2;
+    """
+    #expect(sqlite3_exec(db, v2Create, nil, nil, nil) == SQLITE_OK)
+
+    try ChatSQLiteMigration.migrate(database: db!)
+
+    var stmt: OpaquePointer? = nil
+    #expect(sqlite3_prepare_v2(db, "SELECT audio_path, audio_duration_ms, audio_waveform FROM chat_messages LIMIT 1", -1, &stmt, nil) == SQLITE_OK)
+    sqlite3_finalize(stmt)
+
+    #expect(sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &stmt, nil) == SQLITE_OK)
+    #expect(sqlite3_step(stmt) == SQLITE_ROW)
+    #expect(sqlite3_column_int(stmt, 0) == 3)
+    sqlite3_finalize(stmt)
 }

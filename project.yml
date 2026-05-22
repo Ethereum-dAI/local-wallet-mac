@@ -26,6 +26,7 @@ targets:
         CFBundleDisplayName: Local Wallet
         CFBundleName: Local Wallet
         LSApplicationCategoryType: public.app-category.finance
+        NSMicrophoneUsageDescription: Local Wallet uses the microphone for voice messages to your local AI. Audio never leaves your device.
         NSPrincipalClass: NSApplication
     settings:
       base:

@@ -22,6 +22,8 @@
 	<string>1</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.finance</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Local Wallet uses the microphone for voice messages to your local AI. Audio never leaves your device.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

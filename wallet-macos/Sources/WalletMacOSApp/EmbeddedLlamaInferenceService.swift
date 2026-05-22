@@ -26,8 +26,14 @@ struct EmbeddedLlamaChatTurn: Equatable {
         case assistant
     }
 
+    enum Payload: Equatable {
+        case text(String)
+        case audio(samples: [Float], durationSeconds: TimeInterval)
+        case audioPlaceholder(durationSeconds: TimeInterval)
+    }
+
     let role: Role
-    let text: String
+    let payload: Payload
 }
 
 enum EmbeddedLlamaStreamEvent {
@@ -114,15 +120,18 @@ enum GemmaChannelFallback {
 final class EmbeddedLlamaInferenceService: @unchecked Sendable {
     private let settingsStore: OnboardingSettingsStore
     private let downloadManager: LocalAIModelDownloadManager
+    private let mmprojDownloadManager: LocalMmprojDownloadManager
     private let runtime: LlamaRuntime
 
     init(
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
         downloadManager: LocalAIModelDownloadManager = LocalAIModelDownloadManager(),
+        mmprojDownloadManager: LocalMmprojDownloadManager = LocalMmprojDownloadManager(),
         runtime: LlamaRuntime = LlamaRuntime()
     ) {
         self.settingsStore = settingsStore
         self.downloadManager = downloadManager
+        self.mmprojDownloadManager = mmprojDownloadManager
         self.runtime = runtime
     }
 
@@ -147,21 +156,10 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
                         try runtime.loadModel(at: modelURL)
                     }
 
-                    var messages: [LocalLLM.ChatMessage] = [
-                        LocalLLM.ChatMessage(
-                            role: LocalLLM.ChatMessage.Role.system,
-                            content: "\(personaSystemPrompt())\n\n\(ToolDefinitions.systemNudge)"
-                        )
-                    ]
-                    messages.append(contentsOf: history.map { turn in
-                        switch turn.role {
-                        case .user:
-                            return LocalLLM.ChatMessage(role: LocalLLM.ChatMessage.Role.user, content: turn.text)
-                        case .assistant:
-                            return LocalLLM.ChatMessage(role: LocalLLM.ChatMessage.Role.assistant, content: turn.text)
-                        }
-                    })
-                    messages.append(LocalLLM.ChatMessage(role: LocalLLM.ChatMessage.Role.user, content: prompt))
+                    let messages = buildMessages(
+                        history: history,
+                        pendingUserContent: prompt
+                    )
 
                     var options = SamplerOptions()
                     options.maxTokens = 384
@@ -216,11 +214,152 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
         }
     }
 
+    func streamAudio(
+        samples: [Float],
+        durationSeconds: TimeInterval,
+        history: [EmbeddedLlamaChatTurn],
+        thinkingEnabled: Bool
+    ) -> AsyncThrowingStream<EmbeddedLlamaStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task { [self] in
+                do {
+                    let modelURL = try installedModelURL()
+                    if !runtime.isLoaded {
+                        try runtime.loadModel(at: modelURL)
+                    }
+                    try await ensureMmprojLoaded()
+                    let marker = try requireMarker()
+
+                    let messages = buildMessages(
+                        history: history,
+                        pendingUserContent: "\(marker) "
+                    )
+
+                    var options = SamplerOptions()
+                    options.maxTokens = 384
+                    options.temperature = thinkingEnabled ? 0.7 : 0.3
+                    options.enableThinking = thinkingEnabled
+
+                    var accumulated = ""
+                    var stats: GenerationStats?
+                    let audio = AudioAttachment(samples: samples, sampleRate: 16_000)
+                    for try await event in runtime.chat(
+                        messages: messages,
+                        tools: ToolDefinitions.phase1,
+                        options: options,
+                        userAudio: audio
+                    ) {
+                        try Task.checkCancellation()
+                        switch event {
+                        case .textToken(let token):
+                            accumulated += token
+                            continuation.yield(.token(token))
+                        case .done(let generationStats, stopReason: _):
+                            stats = generationStats
+                        }
+                    }
+
+                    let extracted: ParsedAssistantTurnFlat
+                    do {
+                        extracted = try BridgePEGExtractor(runtime: runtime).extract(from: accumulated)
+                    } catch {
+                        extracted = ParsedAssistantTurnFlat(content: accumulated, reasoning: nil, toolCalls: [])
+                    }
+                    let parsed = GemmaChannelFallback.normalise(extracted)
+                    let generationStats = stats ?? GenerationStats(
+                        promptTokens: 0,
+                        generatedTokens: 0,
+                        contextSize: runtime.configuredContextSize,
+                        duration: 0
+                    )
+                    let result = EmbeddedLlamaGenerationResult(
+                        response: (parsed.content ?? accumulated).trimmingCharacters(in: .whitespacesAndNewlines),
+                        thinking: parsed.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
+                        duration: generationStats.duration,
+                        promptTokens: generationStats.promptTokens,
+                        generatedTokens: generationStats.generatedTokens,
+                        contextSize: generationStats.contextSize,
+                        toolCalls: parsed.toolCalls
+                    )
+                    continuation.yield(.completed(result))
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
+    }
+
     private func installedModelURL() throws -> URL {
         if let path = settingsStore.installedModelPath, !path.isEmpty {
             return URL(fileURLWithPath: path)
         }
         return try downloadManager.localFileURL(for: .recommended)
+    }
+
+    func mmprojLocalURL() throws -> URL {
+        try mmprojDownloadManager.localFileURL(for: .gemma4Audio)
+    }
+
+    func isMmprojInstalled() -> Bool {
+        mmprojDownloadManager.isInstalled(.gemma4Audio)
+    }
+
+    func downloadMmproj(progress: @escaping LocalMmprojDownloadManager.ProgressHandler) async throws -> URL {
+        try await mmprojDownloadManager.download(.gemma4Audio, progress: progress)
+    }
+
+    private func ensureMmprojLoaded() async throws {
+        let url = try mmprojDownloadManager.localFileURL(for: .gemma4Audio)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw LocalLLMError.mmprojLoadFailed("mmproj file missing; download first")
+        }
+        try runtime.loadMmproj(at: url)
+    }
+
+    private func requireMarker() throws -> String {
+        guard let marker = runtime.mediaMarker else {
+            throw LocalLLMError.mmprojNotLoaded
+        }
+        return marker
+    }
+
+    private func buildMessages(
+        history: [EmbeddedLlamaChatTurn],
+        pendingUserContent: String
+    ) -> [LocalLLM.ChatMessage] {
+        var messages: [LocalLLM.ChatMessage] = [
+            LocalLLM.ChatMessage(
+                role: .system,
+                content: "\(personaSystemPrompt())\n\n\(ToolDefinitions.systemNudge)"
+            )
+        ]
+
+        for turn in history {
+            switch (turn.role, turn.payload) {
+            case (.user, .text(let text)):
+                messages.append(.init(role: .user, content: text))
+            case (.assistant, .text(let text)):
+                messages.append(.init(role: .assistant, content: text))
+            case (.user, .audio(_, let durationSeconds)),
+                 (.user, .audioPlaceholder(let durationSeconds)):
+                messages.append(.init(role: .user, content: formatPlaceholder(durationSeconds: durationSeconds)))
+            case (.assistant, .audio),
+                 (.assistant, .audioPlaceholder):
+                break
+            }
+        }
+
+        messages.append(.init(role: .user, content: pendingUserContent))
+        return messages
+    }
+
+    private func formatPlaceholder(durationSeconds: TimeInterval) -> String {
+        let total = max(0, Int(durationSeconds.rounded()))
+        return String(format: "[voice message · %d:%02d]", total / 60, total % 60)
     }
 
     private func personaSystemPrompt() -> String {

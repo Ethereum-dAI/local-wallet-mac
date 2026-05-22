@@ -30,6 +30,7 @@ let package = Package(
                 .linkedLibrary("llama-common"),
                 .linkedLibrary("ggml"),
                 .linkedLibrary("ggml-base"),
+                .linkedLibrary("mtmd"),
             ]
         ),
         .target(

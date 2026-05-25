@@ -13,7 +13,7 @@ enum LocalLLMTestEnv {
     }
 
     static func loadFixtureWAV(named name: String = "audio-prompt") throws -> (samples: [Float], sampleRate: Int) {
-        let url = Bundle.module.url(forResource: name, withExtension: "wav")!
+        let url = Bundle.module.url(forResource: name, withExtension: "wav", subdirectory: "Fixtures")!
         let file = try AVAudioFile(forReading: url)
         let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                    sampleRate: file.fileFormat.sampleRate,

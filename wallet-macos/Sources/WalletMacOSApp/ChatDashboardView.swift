@@ -607,17 +607,20 @@ private final class ChatDashboardModel: ObservableObject {
 
     private func handleAudioCaptureState(_ state: AudioCaptureService.State) {
         switch state {
-        case .recording:
+        case .requestingPermission, .recording, .finalizing:
             isRecording = true
         case .finished(let recording):
             isRecording = false
             recordingElapsed = 0
             sendAudio(recording)
-        case .idle, .failed:
+        case .failed(let message):
             isRecording = false
             recordingElapsed = 0
-        case .requestingPermission, .finalizing:
-            break
+            runtimeStatus = "Needs attention"
+            appendMessage(ChatMessage(kind: .assistantError, role: .assistant, text: message), to: activeConversationID)
+        case .idle:
+            isRecording = false
+            recordingElapsed = 0
         }
     }
 

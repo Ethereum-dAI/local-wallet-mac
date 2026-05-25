@@ -333,11 +333,11 @@ lllm_runtime * lllm_runtime_create(
     // n_batch must be >= the largest single prefill batch. Tool-layer-rendered
     // prompts (system + ToolDefinitions Jinja block + conversation history)
     // routinely exceed 2048 tokens; cap n_batch at n_ctx so any prompt that
-    // fits in context also fits in a single decode batch. Previously hardcoded
-    // to min(n_ctx, 2048) which fired
-    //   GGML_ASSERT(n_tokens_all <= cparams.n_batch) failed
-    // in the signed wallet app after a few chat turns.
+    // fits in context also fits in a single decode batch. Gemma audio chunks
+    // also run with non-causal attention, where llama.cpp requires n_ubatch to
+    // fit the entire chunk.
     context_params.n_batch = context_params.n_ctx;
+    context_params.n_ubatch = context_params.n_batch;
     context_params.n_threads = threads > 0 ? threads : static_cast<int32_t>(std::thread::hardware_concurrency());
     context_params.n_threads_batch = context_params.n_threads;
     context_params.no_perf = true;

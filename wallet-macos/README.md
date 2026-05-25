@@ -83,13 +83,15 @@ xcodegen generate
 ### Chat and local LLM
 
 - `ChatDashboardView.swift`
-  - SwiftUI chat dashboard: sidebar with date-bucketed conversations (delete / rename / context menu), streaming message bubbles with copy / regenerate / edit-and-resend, slash autocomplete, "Tools" footer popover, context-usage banner, keyboard shortcuts (⌘N / ⌘K / ⌘⌫), smart auto-scroll with jump-to-latest pill.
+  - SwiftUI chat dashboard: sidebar with date-bucketed conversations (delete / rename / context menu), streaming message bubbles with copy / regenerate / edit-and-resend, slash autocomplete, "Tools" footer popover, context-usage banner, keyboard shortcuts (⌘N / ⌘K / ⌘⌫), smart auto-scroll with jump-to-latest pill; chat-header gear menu carries a "Show thinking" toggle and a "Download rankings" export action.
 - `ChatSQLiteStore.swift`
-  - SQLite persistence for conversations + messages + tool intents under `Application Support/LocalWallet/chat.sqlite`. Schema version is gated by `ChatSQLiteMigration` (`WalletToolLayer`).
+  - SQLite persistence for conversations + messages + tool intents + tool-intent feedback under `Application Support/LocalWallet/chat.sqlite`. Schema version is gated by `ChatSQLiteMigration` (`WalletToolLayer`); current schema is v2 (adds the `tool_intent_feedback` table).
 - `EmbeddedLlamaInferenceService.swift`
   - Bridges to `LlamaRuntime.chat(...)` from the `local-llm` package, exposes both a one-shot `generate` and a streaming `stream(...) -> AsyncThrowingStream<EmbeddedLlamaStreamEvent, Error>`, applies `GemmaChannelFallback` to recover reasoning when the upstream chat-template parser leaks `<|channel>thought ... <channel|>` markers into the content stream.
 - `ToolIntentCardView.swift`
-  - In-chat recognition card with **Looks good** / **Edit** / **Reject** actions and the structured-arguments edit sheet.
+  - In-chat recognition card with **Looks good** / **Edit** / **Reject** actions, the structured-arguments edit sheet, and thumbs-up / thumbs-down feedback controls (thumbs-down opens a note sheet).
+- `ToolIntentFeedback.swift`
+  - Value types for per-intent thumbs-up/down feedback and the rankings JSON export schema (`ToolIntentFeedbackExportRecord`).
 - `SlashCatalog.swift`
   - Single source of truth for slash commands (`/transfer`, `/swap`) shared by the inline composer autocomplete and the footer "Tools" popover. Each entry carries a display name, summary, signature, and ready-to-edit scaffold with angle-bracket placeholders.
 - `OnboardingView.swift`, `OnboardingSettingsStore.swift`, `OnboardingProvisioningService.swift`
@@ -156,6 +158,7 @@ Highlights of the current UX:
 - **Context-usage banner** — appears above the chat when the latest stats report ≥75% (warning) or ≥92% (critical) context fill; banner CTA opens a fresh chat.
 - **Keyboard shortcuts** — ⌘N new chat, ⌘K focus composer, ⌘⌫ delete the active chat (with confirmation).
 - **Smart auto-scroll** — auto-follow is only re-engaged when the user is near the bottom; when scrolled up, a small ↓ pill in the bottom-trailing corner jumps back to the latest message or in-flight streaming bubble.
+- **Intent feedback & export** — every recognition card carries thumbs-up / thumbs-down controls (thumbs-down opens a note sheet); ratings persist to `chat.sqlite` and the gear menu in the chat header has a **Download rankings** action that writes a JSON export (`local-wallet-tool-rankings-<date>.json`) via `NSSavePanel`.
 
 ## Tool layer (phase 1)
 
@@ -164,9 +167,9 @@ Phase 1 wires a local **intent recognition** layer over the chat. When the user 
 Two ways to surface a card:
 
 1. **Natural language** — type `Send 0.1 ETH to vitalik.eth` in the chat composer. The local model decides whether to emit a `<|tool_call>` block; if it does, `BridgePEGExtractor` (with the Gemma 4 DSL fallback parser, see OPEN-56) decodes it into a `ParsedToolCall` and `ChatDashboardModel` appends a `.toolIntent` `ChatMessage`.
-2. **Slash commands** — type `/transfer 0.1 ETH to <recipient>` or `/swap 100 USDC to ETH` in the composer. `SlashCommandParser` produces the same `ToolIntent` without invoking the model. The inline autocomplete and the footer "Tools" popover both insert scaffolds from `SlashCatalog`.
+2. **Slash commands** — type `/transfer 0.1 ETH to <recipient>` or `/swap 100 USDC to ETH` in the composer. `SlashCommandParser` produces the same `ToolIntent` without invoking the model. The inline autocomplete and the footer "Tools" popover both insert scaffolds from `SlashCatalog`. The parser also accepts an explicit `key=value` form — `/transfer amount=0.1 token=ETH to=vitalik.eth` and `/swap amount=100 from_token=USDC to_token=ETH amount_side=output` — useful when arguments contain spaces or when the positional form is ambiguous. `swap` carries an `amount_side` arg (`input` for "swap 100 USDC for ETH", `output` for "buy 1 ETH with USDC"); it defaults to `input` in both the positional and key=value forms.
 
-When the user acts on the card, a synthetic `.toolResponse` `ChatMessage` (role `.tool`) is appended to the conversation so the *next* model turn sees the disposition (`acknowledged` / `acknowledged + edited` / `rejected`) and continues coherently.
+When the user acts on the card, a synthetic `.toolResponse` `ChatMessage` (role `.tool`) is appended to the conversation so the *next* model turn sees the disposition (`acknowledged` / `acknowledged + edited` / `rejected`) and continues coherently. The user can also rate the recognition with thumbs-up / thumbs-down (with an optional note on thumbs-down); ratings are stored in the `tool_intent_feedback` table (`ChatSQLiteMigration` v1→v2) keyed by conversation + message + intent, reload with the conversation, and can be exported as a single JSON file via the chat-header gear menu's **Download rankings** action.
 
 ### What's explicitly out of scope for phase 1
 
@@ -180,7 +183,8 @@ The grep guard `grep -rE "UserOperationBuilder|BundlerClient|WalletNodeClient|Ke
 ### Where the code lives
 
 - `Sources/WalletToolLayer/` — model-agnostic library (`ToolIntent`, `ToolDefinitions`, `SlashCommandParser`, `BridgePEGExtractor`, `Gemma4FallbackParser`, `ChatSQLiteMigration`).
-- `Sources/WalletMacOSApp/ToolIntentCardView.swift` — the SwiftUI recognition card + edit sheet.
+- `Sources/WalletMacOSApp/ToolIntentCardView.swift` — the SwiftUI recognition card + edit sheet + thumbs feedback controls.
+- `Sources/WalletMacOSApp/ToolIntentFeedback.swift` — feedback value types and the rankings JSON export schema.
 - `Sources/WalletMacOSApp/SlashCatalog.swift` — static catalog of slash commands consumed by the inline autocomplete and the footer "Tools" popover.
 - `Sources/WalletMacOSApp/ChatDashboardView.swift` — integrates the above into the chat dashboard, including streaming, edit-and-resend, regenerate, copy actions, and the smart-scroll plumbing.
 - `Sources/WalletMacOSApp/EmbeddedLlamaInferenceService.swift` — calls `LlamaRuntime.chat(...)` with tools + system nudge; surfaces `toolCalls` on `EmbeddedLlamaGenerationResult` and exposes a streaming `stream(...)` variant for token-by-token consumption.

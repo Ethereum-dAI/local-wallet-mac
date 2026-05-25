@@ -110,6 +110,7 @@ The current demo exercises two complementary layers — wallet plumbing and a lo
 - Streaming chat with thinking/reasoning disclosure, copy / regenerate / edit-and-resend on bubbles, stop button, code-block copy, and a smart auto-scroll that does not yank the user when scrolled up
 - SQLite-backed conversation history (`chat.sqlite` in Application Support), with delete / rename / date-bucketed sidebar
 - Tool intent recognition (transfer, swap) — natural language and `/transfer` / `/swap` slash commands surface an in-chat recognition card; phase 1 is **informational only** (no signing or broadcast yet, see `docs/OPEN_ITEMS.md` OPEN-57)
+- Per-card thumbs-up / thumbs-down feedback (with optional note) persisted to `chat.sqlite`, plus a "Download rankings" action in the chat-header gear menu that exports the captured intents as JSON
 - Inline slash autocomplete and a "Tools" popover in the footer with ready-to-edit command scaffolds
 - Onboarding flow for local model download, hardware inspection, and provisioning
 

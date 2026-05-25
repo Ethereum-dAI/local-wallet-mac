@@ -21,6 +21,7 @@
 		5A43B2D9426FBAE3A87FC324 /* UserOperationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA6F8962EB73A62EDF82FBDD /* UserOperationModels.swift */; };
 		5FAA2DEC9EAAA084756B2579 /* WebAuthnValidator.json in Resources */ = {isa = PBXBuildFile; fileRef = 7FDBD8207805F91A08B2FA8F /* WebAuthnValidator.json */; };
 		615AE4DBE68ECDD43606DDD8 /* OnboardingProvisioningService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80EEACA183C6F7A248A93A62 /* OnboardingProvisioningService.swift */; };
+		64582DE92124486EF7DA3FAC /* ToolIntentFeedback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01686936AC46773E37E58D41 /* ToolIntentFeedback.swift */; };
 		668DB43A48A98BDBFDD29B65 /* KernelFactory.json in Resources */ = {isa = PBXBuildFile; fileRef = 1B2090660CAE81D103494C90 /* KernelFactory.json */; };
 		6FC50B3D78A1BEDD7A8AAC56 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E4918C4C23C14A6A28B3460D /* Assets.xcassets */; };
 		82C23E6456D6B25C14A4338E /* EtherAmountParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0565FE58E3D3C819258A03C1 /* EtherAmountParser.swift */; };
@@ -50,6 +51,7 @@
 
 /* Begin PBXFileReference section */
 		0002B03FC3CE99A6B773309F /* SlashCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashCatalog.swift; sourceTree = "<group>"; };
+		01686936AC46773E37E58D41 /* ToolIntentFeedback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolIntentFeedback.swift; sourceTree = "<group>"; };
 		0565FE58E3D3C819258A03C1 /* EtherAmountParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EtherAmountParser.swift; sourceTree = "<group>"; };
 		0BD8C504DFE574FA718B16B8 /* EmbeddedLlamaInferenceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedLlamaInferenceService.swift; sourceTree = "<group>"; };
 		0EF992555A66C55E68BD7DB9 /* DemoRPCClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoRPCClient.swift; sourceTree = "<group>"; };
@@ -186,6 +188,7 @@
 				0002B03FC3CE99A6B773309F /* SlashCatalog.swift */,
 				8F7EDA7770D91F75143A2D4E /* SmartAccountConfiguration.swift */,
 				46C43E34967044CB6DFF8EEA /* ToolIntentCardView.swift */,
+				01686936AC46773E37E58D41 /* ToolIntentFeedback.swift */,
 				7296A0E20202CF12178A7D1F /* UserOperationBuilder.swift */,
 				AA6F8962EB73A62EDF82FBDD /* UserOperationModels.swift */,
 				611B7A76D937ADC7B38FEDA8 /* WalletMacOSApp.swift */,
@@ -307,6 +310,7 @@
 				B914A76C3423747F115A9493 /* SlashCatalog.swift in Sources */,
 				452F713693CC249455BA1E9F /* SmartAccountConfiguration.swift in Sources */,
 				BDB88F3DB7D6F5EC7CD7403D /* ToolIntentCardView.swift in Sources */,
+				64582DE92124486EF7DA3FAC /* ToolIntentFeedback.swift in Sources */,
 				B38890B21BDBE3CABB8508A2 /* UserOperationBuilder.swift in Sources */,
 				5A43B2D9426FBAE3A87FC324 /* UserOperationModels.swift in Sources */,
 				040411231BD12B67EE891E4C /* WalletMacOSApp.swift in Sources */,

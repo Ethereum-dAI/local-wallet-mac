@@ -165,6 +165,111 @@ final class ChatSQLiteStore {
         try stepDone(statement, database: database)
     }
 
+    func saveToolIntentFeedback(_ feedback: ToolIntentFeedback) throws {
+        let database = try openDatabase()
+        defer {
+            sqlite3_close(database)
+        }
+
+        try createSchema(in: database)
+        try upsertToolIntentFeedback(feedback, in: database)
+    }
+
+    private func upsertToolIntentFeedback(_ feedback: ToolIntentFeedback, in database: OpaquePointer) throws {
+        let statement = try prepare("""
+        INSERT INTO tool_intent_feedback (
+            id, conversation_id, message_id, intent_id, tool, prompt, args_json, rating, note, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(message_id) DO UPDATE SET
+            conversation_id = excluded.conversation_id,
+            intent_id = excluded.intent_id,
+            tool = excluded.tool,
+            prompt = excluded.prompt,
+            args_json = excluded.args_json,
+            rating = excluded.rating,
+            note = excluded.note,
+            updated_at = excluded.updated_at
+        """, in: database)
+        defer {
+            sqlite3_finalize(statement)
+        }
+
+        let data = try JSONEncoder().encode(feedback.args)
+        let argsJSON = String(data: data, encoding: .utf8) ?? "{}"
+
+        try bind(feedback.id.uuidString, at: 1, in: statement)
+        try bind(feedback.conversationID.uuidString, at: 2, in: statement)
+        try bind(feedback.messageID.uuidString, at: 3, in: statement)
+        try bind(feedback.intentID.uuidString, at: 4, in: statement)
+        try bind(feedback.tool.rawValue, at: 5, in: statement)
+        try bind(feedback.prompt, at: 6, in: statement)
+        try bind(argsJSON, at: 7, in: statement)
+        try bind(feedback.rating.rawValue, at: 8, in: statement)
+        try bindOptional(feedback.note, at: 9, in: statement)
+        sqlite3_bind_double(statement, 10, feedback.createdAt.timeIntervalSince1970)
+        sqlite3_bind_double(statement, 11, feedback.updatedAt.timeIntervalSince1970)
+        try stepDone(statement, database: database)
+    }
+
+    func loadToolIntentFeedbackExportRecords() throws -> [ToolIntentFeedbackExportRecord] {
+        let database = try openDatabase()
+        defer {
+            sqlite3_close(database)
+        }
+
+        try createSchema(in: database)
+        let statement = try prepare("""
+        SELECT f.id, f.conversation_id, c.title, f.message_id, f.intent_id, f.tool, f.prompt, f.args_json, f.rating, f.note, f.created_at, f.updated_at
+        FROM tool_intent_feedback f
+        LEFT JOIN chat_conversations c ON c.id = f.conversation_id
+        ORDER BY f.updated_at DESC
+        """, in: database)
+        defer {
+            sqlite3_finalize(statement)
+        }
+
+        var records: [ToolIntentFeedbackExportRecord] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard
+                let idText = columnText(statement, 0),
+                let id = UUID(uuidString: idText),
+                let conversationIDText = columnText(statement, 1),
+                let conversationID = UUID(uuidString: conversationIDText),
+                let messageIDText = columnText(statement, 3),
+                let messageID = UUID(uuidString: messageIDText),
+                let intentIDText = columnText(statement, 4),
+                let intentID = UUID(uuidString: intentIDText),
+                let tool = columnText(statement, 5),
+                let prompt = columnText(statement, 6),
+                let argsJSON = columnText(statement, 7),
+                let rating = columnText(statement, 8)
+            else {
+                continue
+            }
+
+            let parameters = argsJSON.data(using: .utf8)
+                .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+
+            records.append(ToolIntentFeedbackExportRecord(
+                id: id,
+                conversationID: conversationID,
+                conversationTitle: columnText(statement, 2) ?? "",
+                messageID: messageID,
+                intentID: intentID,
+                tool: tool,
+                prompt: prompt,
+                parameters: parameters,
+                valuation: rating,
+                notes: columnText(statement, 9),
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 10)),
+                updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 11))
+            ))
+        }
+
+        return records
+    }
+
     func deleteMessage(_ messageID: UUID, from conversationID: UUID) throws {
         let database = try openDatabase()
         defer {
@@ -234,6 +339,9 @@ final class ChatSQLiteStore {
                 for (index, message) in conversation.messages.enumerated() {
                     let createdAt = conversation.createdAt.addingTimeInterval(Double(index) * 0.001)
                     try insertMessage(message, conversationID: conversation.id, createdAt: createdAt, in: database)
+                    if let feedback = message.toolFeedback {
+                        try upsertToolIntentFeedback(feedback, in: database)
+                    }
                 }
             }
 
@@ -308,11 +416,43 @@ final class ChatSQLiteStore {
             hasV1MessagesTable = true
         }
         if hasV1MessagesTable {
-            try execute("PRAGMA user_version = 1", in: database)
+            try createFeedbackSchema(in: database)
+            try execute("PRAGMA user_version = \(ChatSQLiteMigration.currentVersion)", in: database)
         }
     }
 
+    private func createFeedbackSchema(in database: OpaquePointer) throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS tool_intent_feedback (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            message_id TEXT NOT NULL UNIQUE,
+            intent_id TEXT NOT NULL,
+            tool TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            args_json TEXT NOT NULL,
+            rating TEXT NOT NULL,
+            note TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY(message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+        )
+        """, in: database)
+
+        try execute("""
+        CREATE INDEX IF NOT EXISTS idx_tool_intent_feedback_updated
+        ON tool_intent_feedback(updated_at)
+        """, in: database)
+
+        try execute("""
+        CREATE INDEX IF NOT EXISTS idx_tool_intent_feedback_rating
+        ON tool_intent_feedback(rating)
+        """, in: database)
+    }
+
     private func loadMessages(for conversationID: UUID, in database: OpaquePointer) throws -> [ChatMessage] {
+        let feedbackByMessageID = try loadToolIntentFeedbackByMessageID(for: conversationID, in: database)
         let statement = try prepare("""
         SELECT id, role, kind, text, thinking, duration, prompt_tokens, generated_tokens, context_size, tool_intent_json, tool_call_id
         FROM chat_messages
@@ -368,11 +508,67 @@ final class ChatSQLiteStore {
                 thinking: columnText(statement, 4),
                 stats: stats,
                 toolIntent: toolIntent,
-                toolCallId: columnText(statement, 10)
+                toolCallId: columnText(statement, 10),
+                toolFeedback: feedbackByMessageID[id]
             ))
         }
 
         return messages
+    }
+
+    private func loadToolIntentFeedbackByMessageID(
+        for conversationID: UUID,
+        in database: OpaquePointer
+    ) throws -> [UUID: ToolIntentFeedback] {
+        let statement = try prepare("""
+        SELECT id, message_id, intent_id, tool, prompt, args_json, rating, note, created_at, updated_at
+        FROM tool_intent_feedback
+        WHERE conversation_id = ?
+        """, in: database)
+        defer {
+            sqlite3_finalize(statement)
+        }
+
+        try bind(conversationID.uuidString, at: 1, in: statement)
+
+        var feedbackByMessageID: [UUID: ToolIntentFeedback] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard
+                let idText = columnText(statement, 0),
+                let id = UUID(uuidString: idText),
+                let messageIDText = columnText(statement, 1),
+                let messageID = UUID(uuidString: messageIDText),
+                let intentIDText = columnText(statement, 2),
+                let intentID = UUID(uuidString: intentIDText),
+                let toolText = columnText(statement, 3),
+                let tool = ToolIntent.Tool(rawValue: toolText),
+                let prompt = columnText(statement, 4),
+                let argsJSON = columnText(statement, 5),
+                let ratingText = columnText(statement, 6),
+                let rating = ToolIntentFeedback.Rating(rawValue: ratingText)
+            else {
+                continue
+            }
+
+            let args = argsJSON.data(using: .utf8)
+                .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+
+            feedbackByMessageID[messageID] = ToolIntentFeedback(
+                id: id,
+                conversationID: conversationID,
+                messageID: messageID,
+                intentID: intentID,
+                tool: tool,
+                prompt: prompt,
+                args: args,
+                rating: rating,
+                note: columnText(statement, 7),
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 8)),
+                updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 9))
+            )
+        }
+
+        return feedbackByMessageID
     }
 
     private func insertConversation(_ conversation: ChatConversation, in database: OpaquePointer) throws {

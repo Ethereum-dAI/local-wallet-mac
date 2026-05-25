@@ -3,11 +3,15 @@ import WalletToolLayer
 
 struct ToolIntentCardView: View {
     let intent: ToolIntent
+    let feedback: ToolIntentFeedback?
     let onConfirm: () -> Void
     let onReject: () -> Void
     let onEdit: ([String: String]) -> Void
+    let onFeedback: (ToolIntentFeedback.Rating, String?) -> Void
 
     @State private var showingEditSheet = false
+    @State private var showingFeedbackSheet = false
+    @State private var feedbackNote = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -45,6 +49,8 @@ struct ToolIntentCardView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .italic()
+
+            feedbackControls
 
             switch intent.disposition {
             case .pending:
@@ -90,6 +96,59 @@ struct ToolIntentCardView: View {
             } onCancel: {
                 showingEditSheet = false
             }
+        }
+        .sheet(isPresented: $showingFeedbackSheet) {
+            ToolIntentFeedbackSheet(
+                note: $feedbackNote,
+                onSave: {
+                    onFeedback(.thumbsDown, feedbackNote)
+                    showingFeedbackSheet = false
+                },
+                onCancel: {
+                    showingFeedbackSheet = false
+                }
+            )
+        }
+    }
+
+    private var feedbackControls: some View {
+        HStack(spacing: 8) {
+            Text("Extraction feedback")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+            Button {
+                onFeedback(.thumbsUp, nil)
+            } label: {
+                Image(systemName: feedback?.rating == .thumbsUp ? "hand.thumbsup.fill" : "hand.thumbsup")
+                    .font(.system(size: 13, weight: .bold))
+                    .frame(width: 26, height: 24)
+            }
+            .buttonStyle(.borderless)
+            .help("Good extraction")
+
+            Button {
+                feedbackNote = feedback?.note ?? ""
+                showingFeedbackSheet = true
+            } label: {
+                Image(systemName: feedback?.rating == .thumbsDown ? "hand.thumbsdown.fill" : "hand.thumbsdown")
+                    .font(.system(size: 13, weight: .bold))
+                    .frame(width: 26, height: 24)
+            }
+            .buttonStyle(.borderless)
+            .help("Bad extraction")
+
+            if let feedback {
+                Text(feedback.rating == .thumbsUp ? "Rated up" : "Rated down")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if let note = feedback.note, !note.isEmpty {
+                    Text("Note saved")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
         }
     }
 }
@@ -154,5 +213,39 @@ private struct ToolIntentEditSheet: View {
         }
         .padding(20)
         .frame(minWidth: 440, minHeight: 300)
+    }
+}
+
+private struct ToolIntentFeedbackSheet: View {
+    @Binding var note: String
+    let onSave: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("What was wrong?")
+                .font(.title3.bold())
+
+            TextEditor(text: $note)
+                .font(.body)
+                .frame(minWidth: 360, minHeight: 130)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
+                )
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    onSave()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 420, minHeight: 240)
     }
 }

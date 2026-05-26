@@ -3,10 +3,16 @@ import LocalAuthentication
 import WalletSignature
 
 // AppModel drives the signed macOS demo shell. It is intentionally opinionated
-// around the current demo scope (Sepolia, ETH transfer first, hosted bundler)
+// around the current demo scope (Sepolia, ETH transfer first, local wallet-node)
 // and should not be treated as the final wallet product architecture.
 @MainActor
 final class AppModel: ObservableObject {
+    struct UserOperationSendResult: Equatable {
+        let userOpHash: String
+        let transactionHash: String?
+        let success: Bool?
+    }
+
     @Published private(set) var walletRecord: WalletRecord?
     @Published private(set) var bridgeStatus = "Not checked"
     @Published private(set) var lastError: String?
@@ -44,7 +50,6 @@ final class AppModel: ObservableObject {
     private let settingsStore: DemoSettingsStore
     private let kernelAccountAddressPredictor: KernelAccountAddressPredictor
     private let rpcClient: DemoRPCClient
-    private let bundlerClient: BundlerClient
     private var walletNodeClient: WalletNodeClient?
     private var walletNodeDaemon: WalletNodeDaemon?
     private let userOperationBuilder: UserOperationBuilder
@@ -55,7 +60,6 @@ final class AppModel: ObservableObject {
         settingsStore: DemoSettingsStore = DemoSettingsStore(),
         kernelAccountAddressPredictor: KernelAccountAddressPredictor = KernelAccountAddressPredictor(),
         rpcClient: DemoRPCClient = DemoRPCClient(),
-        bundlerClient: BundlerClient = BundlerClient(),
         walletNodeClient: WalletNodeClient? = WalletNodeClient.Configuration.fromEnvironment().map {
             WalletNodeClient(configuration: $0)
         },
@@ -66,7 +70,6 @@ final class AppModel: ObservableObject {
         self.settingsStore = settingsStore
         self.kernelAccountAddressPredictor = kernelAccountAddressPredictor
         self.rpcClient = rpcClient
-        self.bundlerClient = bundlerClient
         self.walletNodeClient = walletNodeClient
         self.userOperationBuilder = userOperationBuilder
         self.configuration = DemoAppConfiguration(
@@ -308,6 +311,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func refreshOnchainAccountStatus() {
+        appendSection("Refresh Onchain Status")
+        refreshBalance()
+        refreshLocalRelayerStatus()
+    }
+
     func setTestnetModeEnabled(_ isEnabled: Bool) {
         guard configuration.isTestnetModeEnabled != isEnabled else {
             return
@@ -515,6 +524,19 @@ final class AppModel: ObservableObject {
     }
 
     func buildCurrentUserOperationDraft(isDeployedOverride: Bool? = nil) async throws -> UserOperationDraft {
+        try await buildUserOperationDraft(
+            intent: .nativeTransfer(
+                recipient: transactionComposer.recipient,
+                amountETH: transactionComposer.amountETH
+            ),
+            isDeployedOverride: isDeployedOverride
+        )
+    }
+
+    func buildUserOperationDraft(
+        intent: TransactionIntent,
+        isDeployedOverride: Bool? = nil
+    ) async throws -> UserOperationDraft {
         guard let walletRecord else {
             throw AppError.corruptedMetadataStore
         }
@@ -529,10 +551,7 @@ final class AppModel: ObservableObject {
             publicKey: publicKey,
             chain: activeChain,
             isDeployed: isDeployedOverride ?? accountInspection?.isDeployed ?? walletRecord.isDeployed,
-            intent: .nativeTransfer(
-                recipient: transactionComposer.recipient,
-                amountETH: transactionComposer.amountETH
-            )
+            intent: intent
         )
     }
 
@@ -554,19 +573,14 @@ final class AppModel: ObservableObject {
                 let draft = try await buildCurrentUserOperationDraft()
                 appendDraftLogSummary(draft, context: "build")
 
-                let enrichedDraft = try await enrichDraftWithBundlerEstimationIfAvailable(
+                let enrichedDraft = try await enrichDraftWithLocalBundlerEstimation(
                     draft,
                     logContext: "build"
                 )
                 builtUserOperationDraft = enrichedDraft
 
                 let initCodeMode = enrichedDraft.initCode.isEmpty ? "existing account path" : "deployment path included"
-                if activeChain.bundlerURL != nil {
-                    bridgeStatus = "Unsigned UserOperation draft built for \(activeChain.name) with \(initCodeMode). Gas estimated through hosted bundler."
-                } else {
-                    activeBundlerStatus = "No bundler configured for \(activeChain.name)"
-                    bridgeStatus = "Unsigned UserOperation draft built for \(activeChain.name) with \(initCodeMode)."
-                }
+                bridgeStatus = "Unsigned UserOperation draft built for \(activeChain.name) with \(initCodeMode). Gas estimated through local wallet-node."
 
                 appendLog("build: completed successfully")
             } catch {
@@ -586,93 +600,14 @@ final class AppModel: ObservableObject {
             return
         }
 
-        appendSection("Send UserOperation")
-
-        isSendingUserOperation = true
-        lastError = nil
-        lastSubmittedUserOperationHash = nil
-        lastBundledTransactionHash = nil
-
         Task {
             do {
-                appendLog("send: preparing transaction on \(activeChain.name)")
-
-                let liveInspection = try await refreshAccountInspection(logContext: "send-preflight")
-                appendLog("send: using \(liveInspection.isDeployed ? "deployed" : "precomputed") account path")
-
-                let draft = try await buildCurrentUserOperationDraft(
-                    isDeployedOverride: liveInspection.isDeployed
+                _ = try await executeNativeTransfer(
+                    recipient: transactionComposer.recipient,
+                    amountETH: transactionComposer.amountETH,
+                    logContext: "send",
+                    signingReason: "Authorize \(transactionComposer.selectedKind.rawValue) on \(activeChain.name)"
                 )
-                appendDraftLogSummary(draft, context: "send")
-
-                let enrichedDraft = try await enrichDraftWithBundlerEstimationIfAvailable(
-                    draft,
-                    logContext: "send"
-                )
-                builtUserOperationDraft = enrichedDraft
-
-                let finalHash = try enrichedDraft.userOpHash()
-                appendLog("send: final userOpHash \(finalHash.shortHex)")
-
-                let preimage = try WalletSignature.computeSigningPreimage(userOpHash: finalHash)
-                appendLog("send: computed signing preimage (\(preimage.count) bytes)")
-
-                let signingReason = "Authorize \(transactionComposer.selectedKind.rawValue) on \(activeChain.name)"
-                appendLog("send: requesting Secure Enclave signature")
-                let signature = try keyStore.sign(preimage: preimage, reason: signingReason)
-                appendLog("send: signature components r=\(signature.r.shortHex) s=\(signature.s.shortHex)")
-
-                var lowS = signature.s
-                let originalS = lowS
-                try WalletSignature.normaliseLowS(s: &lowS)
-                appendLog(
-                    "send: low-s normalization \(originalS == lowS ? "not needed" : "applied")"
-                )
-
-                let encodedSignature = try WalletSignature.abiEncodeSignature(
-                    userOpHash: finalHash,
-                    r: signature.r,
-                    s: lowS,
-                    usePrecompiled: true
-                )
-                appendLog("send: encoded Kernel/WebAuthn signature (\(encodedSignature.count) bytes)")
-
-                bridgeStatus = "Submitting UserOperation to hosted bundler on \(activeChain.name)…"
-                activeBundlerStatus = "Submitting UserOperation"
-
-                let sentUserOpHash = try await bundlerClient.sendUserOperation(
-                    chain: activeChain,
-                    draft: enrichedDraft,
-                    signature: encodedSignature
-                )
-                lastSubmittedUserOperationHash = sentUserOpHash
-                appendLog("send: bundler accepted userOpHash \(sentUserOpHash)")
-
-                bridgeStatus = "UserOperation accepted by bundler on \(activeChain.name). Waiting for inclusion…"
-
-                let receipt = try await pollForReceipt(userOpHash: sentUserOpHash)
-                if let receipt {
-                    lastBundledTransactionHash = receipt.receipt?.transactionHash
-                    activeBundlerStatus = receipt.success ? "UserOperation included" : "UserOperation reverted on-chain"
-
-                    appendLog("send: receipt success=\(receipt.success) actualGasUsed=\(receipt.actualGasUsed) actualGasCost=\(receipt.actualGasCost)")
-                    if let transactionHash = receipt.receipt?.transactionHash {
-                        appendLog("send: bundle transaction hash \(transactionHash)")
-                    }
-                    if let revertReason = receipt.reason, !revertReason.isEmpty {
-                        appendLog("send: revert reason \(revertReason)")
-                    }
-
-                    bridgeStatus = receipt.success
-                        ? "UserOperation included on \(activeChain.name)."
-                        : "UserOperation included on \(activeChain.name), but execution reverted."
-
-                    _ = try? await refreshAccountInspection(logContext: "post-send-refresh")
-                } else {
-                    activeBundlerStatus = "Receipt pending"
-                    bridgeStatus = "UserOperation submitted to bundler. Receipt still pending."
-                    appendLog("send: receipt still pending after polling window")
-                }
             } catch {
                 lastError = error.localizedDescription
                 bridgeStatus = "UserOperation send failed"
@@ -682,6 +617,164 @@ final class AppModel: ObservableObject {
 
             isSendingUserOperation = false
         }
+    }
+
+    func executeNativeTransfer(
+        recipient: String,
+        amountETH: String,
+        logContext: String = "transfer",
+        signingReason: String? = nil
+    ) async throws -> UserOperationSendResult {
+        try await executeTransfer(
+            intent: .nativeTransfer(recipient: recipient, amountETH: amountETH),
+            logContext: logContext,
+            signingReason: signingReason ?? "Authorize ETH transfer on \(activeChain.name)"
+        )
+    }
+
+    func executeERC20Transfer(
+        token: WalletToken,
+        recipient: String,
+        amount: String,
+        logContext: String = "transfer",
+        signingReason: String? = nil
+    ) async throws -> UserOperationSendResult {
+        try await executeTransfer(
+            intent: .erc20Transfer(token: token, recipient: recipient, amount: amount),
+            logContext: logContext,
+            signingReason: signingReason ?? "Authorize \(amount) \(token.symbol) transfer on \(activeChain.name)"
+        )
+    }
+
+    private func executeTransfer(
+        intent: TransactionIntent,
+        logContext: String,
+        signingReason: String
+    ) async throws -> UserOperationSendResult {
+        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+            throw AppError.walletOperationInProgress
+        }
+        if walletRecord == nil {
+            bootstrap()
+        }
+        guard walletRecord != nil else {
+            throw AppError.corruptedMetadataStore
+        }
+
+        appendSection("Send UserOperation")
+
+        isSendingUserOperation = true
+        lastError = nil
+        lastSubmittedUserOperationHash = nil
+        lastBundledTransactionHash = nil
+
+        do {
+            let result = try await sendUserOperation(
+                intent: intent,
+                logContext: logContext,
+                signingReason: signingReason
+            )
+            isSendingUserOperation = false
+            return result
+        } catch {
+            isSendingUserOperation = false
+            throw error
+        }
+    }
+
+    private func sendUserOperation(
+        intent: TransactionIntent,
+        logContext: String,
+        signingReason: String
+    ) async throws -> UserOperationSendResult {
+        appendLog("\(logContext): preparing transaction on \(activeChain.name)")
+
+        let liveInspection = try await refreshAccountInspection(logContext: "\(logContext)-preflight")
+        appendLog("\(logContext): using \(liveInspection.isDeployed ? "deployed" : "precomputed") account path")
+
+        let draft = try await buildUserOperationDraft(
+            intent: intent,
+            isDeployedOverride: liveInspection.isDeployed
+        )
+        appendDraftLogSummary(draft, context: logContext)
+
+        let enrichedDraft = try await enrichDraftWithLocalBundlerEstimation(
+            draft,
+            logContext: logContext
+        )
+        builtUserOperationDraft = enrichedDraft
+
+        let finalHash = try enrichedDraft.userOpHash()
+        appendLog("\(logContext): final userOpHash \(finalHash.shortHex)")
+
+        let preimage = try WalletSignature.computeSigningPreimage(userOpHash: finalHash)
+        appendLog("\(logContext): computed signing preimage (\(preimage.count) bytes)")
+
+        appendLog("\(logContext): requesting Secure Enclave signature")
+        let signature = try keyStore.sign(preimage: preimage, reason: signingReason)
+        appendLog("\(logContext): signature components r=\(signature.r.shortHex) s=\(signature.s.shortHex)")
+
+        var lowS = signature.s
+        let originalS = lowS
+        try WalletSignature.normaliseLowS(s: &lowS)
+        appendLog(
+            "\(logContext): low-s normalization \(originalS == lowS ? "not needed" : "applied")"
+        )
+
+        let encodedSignature = try WalletSignature.abiEncodeSignature(
+            userOpHash: finalHash,
+            r: signature.r,
+            s: lowS,
+            usePrecompiled: false
+        )
+        appendLog("\(logContext): encoded Kernel/WebAuthn signature (\(encodedSignature.count) bytes)")
+
+        let walletNodeClient = try await ensureWalletNodeClient()
+        bridgeStatus = "Submitting UserOperation to local wallet-node on \(activeChain.name)..."
+        activeBundlerStatus = "Submitting UserOperation"
+
+        let sentUserOpHash = try await walletNodeClient.sendUserOperation(
+            draft: enrichedDraft,
+            signature: encodedSignature
+        )
+        lastSubmittedUserOperationHash = sentUserOpHash
+        appendLog("\(logContext): local wallet-node accepted userOpHash \(sentUserOpHash)")
+
+        bridgeStatus = "UserOperation accepted by local wallet-node on \(activeChain.name). Waiting for inclusion..."
+
+        let receipt = try await pollForLocalReceipt(userOpHash: sentUserOpHash, logContext: logContext)
+        if let receipt {
+            lastBundledTransactionHash = receipt.txHash
+            activeBundlerStatus = receipt.success ? "UserOperation included" : "UserOperation reverted on-chain"
+
+            appendLog("\(logContext): receipt success=\(receipt.success) actualGasUsed=\(receipt.actualGasUsed ?? "nil") actualGasCost=\(receipt.actualGasCost ?? "nil")")
+            appendLog("\(logContext): bundle transaction hash \(receipt.txHash)")
+            if let revertReason = receipt.revertReason, !revertReason.isEmpty {
+                appendLog("\(logContext): revert reason \(revertReason)")
+            }
+
+            bridgeStatus = receipt.success
+                ? "UserOperation included on \(activeChain.name)."
+                : "UserOperation included on \(activeChain.name), but execution reverted."
+
+            _ = try? await refreshAccountInspection(logContext: "post-send-refresh")
+            refreshLocalRelayerStatus()
+            return UserOperationSendResult(
+                userOpHash: sentUserOpHash,
+                transactionHash: receipt.txHash,
+                success: receipt.success
+            )
+        }
+
+        activeBundlerStatus = "Receipt pending"
+        bridgeStatus = "UserOperation submitted to local wallet-node. Receipt still pending."
+        appendLog("\(logContext): receipt still pending after polling window")
+        refreshLocalRelayerStatus()
+        return UserOperationSendResult(
+            userOpHash: sentUserOpHash,
+            transactionHash: nil,
+            success: nil
+        )
     }
 
     private func refreshAccountInspection(logContext: String) async throws -> AccountInspection {
@@ -720,24 +813,20 @@ final class AppModel: ObservableObject {
         return inspection
     }
 
-    private func enrichDraftWithBundlerEstimationIfAvailable(
+    private func enrichDraftWithLocalBundlerEstimation(
         _ draft: UserOperationDraft,
         logContext: String
     ) async throws -> UserOperationDraft {
-        guard let bundlerURL = activeChain.bundlerURL else {
-            appendLog("\(logContext): no bundler configured; keeping placeholder gas values")
-            return draft
-        }
+        let walletNodeClient = try await ensureWalletNodeClient()
 
-        appendLog("\(logContext): checking bundler entry point support at \(bundlerURL.absoluteString)")
-        try await bundlerClient.assertEntryPointSupport(chain: activeChain)
-        appendLog("\(logContext): bundler supports entry point \(activeChain.entryPoint)")
+        appendLog("\(logContext): checking local wallet-node entry point support")
+        try await walletNodeClient.assertEntryPointSupport(activeChain.entryPoint)
+        appendLog("\(logContext): local wallet-node supports entry point \(activeChain.entryPoint)")
 
-        let dummySignature = try WalletSignature.abiEncodeDummySignature(usePrecompiled: true)
+        let dummySignature = try WalletSignature.abiEncodeDummySignature(usePrecompiled: false)
         appendLog("\(logContext): generated dummy signature for estimation (\(dummySignature.count) bytes)")
 
-        let estimate = try await bundlerClient.estimateUserOperationGas(
-            chain: activeChain,
+        let estimate = try await walletNodeClient.estimateUserOperationGas(
             draft: draft,
             dummySignature: dummySignature
         )
@@ -750,7 +839,7 @@ final class AppModel: ObservableObject {
             "\(logContext): fee quote maxPriority=\(feeQuote.maxPriorityFeePerGas.shortHex) maxFee=\(feeQuote.maxFeePerGas.shortHex)"
         )
 
-        activeBundlerStatus = "Bundler ready on \(activeChain.name)"
+        activeBundlerStatus = "Local wallet-node ready on \(activeChain.name)"
 
         return draft.updatingGasPlan(
             UserOperationGasPlan(
@@ -768,19 +857,20 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func pollForReceipt(userOpHash: String) async throws -> BundlerClient.UserOperationReceipt? {
-        appendLog("send: polling bundler receipt for \(userOpHash)")
+    private func pollForLocalReceipt(
+        userOpHash: String,
+        logContext: String
+    ) async throws -> WalletNodeClient.UserOperationReceipt? {
+        let walletNodeClient = try await ensureWalletNodeClient()
+        appendLog("\(logContext): polling local wallet-node receipt for \(userOpHash)")
 
-        for attempt in 1...15 {
-            if let receipt = try await bundlerClient.getUserOperationReceipt(
-                chain: activeChain,
-                userOpHash: userOpHash
-            ) {
-                appendLog("send: receipt received on attempt \(attempt)")
+        for attempt in 1...90 {
+            if let receipt = try await walletNodeClient.getUserOperationReceipt(userOpHash: userOpHash) {
+                appendLog("\(logContext): receipt received on attempt \(attempt)")
                 return receipt
             }
 
-            appendLog("send: receipt pending (attempt \(attempt)/15)")
+            appendLog("\(logContext): receipt pending (attempt \(attempt)/90)")
             try await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
@@ -794,19 +884,16 @@ final class AppModel: ObservableObject {
     private func suggestedUserOperationFees(
         logContext: String
     ) async throws -> (maxPriorityFeePerGas: Data, maxFeePerGas: Data) {
-        guard activeChain.bundlerURL != nil else {
-            return try await rpcClient.suggestedGasFees(chain: activeChain)
-        }
-
         do {
-            let gasPrice = try await bundlerClient.userOperationGasPrice(chain: activeChain)
-            appendLog("\(logContext): using bundler gas price tier 'standard'")
+            let walletNodeClient = try await ensureWalletNodeClient()
+            let gasPrice = try await walletNodeClient.userOperationGasPrice()
+            appendLog("\(logContext): using local wallet-node gas price tier 'standard'")
             return (
                 maxPriorityFeePerGas: gasPrice.standard.maxPriorityFeePerGas,
                 maxFeePerGas: gasPrice.standard.maxFeePerGas
             )
         } catch {
-            appendLog("\(logContext): bundler gas price unavailable, falling back to public RPC fees — \(error.localizedDescription)")
+            appendLog("\(logContext): local wallet-node gas price unavailable, falling back to public RPC fees — \(error.localizedDescription)")
             return try await rpcClient.suggestedGasFees(chain: activeChain)
         }
     }

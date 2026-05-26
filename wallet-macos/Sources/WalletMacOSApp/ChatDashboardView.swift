@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 import WalletToolLayer
@@ -14,6 +15,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         case assistantError
         case toolIntent
         case toolResponse
+        case onchainTransaction
     }
     enum Role: String, Codable { case user, assistant, tool }
     var id = UUID()
@@ -31,6 +33,14 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     }
     static func assistantText(_ text: String, thinking: String? = nil, stats: ChatGenerationStats? = nil) -> ChatMessage {
         ChatMessage(kind: .assistantText, role: .assistant, text: text, thinking: thinking, stats: stats)
+    }
+
+    static func onchainTransaction(_ summary: OnchainTransactionSummary) -> ChatMessage {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let text = (try? encoder.encode(summary))
+            .flatMap { String(data: $0, encoding: .utf8) }
+        return ChatMessage(kind: .onchainTransaction, role: .assistant, text: text)
     }
 }
 
@@ -58,8 +68,105 @@ struct ChatConversation: Identifiable, Equatable, Codable {
 }
 
 private struct ChatAccountIdentity: Equatable {
+    let chainName: String
+    let chainID: UInt64
+    let isTestnet: Bool
     let kernelAddress: String
+    let kernelBalance: String
+    let kernelState: String
     let bundlerAddress: String
+    let bundlerBalance: String
+    let bundlerState: String
+
+    static func placeholder(
+        chain: ChainConfiguration,
+        kernelAddress: String,
+        bundlerAddress: String
+    ) -> ChatAccountIdentity {
+        ChatAccountIdentity(
+            chainName: chain.name,
+            chainID: chain.id,
+            isTestnet: chain.isTestnet,
+            kernelAddress: kernelAddress,
+            kernelBalance: "Balance unavailable",
+            kernelState: "Not inspected",
+            bundlerAddress: bundlerAddress,
+            bundlerBalance: "Balance unavailable",
+            bundlerState: "Not checked"
+        )
+    }
+}
+
+struct OnchainTransactionSummary: Codable, Equatable {
+    enum Status: String, Codable {
+        case included
+        case submitted
+        case reverted
+        case pending
+
+        var title: String {
+            switch self {
+            case .included:
+                return "Transfer included"
+            case .submitted:
+                return "Transfer submitted"
+            case .reverted:
+                return "Transfer reverted"
+            case .pending:
+                return "Transfer pending"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .included:
+                return "checkmark.circle.fill"
+            case .submitted:
+                return "paperplane.circle.fill"
+            case .reverted:
+                return "xmark.octagon.fill"
+            case .pending:
+                return "clock.fill"
+            }
+        }
+    }
+
+    let chainName: String
+    let chainID: UInt64
+    let amount: String
+    let token: String
+    let recipient: String
+    let userOpHash: String
+    let transactionHash: String?
+    let status: Status
+    let createdAt: Date
+}
+
+enum ChatIntentExecutionStatus: Equatable {
+    case idle
+    case running
+    case submitted(userOpHash: String, transactionHash: String?, success: Bool?)
+    case failed(String)
+}
+
+private enum ChatIntentExecutionError: LocalizedError {
+    case unsupportedTransferToken
+    case unsupportedTransferAmount
+    case invalidTransferRecipient
+    case unsupportedChain
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedTransferToken:
+            return "That token is not in the local token registry for the active chain yet."
+        case .unsupportedTransferAmount:
+            return "Only explicit decimal token amounts are executable right now."
+        case .invalidTransferRecipient:
+            return "Only 0x-prefixed Ethereum recipient addresses are executable right now."
+        case .unsupportedChain:
+            return "The active chain does not have a local token registry yet."
+        }
+    }
 }
 
 enum ContextUsageLevel {
@@ -115,20 +222,25 @@ private final class ChatDashboardModel: ObservableObject {
     @Published var feedbackExportMessage: String? = nil
 
     private var generationTask: Task<Void, Never>? = nil
+    private var walletModelCancellable: AnyCancellable?
     private let inferenceService: EmbeddedLlamaInferenceService
     private let chatStore: ChatSQLiteStore
     private let preferencesStore: ChatPreferencesStore
+    private let walletModel: AppModel
+    private var executingIntentIDs: Set<UUID> = []
 
     init(
         inferenceService: EmbeddedLlamaInferenceService = EmbeddedLlamaInferenceService(),
         chatStore: ChatSQLiteStore = ChatSQLiteStore(),
         preferencesStore: ChatPreferencesStore = ChatPreferencesStore(),
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
-        metadataStore: WalletMetadataStore = WalletMetadataStore()
+        metadataStore: WalletMetadataStore = WalletMetadataStore(),
+        walletModel: AppModel = AppModel()
     ) {
         self.inferenceService = inferenceService
         self.chatStore = chatStore
         self.preferencesStore = preferencesStore
+        self.walletModel = walletModel
         self.runtimeStatus = inferenceService.runtimeStatus
         self.thinkingEnabled = preferencesStore.thinkingEnabled
         self.isSidebarVisible = preferencesStore.sidebarVisible
@@ -155,11 +267,19 @@ private final class ChatDashboardModel: ObservableObject {
         }
 
         let kernelAddress = (try? metadataStore.load())?.kernelAccountAddress ?? "Not available"
-        self.accountIdentity = ChatAccountIdentity(
+        self.accountIdentity = ChatAccountIdentity.placeholder(
+            chain: walletModel.activeChain,
             kernelAddress: kernelAddress,
             bundlerAddress: settingsStore.bundlerAddress ?? "Not available"
         )
         preferencesStore.activeConversationID = self.activeConversationID
+        walletModelCancellable = walletModel.objectWillChange.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshAccountIdentity()
+            }
+        }
+        refreshAccountIdentity()
+        walletModel.bootstrap()
     }
 
     var activeConversation: ChatConversation? {
@@ -207,6 +327,18 @@ private final class ChatDashboardModel: ObservableObject {
         return "Context \(stats.usedContextTokens) / \(stats.contextSize) · \(stats.contextTokensLeft) left"
     }
 
+    var hasExecutingIntent: Bool {
+        !executingIntentIDs.isEmpty
+    }
+
+    var executionStatusText: String {
+        hasExecutingIntent ? "Transaction in progress" : runtimeStatus
+    }
+
+    var isRefreshingAccountIdentity: Bool {
+        walletModel.isRefreshingBalance || walletModel.isRefreshingLocalRelayer
+    }
+
     func toggleThinking() {
         thinkingEnabled.toggle()
         preferencesStore.thinkingEnabled = thinkingEnabled
@@ -217,6 +349,10 @@ private final class ChatDashboardModel: ObservableObject {
             isSidebarVisible.toggle()
         }
         preferencesStore.sidebarVisible = isSidebarVisible
+    }
+
+    func refreshOnchainAccountStatus() {
+        walletModel.refreshOnchainAccountStatus()
     }
 
     func createNewChat() {
@@ -454,15 +590,19 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     func confirmIntent(_ message: ChatMessage) {
-        updateIntent(message, disposition: .confirmed, args: nil)
+        if let intent = updateIntent(message, disposition: .confirmed, args: nil) {
+            executeIfSupported(intent)
+        }
     }
 
     func rejectIntent(_ message: ChatMessage) {
-        updateIntent(message, disposition: .rejected, args: nil)
+        _ = updateIntent(message, disposition: .rejected, args: nil)
     }
 
     func editIntent(_ message: ChatMessage, with args: [String: String]) {
-        updateIntent(message, disposition: .edited, args: args)
+        if let intent = updateIntent(message, disposition: .edited, args: args) {
+            executeIfSupported(intent)
+        }
     }
 
     func submitIntentFeedback(
@@ -504,6 +644,37 @@ private final class ChatDashboardModel: ObservableObject {
         }
     }
 
+    func executionStatus(for intent: ToolIntent) -> ChatIntentExecutionStatus {
+        if executingIntentIDs.contains(intent.id) {
+            return .running
+        }
+
+        for message in messages.reversed()
+        where message.kind == .toolResponse && message.toolCallId == intent.id.uuidString {
+            guard let text = message.text,
+                  let data = text.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let status = object["status"] as? String
+            else {
+                continue
+            }
+
+            if status == "submitted" {
+                return .submitted(
+                    userOpHash: object["user_op_hash"] as? String ?? "",
+                    transactionHash: object["transaction_hash"] as? String,
+                    success: object["success"] as? Bool
+                )
+            }
+
+            if status == "failed" {
+                return .failed(object["error"] as? String ?? "Transaction failed")
+            }
+        }
+
+        return .idle
+    }
+
     func exportFeedbackRankings() {
         do {
             let records = try chatStore.loadToolIntentFeedbackExportRecords()
@@ -542,13 +713,53 @@ private final class ChatDashboardModel: ObservableObject {
         sortConversationsKeepingActive()
     }
 
-    private func updateIntent(_ message: ChatMessage, disposition: ToolIntent.Disposition, args: [String: String]?) {
+    private func refreshAccountIdentity() {
+        let chain = walletModel.activeChain
+        let kernelAddress = walletModel.walletRecord?.kernelAccountAddress
+            ?? accountIdentity.kernelAddress
+        let kernelBalance = walletModel.accountInspection?.balanceDisplay ?? "Balance unavailable"
+        let kernelState = walletModel.accountInspection?.stateTitle ?? "Not inspected"
+        let bundlerAddress = walletModel.localRelayerStatus?.eoa
+            ?? accountIdentity.bundlerAddress
+        let bundlerBalance = Self.displayETHBalance(walletModel.localRelayerStatus?.balance)
+        let bundlerState: String
+        if let status = walletModel.localRelayerStatus {
+            bundlerState = status.ready ? "Ready" : status.needsTopup ? "Needs top-up" : status.lifecycle.capitalized
+        } else {
+            bundlerState = walletModel.localRelayerMessage
+        }
+
+        accountIdentity = ChatAccountIdentity(
+            chainName: chain.name,
+            chainID: chain.id,
+            isTestnet: chain.isTestnet,
+            kernelAddress: kernelAddress,
+            kernelBalance: kernelBalance,
+            kernelState: kernelState,
+            bundlerAddress: bundlerAddress,
+            bundlerBalance: bundlerBalance,
+            bundlerState: bundlerState
+        )
+    }
+
+    private static func displayETHBalance(_ rawBalance: String?) -> String {
+        guard let rawBalance, !rawBalance.isEmpty, rawBalance != "unavailable" else {
+            return "Balance unavailable"
+        }
+        return WeiFormatter.ethDisplayString(fromHexWei: rawBalance)
+    }
+
+    private func updateIntent(
+        _ message: ChatMessage,
+        disposition: ToolIntent.Disposition,
+        args: [String: String]?
+    ) -> ToolIntent? {
         guard
             let conversationIndex = conversations.firstIndex(where: { $0.id == activeConversationID }),
             let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == message.id }),
             var intent = conversations[conversationIndex].messages[messageIndex].toolIntent
         else {
-            return
+            return nil
         }
 
         if let args {
@@ -572,7 +783,7 @@ private final class ChatDashboardModel: ObservableObject {
         case .rejected:
             responseText = #"{"status":"rejected","intent_id":"\#(intent.id.uuidString)"}"#
         case .pending:
-            return
+            return intent
         }
 
         appendMessage(
@@ -584,6 +795,184 @@ private final class ChatDashboardModel: ObservableObject {
             ),
             to: updatedConversation.id
         )
+        return intent
+    }
+
+    private func executeIfSupported(_ intent: ToolIntent) {
+        guard intent.tool == .transfer else {
+            return
+        }
+        guard !executingIntentIDs.contains(intent.id) else {
+            return
+        }
+        executingIntentIDs.insert(intent.id)
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.executingIntentIDs.remove(intent.id)
+            }
+
+            do {
+                let request = try self.transferRequest(from: intent)
+                let result: AppModel.UserOperationSendResult
+                switch request.token.kind {
+                case .native:
+                    result = try await self.walletModel.executeNativeTransfer(
+                        recipient: request.recipient,
+                        amountETH: request.amount,
+                        logContext: "chat-transfer",
+                        signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer on \(self.walletModel.activeChain.name)"
+                    )
+                case .erc20:
+                    result = try await self.walletModel.executeERC20Transfer(
+                        token: request.token,
+                        recipient: request.recipient,
+                        amount: request.amount,
+                        logContext: "chat-transfer",
+                        signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer on \(self.walletModel.activeChain.name)"
+                    )
+                }
+                self.appendExecutionResult(result, for: intent)
+            } catch {
+                self.appendExecutionError(error, for: intent)
+            }
+        }
+    }
+
+    private func transferRequest(
+        from intent: ToolIntent
+    ) throws -> (recipient: String, amount: String, token: WalletToken) {
+        guard !WalletTokenRegistry.tokens(on: walletModel.activeChain.id).isEmpty else {
+            throw ChatIntentExecutionError.unsupportedChain
+        }
+
+        guard let token = WalletTokenRegistry.token(
+            matching: intent.args["token"],
+            on: walletModel.activeChain.id
+        ) else {
+            throw ChatIntentExecutionError.unsupportedTransferToken
+        }
+
+        guard let rawAmount = intent.args["amount"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawAmount.isEmpty,
+              rawAmount.lowercased() != "all"
+        else {
+            throw ChatIntentExecutionError.unsupportedTransferAmount
+        }
+
+        guard let rawRecipient = intent.args["to"]?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            throw ChatIntentExecutionError.invalidTransferRecipient
+        }
+        let recipientBytes = try Data(hexString: rawRecipient)
+        guard recipientBytes.count == 20 else {
+            throw ChatIntentExecutionError.invalidTransferRecipient
+        }
+
+        _ = try EtherAmountParser.units(fromDecimalString: rawAmount, decimals: token.decimals)
+        return ("0x" + recipientBytes.hexEncodedString, rawAmount, token)
+    }
+
+    private func appendExecutionResult(
+        _ result: AppModel.UserOperationSendResult,
+        for intent: ToolIntent
+    ) {
+        guard let conversationID = activeConversationIDIfPresent else {
+            return
+        }
+
+        var responsePayload: [String: Any] = [
+            "status": "submitted",
+            "intent_id": intent.id.uuidString,
+            "user_op_hash": result.userOpHash,
+        ]
+        if let transactionHash = result.transactionHash {
+            responsePayload["transaction_hash"] = transactionHash
+        }
+        if let success = result.success {
+            responsePayload["success"] = success
+        }
+        appendMessage(
+            ChatMessage(
+                kind: .toolResponse,
+                role: .tool,
+                text: jsonString(responsePayload),
+                toolCallId: intent.id.uuidString
+            ),
+            to: conversationID
+        )
+
+        let status: OnchainTransactionSummary.Status
+        if result.success == true {
+            status = .included
+        } else if result.success == false {
+            status = .reverted
+        } else if result.transactionHash != nil {
+            status = .submitted
+        } else {
+            status = .pending
+        }
+
+        let summary = OnchainTransactionSummary(
+            chainName: walletModel.activeChain.name,
+            chainID: walletModel.activeChain.id,
+            amount: intent.args["amount"] ?? "—",
+            token: resolvedTokenSymbol(for: intent),
+            recipient: intent.args["to"] ?? "—",
+            userOpHash: result.userOpHash,
+            transactionHash: result.transactionHash,
+            status: status,
+            createdAt: Date()
+        )
+        appendMessage(.onchainTransaction(summary), to: conversationID)
+    }
+
+    private func resolvedTokenSymbol(for intent: ToolIntent) -> String {
+        WalletTokenRegistry.token(
+            matching: intent.args["token"],
+            on: walletModel.activeChain.id
+        )?.symbol ?? intent.args["token"] ?? "ETH"
+    }
+
+    private func appendExecutionError(_ error: Error, for intent: ToolIntent) {
+        guard let conversationID = activeConversationIDIfPresent else {
+            return
+        }
+        appendMessage(
+            ChatMessage(
+                kind: .toolResponse,
+                role: .tool,
+                text: jsonString([
+                    "status": "failed",
+                    "intent_id": intent.id.uuidString,
+                    "error": error.localizedDescription,
+                ]),
+                toolCallId: intent.id.uuidString
+            ),
+            to: conversationID
+        )
+        appendMessage(
+            ChatMessage(
+                kind: .assistantError,
+                role: .assistant,
+                text: error.localizedDescription
+            ),
+            to: conversationID
+        )
+    }
+
+    private var activeConversationIDIfPresent: UUID? {
+        conversations.contains { $0.id == activeConversationID } ? activeConversationID : nil
+    }
+
+    private func jsonString(_ payload: [String: Any]) -> String {
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8)
+        else {
+            return #"{"status":"failed","error":"invalid execution response"}"#
+        }
+        return json
     }
 
     private func editedIntentResponseText(for intent: ToolIntent) -> String {
@@ -656,6 +1045,7 @@ struct LocalWalletChatDashboardView: View {
     @State private var conversationPendingDeletion: ChatConversation?
     @State private var isToolsPopoverPresented = false
     @State private var isAtBottomOfChat = true
+    @State private var isAccountHeaderExpanded = true
 
     var body: some View {
         ZStack {
@@ -897,20 +1287,82 @@ struct LocalWalletChatDashboardView: View {
     }
 
     private var accountHeader: some View {
-        HStack(spacing: 12) {
-            AddressPill(
-                icon: "lock.shield.fill",
-                title: "Kernel smart account",
-                address: model.accountIdentity.kernelAddress
-            )
-            AddressPill(
-                icon: "key.fill",
-                title: "Bundler address",
-                address: model.accountIdentity.bundlerAddress
-            )
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                ChainStatusStrip(
+                    identity: model.accountIdentity,
+                    isExpanded: isAccountHeaderExpanded,
+                    onToggle: {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            isAccountHeaderExpanded.toggle()
+                        }
+                    }
+                )
+                .frame(maxWidth: .infinity)
+
+                Button {
+                    model.refreshOnchainAccountStatus()
+                } label: {
+                    Group {
+                        if model.isRefreshingAccountIdentity {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 13, weight: .black))
+                                .foregroundStyle(ChatPalette.secondaryText)
+                        }
+                    }
+                    .frame(width: 34, height: 34)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(ChatPalette.panel.opacity(0.75))
+                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(ChatPalette.border.opacity(0.75), lineWidth: 1))
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isRefreshingAccountIdentity)
+                .help("Refresh balances")
+            }
+            if isAccountHeaderExpanded {
+                HStack(spacing: 12) {
+                    AddressPill(
+                        icon: "lock.shield.fill",
+                        title: "Kernel smart account",
+                        address: model.accountIdentity.kernelAddress,
+                        balance: model.accountIdentity.kernelBalance,
+                        state: model.accountIdentity.kernelState,
+                        explorerURL: explorerAddressURL(model.accountIdentity.kernelAddress)
+                    )
+                    AddressPill(
+                        icon: "key.fill",
+                        title: "Bundler address",
+                        address: model.accountIdentity.bundlerAddress,
+                        balance: model.accountIdentity.bundlerBalance,
+                        state: model.accountIdentity.bundlerState,
+                        explorerURL: explorerAddressURL(model.accountIdentity.bundlerAddress)
+                    )
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
         .padding(.top, 10)
         .padding(.bottom, 8)
+        .animation(.easeInOut(duration: 0.18), value: isAccountHeaderExpanded)
+    }
+
+    private func explorerAddressURL(_ address: String) -> URL? {
+        guard address.hasPrefix("0x"), address.count == 42 else {
+            return nil
+        }
+        return explorerBaseURL.appending(path: "address").appending(path: address)
+    }
+
+    private var explorerBaseURL: URL {
+        if model.accountIdentity.chainID == 11_155_111 {
+            return URL(string: "https://sepolia.etherscan.io")!
+        }
+        return URL(string: "https://etherscan.io")!
     }
 
     @ViewBuilder
@@ -949,6 +1401,7 @@ struct LocalWalletChatDashboardView: View {
                                             ToolIntentCardView(
                                                 intent: intent,
                                                 feedback: message.toolFeedback,
+                                                executionStatus: model.executionStatus(for: intent),
                                                 onConfirm: { model.confirmIntent(message) },
                                                 onReject: { model.rejectIntent(message) },
                                                 onEdit: { editedIntent in
@@ -958,6 +1411,15 @@ struct LocalWalletChatDashboardView: View {
                                                     model.submitIntentFeedback(for: message, rating: rating, note: note)
                                                 }
                                             )
+                                            Spacer(minLength: 0)
+                                        }
+                                        .padding(.horizontal)
+                                        .id(message.id)
+                                    }
+                                case .onchainTransaction:
+                                    if let summary = OnchainTransactionCard.summary(from: message) {
+                                        HStack {
+                                            OnchainTransactionCard(summary: summary)
                                             Spacer(minLength: 0)
                                         }
                                         .padding(.horizontal)
@@ -1127,7 +1589,11 @@ struct LocalWalletChatDashboardView: View {
                 StatusPill(icon: model.thinkingEnabled ? "brain" : "brain.head.profile", text: model.thinkingEnabled ? "Thinking on" : "Thinking off")
             }
             .buttonStyle(.plain)
-            StatusPill(icon: "slider.horizontal.3", text: model.runtimeStatus)
+            StatusPill(
+                icon: model.hasExecutingIntent ? "arrow.triangle.2.circlepath" : "slider.horizontal.3",
+                text: model.executionStatusText,
+                tint: model.hasExecutingIntent ? ChatPalette.accent : ChatPalette.secondaryText
+            )
             Button {
                 isToolsPopoverPresented.toggle()
             } label: {
@@ -1470,10 +1936,99 @@ private struct ChatConversationRow: View {
     }
 }
 
+private struct ChainStatusStrip: View {
+    let identity: ChatAccountIdentity
+    let isExpanded: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: 10) {
+                Image(systemName: identity.isTestnet ? "testtube.2" : "network")
+                    .font(.system(size: 13, weight: .black))
+                    .foregroundStyle(identity.isTestnet ? ChatPalette.warning : ChatPalette.success)
+                Text(identity.chainName)
+                    .font(.system(size: 13, weight: .heavy))
+                    .foregroundStyle(ChatPalette.primaryText)
+                Text("Chain \(identity.chainID)")
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundStyle(ChatPalette.secondaryText)
+                Text(identity.isTestnet ? "Testnet" : "Mainnet")
+                    .font(.system(size: 11, weight: .black))
+                    .foregroundStyle(identity.isTestnet ? ChatPalette.warning : ChatPalette.success)
+                    .padding(.horizontal, 8)
+                    .frame(height: 22)
+                    .background(Capsule().fill((identity.isTestnet ? ChatPalette.warning : ChatPalette.success).opacity(0.12)))
+
+                if !isExpanded {
+                    compactAccountSummary(
+                        title: "Kernel",
+                        address: identity.kernelAddress,
+                        balance: identity.kernelBalance
+                    )
+                    compactAccountSummary(
+                        title: "Bundler",
+                        address: identity.bundlerAddress,
+                        balance: identity.bundlerBalance
+                    )
+                }
+
+                Spacer(minLength: 0)
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 11, weight: .black))
+                    .foregroundStyle(ChatPalette.secondaryText)
+                    .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(ChatPalette.buttonCircle.opacity(0.85)))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isExpanded ? "Hide account details" : "Show account details")
+        .padding(.horizontal, 12)
+        .frame(height: 34)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(ChatPalette.panel.opacity(0.75))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(ChatPalette.border.opacity(0.75), lineWidth: 1))
+        )
+    }
+
+    private func compactAccountSummary(title: String, address: String, balance: String) -> some View {
+        HStack(spacing: 5) {
+            Text(title)
+                .font(.system(size: 11, weight: .black))
+                .foregroundStyle(ChatPalette.mutedText)
+            Text(shortAddress(address))
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(ChatPalette.secondaryText)
+            Text(balance)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(ChatPalette.secondaryText)
+        }
+        .lineLimit(1)
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .background(Capsule().fill(ChatPalette.buttonCircle.opacity(0.6)))
+    }
+
+    private func shortAddress(_ value: String) -> String {
+        guard value.hasPrefix("0x"), value.count > 14 else {
+            return value
+        }
+        return "\(value.prefix(6))...\(value.suffix(4))"
+    }
+}
+
 private struct AddressPill: View {
     let icon: String
     let title: String
     let address: String
+    let balance: String
+    let state: String
+    let explorerURL: URL?
+    @State private var copied = false
 
     var body: some View {
         HStack(spacing: 11) {
@@ -1483,7 +2038,7 @@ private struct AddressPill: View {
                 .frame(width: 34, height: 34)
                 .background(Circle().fill(ChatPalette.buttonCircle))
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text(title)
                     .font(.system(size: 10, weight: .black))
                     .foregroundStyle(ChatPalette.mutedText)
@@ -1493,12 +2048,52 @@ private struct AddressPill: View {
                     .foregroundStyle(ChatPalette.primaryText)
                     .lineLimit(1)
                     .textSelection(.enabled)
+                HStack(spacing: 8) {
+                    Text(balance)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                        .lineLimit(1)
+                    Text(state)
+                        .font(.system(size: 10, weight: .black))
+                        .foregroundStyle(state.lowercased().contains("ready") || state.lowercased().contains("deployed") ? ChatPalette.success : ChatPalette.mutedText)
+                        .padding(.horizontal, 6)
+                        .frame(height: 18)
+                        .background(Capsule().fill(ChatPalette.buttonCircle.opacity(0.75)))
+                        .lineLimit(1)
+                }
             }
 
             Spacer(minLength: 0)
+
+            HStack(spacing: 6) {
+                Button {
+                    copy(address)
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 12, weight: .black))
+                        .foregroundStyle(copied ? ChatPalette.success : ChatPalette.secondaryText)
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(ChatPalette.buttonCircle))
+                }
+                .buttonStyle(.plain)
+                .disabled(!address.hasPrefix("0x"))
+                .help(copied ? "Copied" : "Copy address")
+
+                if let explorerURL {
+                    Link(destination: explorerURL) {
+                        Image(systemName: "safari")
+                            .font(.system(size: 12, weight: .black))
+                            .foregroundStyle(ChatPalette.secondaryText)
+                            .frame(width: 28, height: 28)
+                            .background(Circle().fill(ChatPalette.buttonCircle))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open in explorer")
+                }
+            }
         }
         .padding(.horizontal, 12)
-        .frame(height: 62)
+        .frame(height: 78)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(ChatPalette.panel)
@@ -1514,6 +2109,210 @@ private struct AddressPill: View {
         let prefix = value.prefix(10)
         let suffix = value.suffix(8)
         return "\(prefix)...\(suffix)"
+    }
+
+    private func copy(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        withAnimation(.easeInOut(duration: 0.12)) {
+            copied = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
+            copied = false
+        }
+    }
+}
+
+private struct OnchainTransactionCard: View {
+    let summary: OnchainTransactionSummary
+    @State private var copiedValue: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: summary.status.icon)
+                    .font(.system(size: 17, weight: .black))
+                    .foregroundStyle(statusTint)
+                    .frame(width: 38, height: 38)
+                    .background(Circle().fill(statusTint.opacity(0.14)))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(summary.status.title)
+                        .font(.system(size: 18, weight: .heavy))
+                        .foregroundStyle(ChatPalette.primaryText)
+                    Text("\(summary.amount) \(summary.token.uppercased()) on \(summary.chainName)")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                }
+
+                Spacer()
+
+                Text("Chain \(summary.chainID)")
+                    .font(.system(size: 11, weight: .black, design: .monospaced))
+                    .foregroundStyle(ChatPalette.secondaryText)
+                    .padding(.horizontal, 8)
+                    .frame(height: 24)
+                    .background(Capsule().fill(ChatPalette.buttonCircle))
+            }
+
+            VStack(spacing: 8) {
+                TransactionHashRow(
+                    title: "Recipient",
+                    value: summary.recipient,
+                    copiedValue: $copiedValue
+                )
+                TransactionHashRow(
+                    title: "UserOperation",
+                    value: summary.userOpHash,
+                    copiedValue: $copiedValue
+                )
+                if let transactionHash = summary.transactionHash {
+                    TransactionHashRow(
+                        title: "Transaction",
+                        value: transactionHash,
+                        copiedValue: $copiedValue,
+                        explorerURL: explorerTransactionURL(transactionHash)
+                    )
+                } else {
+                    HStack {
+                        Text("Transaction")
+                            .font(.system(size: 11, weight: .black))
+                            .foregroundStyle(ChatPalette.mutedText)
+                            .frame(width: 108, alignment: .leading)
+                        HStack(spacing: 7) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Waiting for receipt")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(ChatPalette.secondaryText)
+                        }
+                        Spacer()
+                    }
+                    .frame(height: 30)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "clock")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(ChatPalette.mutedText)
+                Text("Recorded \(summary.createdAt, style: .time)")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(ChatPalette.mutedText)
+                Spacer()
+                if let transactionHash = summary.transactionHash,
+                   let url = explorerTransactionURL(transactionHash) {
+                    Link(destination: url) {
+                        Label("Open in Etherscan", systemImage: "safari")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(ChatPalette.primaryText)
+                            .padding(.horizontal, 11)
+                            .frame(height: 30)
+                            .background(Capsule().fill(ChatPalette.accent.opacity(0.88)))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(ChatPalette.panel)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(statusTint.opacity(0.55), lineWidth: 1)
+                )
+        )
+    }
+
+    static func summary(from message: ChatMessage) -> OnchainTransactionSummary? {
+        guard let text = message.text,
+              let data = text.data(using: .utf8)
+        else {
+            return nil
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(OnchainTransactionSummary.self, from: data)
+    }
+
+    private var statusTint: Color {
+        switch summary.status {
+        case .included:
+            return ChatPalette.success
+        case .submitted, .pending:
+            return ChatPalette.accent
+        case .reverted:
+            return ChatPalette.warning
+        }
+    }
+
+    private func explorerTransactionURL(_ hash: String) -> URL? {
+        guard hash.hasPrefix("0x") else {
+            return nil
+        }
+        let host = summary.chainID == 11_155_111 ? "https://sepolia.etherscan.io" : "https://etherscan.io"
+        return URL(string: "\(host)/tx/\(hash)")
+    }
+}
+
+private struct TransactionHashRow: View {
+    let title: String
+    let value: String
+    @Binding var copiedValue: String?
+    var explorerURL: URL? = nil
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 11, weight: .black))
+                .foregroundStyle(ChatPalette.mutedText)
+                .frame(width: 108, alignment: .leading)
+            Text(value)
+                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .foregroundStyle(ChatPalette.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            Spacer()
+            Button {
+                copy(value)
+            } label: {
+                Image(systemName: copiedValue == value ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 11, weight: .black))
+                    .foregroundStyle(copiedValue == value ? ChatPalette.success : ChatPalette.secondaryText)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(ChatPalette.buttonCircle))
+            }
+            .buttonStyle(.plain)
+            .help(copiedValue == value ? "Copied" : "Copy")
+
+            if let explorerURL {
+                Link(destination: explorerURL) {
+                    Image(systemName: "safari")
+                        .font(.system(size: 11, weight: .black))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(ChatPalette.buttonCircle))
+                }
+                .buttonStyle(.plain)
+                .help("Open in explorer")
+            }
+        }
+        .frame(height: 30)
+    }
+
+    private func copy(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        withAnimation(.easeInOut(duration: 0.12)) {
+            copiedValue = value
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            if copiedValue == value {
+                copiedValue = nil
+            }
+        }
     }
 }
 
@@ -2387,6 +3186,7 @@ private enum ChatPalette {
     static let border = Color(red: 0.170, green: 0.205, blue: 0.355)
     static let accent = Color(red: 0.300, green: 0.440, blue: 0.890)
     static let success = Color(red: 0.360, green: 0.900, blue: 0.340)
+    static let warning = Color(red: 1.000, green: 0.620, blue: 0.230)
     static let primaryText = Color(red: 1.000, green: 0.990, blue: 0.880)
     static let secondaryText = Color(red: 0.720, green: 0.770, blue: 0.930)
     static let mutedText = Color(red: 0.460, green: 0.520, blue: 0.710)

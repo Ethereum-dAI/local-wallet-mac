@@ -89,6 +89,34 @@ struct WalletNodeClient {
         let latestAuditEvent: String?
     }
 
+    struct UserOperationGasEstimate: Equatable {
+        let callGasLimit: Data
+        let verificationGasLimit: Data
+        let preVerificationGas: Data
+    }
+
+    struct UserOperationGasPriceTier: Equatable {
+        let maxFeePerGas: Data
+        let maxPriorityFeePerGas: Data
+    }
+
+    struct UserOperationGasPrice: Equatable {
+        let slow: UserOperationGasPriceTier
+        let standard: UserOperationGasPriceTier
+        let fast: UserOperationGasPriceTier
+    }
+
+    struct UserOperationReceipt: Equatable {
+        let userOpHash: String
+        let txHash: String
+        let success: Bool
+        let actualGasCost: String?
+        let actualGasUsed: String?
+        let revertReason: String?
+        let tentative: Bool
+        let invalidated: Bool
+    }
+
     enum ClientError: LocalizedError {
         case invalidResponse
         case transport(String)
@@ -123,6 +151,99 @@ struct WalletNodeClient {
             throw ClientError.invalidResponse
         }
         return try RelayerStatus(json: object)
+    }
+
+    func supportedEntryPoints() async throws -> [String] {
+        let result = try await call(method: "localwallet_supportedEntryPoints", params: [])
+        guard let entryPoints = result as? [String] else {
+            throw ClientError.invalidResponse
+        }
+        return entryPoints
+    }
+
+    func assertEntryPointSupport(_ entryPoint: String) async throws {
+        let supported = try await supportedEntryPoints().map { $0.lowercased() }
+        guard supported.contains(entryPoint.lowercased()) else {
+            throw AppError.unsupportedBundlerEntryPoint
+        }
+    }
+
+    func estimateUserOperationGas(
+        draft: UserOperationDraft,
+        dummySignature: Data
+    ) async throws -> UserOperationGasEstimate {
+        let userOperation = rpcUserOperation(
+            draft: draft,
+            signature: dummySignature,
+            overrides: RPCOverrides(
+                callGasLimit: "0x0",
+                verificationGasLimit: "0x0",
+                preVerificationGas: "0x0",
+                maxFeePerGas: "0x0",
+                maxPriorityFeePerGas: "0x0"
+            )
+        )
+        let result = try await call(
+            method: "localwallet_estimateUserOperationGas",
+            params: [userOperation, draft.entryPoint]
+        )
+        guard let object = result as? [String: Any],
+              let callGasLimit = object["callGasLimit"] as? String,
+              let verificationGasLimit = object["verificationGasLimit"] as? String,
+              let preVerificationGas = object["preVerificationGas"] as? String
+        else {
+            throw ClientError.invalidResponse
+        }
+
+        return UserOperationGasEstimate(
+            callGasLimit: try parseQuantity(callGasLimit, field: "callGasLimit").leftPadded(to: 32),
+            verificationGasLimit: try parseQuantity(verificationGasLimit, field: "verificationGasLimit").leftPadded(to: 32),
+            preVerificationGas: try parseQuantity(preVerificationGas, field: "preVerificationGas").leftPadded(to: 32)
+        )
+    }
+
+    func sendUserOperation(
+        draft: UserOperationDraft,
+        signature: Data
+    ) async throws -> String {
+        let result = try await call(
+            method: "localwallet_sendUserOperation",
+            params: [
+                rpcUserOperation(draft: draft, signature: signature),
+                draft.entryPoint,
+            ]
+        )
+        guard let userOpHash = result as? String else {
+            throw ClientError.invalidResponse
+        }
+        return userOpHash
+    }
+
+    func getUserOperationReceipt(userOpHash: String) async throws -> UserOperationReceipt? {
+        let result = try await call(
+            method: "localwallet_getUserOperationReceipt",
+            params: [userOpHash],
+            allowsNullResult: true
+        )
+        if result is NSNull {
+            return nil
+        }
+        guard let object = result as? [String: Any] else {
+            throw ClientError.invalidResponse
+        }
+        return try UserOperationReceipt(json: object)
+    }
+
+    func userOperationGasPrice() async throws -> UserOperationGasPrice {
+        let result = try await call(method: "localwallet_getUserOperationGasPrice", params: [])
+        guard let object = result as? [String: Any] else {
+            throw ClientError.invalidResponse
+        }
+        return UserOperationGasPrice(
+            slow: try parseGasPriceTier(object["slow"], field: "slow"),
+            standard: try parseGasPriceTier(object["standard"], field: "standard"),
+            fast: try parseGasPriceTier(object["fast"], field: "fast")
+        )
     }
 
     func beginAdminAction(action: String, chainId: Int, keyRef: String? = nil) async throws -> AdminChallenge {
@@ -192,7 +313,11 @@ struct WalletNodeClient {
         )
     }
 
-    private func call(method: String, params: [Any]) async throws -> Any {
+    private func call(
+        method: String,
+        params: [Any],
+        allowsNullResult: Bool = false
+    ) async throws -> Any {
         let body = try JSONSerialization.data(withJSONObject: [
             "jsonrpc": "2.0",
             "id": 1,
@@ -236,7 +361,77 @@ struct WalletNodeClient {
         guard let result = object["result"] else {
             throw ClientError.invalidResponse
         }
+        if result is NSNull, !allowsNullResult {
+            throw ClientError.invalidResponse
+        }
         return result
+    }
+
+    private struct RPCOverrides {
+        let callGasLimit: String
+        let verificationGasLimit: String
+        let preVerificationGas: String
+        let maxFeePerGas: String
+        let maxPriorityFeePerGas: String
+    }
+
+    private func rpcUserOperation(
+        draft: UserOperationDraft,
+        signature: Data,
+        overrides: RPCOverrides? = nil
+    ) -> [String: Any] {
+        let deploymentParts = splitInitCode(draft.initCode)
+        var object: [String: Any] = [
+            "sender": draft.sender,
+            "nonce": hexString(draft.nonce),
+            "callData": hexString(draft.callData),
+            "callGasLimit": overrides?.callGasLimit ?? hexString(draft.gasPlan.callGasLimit),
+            "verificationGasLimit": overrides?.verificationGasLimit ?? hexString(draft.gasPlan.verificationGasLimit),
+            "preVerificationGas": overrides?.preVerificationGas ?? hexString(draft.gasPlan.preVerificationGas),
+            "maxFeePerGas": overrides?.maxFeePerGas ?? hexString(draft.gasPlan.maxFeePerGas),
+            "maxPriorityFeePerGas": overrides?.maxPriorityFeePerGas ?? hexString(draft.gasPlan.maxPriorityFeePerGas),
+            "signature": hexString(signature),
+        ]
+        if let factory = deploymentParts.factory, let factoryData = deploymentParts.factoryData {
+            object["factory"] = factory
+            object["factoryData"] = factoryData
+        }
+        return object
+    }
+
+    private func splitInitCode(_ initCode: Data) -> (factory: String?, factoryData: String?) {
+        guard !initCode.isEmpty else {
+            return (nil, nil)
+        }
+        return (
+            "0x" + Data(initCode.prefix(20)).hexEncodedString,
+            "0x" + Data(initCode.dropFirst(20)).hexEncodedString
+        )
+    }
+
+    private func hexString(_ data: Data) -> String {
+        "0x" + data.hexEncodedString
+    }
+
+    private func parseQuantity(_ value: String, field: String) throws -> Data {
+        do {
+            return try Data.quantityString(value)
+        } catch {
+            throw ClientError.transport("wallet-node returned invalid \(field): \(value)")
+        }
+    }
+
+    private func parseGasPriceTier(_ value: Any?, field: String) throws -> UserOperationGasPriceTier {
+        guard let object = value as? [String: Any],
+              let maxFeePerGas = object["maxFeePerGas"] as? String,
+              let maxPriorityFeePerGas = object["maxPriorityFeePerGas"] as? String
+        else {
+            throw ClientError.invalidResponse
+        }
+        return UserOperationGasPriceTier(
+            maxFeePerGas: try parseQuantity(maxFeePerGas, field: "\(field).maxFeePerGas").leftPadded(to: 32),
+            maxPriorityFeePerGas: try parseQuantity(maxPriorityFeePerGas, field: "\(field).maxPriorityFeePerGas").leftPadded(to: 32)
+        )
     }
 }
 
@@ -439,6 +634,30 @@ private extension WalletNodeClient.RelayerStatus.KeyHistoryEntry {
             retiredAt: json["retiredAt"] as? Int,
             deletedAt: json["deletedAt"] as? Int,
             lastExportedAt: json["lastExportedAt"] as? Int
+        )
+    }
+}
+
+private extension WalletNodeClient.UserOperationReceipt {
+    init(json: [String: Any]) throws {
+        guard let userOpHash = json["userOpHash"] as? String,
+              let txHash = json["txHash"] as? String,
+              let success = json["success"] as? Bool,
+              let tentative = json["tentative"] as? Bool,
+              let invalidated = json["invalidated"] as? Bool
+        else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+
+        self.init(
+            userOpHash: userOpHash,
+            txHash: txHash,
+            success: success,
+            actualGasCost: json["actualGasCost"] as? String,
+            actualGasUsed: json["actualGasUsed"] as? String,
+            revertReason: json["revertReason"] as? String,
+            tentative: tentative,
+            invalidated: invalidated
         )
     }
 }

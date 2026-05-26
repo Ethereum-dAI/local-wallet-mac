@@ -32,6 +32,21 @@ struct KernelCallEncoder {
     }
 }
 
+struct ERC20TransferCallEncoder {
+    private static let transferSelector = Data(hex: "a9059cbb")
+
+    func encodeTransfer(recipient: String, amount: Data) throws -> Data {
+        let recipientData = try Data(hexString: recipient)
+        guard recipientData.count == 20 else {
+            throw AppError.invalidExecutionAddress
+        }
+
+        return Self.transferSelector
+            + recipientData.leftPadded(to: 32)
+            + amount.leftPadded(to: 32)
+    }
+}
+
 struct KernelDeploymentEncoder {
     private static let createAccountSelector = Data(hex: "ea6d13ac")
 
@@ -86,15 +101,18 @@ struct KernelDeploymentEncoder {
 struct UserOperationBuilder {
     private let rpcClient: DemoRPCClient
     private let kernelCallEncoder: KernelCallEncoder
+    private let erc20TransferCallEncoder: ERC20TransferCallEncoder
     private let deploymentEncoder: KernelDeploymentEncoder
 
     init(
         rpcClient: DemoRPCClient = DemoRPCClient(),
         kernelCallEncoder: KernelCallEncoder = KernelCallEncoder(),
+        erc20TransferCallEncoder: ERC20TransferCallEncoder = ERC20TransferCallEncoder(),
         deploymentEncoder: KernelDeploymentEncoder = KernelDeploymentEncoder()
     ) {
         self.rpcClient = rpcClient
         self.kernelCallEncoder = kernelCallEncoder
+        self.erc20TransferCallEncoder = erc20TransferCallEncoder
         self.deploymentEncoder = deploymentEncoder
     }
 
@@ -168,6 +186,27 @@ struct UserOperationBuilder {
                 target: "0x" + addressData.hexEncodedString,
                 value: try EtherAmountParser.wei(fromETHString: amountETH),
                 callData: Data()
+            )
+        case .erc20Transfer(let token, let recipient, let amount):
+            guard let tokenAddress = token.contractAddress else {
+                throw AppError.invalidExecutionAddress
+            }
+            let tokenAddressData = try Data(hexString: tokenAddress)
+            guard tokenAddressData.count == 20 else {
+                throw AppError.invalidExecutionAddress
+            }
+
+            let transferAmount = try EtherAmountParser.units(
+                fromDecimalString: amount,
+                decimals: token.decimals
+            )
+            return KernelExecutionRequest(
+                target: "0x" + tokenAddressData.hexEncodedString,
+                value: Data(repeating: 0, count: 32),
+                callData: try erc20TransferCallEncoder.encodeTransfer(
+                    recipient: recipient,
+                    amount: transferAmount
+                )
             )
         }
     }

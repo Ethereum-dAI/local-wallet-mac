@@ -1016,7 +1016,6 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         styleButton(buildDraftButton, role: canBuildUserOperation ? .secondary : .disabled)
 
         let canSendUserOperation = model.walletRecord != nil
-            && model.activeChain.bundlerURL != nil
             && !model.isBootstrapping
             && !model.isBuildingUserOperation
             && !model.isSendingUserOperation
@@ -1361,7 +1360,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
 
         4. If the account is still precomputed, the first UserOperation includes Kernel factory deployment initCode. The EntryPoint deploys the smart account and executes the requested call in the same flow.
 
-        5. For an ETH transfer, the app builds an ERC-4337 UserOperation, asks the hosted bundler for gas estimates, signs locally after user approval, submits it, and polls for a receipt.
+        5. For an ETH transfer, the app builds an ERC-4337 UserOperation, asks local wallet-node for gas estimates, signs locally after user approval, submits it through the local bundler, and polls for a receipt.
 
         This is a Sepolia-only demo, not the final wallet product.
         """
@@ -1686,7 +1685,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         }
 
         if model.isSendingUserOperation {
-            return "Signing and sending through the hosted bundler on \(model.activeChain.shortName). Watch the debug activity panel for per-step logs."
+            return "Signing and sending through local wallet-node on \(model.activeChain.shortName). Watch the debug activity panel for per-step logs."
         }
 
         if let userOpHash = model.lastSubmittedUserOperationHash {
@@ -1696,11 +1695,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
             return "Last submission: \(userOpHash.shortAddress). Receipt may still be pending."
         }
 
-        if model.activeChain.bundlerURL == nil {
-            return "Submission is disabled because no hosted bundler is configured for \(model.activeChain.name)."
-        }
-
-        return "Build the draft, then send it through the hosted bundler. The app will re-check deployment state, estimate gas, sign via Secure Enclave, and poll for a receipt."
+        return "Build the draft, then send it through local wallet-node. The app will re-check deployment state, estimate gas, sign via Secure Enclave, and poll for a receipt."
     }
 }
 

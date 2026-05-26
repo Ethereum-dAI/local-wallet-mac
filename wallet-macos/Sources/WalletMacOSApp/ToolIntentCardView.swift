@@ -4,6 +4,7 @@ import WalletToolLayer
 struct ToolIntentCardView: View {
     let intent: ToolIntent
     let feedback: ToolIntentFeedback?
+    let executionStatus: ChatIntentExecutionStatus
     let onConfirm: () -> Void
     let onReject: () -> Void
     let onEdit: ([String: String]) -> Void
@@ -45,10 +46,7 @@ struct ToolIntentCardView: View {
             }
             .padding(.vertical, 4)
 
-            Text("Phase 1 demo: this intent is recognized but no transaction is signed or broadcast.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .italic()
+            executionStatusRow
 
             feedbackControls
 
@@ -57,16 +55,19 @@ struct ToolIntentCardView: View {
                 HStack(spacing: 8) {
                     Button("Edit") { showingEditSheet = true }
                         .buttonStyle(.bordered)
+                        .disabled(isExecutionRunning)
                     Button("Reject", role: .destructive, action: onReject)
                         .buttonStyle(.bordered)
+                        .disabled(isExecutionRunning)
                     Spacer()
                     Button("Looks good", action: onConfirm)
                         .buttonStyle(.borderedProminent)
+                        .disabled(isExecutionRunning)
                 }
             case .confirmed:
                 HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                    Text("Confirmed at \(intent.updatedAt, style: .time)").foregroundStyle(.secondary)
+                    Image(systemName: confirmedIcon).foregroundStyle(confirmedTint)
+                    Text(confirmedText).foregroundStyle(.secondary)
                 }
             case .edited:
                 HStack(spacing: 6) {
@@ -111,6 +112,104 @@ struct ToolIntentCardView: View {
         }
     }
 
+    private var isExecutionRunning: Bool {
+        if case .running = executionStatus {
+            return true
+        }
+        return false
+    }
+
+    private var confirmedIcon: String {
+        switch executionStatus {
+        case .running:
+            return "arrow.triangle.2.circlepath"
+        case .submitted(_, _, let success):
+            if success == true {
+                return "checkmark.circle.fill"
+            }
+            if success == false {
+                return "xmark.octagon.fill"
+            }
+            return "paperplane.circle.fill"
+        case .failed:
+            return "exclamationmark.triangle.fill"
+        case .idle:
+            return "checkmark.circle.fill"
+        }
+    }
+
+    private var confirmedTint: Color {
+        switch executionStatus {
+        case .running:
+            return .blue
+        case .submitted(_, _, let success):
+            return success == false ? .red : .green
+        case .failed:
+            return .orange
+        case .idle:
+            return .green
+        }
+    }
+
+    private var confirmedText: String {
+        switch executionStatus {
+        case .running:
+            return "Signing and submitting onchain..."
+        case .submitted(_, let txHash, let success):
+            if success == true {
+                return "Included onchain at \(Self.timeFormatter.string(from: intent.updatedAt))"
+            }
+            if success == false {
+                return "Submitted but reverted"
+            }
+            return txHash == nil ? "Submitted; receipt pending" : "Submitted onchain"
+        case .failed(let message):
+            return message
+        case .idle:
+            return "Confirmed at \(Self.timeFormatter.string(from: intent.updatedAt))"
+        }
+    }
+
+    @ViewBuilder
+    private var executionStatusRow: some View {
+        switch executionStatus {
+        case .running:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Preparing gas, requesting signature, and relaying through local wallet-node.")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 4)
+        case .submitted(let userOpHash, let transactionHash, let success):
+            VStack(alignment: .leading, spacing: 4) {
+                Text(success == false ? "Execution reverted after submission." : "Onchain submission recorded.")
+                    .font(.caption.bold())
+                    .foregroundStyle(success == false ? .red : .green)
+                Text(transactionHash ?? userOpHash)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+            .padding(.vertical, 4)
+        case .failed(let message):
+            Text(message)
+                .font(.caption.bold())
+                .foregroundStyle(.orange)
+                .padding(.vertical, 4)
+        case .idle:
+            Text(intent.tool == .transfer
+                 ? "Review before signing. Confirmation will request Secure Enclave approval and submit onchain."
+                 : "Review before confirming this tool intent.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .italic()
+        }
+    }
+
     private var feedbackControls: some View {
         HStack(spacing: 8) {
             Text("Extraction feedback")
@@ -151,6 +250,13 @@ struct ToolIntentCardView: View {
             Spacer()
         }
     }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter
+    }()
 }
 
 private struct ToolIntentEditSheet: View {

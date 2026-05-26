@@ -17,6 +17,7 @@ enum AppError: LocalizedError {
     case metadataKeyMismatch
     case corruptedMetadataStore
     case unsupportedSigningAlgorithm
+    case walletOperationInProgress
 
     var errorDescription: String? {
         switch self {
@@ -52,6 +53,8 @@ enum AppError: LocalizedError {
             return "The wallet metadata file could not be decoded."
         case .unsupportedSigningAlgorithm:
             return "The Secure Enclave key does not support the expected signing algorithm."
+        case .walletOperationInProgress:
+            return "Another wallet operation is already in progress."
         }
     }
 }

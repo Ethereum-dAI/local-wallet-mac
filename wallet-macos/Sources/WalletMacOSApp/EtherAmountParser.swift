@@ -2,6 +2,14 @@ import Foundation
 
 enum EtherAmountParser {
     static func wei(fromETHString value: String) throws -> Data {
+        try units(fromDecimalString: value, decimals: 18)
+    }
+
+    static func units(fromDecimalString value: String, decimals: Int) throws -> Data {
+        guard decimals >= 0 else {
+            throw AppError.invalidAmount
+        }
+
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw AppError.invalidAmount
@@ -18,12 +26,21 @@ enum EtherAmountParser {
         guard wholePart.allSatisfy(\.isNumber), fractionalPart.allSatisfy(\.isNumber) else {
             throw AppError.invalidAmount
         }
-        guard fractionalPart.count <= 18 else {
+
+        if fractionalPart.count > decimals {
+            let extraFraction = fractionalPart.dropFirst(decimals)
+            guard extraFraction.allSatisfy({ $0 == "0" }) else {
+                throw AppError.invalidAmount
+            }
+        }
+
+        let clippedFraction = String(fractionalPart.prefix(decimals))
+        guard clippedFraction.count <= decimals else {
             throw AppError.invalidAmount
         }
 
         let normalizedWhole = wholePart.isEmpty ? "0" : wholePart
-        let paddedFraction = fractionalPart + String(repeating: "0", count: 18 - fractionalPart.count)
+        let paddedFraction = clippedFraction + String(repeating: "0", count: decimals - clippedFraction.count)
         let decimalString = normalizedWhole + paddedFraction
         let normalizedDecimal = decimalString.drop { $0 == "0" }
 

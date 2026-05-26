@@ -45,6 +45,7 @@ node_modules/
 xcuserdata/
 *.xcuserstate
 DerivedData/
+.xcode-derived/
 
 # Local git worktrees created for parallel branch work
 .worktrees/

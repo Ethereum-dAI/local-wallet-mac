@@ -135,8 +135,8 @@ struct ToolIntentCardView: View {
         switch swapPreflightStatus {
         case .quoting, .failed:
             return false
-        case .quoted(let preview):
-            return !preview.quote.requiresApproval
+        case .quoted:
+            return true
         case nil:
             return true
         }
@@ -251,11 +251,11 @@ struct ToolIntentCardView: View {
             case .quoted(let preview):
                 VStack(alignment: .leading, spacing: 5) {
                     Label(
-                        preview.quote.requiresApproval ? "Approval required" : "Route quoted",
-                        systemImage: preview.quote.requiresApproval ? "exclamationmark.triangle.fill" : "arrow.triangle.swap"
+                        preview.quote.requiresApproval ? "Approve + swap batch" : "Route quoted",
+                        systemImage: preview.quote.requiresApproval ? "checkmark.shield.fill" : "arrow.triangle.swap"
                     )
                     .font(.caption.bold())
-                    .foregroundStyle(preview.quote.requiresApproval ? .orange : .green)
+                    .foregroundStyle(.green)
                     intentDetailRow(
                         "estimated out",
                         TokenAmountFormatter.displayString(
@@ -274,6 +274,9 @@ struct ToolIntentCardView: View {
                     )
                     intentDetailRow("route", swapRouteLabel(preview))
                     intentDetailRow("slippage", "\(preview.quote.slippageBps) bps")
+                    if preview.quote.requiresApproval {
+                        intentDetailRow("approval", "included before swap")
+                    }
                 }
                 .padding(.vertical, 4)
             case .failed(let message):

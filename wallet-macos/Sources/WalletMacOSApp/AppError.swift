@@ -19,6 +19,7 @@ enum AppError: LocalizedError {
     case unsupportedSigningAlgorithm
     case walletOperationInProgress
     case swapApprovalRequired(String)
+    case invalidExecutionBatch
 
     var errorDescription: String? {
         switch self {
@@ -57,7 +58,9 @@ enum AppError: LocalizedError {
         case .walletOperationInProgress:
             return "Another wallet operation is already in progress."
         case .swapApprovalRequired(let token):
-            return "\(token) approval is required before this swap can be submitted. Batch approval is not implemented on this branch yet."
+            return "\(token) approval is required before this swap can be submitted."
+        case .invalidExecutionBatch:
+            return "Batch execution needs at least one transaction."
         }
     }
 }

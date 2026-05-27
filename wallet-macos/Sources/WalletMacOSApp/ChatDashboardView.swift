@@ -671,10 +671,8 @@ private final class ChatDashboardModel: ObservableObject {
             switch preflightStatus {
             case .quoting, .failed:
                 return
-            case .quoted(let preview):
-                if preview.quote.requiresApproval {
-                    return
-                }
+            case .quoted:
+                break
             }
         }
         if let intent = updateIntent(message, disposition: .confirmed, args: nil) {
@@ -1029,13 +1027,16 @@ private final class ChatDashboardModel: ObservableObject {
                     }
                     self.appendExecutionResult(result, for: intent, request: request)
                 case .swap:
-                    let request = try await self.swapRequest(from: intent)
+                    let request = try await self.swapRequest(from: intent, allowApprovalRequired: true)
+                    let signingAction = request.quote.requiresApproval && !request.fromToken.isNative
+                        ? "Approve \(request.amount) \(request.fromToken.symbol) and authorize \(request.fromToken.symbol) to \(request.toToken.symbol) swap"
+                        : "Authorize \(request.amount) \(request.fromToken.symbol) to \(request.toToken.symbol) swap"
                     let result = try await self.walletModel.executeExactInputSwap(
                         quote: request.quote,
                         from: request.fromToken,
                         to: request.toToken,
                         logContext: "chat-swap",
-                        signingReason: "Authorize \(request.amount) \(request.fromToken.symbol) to \(request.toToken.symbol) swap on \(self.walletModel.activeChain.name)"
+                        signingReason: "\(signingAction) on \(self.walletModel.activeChain.name)"
                     )
                     self.appendSwapExecutionResult(result, for: intent, request: request)
                 }
@@ -1240,6 +1241,7 @@ private final class ChatDashboardModel: ObservableObject {
             "amount_in": request.amount,
             "quote_amount_out": "0x" + request.quote.quoteAmountOut.hexEncodedString,
             "amount_out_minimum": "0x" + request.quote.amountOutMinimum.hexEncodedString,
+            "approval_batched": request.quote.requiresApproval && !request.fromToken.isNative,
         ]
         if let transactionHash = result.transactionHash {
             responsePayload["transaction_hash"] = transactionHash

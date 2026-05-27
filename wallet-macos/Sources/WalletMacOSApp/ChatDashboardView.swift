@@ -98,6 +98,11 @@ private struct ChatAccountIdentity: Equatable {
 }
 
 struct OnchainTransactionSummary: Codable, Equatable {
+    enum Operation: String, Codable {
+        case transfer
+        case swap
+    }
+
     enum Status: String, Codable {
         case included
         case submitted
@@ -107,13 +112,13 @@ struct OnchainTransactionSummary: Codable, Equatable {
         var title: String {
             switch self {
             case .included:
-                return "Transfer included"
+                return "Transaction included"
             case .submitted:
-                return "Transfer submitted"
+                return "Transaction submitted"
             case .reverted:
-                return "Transfer reverted"
+                return "Transaction reverted"
             case .pending:
-                return "Transfer pending"
+                return "Transaction pending"
             }
         }
 
@@ -141,6 +146,10 @@ struct OnchainTransactionSummary: Codable, Equatable {
     let resolutionChainName: String?
     let resolutionChainID: UInt64?
     let ccipReadUsed: Bool?
+    let operation: Operation?
+    let amountOut: String?
+    let minimumReceived: String?
+    let route: String?
     let userOpHash: String
     let transactionHash: String?
     let status: Status
@@ -160,12 +169,29 @@ enum ChatTransferPreflightStatus: Equatable {
     case failed(String)
 }
 
+struct ChatSwapPreview: Equatable {
+    let fromToken: WalletToken
+    let toToken: WalletToken
+    let amount: String
+    let quote: SwapQuote
+}
+
+enum ChatSwapPreflightStatus: Equatable {
+    case quoting
+    case quoted(ChatSwapPreview)
+    case failed(String)
+}
+
 private enum ChatIntentExecutionError: LocalizedError {
     case unsupportedTransferToken
     case unsupportedTransferAmount
     case invalidTransferRecipient
     case unsupportedENSRecipient
     case unsupportedChain
+    case unsupportedSwapAmountSide
+    case unsupportedSwapToken
+    case unsupportedSwapAmount
+    case sameSwapToken
 
     var errorDescription: String? {
         switch self {
@@ -179,6 +205,14 @@ private enum ChatIntentExecutionError: LocalizedError {
             return "That ENS name could not be resolved to an EVM address on the active chain."
         case .unsupportedChain:
             return "The active chain does not have a local token registry yet."
+        case .unsupportedSwapAmountSide:
+            return "Only exact-input swaps are supported. Say how much of the input token to spend, for example “swap 10 USDC to ETH”."
+        case .unsupportedSwapToken:
+            return "That swap token is not in the local token registry for the active chain yet."
+        case .unsupportedSwapAmount:
+            return "Only explicit decimal input amounts are executable for swaps right now."
+        case .sameSwapToken:
+            return "Choose two different tokens for a swap."
         }
     }
 }
@@ -189,6 +223,13 @@ private struct ChatTransferRequest {
     let resolvedName: WalletNodeClient.ResolvedName?
     let amount: String
     let token: WalletToken
+}
+
+private struct ChatSwapRequest {
+    let fromToken: WalletToken
+    let toToken: WalletToken
+    let amount: String
+    let quote: SwapQuote
 }
 
 enum ContextUsageLevel {
@@ -243,9 +284,11 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var streamingMessageID: UUID? = nil
     @Published var feedbackExportMessage: String? = nil
     @Published private var transferPreflightStatuses: [UUID: ChatTransferPreflightStatus] = [:]
+    @Published private var swapPreflightStatuses: [UUID: ChatSwapPreflightStatus] = [:]
 
     private var generationTask: Task<Void, Never>? = nil
     private var transferPreflightTasks: [UUID: Task<Void, Never>] = [:]
+    private var swapPreflightTasks: [UUID: Task<Void, Never>] = [:]
     private var walletModelCancellable: AnyCancellable?
     private let inferenceService: EmbeddedLlamaInferenceService
     private let chatStore: ChatSQLiteStore
@@ -623,6 +666,17 @@ private final class ChatDashboardModel: ObservableObject {
                 break
             }
         }
+        if let intent = message.toolIntent,
+           let preflightStatus = swapPreflightStatuses[intent.id] {
+            switch preflightStatus {
+            case .quoting, .failed:
+                return
+            case .quoted(let preview):
+                if preview.quote.requiresApproval {
+                    return
+                }
+            }
+        }
         if let intent = updateIntent(message, disposition: .confirmed, args: nil) {
             executeIfSupported(intent)
         }
@@ -712,8 +766,19 @@ private final class ChatDashboardModel: ObservableObject {
         transferPreflightStatuses[intent.id]
     }
 
+    func swapPreflightStatus(for intent: ToolIntent) -> ChatSwapPreflightStatus? {
+        swapPreflightStatuses[intent.id]
+    }
+
     func prepareIntentPreview(_ message: ChatMessage) {
-        guard let intent = message.toolIntent, intent.tool == .transfer else {
+        guard let intent = message.toolIntent else {
+            return
+        }
+        if intent.tool == .swap {
+            prepareSwapPreview(intent)
+            return
+        }
+        guard intent.tool == .transfer else {
             return
         }
         guard intent.disposition != .rejected else {
@@ -746,6 +811,44 @@ private final class ChatDashboardModel: ObservableObject {
                 self.transferPreflightStatuses[intent.id] = nil
             } catch {
                 self.transferPreflightStatuses[intent.id] = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    private func prepareSwapPreview(_ intent: ToolIntent) {
+        guard intent.disposition != .rejected else {
+            swapPreflightTasks[intent.id]?.cancel()
+            swapPreflightTasks[intent.id] = nil
+            swapPreflightStatuses[intent.id] = nil
+            return
+        }
+        guard swapPreflightStatuses[intent.id] == nil,
+              swapPreflightTasks[intent.id] == nil
+        else {
+            return
+        }
+
+        swapPreflightStatuses[intent.id] = .quoting
+        swapPreflightTasks[intent.id] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.swapPreflightTasks[intent.id] = nil
+            }
+
+            do {
+                let request = try await self.swapRequest(from: intent, allowApprovalRequired: true)
+                self.swapPreflightStatuses[intent.id] = .quoted(
+                    ChatSwapPreview(
+                        fromToken: request.fromToken,
+                        toToken: request.toToken,
+                        amount: request.amount,
+                        quote: request.quote
+                    )
+                )
+            } catch is CancellationError {
+                self.swapPreflightStatuses[intent.id] = nil
+            } catch {
+                self.swapPreflightStatuses[intent.id] = .failed(error.localizedDescription)
             }
         }
     }
@@ -847,6 +950,9 @@ private final class ChatDashboardModel: ObservableObject {
         transferPreflightTasks[intent.id]?.cancel()
         transferPreflightTasks[intent.id] = nil
         transferPreflightStatuses[intent.id] = nil
+        swapPreflightTasks[intent.id]?.cancel()
+        swapPreflightTasks[intent.id] = nil
+        swapPreflightStatuses[intent.id] = nil
 
         conversations[conversationIndex].messages[messageIndex].toolIntent = intent
         conversations[conversationIndex].updatedAt = Date()
@@ -882,7 +988,7 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     private func executeIfSupported(_ intent: ToolIntent) {
-        guard intent.tool == .transfer else {
+        guard intent.tool == .transfer || intent.tool == .swap else {
             return
         }
         guard !executingIntentIDs.contains(intent.id) else {
@@ -897,29 +1003,42 @@ private final class ChatDashboardModel: ObservableObject {
             }
 
             do {
-                let request = try await self.transferRequest(from: intent)
-                let result: AppModel.UserOperationSendResult
-                let recipientLabel = request.recipientName.map {
-                    "\($0) (\(request.recipient.walletDisplayShortAddress))"
-                } ?? request.recipient.walletDisplayShortAddress
-                switch request.token.kind {
-                case .native:
-                    result = try await self.walletModel.executeNativeTransfer(
-                        recipient: request.recipient,
-                        amountETH: request.amount,
-                        logContext: "chat-transfer",
-                        signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer to \(recipientLabel) on \(self.walletModel.activeChain.name)"
+                switch intent.tool {
+                case .transfer:
+                    let request = try await self.transferRequest(from: intent)
+                    let result: AppModel.UserOperationSendResult
+                    let recipientLabel = request.recipientName.map {
+                        "\($0) (\(request.recipient.walletDisplayShortAddress))"
+                    } ?? request.recipient.walletDisplayShortAddress
+                    switch request.token.kind {
+                    case .native:
+                        result = try await self.walletModel.executeNativeTransfer(
+                            recipient: request.recipient,
+                            amountETH: request.amount,
+                            logContext: "chat-transfer",
+                            signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer to \(recipientLabel) on \(self.walletModel.activeChain.name)"
+                        )
+                    case .erc20:
+                        result = try await self.walletModel.executeERC20Transfer(
+                            token: request.token,
+                            recipient: request.recipient,
+                            amount: request.amount,
+                            logContext: "chat-transfer",
+                            signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer to \(recipientLabel) on \(self.walletModel.activeChain.name)"
+                        )
+                    }
+                    self.appendExecutionResult(result, for: intent, request: request)
+                case .swap:
+                    let request = try await self.swapRequest(from: intent)
+                    let result = try await self.walletModel.executeExactInputSwap(
+                        quote: request.quote,
+                        from: request.fromToken,
+                        to: request.toToken,
+                        logContext: "chat-swap",
+                        signingReason: "Authorize \(request.amount) \(request.fromToken.symbol) to \(request.toToken.symbol) swap on \(self.walletModel.activeChain.name)"
                     )
-                case .erc20:
-                    result = try await self.walletModel.executeERC20Transfer(
-                        token: request.token,
-                        recipient: request.recipient,
-                        amount: request.amount,
-                        logContext: "chat-transfer",
-                        signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer to \(recipientLabel) on \(self.walletModel.activeChain.name)"
-                    )
+                    self.appendSwapExecutionResult(result, for: intent, request: request)
                 }
-                self.appendExecutionResult(result, for: intent, request: request)
             } catch {
                 self.appendExecutionError(error, for: intent)
             }
@@ -988,6 +1107,53 @@ private final class ChatDashboardModel: ObservableObject {
         }
     }
 
+    private func swapRequest(
+        from intent: ToolIntent,
+        allowApprovalRequired: Bool = false
+    ) async throws -> ChatSwapRequest {
+        guard !WalletTokenRegistry.tokens(on: walletModel.activeChain.id).isEmpty else {
+            throw ChatIntentExecutionError.unsupportedChain
+        }
+        guard (intent.args["amount_side"] ?? "input").caseInsensitiveCompare("input") == .orderedSame else {
+            throw ChatIntentExecutionError.unsupportedSwapAmountSide
+        }
+        guard let fromToken = WalletTokenRegistry.token(
+            matching: intent.args["from_token"],
+            on: walletModel.activeChain.id
+        ),
+              let toToken = WalletTokenRegistry.token(
+                matching: intent.args["to_token"],
+                on: walletModel.activeChain.id
+              )
+        else {
+            throw ChatIntentExecutionError.unsupportedSwapToken
+        }
+        guard fromToken.id != toToken.id else {
+            throw ChatIntentExecutionError.sameSwapToken
+        }
+        guard let rawAmount = intent.args["amount"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawAmount.isEmpty,
+              rawAmount.lowercased() != "all"
+        else {
+            throw ChatIntentExecutionError.unsupportedSwapAmount
+        }
+        _ = try EtherAmountParser.units(fromDecimalString: rawAmount, decimals: fromToken.decimals)
+        let quote = try await walletModel.quoteExactInputSwap(
+            from: fromToken,
+            to: toToken,
+            amount: rawAmount
+        )
+        if quote.requiresApproval && !allowApprovalRequired {
+            throw AppError.swapApprovalRequired(fromToken.symbol)
+        }
+        return ChatSwapRequest(
+            fromToken: fromToken,
+            toToken: toToken,
+            amount: rawAmount,
+            quote: quote
+        )
+    }
+
     private func appendExecutionResult(
         _ result: AppModel.UserOperationSendResult,
         for intent: ToolIntent,
@@ -1044,12 +1210,109 @@ private final class ChatDashboardModel: ObservableObject {
             resolutionChainName: request.resolvedName?.resolutionChainName,
             resolutionChainID: request.resolvedName.map { UInt64($0.resolutionChainId) },
             ccipReadUsed: request.resolvedName?.ccipReadUsed,
+            operation: .transfer,
+            amountOut: nil,
+            minimumReceived: nil,
+            route: nil,
             userOpHash: result.userOpHash,
             transactionHash: result.transactionHash,
             status: status,
             createdAt: Date()
         )
         appendMessage(.onchainTransaction(summary), to: conversationID)
+    }
+
+    private func appendSwapExecutionResult(
+        _ result: AppModel.UserOperationSendResult,
+        for intent: ToolIntent,
+        request: ChatSwapRequest
+    ) {
+        guard let conversationID = activeConversationIDIfPresent else {
+            return
+        }
+
+        var responsePayload: [String: Any] = [
+            "status": "submitted",
+            "intent_id": intent.id.uuidString,
+            "user_op_hash": result.userOpHash,
+            "token_in": request.fromToken.symbol,
+            "token_out": request.toToken.symbol,
+            "amount_in": request.amount,
+            "quote_amount_out": "0x" + request.quote.quoteAmountOut.hexEncodedString,
+            "amount_out_minimum": "0x" + request.quote.amountOutMinimum.hexEncodedString,
+        ]
+        if let transactionHash = result.transactionHash {
+            responsePayload["transaction_hash"] = transactionHash
+        }
+        if let success = result.success {
+            responsePayload["success"] = success
+        }
+        appendMessage(
+            ChatMessage(
+                kind: .toolResponse,
+                role: .tool,
+                text: jsonString(responsePayload),
+                toolCallId: intent.id.uuidString
+            ),
+            to: conversationID
+        )
+
+        let status: OnchainTransactionSummary.Status
+        if result.success == true {
+            status = .included
+        } else if result.success == false {
+            status = .reverted
+        } else if result.transactionHash != nil {
+            status = .submitted
+        } else {
+            status = .pending
+        }
+
+        let summary = OnchainTransactionSummary(
+            chainName: walletModel.activeChain.name,
+            chainID: walletModel.activeChain.id,
+            amount: request.amount,
+            token: "\(request.fromToken.symbol) -> \(request.toToken.symbol)",
+            recipient: request.quote.router,
+            recipientName: "Uniswap SwapRouter02",
+            resolvedRecipient: nil,
+            resolutionChainName: nil,
+            resolutionChainID: nil,
+            ccipReadUsed: nil,
+            operation: .swap,
+            amountOut: TokenAmountFormatter.displayString(
+                rawUnits: request.quote.quoteAmountOut,
+                decimals: request.toToken.decimals,
+                symbol: request.toToken.symbol
+            ),
+            minimumReceived: TokenAmountFormatter.displayString(
+                rawUnits: request.quote.amountOutMinimum,
+                decimals: request.toToken.decimals,
+                symbol: request.toToken.symbol
+            ),
+            route: swapRouteLabel(for: request),
+            userOpHash: result.userOpHash,
+            transactionHash: result.transactionHash,
+            status: status,
+            createdAt: Date()
+        )
+        appendMessage(.onchainTransaction(summary), to: conversationID)
+    }
+
+    private func swapRouteLabel(for request: ChatSwapRequest) -> String {
+        guard !request.quote.hops.isEmpty else {
+            return "\(request.fromToken.symbol) -> \(request.toToken.symbol)"
+        }
+        var symbols = [request.fromToken.symbol]
+        for hop in request.quote.hops {
+            symbols.append(
+                WalletTokenRegistry.token(
+                    matching: hop.tokenOut,
+                    on: request.fromToken.chainID
+                )?.symbol ?? hop.tokenOut.walletDisplayShortAddress
+            )
+        }
+        return symbols.joined(separator: " -> ")
     }
 
     private func resolvedTokenSymbol(for intent: ToolIntent) -> String {
@@ -1528,6 +1791,7 @@ struct LocalWalletChatDashboardView: View {
                                                 feedback: message.toolFeedback,
                                                 executionStatus: model.executionStatus(for: intent),
                                                 transferPreflightStatus: model.transferPreflightStatus(for: intent),
+                                                swapPreflightStatus: model.swapPreflightStatus(for: intent),
                                                 onConfirm: { model.confirmIntent(message) },
                                                 onReject: { model.rejectIntent(message) },
                                                 onEdit: { editedIntent in
@@ -2266,10 +2530,10 @@ private struct OnchainTransactionCard: View {
                     .background(Circle().fill(statusTint.opacity(0.14)))
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(summary.status.title)
+                    Text(statusTitle)
                         .font(.system(size: 18, weight: .heavy))
                         .foregroundStyle(ChatPalette.primaryText)
-                    Text("\(summary.amount) \(summary.token.uppercased()) on \(summary.chainName)")
+                    Text(subtitle)
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(ChatPalette.secondaryText)
                 }
@@ -2285,30 +2549,68 @@ private struct OnchainTransactionCard: View {
             }
 
             VStack(spacing: 8) {
-                if let recipientName = summary.recipientName {
+                if isSwap {
+                    if let amountOut = summary.amountOut {
+                        TransactionHashRow(
+                            title: "Estimated out",
+                            value: amountOut,
+                            copiedValue: $copiedValue,
+                            usesMonospacedValue: false
+                        )
+                    }
+                    if let minimumReceived = summary.minimumReceived {
+                        TransactionHashRow(
+                            title: "Minimum out",
+                            value: minimumReceived,
+                            copiedValue: $copiedValue,
+                            usesMonospacedValue: false
+                        )
+                    }
+                    if let route = summary.route {
+                        TransactionHashRow(
+                            title: "Route",
+                            value: route,
+                            copiedValue: $copiedValue,
+                            usesMonospacedValue: false
+                        )
+                    }
                     TransactionHashRow(
-                        title: "ENS name",
-                        value: recipientName,
+                        title: "Router",
+                        value: summary.recipientName ?? "Uniswap SwapRouter02",
+                        copiedValue: $copiedValue,
+                        usesMonospacedValue: false
+                    )
+                    TransactionHashRow(
+                        title: "Router address",
+                        value: summary.recipient,
                         copiedValue: $copiedValue
                     )
-                }
-                TransactionHashRow(
-                    title: summary.recipientName == nil ? "Recipient" : "Resolved to",
-                    value: summary.recipient,
-                    copiedValue: $copiedValue
-                )
-                if let resolutionChainName = summary.resolutionChainName {
-                    HStack {
-                        Text("Resolved on")
-                            .font(.system(size: 11, weight: .black))
-                            .foregroundStyle(ChatPalette.mutedText)
-                            .frame(width: 108, alignment: .leading)
-                        Text(summary.ccipReadUsed == true ? "\(resolutionChainName) · CCIP Read" : resolutionChainName)
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(ChatPalette.secondaryText)
-                        Spacer()
+                } else {
+                    if let recipientName = summary.recipientName {
+                        TransactionHashRow(
+                            title: "ENS name",
+                            value: recipientName,
+                            copiedValue: $copiedValue
+                        )
                     }
-                    .frame(height: 30)
+                    TransactionHashRow(
+                        title: summary.recipientName == nil ? "Recipient" : "Resolved to",
+                        value: summary.recipient,
+                        copiedValue: $copiedValue
+                    )
+                    if let resolutionChainName = summary.resolutionChainName {
+                        HStack {
+                            Text("Resolved on")
+                                .font(.system(size: 11, weight: .black))
+                                .foregroundStyle(ChatPalette.mutedText)
+                                .frame(width: 116, alignment: .leading)
+                            Text(summary.ccipReadUsed == true ? "\(resolutionChainName) · CCIP Read" : resolutionChainName)
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(ChatPalette.secondaryText)
+                            Spacer()
+                        }
+                        .frame(height: 30)
+                    }
                 }
                 TransactionHashRow(
                     title: "UserOperation",
@@ -2385,6 +2687,33 @@ private struct OnchainTransactionCard: View {
         return try? decoder.decode(OnchainTransactionSummary.self, from: data)
     }
 
+    private var isSwap: Bool {
+        summary.operation == .swap
+    }
+
+    private var statusTitle: String {
+        guard isSwap else {
+            return summary.status.title
+        }
+        switch summary.status {
+        case .included:
+            return "Swap included"
+        case .submitted:
+            return "Swap submitted"
+        case .reverted:
+            return "Swap reverted"
+        case .pending:
+            return "Swap pending"
+        }
+    }
+
+    private var subtitle: String {
+        if isSwap {
+            return "\(summary.amount) \(summary.token.uppercased()) on \(summary.chainName)"
+        }
+        return "\(summary.amount) \(summary.token.uppercased()) on \(summary.chainName)"
+    }
+
     private var statusTint: Color {
         switch summary.status {
         case .included:
@@ -2410,15 +2739,16 @@ private struct TransactionHashRow: View {
     let value: String
     @Binding var copiedValue: String?
     var explorerURL: URL? = nil
+    var usesMonospacedValue = true
 
     var body: some View {
         HStack(spacing: 8) {
             Text(title)
                 .font(.system(size: 11, weight: .black))
                 .foregroundStyle(ChatPalette.mutedText)
-                .frame(width: 108, alignment: .leading)
+                .frame(width: 116, alignment: .leading)
             Text(value)
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .font(valueFont)
                 .foregroundStyle(ChatPalette.secondaryText)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -2449,6 +2779,12 @@ private struct TransactionHashRow: View {
             }
         }
         .frame(height: 30)
+    }
+
+    private var valueFont: Font {
+        usesMonospacedValue
+            ? .system(size: 12, weight: .bold, design: .monospaced)
+            : .system(size: 12, weight: .bold)
     }
 
     private func copy(_ value: String) {

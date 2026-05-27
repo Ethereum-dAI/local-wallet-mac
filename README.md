@@ -100,23 +100,23 @@ The current demo exercises two complementary layers — wallet plumbing and a lo
 - Secure Enclave + Keychain key lifecycle
 - Kernel smart account address prediction
 - Sepolia account inspection over public RPC
-- Local UserOperation building for ETH transfer
-- Hosted Sepolia bundler submission
-- Local daemon integration for bundler EOA admin (rotate/export/delete)
+- Local UserOperation building for native ETH transfers, ERC-20 transfers, and exact-input Uniswap v3 swaps
+- Local `wallet-node` submission through the app-owned bundler EOA on Sepolia or mainnet
+- Local daemon integration for bundler EOA admin (rotate/export/delete), Helios-backed reads, gas estimation, submission, and receipt polling
 
 **Local LLM and tool intent layer:**
 
 - On-device Gemma 4 E4B inference via `llama.cpp` (no network at inference time)
 - Streaming chat with thinking/reasoning disclosure, copy / regenerate / edit-and-resend on bubbles, stop button, code-block copy, and a smart auto-scroll that does not yank the user when scrolled up
 - SQLite-backed conversation history (`chat.sqlite` in Application Support), with delete / rename / date-bucketed sidebar
-- Tool intent recognition (transfer, swap) — natural language and `/transfer` / `/swap` slash commands surface an in-chat recognition card; phase 1 is **informational only** (no signing or broadcast yet, see `docs/OPEN_ITEMS.md` OPEN-57)
+- Tool intent recognition (transfer, swap) — natural language and `/transfer` / `/swap` slash commands surface an in-chat review card. Supported transfers and exact-input swaps can be confirmed, signed with Secure Enclave, submitted through local `wallet-node`, and summarized with Etherscan links.
 - Per-card thumbs-up / thumbs-down feedback (with optional note) persisted to `chat.sqlite`, plus a "Download rankings" action in the chat-header gear menu that exports the captured intents as JSON
 - Inline slash autocomplete and a "Tools" popover in the footer with ready-to-edit command scaffolds
 - Onboarding flow for local model download, hardware inspection, and provisioning
 
 A separate `wallet-eval` CLI in `wallet-macos/Sources/wallet-eval/` benchmarks recognition accuracy, multi-turn coherence, and latency against a curated dataset (`wallet-macos/Sources/wallet-eval/Dataset/recognition.json`).
 
-The Sepolia hosted bundler URL is not committed. Provide it as:
+The chat tool path submits through local `wallet-node`. The older hosted Sepolia composer path still reads a hosted bundler URL, which is not committed. Provide it as:
 
 ```bash
 export LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..."

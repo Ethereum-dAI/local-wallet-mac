@@ -6,6 +6,7 @@ struct ToolIntentCardView: View {
     let feedback: ToolIntentFeedback?
     let executionStatus: ChatIntentExecutionStatus
     let transferPreflightStatus: ChatTransferPreflightStatus?
+    let swapPreflightStatus: ChatSwapPreflightStatus?
     let onConfirm: () -> Void
     let onReject: () -> Void
     let onEdit: ([String: String]) -> Void
@@ -48,6 +49,8 @@ struct ToolIntentCardView: View {
             .padding(.vertical, 4)
 
             transferPreflightRow
+
+            swapPreflightRow
 
             executionStatusRow
 
@@ -127,6 +130,14 @@ struct ToolIntentCardView: View {
         case .resolving, .failed:
             return false
         case .resolved, nil:
+            break
+        }
+        switch swapPreflightStatus {
+        case .quoting, .failed:
+            return false
+        case .quoted(let preview):
+            return !preview.quote.requiresApproval
+        case nil:
             return true
         }
     }
@@ -225,6 +236,61 @@ struct ToolIntentCardView: View {
     }
 
     @ViewBuilder
+    private var swapPreflightRow: some View {
+        if intent.tool == .swap, let swapPreflightStatus {
+            switch swapPreflightStatus {
+            case .quoting:
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Quoting Uniswap v3 routes through local wallet-node...")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            case .quoted(let preview):
+                VStack(alignment: .leading, spacing: 5) {
+                    Label(
+                        preview.quote.requiresApproval ? "Approval required" : "Route quoted",
+                        systemImage: preview.quote.requiresApproval ? "exclamationmark.triangle.fill" : "arrow.triangle.swap"
+                    )
+                    .font(.caption.bold())
+                    .foregroundStyle(preview.quote.requiresApproval ? .orange : .green)
+                    intentDetailRow(
+                        "estimated out",
+                        TokenAmountFormatter.displayString(
+                            rawUnits: preview.quote.quoteAmountOut,
+                            decimals: preview.toToken.decimals,
+                            symbol: preview.toToken.symbol
+                        )
+                    )
+                    intentDetailRow(
+                        "minimum out",
+                        TokenAmountFormatter.displayString(
+                            rawUnits: preview.quote.amountOutMinimum,
+                            decimals: preview.toToken.decimals,
+                            symbol: preview.toToken.symbol
+                        )
+                    )
+                    intentDetailRow("route", swapRouteLabel(preview))
+                    intentDetailRow("slippage", "\(preview.quote.slippageBps) bps")
+                }
+                .padding(.vertical, 4)
+            case .failed(let message):
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(message)
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.vertical, 4)
+            }
+        }
+    }
+
+    @ViewBuilder
     private var executionStatusRow: some View {
         switch executionStatus {
         case .running:
@@ -277,6 +343,32 @@ struct ToolIntentCardView: View {
                 .truncationMode(.middle)
                 .textSelection(.enabled)
         }
+    }
+
+    private func swapRouteLabel(_ preview: ChatSwapPreview) -> String {
+        guard !preview.quote.hops.isEmpty else {
+            return "\(preview.fromToken.symbol) -> \(preview.toToken.symbol)"
+        }
+        var symbols = [preview.fromToken.symbol]
+        for hop in preview.quote.hops {
+            symbols.append(symbol(for: hop.tokenOut, in: preview))
+        }
+        return symbols.joined(separator: " -> ")
+    }
+
+    private func symbol(for address: String, in preview: ChatSwapPreview) -> String {
+        if address.caseInsensitiveCompare(preview.quote.tokenIn) == .orderedSame {
+            return preview.fromToken.symbol
+        }
+        if address.caseInsensitiveCompare(preview.quote.tokenOut) == .orderedSame {
+            return preview.toToken.symbol
+        }
+        if let token = WalletTokenRegistry.tokens(on: preview.quote.chainID).first(where: {
+            $0.contractAddress?.caseInsensitiveCompare(address) == .orderedSame
+        }) {
+            return token.symbol
+        }
+        return address.walletDisplayShortAddress
     }
 
     private var feedbackControls: some View {

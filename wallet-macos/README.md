@@ -7,13 +7,13 @@ What this demo currently exercises:
 - Secure Enclave + Keychain persistence for the device-bound P-256 signing key
 - public-key derivation and local wallet metadata persistence
 - precomputed Kernel smart-account address derivation
-- balance/deployment inspection over public Ethereum Sepolia RPC
-- local ERC-4337 UserOperation building for a simple ETH transfer intent
-- Secure Enclave signing + hosted bundler submission on Ethereum Sepolia
+- balance/deployment inspection on Ethereum Sepolia or mainnet
+- local ERC-4337 UserOperation building for native ETH transfers, ERC-20 transfers, and exact-input Uniswap v3 swaps
+- Secure Enclave signing + local `wallet-node` submission through the app-owned bundler EOA
 - debug logging for bootstrap, inspection, gas estimation, signing, submission, and receipt polling
-- on-device Gemma 4 E4B chat with streaming, tool intent recognition (transfer / swap), slash commands, and an in-chat recognition card — the chat layer is documented in [Chat layer](#chat-layer) and [Tool layer (phase 1)](#tool-layer-phase-1) below
+- on-device Gemma 4 E4B chat with streaming, tool intent recognition (transfer / swap), slash commands, and an in-chat review card — the chat layer is documented in [Chat layer](#chat-layer) and [Tool layer](#tool-layer) below
 
-The package also contains `SpawnHelper`, the process-launch shim for the local `wallet-node` daemon. The current demo UI uses the hosted Sepolia composer for primary transaction submission, but it also starts/connects to the local daemon for relayer-key admin flows (rotate/export/delete the bundler EOA via admin challenges) and surfaces local relayer status independently of the hosted Sepolia path.
+The package also contains `SpawnHelper`, the process-launch shim for the local `wallet-node` daemon. Confirmed chat intents use the daemon for Helios-backed reads, gas estimation, UserOperation submission, receipt polling, swap quotes, and relayer-key admin flows (rotate/export/delete the bundler EOA via admin challenges).
 
 This app must be run as a signed macOS app bundle.
 
@@ -60,7 +60,7 @@ xcodegen generate
 - `DemoRPCClient.swift`
   - Read-only JSON-RPC client for public chain inspection and fee fallback data.
 - `BundlerClient.swift`
-  - Hosted ERC-4337 bundler RPC client for gas estimation, fee quoting, submission, and receipt polling.
+  - Legacy hosted ERC-4337 bundler RPC client retained for older composer paths. Chat-confirmed transfer and swap intents use local `wallet-node` instead.
 - `UserOperationBuilder.swift`
   - Local draft construction for the current transaction intents.
 - `UserOperationModels.swift`
@@ -70,7 +70,7 @@ xcodegen generate
 - `DemoSettingsStore.swift`
   - Persistent demo-time settings (e.g., testnet-mode toggle).
 - `WalletNodeClient.swift`
-  - JSON-RPC client for the local `wallet-node` daemon over Unix socket or HTTP, including admin-authorized rotate/export/delete bundler-EOA flows.
+  - JSON-RPC client for the local `wallet-node` daemon over Unix socket or HTTP, including admin-authorized rotate/export/delete bundler-EOA flows, ENS resolution, and Uniswap v3 swap quotes.
 - `WalletNodeDaemon.swift`
   - Lifecycle wrapper around the spawned daemon process.
 - `WalletRecord.swift`
@@ -101,10 +101,11 @@ xcodegen generate
 
 ## Current Limits
 
-- Sepolia-only demo mode is currently enforced in the app shell.
-- The app currently focuses on ETH transfer as the first transaction type.
+- Mainnet and Sepolia are the supported app chains.
+- The chat tool path supports native ETH transfers, ERC-20 transfers from the local token registry, and exact-input Uniswap v3 swaps.
+- ERC-20 input swaps require an existing allowance from the Kernel smart account to SwapRouter02. Approval UserOperations are intentionally not built yet, so the UI blocks those swaps with an "Approval required" state.
 - The UI is intentionally a workbench/demo shell, not the final wallet interface.
-- The local mainnet `wallet-node` daemon is integrated for relayer-key admin flows but is not yet the default transaction submission backend for this demo UI; the composer still routes through the hosted Sepolia bundler.
+- Swap routing is intentionally local/on-chain only: the app asks `wallet-node` to query Uniswap v3 factory/pools/quoter through Helios-backed reads. No aggregator API or third-party quote service is used.
 
 ## Daemon Spawn Test
 
@@ -124,9 +125,9 @@ swift test --filter SpawnHelperTests
 
 Set `WALLET_NODE_BIN=/absolute/path/to/wallet-node` to point at a non-default daemon binary location. The fd-3 ready / fd-4 alive contract used by the spawn helper is documented in [`Sources/Spawn/README.md`](Sources/Spawn/README.md).
 
-## Hosted Bundler Configuration
+## Legacy Hosted Bundler Configuration
 
-The Sepolia hosted bundler URL is intentionally not committed in source. For local development you can provide it as an environment variable:
+The chat tool path submits through local `wallet-node`. The older composer path still has a hosted Sepolia bundler client, and that URL is intentionally not committed in source. For local development you can provide it as an environment variable:
 
 ```bash
 export LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..."
@@ -138,7 +139,7 @@ For packaged demo builds, use the same variable when running the package script:
 LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..." ./scripts/package-macos-demo.sh
 ```
 
-The package script injects the URL into the built app's `Info.plist` and re-signs that copied app bundle. If the variable is not set, the app still builds and can inspect the account, but bundler submission is disabled.
+The package script injects the URL into the built app's `Info.plist` and re-signs that copied app bundle. If the variable is not set, the app still builds and the chat tool path can use local `wallet-node`; hosted composer submission is disabled.
 
 ---
 
@@ -160,25 +161,20 @@ Highlights of the current UX:
 - **Smart auto-scroll** — auto-follow is only re-engaged when the user is near the bottom; when scrolled up, a small ↓ pill in the bottom-trailing corner jumps back to the latest message or in-flight streaming bubble.
 - **Intent feedback & export** — every recognition card carries thumbs-up / thumbs-down controls (thumbs-down opens a note sheet); ratings persist to `chat.sqlite` and the gear menu in the chat header has a **Download rankings** action that writes a JSON export (`local-wallet-tool-rankings-<date>.json`) via `NSSavePanel`.
 
-## Tool layer (phase 1)
+## Tool layer
 
-Phase 1 wires a local **intent recognition** layer over the chat. When the user expresses a clear on-chain action (transfer / swap), the chat thread renders an inline **recognition card** — `ToolIntentCardView` — showing the tool name and structured arguments. The card has three actions: **Looks good**, **Edit**, **Reject**. The card is *informational only*: phase 1 does not sign or broadcast any transaction (tracked centrally in `docs/OPEN_ITEMS.md` OPEN-57).
+The chat wires a local **intent recognition** layer to on-chain execution. When the user expresses a clear on-chain action (transfer / swap), the chat thread renders an inline review card — `ToolIntentCardView` — showing the tool name, structured arguments, preflight status, and actions. Supported intents can be confirmed with **Looks good**, edited, or rejected. Confirmation asks for local signing and submits the UserOperation through the local `wallet-node` daemon.
 
 Two ways to surface a card:
 
 1. **Natural language** — type `Send 0.1 ETH to vitalik.eth` in the chat composer. The local model decides whether to emit a `<|tool_call>` block; if it does, `BridgePEGExtractor` (with the Gemma 4 DSL fallback parser, see OPEN-56) decodes it into a `ParsedToolCall` and `ChatDashboardModel` appends a `.toolIntent` `ChatMessage`.
-2. **Slash commands** — type `/transfer 0.1 ETH to <recipient>` or `/swap 100 USDC to ETH` in the composer. `SlashCommandParser` produces the same `ToolIntent` without invoking the model. The inline autocomplete and the footer "Tools" popover both insert scaffolds from `SlashCatalog`. The parser also accepts an explicit `key=value` form — `/transfer amount=0.1 token=ETH to=vitalik.eth` and `/swap amount=100 from_token=USDC to_token=ETH amount_side=output` — useful when arguments contain spaces or when the positional form is ambiguous. `swap` carries an `amount_side` arg (`input` for "swap 100 USDC for ETH", `output` for "buy 1 ETH with USDC"); it defaults to `input` in both the positional and key=value forms.
+2. **Slash commands** — type `/transfer 0.1 ETH to <recipient>` or `/swap 100 USDC to ETH` in the composer. `SlashCommandParser` produces the same `ToolIntent` without invoking the model. The inline autocomplete and the footer "Tools" popover both insert scaffolds from `SlashCatalog`. The parser also accepts an explicit `key=value` form — `/transfer amount=0.1 token=ETH to=vitalik.eth` and `/swap amount=100 from_token=USDC to_token=ETH amount_side=input` — useful when arguments contain spaces or when the positional form is ambiguous. `swap` is exact-input only; output-side swaps are rejected before execution.
 
-When the user acts on the card, a synthetic `.toolResponse` `ChatMessage` (role `.tool`) is appended to the conversation so the *next* model turn sees the disposition (`acknowledged` / `acknowledged + edited` / `rejected`) and continues coherently. The user can also rate the recognition with thumbs-up / thumbs-down (with an optional note on thumbs-down); ratings are stored in the `tool_intent_feedback` table (`ChatSQLiteMigration` v1→v2) keyed by conversation + message + intent, reload with the conversation, and can be exported as a single JSON file via the chat-header gear menu's **Download rankings** action.
+Transfers support native ETH, ERC-20 tokens in `WalletTokenRegistry`, `0x` recipients, and ENS names. ENS resolution runs through `wallet-node`, including CCIP Read when required by the resolver. The review card shows the resolved address before signing.
 
-### What's explicitly out of scope for phase 1
+Swaps support exact-input Uniswap v3 routes on mainnet and Sepolia. The app asks `wallet-node` for an on-chain quote using local token metadata, direct pools, one-hop intermediate routes, the configured Uniswap v3 factory, QuoterV2, and SwapRouter02 addresses. ETH input swaps can execute directly; ERC-20 input swaps execute only when the smart account already has enough allowance for SwapRouter02. Approval/batch-approval UserOperations are intentionally not implemented yet.
 
-- ENS resolution, token-symbol → contract-address lookup
-- Gas estimation, fee preview, balance / allowance checks
-- `UserOperationBuilder`, `BundlerClient`, signing, broadcast
-- DEX quoting / routing for `swap`
-
-The grep guard `grep -rE "UserOperationBuilder|BundlerClient|WalletNodeClient|KernelAccountAddressPredictor|KeyStore" Sources/WalletMacOSApp/ChatDashboardView.swift Sources/WalletMacOSApp/EmbeddedLlamaInferenceService.swift Sources/WalletMacOSApp/ToolIntentCardView.swift Sources/WalletToolLayer/` MUST come back empty. Phase 2 wires those in.
+When the user acts on the card, a synthetic `.toolResponse` `ChatMessage` (role `.tool`) is appended to the conversation so the *next* model turn sees the disposition (`acknowledged` / `acknowledged + edited` / `rejected`) and continues coherently. Successful submissions also append an on-chain summary card with copy actions and an Etherscan link. The user can rate the recognition with thumbs-up / thumbs-down (with an optional note on thumbs-down); ratings are stored in the `tool_intent_feedback` table (`ChatSQLiteMigration` v1→v2) keyed by conversation + message + intent, reload with the conversation, and can be exported as a single JSON file via the chat-header gear menu's **Download rankings** action.
 
 ### Where the code lives
 

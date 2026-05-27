@@ -27,11 +27,20 @@ import Testing
 }
 
 @Test func parsesSwapKeyValue() throws {
-    let intent = try SlashCommandParser().parse("/swap from_token=ETH to_token=USDC amount=0.1 amount_side=output")
+    let intent = try SlashCommandParser().parse("/swap from_token=ETH to_token=USDC amount=0.1 amount_side=input")
 
     #expect(intent.tool == .swap)
     #expect(intent.source == .slash)
-    #expect(intent.args == ["from_token": "ETH", "to_token": "USDC", "amount": "0.1", "amount_side": "output"])
+    #expect(intent.args == ["from_token": "ETH", "to_token": "USDC", "amount": "0.1", "amount_side": "input"])
+}
+
+@Test func rejectsSwapOutputAmountSide() {
+    expectSlashParseError(try SlashCommandParser().parse("/swap from_token=ETH to_token=USDC amount=0.1 amount_side=output")) { error in
+        guard case .malformedArgument("amount_side", value: "only input is supported") = error else {
+            return false
+        }
+        return true
+    }
 }
 
 @Test func unknownCommandThrows() {

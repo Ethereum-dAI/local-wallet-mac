@@ -129,6 +129,24 @@ struct WalletNodeClient {
         let ccipReadUsed: Bool
     }
 
+    struct SwapQuoteResponse: Equatable {
+        let chainID: UInt64
+        let factory: String
+        let router: String
+        let quoter: String
+        let tokenIn: String
+        let tokenOut: String
+        let amountIn: Data
+        let quoteAmountOut: Data
+        let amountOutMinimum: Data
+        let slippageBps: UInt64
+        let path: Data
+        let hops: [SwapQuoteHop]
+        let gasEstimate: String
+        let allowance: Data?
+        let requiresApproval: Bool
+    }
+
     enum ClientError: LocalizedError {
         case invalidResponse
         case transport(String)
@@ -151,6 +169,24 @@ struct WalletNodeClient {
 
     private let configuration: Configuration
     private let session: URLSession
+
+    var usesUnixSocketTransport: Bool {
+        if case .unixSocket = configuration.transport {
+            return true
+        }
+        return false
+    }
+
+    static func isRecoverableUnixSocketFailure(_ error: Error) -> Bool {
+        guard case let ClientError.transport(message) = error else {
+            return false
+        }
+
+        return message.contains("failed to connect to wallet-node socket")
+            || message.contains("wallet-node socket closed while writing")
+            || message.contains("failed to write wallet-node request")
+            || message.contains("failed to read wallet-node response")
+    }
 
     init(configuration: Configuration, session: URLSession = .shared) {
         self.configuration = configuration
@@ -270,6 +306,36 @@ struct WalletNodeClient {
             throw ClientError.invalidResponse
         }
         return try ResolvedName(json: object)
+    }
+
+    func quoteSwap(
+        sendChainId: UInt64,
+        tokenIn: String,
+        tokenOut: String,
+        amountIn: Data,
+        owner: String?,
+        tokenInIsNative: Bool,
+        slippageBps: UInt64,
+        intermediates: [String]
+    ) async throws -> SwapQuoteResponse {
+        var request: [String: Any] = [
+            "sendChainId": sendChainId,
+            "tokenIn": tokenIn,
+            "tokenOut": tokenOut,
+            "amountIn": hexString(amountIn),
+            "tokenInIsNative": tokenInIsNative,
+            "slippageBps": slippageBps,
+            "intermediates": intermediates,
+        ]
+        if let owner {
+            request["owner"] = owner
+        }
+
+        let result = try await call(method: "localwallet_quoteSwap", params: [request])
+        guard let object = result as? [String: Any] else {
+            throw ClientError.invalidResponse
+        }
+        return try SwapQuoteResponse(json: object)
     }
 
     func beginAdminAction(action: String, chainId: Int, keyRef: String? = nil) async throws -> AdminChallenge {
@@ -689,6 +755,71 @@ private extension WalletNodeClient.ResolvedName {
             addressRecord: addressRecord,
             coinType: coinType,
             ccipReadUsed: ccipReadUsed
+        )
+    }
+}
+
+private extension WalletNodeClient.SwapQuoteResponse {
+    init(json: [String: Any]) throws {
+        guard let chainID = json["chainId"] as? UInt64 ?? (json["chainId"] as? Int).map(UInt64.init),
+              let factory = json["factory"] as? String,
+              let router = json["router"] as? String,
+              let quoter = json["quoter"] as? String,
+              let tokenIn = json["tokenIn"] as? String,
+              let tokenOut = json["tokenOut"] as? String,
+              let amountIn = json["amountIn"] as? String,
+              let quoteAmountOut = json["quoteAmountOut"] as? String,
+              let amountOutMinimum = json["amountOutMinimum"] as? String,
+              let slippageBps = json["slippageBps"] as? UInt64 ?? (json["slippageBps"] as? Int).map(UInt64.init),
+              let path = json["path"] as? String,
+              let gasEstimate = json["gasEstimate"] as? String,
+              let requiresApproval = json["requiresApproval"] as? Bool
+        else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+
+        let hops = try (json["hops"] as? [[String: Any]] ?? []).map { try SwapQuoteHop(json: $0) }
+        let allowance = try (json["allowance"] as? String).map {
+            try Data.quantityString($0).leftPadded(to: 32)
+        }
+
+        self.init(
+            chainID: chainID,
+            factory: factory,
+            router: router,
+            quoter: quoter,
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            amountIn: try Data.quantityString(amountIn).leftPadded(to: 32),
+            quoteAmountOut: try Data.quantityString(quoteAmountOut).leftPadded(to: 32),
+            amountOutMinimum: try Data.quantityString(amountOutMinimum).leftPadded(to: 32),
+            slippageBps: slippageBps,
+            path: try Data(hexString: path),
+            hops: hops,
+            gasEstimate: gasEstimate,
+            allowance: allowance,
+            requiresApproval: requiresApproval
+        )
+    }
+}
+
+private extension SwapQuoteHop {
+    init(json: [String: Any]) throws {
+        guard let tokenIn = json["tokenIn"] as? String,
+              let tokenOut = json["tokenOut"] as? String,
+              let fee = json["fee"] as? Int,
+              let pool = json["pool"] as? String,
+              let liquidity = json["liquidity"] as? String
+        else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+
+        self.init(
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            fee: fee,
+            pool: pool,
+            liquidity: liquidity
         )
     }
 }

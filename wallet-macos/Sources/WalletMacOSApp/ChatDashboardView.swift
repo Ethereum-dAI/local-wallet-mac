@@ -136,6 +136,11 @@ struct OnchainTransactionSummary: Codable, Equatable {
     let amount: String
     let token: String
     let recipient: String
+    let recipientName: String?
+    let resolvedRecipient: String?
+    let resolutionChainName: String?
+    let resolutionChainID: UInt64?
+    let ccipReadUsed: Bool?
     let userOpHash: String
     let transactionHash: String?
     let status: Status
@@ -149,10 +154,17 @@ enum ChatIntentExecutionStatus: Equatable {
     case failed(String)
 }
 
+enum ChatTransferPreflightStatus: Equatable {
+    case resolving
+    case resolved(WalletNodeClient.ResolvedName)
+    case failed(String)
+}
+
 private enum ChatIntentExecutionError: LocalizedError {
     case unsupportedTransferToken
     case unsupportedTransferAmount
     case invalidTransferRecipient
+    case unsupportedENSRecipient
     case unsupportedChain
 
     var errorDescription: String? {
@@ -162,11 +174,21 @@ private enum ChatIntentExecutionError: LocalizedError {
         case .unsupportedTransferAmount:
             return "Only explicit decimal token amounts are executable right now."
         case .invalidTransferRecipient:
-            return "Only 0x-prefixed Ethereum recipient addresses are executable right now."
+            return "Enter a 0x Ethereum address or an ENS name with at least one dot."
+        case .unsupportedENSRecipient:
+            return "That ENS name could not be resolved to an EVM address on the active chain."
         case .unsupportedChain:
             return "The active chain does not have a local token registry yet."
         }
     }
+}
+
+private struct ChatTransferRequest {
+    let recipient: String
+    let recipientName: String?
+    let resolvedName: WalletNodeClient.ResolvedName?
+    let amount: String
+    let token: WalletToken
 }
 
 enum ContextUsageLevel {
@@ -220,8 +242,10 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var streamingText: String = ""
     @Published private(set) var streamingMessageID: UUID? = nil
     @Published var feedbackExportMessage: String? = nil
+    @Published private var transferPreflightStatuses: [UUID: ChatTransferPreflightStatus] = [:]
 
     private var generationTask: Task<Void, Never>? = nil
+    private var transferPreflightTasks: [UUID: Task<Void, Never>] = [:]
     private var walletModelCancellable: AnyCancellable?
     private let inferenceService: EmbeddedLlamaInferenceService
     private let chatStore: ChatSQLiteStore
@@ -590,6 +614,15 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     func confirmIntent(_ message: ChatMessage) {
+        if let intent = message.toolIntent,
+           let preflightStatus = transferPreflightStatuses[intent.id] {
+            switch preflightStatus {
+            case .resolving, .failed:
+                return
+            case .resolved:
+                break
+            }
+        }
         if let intent = updateIntent(message, disposition: .confirmed, args: nil) {
             executeIfSupported(intent)
         }
@@ -675,6 +708,48 @@ private final class ChatDashboardModel: ObservableObject {
         return .idle
     }
 
+    func transferPreflightStatus(for intent: ToolIntent) -> ChatTransferPreflightStatus? {
+        transferPreflightStatuses[intent.id]
+    }
+
+    func prepareIntentPreview(_ message: ChatMessage) {
+        guard let intent = message.toolIntent, intent.tool == .transfer else {
+            return
+        }
+        guard intent.disposition != .rejected else {
+            transferPreflightTasks[intent.id]?.cancel()
+            transferPreflightTasks[intent.id] = nil
+            transferPreflightStatuses[intent.id] = nil
+            return
+        }
+        guard transferPreflightStatuses[intent.id] == nil,
+              transferPreflightTasks[intent.id] == nil
+        else {
+            return
+        }
+
+        transferPreflightStatuses[intent.id] = .resolving
+        transferPreflightTasks[intent.id] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.transferPreflightTasks[intent.id] = nil
+            }
+
+            do {
+                let request = try await self.transferRequest(from: intent)
+                if let resolvedName = request.resolvedName {
+                    self.transferPreflightStatuses[intent.id] = .resolved(resolvedName)
+                } else {
+                    self.transferPreflightStatuses[intent.id] = nil
+                }
+            } catch is CancellationError {
+                self.transferPreflightStatuses[intent.id] = nil
+            } catch {
+                self.transferPreflightStatuses[intent.id] = .failed(error.localizedDescription)
+            }
+        }
+    }
+
     func exportFeedbackRankings() {
         do {
             let records = try chatStore.loadToolIntentFeedbackExportRecords()
@@ -711,6 +786,7 @@ private final class ChatDashboardModel: ObservableObject {
         try? chatStore.appendMessage(message, to: conversationID)
         try? chatStore.updateConversationMetadata(updatedConversation)
         sortConversationsKeepingActive()
+        prepareIntentPreview(message)
     }
 
     private func refreshAccountIdentity() {
@@ -768,6 +844,10 @@ private final class ChatDashboardModel: ObservableObject {
         intent.disposition = disposition
         intent.updatedAt = Date()
 
+        transferPreflightTasks[intent.id]?.cancel()
+        transferPreflightTasks[intent.id] = nil
+        transferPreflightStatuses[intent.id] = nil
+
         conversations[conversationIndex].messages[messageIndex].toolIntent = intent
         conversations[conversationIndex].updatedAt = Date()
         let updatedConversation = conversations[conversationIndex]
@@ -795,6 +875,9 @@ private final class ChatDashboardModel: ObservableObject {
             ),
             to: updatedConversation.id
         )
+        if disposition != .rejected {
+            prepareIntentPreview(conversations[conversationIndex].messages[messageIndex])
+        }
         return intent
     }
 
@@ -814,15 +897,18 @@ private final class ChatDashboardModel: ObservableObject {
             }
 
             do {
-                let request = try self.transferRequest(from: intent)
+                let request = try await self.transferRequest(from: intent)
                 let result: AppModel.UserOperationSendResult
+                let recipientLabel = request.recipientName.map {
+                    "\($0) (\(request.recipient.walletDisplayShortAddress))"
+                } ?? request.recipient.walletDisplayShortAddress
                 switch request.token.kind {
                 case .native:
                     result = try await self.walletModel.executeNativeTransfer(
                         recipient: request.recipient,
                         amountETH: request.amount,
                         logContext: "chat-transfer",
-                        signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer on \(self.walletModel.activeChain.name)"
+                        signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer to \(recipientLabel) on \(self.walletModel.activeChain.name)"
                     )
                 case .erc20:
                     result = try await self.walletModel.executeERC20Transfer(
@@ -830,10 +916,10 @@ private final class ChatDashboardModel: ObservableObject {
                         recipient: request.recipient,
                         amount: request.amount,
                         logContext: "chat-transfer",
-                        signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer on \(self.walletModel.activeChain.name)"
+                        signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer to \(recipientLabel) on \(self.walletModel.activeChain.name)"
                     )
                 }
-                self.appendExecutionResult(result, for: intent)
+                self.appendExecutionResult(result, for: intent, request: request)
             } catch {
                 self.appendExecutionError(error, for: intent)
             }
@@ -842,7 +928,7 @@ private final class ChatDashboardModel: ObservableObject {
 
     private func transferRequest(
         from intent: ToolIntent
-    ) throws -> (recipient: String, amount: String, token: WalletToken) {
+    ) async throws -> ChatTransferRequest {
         guard !WalletTokenRegistry.tokens(on: walletModel.activeChain.id).isEmpty else {
             throw ChatIntentExecutionError.unsupportedChain
         }
@@ -864,18 +950,48 @@ private final class ChatDashboardModel: ObservableObject {
         guard let rawRecipient = intent.args["to"]?.trimmingCharacters(in: .whitespacesAndNewlines) else {
             throw ChatIntentExecutionError.invalidTransferRecipient
         }
-        let recipientBytes = try Data(hexString: rawRecipient)
-        guard recipientBytes.count == 20 else {
+
+        _ = try EtherAmountParser.units(fromDecimalString: rawAmount, decimals: token.decimals)
+
+        if let recipientBytes = try? Data(hexString: rawRecipient), recipientBytes.count == 20 {
+            return ChatTransferRequest(
+                recipient: "0x" + recipientBytes.hexEncodedString,
+                recipientName: nil,
+                resolvedName: nil,
+                amount: rawAmount,
+                token: token
+            )
+        }
+
+        guard rawRecipient.contains(".") else {
             throw ChatIntentExecutionError.invalidTransferRecipient
         }
 
-        _ = try EtherAmountParser.units(fromDecimalString: rawAmount, decimals: token.decimals)
-        return ("0x" + recipientBytes.hexEncodedString, rawAmount, token)
+        do {
+            let resolvedName = try await walletModel.resolveName(rawRecipient)
+            let recipientBytes = try Data(hexString: resolvedName.address)
+            guard recipientBytes.count == 20 else {
+                throw ChatIntentExecutionError.unsupportedENSRecipient
+            }
+            return ChatTransferRequest(
+                recipient: "0x" + recipientBytes.hexEncodedString,
+                recipientName: resolvedName.normalizedName,
+                resolvedName: resolvedName,
+                amount: rawAmount,
+                token: token
+            )
+        } catch {
+            if error is ChatIntentExecutionError {
+                throw error
+            }
+            throw error
+        }
     }
 
     private func appendExecutionResult(
         _ result: AppModel.UserOperationSendResult,
-        for intent: ToolIntent
+        for intent: ToolIntent,
+        request: ChatTransferRequest
     ) {
         guard let conversationID = activeConversationIDIfPresent else {
             return
@@ -891,6 +1007,10 @@ private final class ChatDashboardModel: ObservableObject {
         }
         if let success = result.success {
             responsePayload["success"] = success
+        }
+        responsePayload["recipient"] = request.recipient
+        if let recipientName = request.recipientName {
+            responsePayload["recipient_name"] = recipientName
         }
         appendMessage(
             ChatMessage(
@@ -918,7 +1038,12 @@ private final class ChatDashboardModel: ObservableObject {
             chainID: walletModel.activeChain.id,
             amount: intent.args["amount"] ?? "—",
             token: resolvedTokenSymbol(for: intent),
-            recipient: intent.args["to"] ?? "—",
+            recipient: request.recipient,
+            recipientName: request.recipientName,
+            resolvedRecipient: request.resolvedName?.address,
+            resolutionChainName: request.resolvedName?.resolutionChainName,
+            resolutionChainID: request.resolvedName.map { UInt64($0.resolutionChainId) },
+            ccipReadUsed: request.resolvedName?.ccipReadUsed,
             userOpHash: result.userOpHash,
             transactionHash: result.transactionHash,
             status: status,
@@ -1402,6 +1527,7 @@ struct LocalWalletChatDashboardView: View {
                                                 intent: intent,
                                                 feedback: message.toolFeedback,
                                                 executionStatus: model.executionStatus(for: intent),
+                                                transferPreflightStatus: model.transferPreflightStatus(for: intent),
                                                 onConfirm: { model.confirmIntent(message) },
                                                 onReject: { model.rejectIntent(message) },
                                                 onEdit: { editedIntent in
@@ -1412,6 +1538,9 @@ struct LocalWalletChatDashboardView: View {
                                                 }
                                             )
                                             Spacer(minLength: 0)
+                                        }
+                                        .onAppear {
+                                            model.prepareIntentPreview(message)
                                         }
                                         .padding(.horizontal)
                                         .id(message.id)
@@ -2156,11 +2285,31 @@ private struct OnchainTransactionCard: View {
             }
 
             VStack(spacing: 8) {
+                if let recipientName = summary.recipientName {
+                    TransactionHashRow(
+                        title: "ENS name",
+                        value: recipientName,
+                        copiedValue: $copiedValue
+                    )
+                }
                 TransactionHashRow(
-                    title: "Recipient",
+                    title: summary.recipientName == nil ? "Recipient" : "Resolved to",
                     value: summary.recipient,
                     copiedValue: $copiedValue
                 )
+                if let resolutionChainName = summary.resolutionChainName {
+                    HStack {
+                        Text("Resolved on")
+                            .font(.system(size: 11, weight: .black))
+                            .foregroundStyle(ChatPalette.mutedText)
+                            .frame(width: 108, alignment: .leading)
+                        Text(summary.ccipReadUsed == true ? "\(resolutionChainName) · CCIP Read" : resolutionChainName)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(ChatPalette.secondaryText)
+                        Spacer()
+                    }
+                    .frame(height: 30)
+                }
                 TransactionHashRow(
                     title: "UserOperation",
                     value: summary.userOpHash,
@@ -2313,6 +2462,15 @@ private struct TransactionHashRow: View {
                 copiedValue = nil
             }
         }
+    }
+}
+
+private extension String {
+    var walletDisplayShortAddress: String {
+        guard hasPrefix("0x"), count > 18 else {
+            return self
+        }
+        return "\(prefix(10))...\(suffix(8))"
     }
 }
 

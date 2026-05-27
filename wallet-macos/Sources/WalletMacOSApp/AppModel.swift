@@ -646,6 +646,17 @@ final class AppModel: ObservableObject {
         )
     }
 
+    func resolveName(_ name: String) async throws -> WalletNodeClient.ResolvedName {
+        let walletNodeClient = try await ensureWalletNodeClient()
+        appendLog("ens: resolving \(name) on \(activeChain.name)")
+        let resolved = try await walletNodeClient.resolveName(
+            name,
+            sendChainId: Int(activeChain.id)
+        )
+        appendLog("ens: \(resolved.normalizedName) resolved to \(resolved.address) via \(resolved.resolutionChainName)")
+        return resolved
+    }
+
     private func executeTransfer(
         intent: TransactionIntent,
         logContext: String,

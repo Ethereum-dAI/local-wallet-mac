@@ -62,6 +62,65 @@ enum WeiFormatter {
     }
 }
 
+enum TokenAmountFormatter {
+    static func displayString(rawUnits: Data, decimals: Int, symbol: String) -> String {
+        let trimmed = rawUnits.drop { $0 == 0 }
+        guard !trimmed.isEmpty else {
+            return "0 \(symbol)"
+        }
+
+        var digits = [Int](repeating: 0, count: 1)
+        for byte in trimmed {
+            multiplyDecimalDigitsBy256(&digits)
+            addByte(Int(byte), to: &digits)
+        }
+
+        let decimal = digits.reversed().map(String.init).joined()
+        let splitIndex = max(decimal.count - decimals, 0)
+        let whole = splitIndex == 0 ? "0" : String(decimal.prefix(splitIndex))
+        let fractionRaw = decimals == 0
+            ? ""
+            : (splitIndex == 0
+               ? String(decimal).leftPadding(to: decimals, with: "0")
+               : String(decimal.suffix(decimals)))
+        let fraction = String(fractionRaw.prefix(6)).trimmingTrailingZeros()
+
+        if fraction.isEmpty {
+            return "\(whole) \(symbol)"
+        }
+        return "\(whole).\(fraction) \(symbol)"
+    }
+
+    private static func multiplyDecimalDigitsBy256(_ digits: inout [Int]) {
+        var carry = 0
+        for index in 0..<digits.count {
+            let value = digits[index] * 256 + carry
+            digits[index] = value % 10
+            carry = value / 10
+        }
+
+        while carry > 0 {
+            digits.append(carry % 10)
+            carry /= 10
+        }
+    }
+
+    private static func addByte(_ value: Int, to digits: inout [Int]) {
+        var carry = value
+        var index = 0
+        while carry > 0 {
+            if index == digits.count {
+                digits.append(0)
+            }
+
+            let total = digits[index] + carry
+            digits[index] = total % 10
+            carry = total / 10
+            index += 1
+        }
+    }
+}
+
 private extension String {
     func leftPadding(to length: Int, with character: Character) -> String {
         if count >= length {

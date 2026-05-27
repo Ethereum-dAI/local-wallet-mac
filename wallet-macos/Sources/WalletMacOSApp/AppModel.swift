@@ -52,6 +52,7 @@ final class AppModel: ObservableObject {
     private let rpcClient: DemoRPCClient
     private var walletNodeClient: WalletNodeClient?
     private var walletNodeDaemon: WalletNodeDaemon?
+    private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
     private let userOperationBuilder: UserOperationBuilder
 
     init(
@@ -368,8 +369,9 @@ final class AppModel: ObservableObject {
         isRefreshingLocalRelayer = true
         Task {
             do {
-                let walletNodeClient = try await ensureWalletNodeClient()
-                let status = try await walletNodeClient.bundlerStatus()
+                let status = try await withWalletNodeClient(operation: "status") { client in
+                    try await client.bundlerStatus()
+                }
                 localRelayerStatus = status
                 localRelayerMessage = status.ready
                     ? "Local relayer ready on \(status.networkProfile)."
@@ -495,18 +497,63 @@ final class AppModel: ObservableObject {
         if let walletNodeClient {
             return walletNodeClient
         }
+        if let walletNodeLaunchTask {
+            let daemon = try await walletNodeLaunchTask.value
+            walletNodeDaemon = daemon
+            walletNodeClient = daemon.client
+            return daemon.client
+        }
+
         localRelayerMessage = "Starting local wallet-node daemon..."
         let keyRef = "bundler-eoa:default:\(activeChain.id):1"
-        let bundlerSecret = try BundlerKeyStore.shared.createIfNeeded(keyRef: keyRef)
-        let daemon = try await WalletNodeDaemon.launch(
-            bundlerSecret: bundlerSecret,
-            chain: activeChain
-        )
-        walletNodeDaemon = daemon
-        walletNodeClient = daemon.client
-        localRelayerMessage = "Local wallet-node daemon connected."
-        appendLog("relayer: wallet-node daemon started")
-        return daemon.client
+        let chain = activeChain
+        let launchTask = Task {
+            let bundlerSecret = try BundlerKeyStore.shared.createIfNeeded(keyRef: keyRef)
+            return try await WalletNodeDaemon.launch(
+                bundlerSecret: bundlerSecret,
+                chain: chain
+            )
+        }
+        walletNodeLaunchTask = launchTask
+
+        do {
+            let daemon = try await launchTask.value
+            walletNodeLaunchTask = nil
+            walletNodeDaemon = daemon
+            walletNodeClient = daemon.client
+            localRelayerMessage = "Local wallet-node daemon connected."
+            appendLog("relayer: wallet-node daemon started")
+            return daemon.client
+        } catch {
+            walletNodeLaunchTask = nil
+            throw error
+        }
+    }
+
+    private func withWalletNodeClient<T>(
+        operation: String,
+        _ body: (WalletNodeClient) async throws -> T
+    ) async throws -> T {
+        let client = try await ensureWalletNodeClient()
+
+        do {
+            return try await body(client)
+        } catch {
+            guard client.usesUnixSocketTransport,
+                  walletNodeDaemon != nil,
+                  WalletNodeClient.isRecoverableUnixSocketFailure(error)
+            else {
+                throw error
+            }
+
+            appendLog("relayer: \(operation) lost wallet-node socket; relaunching daemon and retrying once")
+            walletNodeLaunchTask = nil
+            walletNodeClient = nil
+            walletNodeDaemon = nil
+
+            let relaunchedClient = try await ensureWalletNodeClient()
+            return try await body(relaunchedClient)
+        }
     }
 
     private func authorizeLocalRelayerAdminAction(summary: String) async throws {
@@ -647,14 +694,100 @@ final class AppModel: ObservableObject {
     }
 
     func resolveName(_ name: String) async throws -> WalletNodeClient.ResolvedName {
-        let walletNodeClient = try await ensureWalletNodeClient()
         appendLog("ens: resolving \(name) on \(activeChain.name)")
-        let resolved = try await walletNodeClient.resolveName(
-            name,
-            sendChainId: Int(activeChain.id)
-        )
+        let resolved = try await withWalletNodeClient(operation: "ENS resolution") { client in
+            try await client.resolveName(
+                name,
+                sendChainId: Int(activeChain.id)
+            )
+        }
         appendLog("ens: \(resolved.normalizedName) resolved to \(resolved.address) via \(resolved.resolutionChainName)")
         return resolved
+    }
+
+    func quoteExactInputSwap(
+        from tokenIn: WalletToken,
+        to tokenOut: WalletToken,
+        amount: String,
+        slippageBps: UInt64 = 100
+    ) async throws -> SwapQuote {
+        guard let walletAddress = walletRecord?.kernelAccountAddress else {
+            throw AppError.invalidCounterfactualAddress
+        }
+        guard let wrappedNative = WalletTokenRegistry.wrappedNativeToken(on: activeChain.id),
+              let wrappedNativeAddress = wrappedNative.contractAddress
+        else {
+            throw AppError.invalidExecutionAddress
+        }
+
+        let tokenInAddress = tokenIn.contractAddress ?? wrappedNativeAddress
+        let tokenOutAddress = tokenOut.contractAddress ?? wrappedNativeAddress
+        let amountIn = try EtherAmountParser.units(
+            fromDecimalString: amount,
+            decimals: tokenIn.decimals
+        )
+        let intermediates = WalletTokenRegistry.swapIntermediates(on: activeChain.id)
+            .compactMap(\.contractAddress)
+            .filter {
+                $0.caseInsensitiveCompare(tokenInAddress) != .orderedSame
+                    && $0.caseInsensitiveCompare(tokenOutAddress) != .orderedSame
+            }
+
+        appendLog("swap: quoting \(amount) \(tokenIn.symbol) to \(tokenOut.symbol) on \(activeChain.name)")
+        let quote = try await withWalletNodeClient(operation: "swap quote") { client in
+            try await client.quoteSwap(
+                sendChainId: activeChain.id,
+                tokenIn: tokenInAddress,
+                tokenOut: tokenOutAddress,
+                amountIn: amountIn,
+                owner: walletAddress,
+                tokenInIsNative: tokenIn.isNative,
+                slippageBps: slippageBps,
+                intermediates: intermediates
+            )
+        }
+        appendLog("swap: quoted \(quote.hops.count) hop route amountOut=\(quote.quoteAmountOut.shortHex) minOut=\(quote.amountOutMinimum.shortHex)")
+
+        return SwapQuote(
+            chainID: quote.chainID,
+            factory: quote.factory,
+            router: quote.router,
+            quoter: quote.quoter,
+            tokenIn: quote.tokenIn,
+            tokenOut: quote.tokenOut,
+            amountIn: quote.amountIn,
+            quoteAmountOut: quote.quoteAmountOut,
+            amountOutMinimum: quote.amountOutMinimum,
+            slippageBps: quote.slippageBps,
+            path: quote.path,
+            hops: quote.hops,
+            gasEstimate: quote.gasEstimate,
+            allowance: quote.allowance,
+            requiresApproval: quote.requiresApproval
+        )
+    }
+
+    func executeExactInputSwap(
+        quote: SwapQuote,
+        from tokenIn: WalletToken,
+        to tokenOut: WalletToken,
+        logContext: String = "swap",
+        signingReason: String? = nil
+    ) async throws -> UserOperationSendResult {
+        guard let walletAddress = walletRecord?.kernelAccountAddress else {
+            throw AppError.invalidCounterfactualAddress
+        }
+        let request = SwapExecutionRequest(
+            quote: quote,
+            recipient: walletAddress,
+            tokenInIsNative: tokenIn.isNative,
+            tokenOutIsNative: tokenOut.isNative
+        )
+        return try await executeTransfer(
+            intent: .exactInputSwap(request),
+            logContext: logContext,
+            signingReason: signingReason ?? "Authorize \(tokenIn.symbol) to \(tokenOut.symbol) swap on \(activeChain.name)"
+        )
     }
 
     private func executeTransfer(
@@ -740,14 +873,15 @@ final class AppModel: ObservableObject {
         )
         appendLog("\(logContext): encoded Kernel/WebAuthn signature (\(encodedSignature.count) bytes)")
 
-        let walletNodeClient = try await ensureWalletNodeClient()
         bridgeStatus = "Submitting UserOperation to local wallet-node on \(activeChain.name)..."
         activeBundlerStatus = "Submitting UserOperation"
 
-        let sentUserOpHash = try await walletNodeClient.sendUserOperation(
-            draft: enrichedDraft,
-            signature: encodedSignature
-        )
+        let sentUserOpHash = try await withWalletNodeClient(operation: "\(logContext) submit") { client in
+            try await client.sendUserOperation(
+                draft: enrichedDraft,
+                signature: encodedSignature
+            )
+        }
         lastSubmittedUserOperationHash = sentUserOpHash
         appendLog("\(logContext): local wallet-node accepted userOpHash \(sentUserOpHash)")
 
@@ -828,19 +962,21 @@ final class AppModel: ObservableObject {
         _ draft: UserOperationDraft,
         logContext: String
     ) async throws -> UserOperationDraft {
-        let walletNodeClient = try await ensureWalletNodeClient()
-
         appendLog("\(logContext): checking local wallet-node entry point support")
-        try await walletNodeClient.assertEntryPointSupport(activeChain.entryPoint)
+        try await withWalletNodeClient(operation: "\(logContext) entry point check") { client in
+            try await client.assertEntryPointSupport(activeChain.entryPoint)
+        }
         appendLog("\(logContext): local wallet-node supports entry point \(activeChain.entryPoint)")
 
         let dummySignature = try WalletSignature.abiEncodeDummySignature(usePrecompiled: false)
         appendLog("\(logContext): generated dummy signature for estimation (\(dummySignature.count) bytes)")
 
-        let estimate = try await walletNodeClient.estimateUserOperationGas(
-            draft: draft,
-            dummySignature: dummySignature
-        )
+        let estimate = try await withWalletNodeClient(operation: "\(logContext) gas estimate") { client in
+            try await client.estimateUserOperationGas(
+                draft: draft,
+                dummySignature: dummySignature
+            )
+        }
         appendLog(
             "\(logContext): gas estimate call=\(estimate.callGasLimit.shortHex) verification=\(estimate.verificationGasLimit.shortHex) preVerification=\(estimate.preVerificationGas.shortHex)"
         )
@@ -872,11 +1008,13 @@ final class AppModel: ObservableObject {
         userOpHash: String,
         logContext: String
     ) async throws -> WalletNodeClient.UserOperationReceipt? {
-        let walletNodeClient = try await ensureWalletNodeClient()
         appendLog("\(logContext): polling local wallet-node receipt for \(userOpHash)")
 
         for attempt in 1...90 {
-            if let receipt = try await walletNodeClient.getUserOperationReceipt(userOpHash: userOpHash) {
+            let receipt = try await withWalletNodeClient(operation: "\(logContext) receipt poll") { client in
+                try await client.getUserOperationReceipt(userOpHash: userOpHash)
+            }
+            if let receipt {
                 appendLog("\(logContext): receipt received on attempt \(attempt)")
                 return receipt
             }
@@ -896,8 +1034,9 @@ final class AppModel: ObservableObject {
         logContext: String
     ) async throws -> (maxPriorityFeePerGas: Data, maxFeePerGas: Data) {
         do {
-            let walletNodeClient = try await ensureWalletNodeClient()
-            let gasPrice = try await walletNodeClient.userOperationGasPrice()
+            let gasPrice = try await withWalletNodeClient(operation: "\(logContext) gas price") { client in
+                try await client.userOperationGasPrice()
+            }
             appendLog("\(logContext): using local wallet-node gas price tier 'standard'")
             return (
                 maxPriorityFeePerGas: gasPrice.standard.maxPriorityFeePerGas,

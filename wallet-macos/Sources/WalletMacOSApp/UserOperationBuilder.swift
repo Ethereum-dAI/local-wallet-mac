@@ -47,6 +47,63 @@ struct ERC20TransferCallEncoder {
     }
 }
 
+struct SwapRouterCallEncoder {
+    private static let exactInputSelector = Data(hex: "b858183f")
+    private static let multicallSelector = Data(hex: "ac9650d8")
+    private static let unwrapWETH9Selector = Data(hex: "49404b7c")
+
+    func encodeExactInput(path: Data, recipient: String, amountIn: Data, amountOutMinimum: Data) throws -> Data {
+        let recipientData = try Data(hexString: recipient)
+        guard recipientData.count == 20 else {
+            throw AppError.invalidExecutionAddress
+        }
+
+        return Self.exactInputSelector
+            + Data.fromBigEndian(UInt64(32)).leftPadded(to: 32)
+            + Data.fromBigEndian(UInt64(128)).leftPadded(to: 32)
+            + recipientData.leftPadded(to: 32)
+            + amountIn.leftPadded(to: 32)
+            + amountOutMinimum.leftPadded(to: 32)
+            + abiEncodeDynamicBytes(path)
+    }
+
+    func encodeUnwrapWETH9(amountMinimum: Data, recipient: String) throws -> Data {
+        let recipientData = try Data(hexString: recipient)
+        guard recipientData.count == 20 else {
+            throw AppError.invalidExecutionAddress
+        }
+
+        return Self.unwrapWETH9Selector
+            + amountMinimum.leftPadded(to: 32)
+            + recipientData.leftPadded(to: 32)
+    }
+
+    func encodeMulticall(_ calls: [Data]) -> Data {
+        var encodedCalls = Data()
+        var offsets = Data()
+        var nextOffset = calls.count * 32
+        for call in calls {
+            offsets += Data.fromBigEndian(UInt64(nextOffset)).leftPadded(to: 32)
+            let encoded = abiEncodeDynamicBytes(call)
+            encodedCalls += encoded
+            nextOffset += encoded.count
+        }
+
+        return Self.multicallSelector
+            + Data.fromBigEndian(UInt64(32)).leftPadded(to: 32)
+            + Data.fromBigEndian(UInt64(calls.count)).leftPadded(to: 32)
+            + offsets
+            + encodedCalls
+    }
+
+    private func abiEncodeDynamicBytes(_ value: Data) -> Data {
+        let length = Data.fromBigEndian(UInt64(value.count)).leftPadded(to: 32)
+        let remainder = value.count % 32
+        let padding = remainder == 0 ? 0 : 32 - remainder
+        return length + value + Data(repeating: 0, count: padding)
+    }
+}
+
 struct KernelDeploymentEncoder {
     private static let createAccountSelector = Data(hex: "ea6d13ac")
 
@@ -102,17 +159,20 @@ struct UserOperationBuilder {
     private let rpcClient: DemoRPCClient
     private let kernelCallEncoder: KernelCallEncoder
     private let erc20TransferCallEncoder: ERC20TransferCallEncoder
+    private let swapRouterCallEncoder: SwapRouterCallEncoder
     private let deploymentEncoder: KernelDeploymentEncoder
 
     init(
         rpcClient: DemoRPCClient = DemoRPCClient(),
         kernelCallEncoder: KernelCallEncoder = KernelCallEncoder(),
         erc20TransferCallEncoder: ERC20TransferCallEncoder = ERC20TransferCallEncoder(),
+        swapRouterCallEncoder: SwapRouterCallEncoder = SwapRouterCallEncoder(),
         deploymentEncoder: KernelDeploymentEncoder = KernelDeploymentEncoder()
     ) {
         self.rpcClient = rpcClient
         self.kernelCallEncoder = kernelCallEncoder
         self.erc20TransferCallEncoder = erc20TransferCallEncoder
+        self.swapRouterCallEncoder = swapRouterCallEncoder
         self.deploymentEncoder = deploymentEncoder
     }
 
@@ -207,6 +267,42 @@ struct UserOperationBuilder {
                     recipient: recipient,
                     amount: transferAmount
                 )
+            )
+        case .exactInputSwap(let request):
+            if request.quote.requiresApproval {
+                throw AppError.swapApprovalRequired("Input token")
+            }
+            let routerData = try Data(hexString: request.quote.router)
+            guard routerData.count == 20 else {
+                throw AppError.invalidExecutionAddress
+            }
+
+            let routerCallData: Data
+            if request.tokenOutIsNative {
+                let swapCallData = try swapRouterCallEncoder.encodeExactInput(
+                    path: request.quote.path,
+                    recipient: request.quote.router,
+                    amountIn: request.quote.amountIn,
+                    amountOutMinimum: request.quote.amountOutMinimum
+                )
+                let unwrapCallData = try swapRouterCallEncoder.encodeUnwrapWETH9(
+                    amountMinimum: request.quote.amountOutMinimum,
+                    recipient: request.recipient
+                )
+                routerCallData = swapRouterCallEncoder.encodeMulticall([swapCallData, unwrapCallData])
+            } else {
+                routerCallData = try swapRouterCallEncoder.encodeExactInput(
+                    path: request.quote.path,
+                    recipient: request.recipient,
+                    amountIn: request.quote.amountIn,
+                    amountOutMinimum: request.quote.amountOutMinimum
+                )
+            }
+
+            return KernelExecutionRequest(
+                target: "0x" + routerData.hexEncodedString,
+                value: request.tokenInIsNative ? request.quote.amountIn : Data(repeating: 0, count: 32),
+                callData: routerCallData
             )
         }
     }

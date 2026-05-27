@@ -56,6 +56,14 @@ enum WalletTokenRegistry {
         }
     }
 
+    static func wrappedNativeToken(on chainID: UInt64) -> WalletToken? {
+        token(matching: "WETH", on: chainID)
+    }
+
+    static func swapIntermediates(on chainID: UInt64) -> [WalletToken] {
+        ["WETH", "USDC", "USDT", "DAI"].compactMap { token(matching: $0, on: chainID) }
+    }
+
     private static let allTokens: [WalletToken] = [
         WalletToken(chainID: 1, symbol: "ETH", name: "Ether", decimals: 18, kind: .native),
         WalletToken(chainID: 1, symbol: "WETH", name: "Wrapped Ether", decimals: 18, kind: .erc20(address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")),
@@ -81,6 +89,40 @@ enum WalletTokenRegistry {
 enum TransactionIntent: Equatable {
     case nativeTransfer(recipient: String, amountETH: String)
     case erc20Transfer(token: WalletToken, recipient: String, amount: String)
+    case exactInputSwap(SwapExecutionRequest)
+}
+
+struct SwapQuoteHop: Equatable, Codable {
+    let tokenIn: String
+    let tokenOut: String
+    let fee: Int
+    let pool: String
+    let liquidity: String
+}
+
+struct SwapQuote: Equatable, Codable {
+    let chainID: UInt64
+    let factory: String
+    let router: String
+    let quoter: String
+    let tokenIn: String
+    let tokenOut: String
+    let amountIn: Data
+    let quoteAmountOut: Data
+    let amountOutMinimum: Data
+    let slippageBps: UInt64
+    let path: Data
+    let hops: [SwapQuoteHop]
+    let gasEstimate: String
+    let allowance: Data?
+    let requiresApproval: Bool
+}
+
+struct SwapExecutionRequest: Equatable {
+    let quote: SwapQuote
+    let recipient: String
+    let tokenInIsNative: Bool
+    let tokenOutIsNative: Bool
 }
 
 struct UserOperationGasPlan: Equatable {

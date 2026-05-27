@@ -62,6 +62,9 @@ public struct SlashCommandParser: Sendable {
             try require(args, key: "amount")
             var withDefaults = args
             if withDefaults["amount_side"] == nil { withDefaults["amount_side"] = "input" }
+            guard withDefaults["amount_side"]?.lowercased() == "input" else {
+                throw SlashParseError.malformedArgument("amount_side", value: "only input is supported")
+            }
             return ToolIntent(tool: .swap, args: withDefaults, source: .slash)
         }
         guard let toRange = rest.range(of: " to ") else {

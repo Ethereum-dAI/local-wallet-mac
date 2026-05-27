@@ -18,6 +18,7 @@ enum AppError: LocalizedError {
     case corruptedMetadataStore
     case unsupportedSigningAlgorithm
     case walletOperationInProgress
+    case swapApprovalRequired(String)
 
     var errorDescription: String? {
         switch self {
@@ -55,6 +56,8 @@ enum AppError: LocalizedError {
             return "The Secure Enclave key does not support the expected signing algorithm."
         case .walletOperationInProgress:
             return "Another wallet operation is already in progress."
+        case .swapApprovalRequired(let token):
+            return "\(token) approval is required before this swap can be submitted. Batch approval is not implemented on this branch yet."
         }
     }
 }

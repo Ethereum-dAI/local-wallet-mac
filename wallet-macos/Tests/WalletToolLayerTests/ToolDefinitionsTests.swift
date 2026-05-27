@@ -15,14 +15,14 @@ import LocalLLM
     #expect(required.sorted() == ["amount", "to"])
 }
 
-@Test func swapToolHasAmountSideEnum() throws {
+@Test func swapToolOnlySupportsInputAmountSide() throws {
     let tools = ToolDefinitions.phase1
     let swap = try #require(tools.first { $0.name == "swap" })
     let schema = try JSONSerialization.jsonObject(with: Data(swap.parametersJSONSchema.utf8)) as! [String: Any]
     let props = schema["properties"] as! [String: Any]
     let amountSide = props["amount_side"] as! [String: Any]
     let enumValues = amountSide["enum"] as! [String]
-    #expect(enumValues.sorted() == ["input", "output"])
+    #expect(enumValues == ["input"])
     let required = schema["required"] as! [String]
     #expect(required.sorted() == ["amount", "from_token", "to_token"])
 }

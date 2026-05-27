@@ -5,6 +5,7 @@ struct ToolIntentCardView: View {
     let intent: ToolIntent
     let feedback: ToolIntentFeedback?
     let executionStatus: ChatIntentExecutionStatus
+    let transferPreflightStatus: ChatTransferPreflightStatus?
     let onConfirm: () -> Void
     let onReject: () -> Void
     let onEdit: ([String: String]) -> Void
@@ -46,6 +47,8 @@ struct ToolIntentCardView: View {
             }
             .padding(.vertical, 4)
 
+            transferPreflightRow
+
             executionStatusRow
 
             feedbackControls
@@ -62,7 +65,7 @@ struct ToolIntentCardView: View {
                     Spacer()
                     Button("Looks good", action: onConfirm)
                         .buttonStyle(.borderedProminent)
-                        .disabled(isExecutionRunning)
+                        .disabled(isExecutionRunning || !canConfirm)
                 }
             case .confirmed:
                 HStack(spacing: 6) {
@@ -119,6 +122,15 @@ struct ToolIntentCardView: View {
         return false
     }
 
+    private var canConfirm: Bool {
+        switch transferPreflightStatus {
+        case .resolving, .failed:
+            return false
+        case .resolved, nil:
+            return true
+        }
+    }
+
     private var confirmedIcon: String {
         switch executionStatus {
         case .running:
@@ -171,6 +183,48 @@ struct ToolIntentCardView: View {
     }
 
     @ViewBuilder
+    private var transferPreflightRow: some View {
+        if intent.tool == .transfer, let transferPreflightStatus {
+            switch transferPreflightStatus {
+            case .resolving:
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Resolving recipient before signing...")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            case .resolved(let resolvedName):
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("ENS resolved", systemImage: resolvedName.ccipReadUsed ? "network" : "checkmark.circle.fill")
+                        .font(.caption.bold())
+                        .foregroundStyle(.green)
+                    intentDetailRow("name", resolvedName.normalizedName)
+                    intentDetailRow("resolved to", resolvedName.address.walletDisplayShortAddress)
+                    intentDetailRow(
+                        "resolved on",
+                        resolvedName.ccipReadUsed
+                        ? "\(resolvedName.resolutionChainName) · CCIP Read"
+                        : resolvedName.resolutionChainName
+                    )
+                }
+                .padding(.vertical, 4)
+            case .failed(let message):
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(message)
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.vertical, 4)
+            }
+        }
+    }
+
+    @ViewBuilder
     private var executionStatusRow: some View {
         switch executionStatus {
         case .running:
@@ -207,6 +261,21 @@ struct ToolIntentCardView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .italic()
+        }
+    }
+
+    private func intentDetailRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .frame(width: 96, alignment: .leading)
+            Text(value)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
         }
     }
 
@@ -353,5 +422,14 @@ private struct ToolIntentFeedbackSheet: View {
         }
         .padding(20)
         .frame(minWidth: 420, minHeight: 240)
+    }
+}
+
+private extension String {
+    var walletDisplayShortAddress: String {
+        guard hasPrefix("0x"), count > 18 else {
+            return self
+        }
+        return "\(prefix(10))...\(suffix(8))"
     }
 }

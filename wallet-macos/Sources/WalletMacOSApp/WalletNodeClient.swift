@@ -117,6 +117,18 @@ struct WalletNodeClient {
         let invalidated: Bool
     }
 
+    struct ResolvedName: Equatable {
+        let input: String
+        let normalizedName: String
+        let address: String
+        let resolver: String
+        let resolutionChainId: Int
+        let resolutionChainName: String
+        let addressRecord: String
+        let coinType: Int
+        let ccipReadUsed: Bool
+    }
+
     enum ClientError: LocalizedError {
         case invalidResponse
         case transport(String)
@@ -244,6 +256,20 @@ struct WalletNodeClient {
             standard: try parseGasPriceTier(object["standard"], field: "standard"),
             fast: try parseGasPriceTier(object["fast"], field: "fast")
         )
+    }
+
+    func resolveName(_ name: String, sendChainId: Int) async throws -> ResolvedName {
+        let result = try await call(
+            method: "localwallet_resolveName",
+            params: [[
+                "name": name,
+                "sendChainId": sendChainId,
+            ]]
+        )
+        guard let object = result as? [String: Any] else {
+            throw ClientError.invalidResponse
+        }
+        return try ResolvedName(json: object)
     }
 
     func beginAdminAction(action: String, chainId: Int, keyRef: String? = nil) async throws -> AdminChallenge {
@@ -634,6 +660,35 @@ private extension WalletNodeClient.RelayerStatus.KeyHistoryEntry {
             retiredAt: json["retiredAt"] as? Int,
             deletedAt: json["deletedAt"] as? Int,
             lastExportedAt: json["lastExportedAt"] as? Int
+        )
+    }
+}
+
+private extension WalletNodeClient.ResolvedName {
+    init(json: [String: Any]) throws {
+        guard let input = json["input"] as? String,
+              let normalizedName = json["normalizedName"] as? String,
+              let address = json["address"] as? String,
+              let resolver = json["resolver"] as? String,
+              let resolutionChainId = json["resolutionChainId"] as? Int,
+              let resolutionChainName = json["resolutionChainName"] as? String,
+              let addressRecord = json["addressRecord"] as? String,
+              let coinType = json["coinType"] as? Int,
+              let ccipReadUsed = json["ccipReadUsed"] as? Bool
+        else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+
+        self.init(
+            input: input,
+            normalizedName: normalizedName,
+            address: address,
+            resolver: resolver,
+            resolutionChainId: resolutionChainId,
+            resolutionChainName: resolutionChainName,
+            addressRecord: addressRecord,
+            coinType: coinType,
+            ccipReadUsed: ccipReadUsed
         )
     }
 }

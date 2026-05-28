@@ -107,6 +107,30 @@ struct DemoRPCClient {
         )
     }
 
+    func ethBalance(
+        chain: ChainConfiguration,
+        address: String
+    ) async throws -> String {
+        try await call(
+            method: "eth_getBalance",
+            params: [.string(address), .string("latest")],
+            rpcURL: chain.rpcURL
+        )
+    }
+
+    func erc20Balance(
+        chain: ChainConfiguration,
+        tokenAddress: String,
+        ownerAddress: String
+    ) async throws -> String {
+        let callData = try DemoRPCClient.erc20BalanceOfCallData(ownerAddress: ownerAddress)
+        return try await ethCall(
+            to: tokenAddress,
+            data: callData,
+            rpcURL: chain.rpcURL
+        )
+    }
+
     func entryPointNonce(
         chain: ChainConfiguration,
         accountAddress: String,
@@ -242,6 +266,15 @@ struct DemoRPCClient {
         let nonceKeyData = Data.fromBigEndian(nonceKey).leftPadded(to: 32)
         let encoded = account.leftPadded(to: 32) + nonceKeyData
         return "0x" + selector + encoded.hexEncodedString
+    }
+
+    private static func erc20BalanceOfCallData(ownerAddress: String) throws -> String {
+        let selector = "70a08231"
+        let owner = try Data(hexString: ownerAddress)
+        guard owner.count == 20 else {
+            throw AppError.invalidExecutionAddress
+        }
+        return "0x" + selector + owner.leftPadded(to: 32).hexEncodedString
     }
 
     private func u256Data(from data: Data) -> [UInt8] {

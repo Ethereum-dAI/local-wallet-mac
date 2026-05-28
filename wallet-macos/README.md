@@ -57,8 +57,8 @@ xcodegen generate
   - Chain config, Kernel contract addresses, EntryPoint config, and bundled ABI references.
 - `KernelAccountAddressPredictor.swift`
   - Thin app-side wrapper around shared Rust/Swift bridge logic for predicted Kernel account addresses.
-- `DemoRPCClient.swift`
-  - Read-only JSON-RPC client for public chain inspection and fee fallback data.
+- `ChainReadCallData.swift`
+  - ABI calldata helpers for read-only calls that are transported through local `wallet-node`.
 - `BundlerClient.swift`
   - Legacy hosted ERC-4337 bundler RPC client retained for older composer paths. Chat-confirmed transfer and swap intents use local `wallet-node` instead.
 - `UserOperationBuilder.swift`
@@ -70,7 +70,7 @@ xcodegen generate
 - `DemoSettingsStore.swift`
   - Persistent demo-time settings (e.g., testnet-mode toggle).
 - `WalletNodeClient.swift`
-  - JSON-RPC client for the local `wallet-node` daemon over Unix socket or HTTP, including admin-authorized rotate/export/delete bundler-EOA flows, ENS resolution, and Uniswap v3 swap quotes.
+  - JSON-RPC client for the local `wallet-node` daemon over Unix socket or HTTP, including Helios-backed chain reads, admin-authorized rotate/export/delete bundler-EOA flows, ENS resolution, and Uniswap v3 swap quotes.
 - `WalletNodeDaemon.swift`
   - Lifecycle wrapper around the spawned daemon process.
 - `WalletRecord.swift`

@@ -313,7 +313,6 @@ private final class ChatDashboardModel: ObservableObject {
     private let walletHistoryStore: WalletTransactionHistoryStore
     private let preferencesStore: ChatPreferencesStore
     private let walletModel: AppModel
-    private let rpcClient: DemoRPCClient
     private var executingIntentIDs: Set<UUID> = []
     private var lastTokenBalanceKey: String?
 
@@ -324,14 +323,12 @@ private final class ChatDashboardModel: ObservableObject {
         preferencesStore: ChatPreferencesStore = ChatPreferencesStore(),
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
         metadataStore: WalletMetadataStore = WalletMetadataStore(),
-        rpcClient: DemoRPCClient = DemoRPCClient(),
         walletModel: AppModel? = nil
     ) {
         self.inferenceService = inferenceService
         self.chatStore = chatStore
         self.walletHistoryStore = walletHistoryStore
         self.preferencesStore = preferencesStore
-        self.rpcClient = rpcClient
         self.walletModel = walletModel ?? AppModel(walletHistoryStore: walletHistoryStore)
         self.runtimeStatus = inferenceService.runtimeStatus
         self.thinkingEnabled = preferencesStore.thinkingEnabled
@@ -527,10 +524,9 @@ private final class ChatDashboardModel: ObservableObject {
             do {
                 let balanceHex: String
                 if token.isNative {
-                    balanceHex = try await rpcClient.ethBalance(chain: chain, address: address)
+                    balanceHex = try await walletModel.ethBalance(address: address)
                 } else if let tokenAddress = token.contractAddress {
-                    balanceHex = try await rpcClient.erc20Balance(
-                        chain: chain,
+                    balanceHex = try await walletModel.erc20Balance(
                         tokenAddress: tokenAddress,
                         ownerAddress: address
                     )

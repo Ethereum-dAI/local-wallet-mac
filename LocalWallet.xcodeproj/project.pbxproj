@@ -41,7 +41,7 @@
 		D612FF089828F9AA74757307 /* HexEncoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71F6CC5F8F55F7C5D22BBD6F /* HexEncoding.swift */; };
 		D720097E3C1CA355A0CB0B69 /* BundlerKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 338C3CE5B2A1B13400716881 /* BundlerKeyStore.swift */; };
 		E1C3DCD8C60EB9C2062460DB /* LocalHardwareInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A65A9349550912C759EED6DC /* LocalHardwareInspector.swift */; };
-		E3E827E96E85611AC6AB0CFF /* DemoRPCClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EF992555A66C55E68BD7DB9 /* DemoRPCClient.swift */; };
+		E3E827E96E85611AC6AB0CFF /* ChainReadCallData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EF992555A66C55E68BD7DB9 /* ChainReadCallData.swift */; };
 		EABBBB4361487720CC466308 /* KernelAccountAddressPredictor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6220284599C5BA1AD595394 /* KernelAccountAddressPredictor.swift */; };
 		F090CBF43D86C2A57BC2D110 /* QRCodeImageFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A23DA49317E3EDDFC173857 /* QRCodeImageFactory.swift */; };
 		F1987C5627761B64C579BD75 /* AppError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86145305356A12B55B0C0B52 /* AppError.swift */; };
@@ -54,7 +54,7 @@
 		01686936AC46773E37E58D41 /* ToolIntentFeedback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolIntentFeedback.swift; sourceTree = "<group>"; };
 		0565FE58E3D3C819258A03C1 /* EtherAmountParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EtherAmountParser.swift; sourceTree = "<group>"; };
 		0BD8C504DFE574FA718B16B8 /* EmbeddedLlamaInferenceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedLlamaInferenceService.swift; sourceTree = "<group>"; };
-		0EF992555A66C55E68BD7DB9 /* DemoRPCClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoRPCClient.swift; sourceTree = "<group>"; };
+		0EF992555A66C55E68BD7DB9 /* ChainReadCallData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChainReadCallData.swift; sourceTree = "<group>"; };
 		10EF37094DF3BB75ADE15500 /* BundlerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundlerClient.swift; sourceTree = "<group>"; };
 		1B2090660CAE81D103494C90 /* KernelFactory.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = KernelFactory.json; sourceTree = "<group>"; };
 		2FDD97F68DC79C7A31430C30 /* ChatDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDashboardView.swift; sourceTree = "<group>"; };
@@ -172,7 +172,7 @@
 				2FDD97F68DC79C7A31430C30 /* ChatDashboardView.swift */,
 				DF0CD621D86FF51807777FFF /* ChatSQLiteStore.swift */,
 				B9D44A78B0A9523321B9F367 /* DemoModels.swift */,
-				0EF992555A66C55E68BD7DB9 /* DemoRPCClient.swift */,
+				0EF992555A66C55E68BD7DB9 /* ChainReadCallData.swift */,
 				5FF9147DC25C40D4A7D8DA39 /* DemoSettingsStore.swift */,
 				0BD8C504DFE574FA718B16B8 /* EmbeddedLlamaInferenceService.swift */,
 				0565FE58E3D3C819258A03C1 /* EtherAmountParser.swift */,
@@ -294,7 +294,7 @@
 				B2656DCF13F49D71F359FC59 /* ChatDashboardView.swift in Sources */,
 				A31DC37F436D23B0A1BB950A /* ChatSQLiteStore.swift in Sources */,
 				C7372C6CA4E7765A2AA35B7A /* DemoModels.swift in Sources */,
-				E3E827E96E85611AC6AB0CFF /* DemoRPCClient.swift in Sources */,
+				E3E827E96E85611AC6AB0CFF /* ChainReadCallData.swift in Sources */,
 				0AEF64FBB3ECFADFD9712B00 /* DemoSettingsStore.swift in Sources */,
 				3FF118FCF7A80FC444631D4F /* EmbeddedLlamaInferenceService.swift in Sources */,
 				82C23E6456D6B25C14A4338E /* EtherAmountParser.swift in Sources */,

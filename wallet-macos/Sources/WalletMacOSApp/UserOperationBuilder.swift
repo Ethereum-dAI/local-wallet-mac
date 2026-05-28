@@ -156,20 +156,17 @@ struct KernelDeploymentEncoder {
 }
 
 struct UserOperationBuilder {
-    private let rpcClient: DemoRPCClient
     private let kernelCallEncoder: KernelCallEncoder
     private let erc20TransferCallEncoder: ERC20TransferCallEncoder
     private let swapRouterCallEncoder: SwapRouterCallEncoder
     private let deploymentEncoder: KernelDeploymentEncoder
 
     init(
-        rpcClient: DemoRPCClient = DemoRPCClient(),
         kernelCallEncoder: KernelCallEncoder = KernelCallEncoder(),
         erc20TransferCallEncoder: ERC20TransferCallEncoder = ERC20TransferCallEncoder(),
         swapRouterCallEncoder: SwapRouterCallEncoder = SwapRouterCallEncoder(),
         deploymentEncoder: KernelDeploymentEncoder = KernelDeploymentEncoder()
     ) {
-        self.rpcClient = rpcClient
         self.kernelCallEncoder = kernelCallEncoder
         self.erc20TransferCallEncoder = erc20TransferCallEncoder
         self.swapRouterCallEncoder = swapRouterCallEncoder
@@ -181,13 +178,15 @@ struct UserOperationBuilder {
         publicKey: PublicKeyCoordinates,
         chain: ChainConfiguration,
         isDeployed: Bool,
+        nonceHex: String,
         intent: TransactionIntent
-    ) async throws -> UserOperationDraft {
-        try await buildDraft(
+    ) throws -> UserOperationDraft {
+        try buildDraft(
             walletRecord: walletRecord,
             publicKey: publicKey,
             chain: chain,
             isDeployed: isDeployed,
+            nonceHex: nonceHex,
             execution: buildExecutionRequest(for: intent)
         )
     }
@@ -197,18 +196,14 @@ struct UserOperationBuilder {
         publicKey: PublicKeyCoordinates,
         chain: ChainConfiguration,
         isDeployed: Bool,
+        nonceHex: String,
         execution: KernelExecutionRequest
-    ) async throws -> UserOperationDraft {
+    ) throws -> UserOperationDraft {
         guard let sender = walletRecord.kernelAccountAddress else {
             throw AppError.invalidCounterfactualAddress
         }
 
         let callData = try kernelCallEncoder.encodeExecuteSingle(execution)
-        let nonceHex = try await rpcClient.entryPointNonce(
-            chain: chain,
-            accountAddress: sender,
-            nonceKey: 0
-        )
         let nonce = try Data(hexString: nonceHex).leftPadded(to: 32)
 
         let initCode: Data

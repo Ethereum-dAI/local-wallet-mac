@@ -50,7 +50,6 @@ final class AppModel: ObservableObject {
     private let metadataStore: WalletMetadataStore
     private let settingsStore: DemoSettingsStore
     private let kernelAccountAddressPredictor: KernelAccountAddressPredictor
-    private let rpcClient: DemoRPCClient
     private var walletNodeClient: WalletNodeClient?
     private var walletNodeDaemon: WalletNodeDaemon?
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
@@ -62,7 +61,6 @@ final class AppModel: ObservableObject {
         metadataStore: WalletMetadataStore = WalletMetadataStore(),
         settingsStore: DemoSettingsStore = DemoSettingsStore(),
         kernelAccountAddressPredictor: KernelAccountAddressPredictor = KernelAccountAddressPredictor(),
-        rpcClient: DemoRPCClient = DemoRPCClient(),
         walletNodeClient: WalletNodeClient? = WalletNodeClient.Configuration.fromEnvironment().map {
             WalletNodeClient(configuration: $0)
         },
@@ -73,7 +71,6 @@ final class AppModel: ObservableObject {
         self.metadataStore = metadataStore
         self.settingsStore = settingsStore
         self.kernelAccountAddressPredictor = kernelAccountAddressPredictor
-        self.rpcClient = rpcClient
         self.walletNodeClient = walletNodeClient
         self.userOperationBuilder = userOperationBuilder
         self.walletHistoryStore = walletHistoryStore
@@ -596,12 +593,25 @@ final class AppModel: ObservableObject {
             x: walletRecord.pubkeyX,
             y: walletRecord.pubkeyY
         )
+        guard let sender = walletRecord.kernelAccountAddress else {
+            throw AppError.invalidCounterfactualAddress
+        }
 
-        return try await userOperationBuilder.buildDraft(
+        appendLog("build: reading EntryPoint nonce through local wallet-node")
+        let nonceHex = try await withWalletNodeClient(operation: "EntryPoint nonce read") { client in
+            try await client.entryPointNonce(
+                entryPoint: activeChain.entryPoint,
+                accountAddress: sender,
+                nonceKey: 0
+            )
+        }
+
+        return try userOperationBuilder.buildDraft(
             walletRecord: walletRecord,
             publicKey: publicKey,
             chain: activeChain,
             isDeployed: isDeployedOverride ?? accountInspection?.isDeployed ?? walletRecord.isDeployed,
+            nonceHex: nonceHex,
             intent: intent
         )
     }
@@ -707,6 +717,21 @@ final class AppModel: ObservableObject {
         }
         appendLog("ens: \(resolved.normalizedName) resolved to \(resolved.address) via \(resolved.resolutionChainName)")
         return resolved
+    }
+
+    func ethBalance(address: String) async throws -> String {
+        try await withWalletNodeClient(operation: "ETH balance read") { client in
+            try await client.ethBalance(address: address)
+        }
+    }
+
+    func erc20Balance(tokenAddress: String, ownerAddress: String) async throws -> String {
+        try await withWalletNodeClient(operation: "ERC20 balance read") { client in
+            try await client.erc20Balance(
+                tokenAddress: tokenAddress,
+                ownerAddress: ownerAddress
+            )
+        }
     }
 
     func quoteExactInputSwap(
@@ -941,10 +966,9 @@ final class AppModel: ObservableObject {
 
         appendLog("\(logContext): querying code and balance for \(address.shortAddress) via \(activeChain.shortName)")
 
-        let inspection = try await rpcClient.inspectAccount(
-            chain: activeChain,
-            address: address
-        )
+        let inspection = try await withWalletNodeClient(operation: "\(logContext) account inspection") { client in
+            try await client.inspectAccount(address: address)
+        }
         accountInspection = inspection
 
         let refreshed = WalletRecord(
@@ -1258,19 +1282,14 @@ final class AppModel: ObservableObject {
     private func suggestedUserOperationFees(
         logContext: String
     ) async throws -> (maxPriorityFeePerGas: Data, maxFeePerGas: Data) {
-        do {
-            let gasPrice = try await withWalletNodeClient(operation: "\(logContext) gas price") { client in
-                try await client.userOperationGasPrice()
-            }
-            appendLog("\(logContext): using local wallet-node gas price tier 'standard'")
-            return (
-                maxPriorityFeePerGas: gasPrice.standard.maxPriorityFeePerGas,
-                maxFeePerGas: gasPrice.standard.maxFeePerGas
-            )
-        } catch {
-            appendLog("\(logContext): local wallet-node gas price unavailable, falling back to public RPC fees — \(error.localizedDescription)")
-            return try await rpcClient.suggestedGasFees(chain: activeChain)
+        let gasPrice = try await withWalletNodeClient(operation: "\(logContext) gas price") { client in
+            try await client.userOperationGasPrice()
         }
+        appendLog("\(logContext): using local wallet-node gas price tier 'standard'")
+        return (
+            maxPriorityFeePerGas: gasPrice.standard.maxPriorityFeePerGas,
+            maxFeePerGas: gasPrice.standard.maxFeePerGas
+        )
     }
 
     private func appendDraftLogSummary(_ draft: UserOperationDraft, context: String) {

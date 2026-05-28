@@ -294,6 +294,72 @@ struct WalletNodeClient {
         )
     }
 
+    func inspectAccount(address: String) async throws -> AccountInspection {
+        async let code = ethCode(address: address)
+        async let balance = ethBalance(address: address)
+
+        let codeHex = try await code
+        let balanceHex = try await balance
+        let isDeployed = normalizedHex(codeHex) != "0x"
+
+        return AccountInspection(
+            address: address,
+            isDeployed: isDeployed,
+            balanceWeiHex: balanceHex,
+            codeHex: codeHex
+        )
+    }
+
+    func ethBalance(address: String, block: String = "latest") async throws -> String {
+        let result = try await call(method: "eth_getBalance", params: [address, block])
+        guard let value = result as? String else {
+            throw ClientError.invalidResponse
+        }
+        return value
+    }
+
+    func ethCode(address: String, block: String = "latest") async throws -> String {
+        let result = try await call(method: "eth_getCode", params: [address, block])
+        guard let value = result as? String else {
+            throw ClientError.invalidResponse
+        }
+        return value
+    }
+
+    func ethCall(to: String, data: String, block: String = "latest") async throws -> String {
+        let result = try await call(
+            method: "eth_call",
+            params: [
+                [
+                    "to": to,
+                    "data": data,
+                ],
+                block,
+            ]
+        )
+        guard let value = result as? String else {
+            throw ClientError.invalidResponse
+        }
+        return value
+    }
+
+    func erc20Balance(tokenAddress: String, ownerAddress: String) async throws -> String {
+        let callData = try ChainReadCallData.erc20BalanceOf(ownerAddress: ownerAddress)
+        return try await ethCall(to: tokenAddress, data: callData)
+    }
+
+    func entryPointNonce(
+        entryPoint: String,
+        accountAddress: String,
+        nonceKey: UInt64 = 0
+    ) async throws -> String {
+        let callData = try ChainReadCallData.entryPointGetNonce(
+            accountAddress: accountAddress,
+            nonceKey: nonceKey
+        )
+        return try await ethCall(to: entryPoint, data: callData)
+    }
+
     func resolveName(_ name: String, sendChainId: Int) async throws -> ResolvedName {
         let result = try await call(
             method: "localwallet_resolveName",
@@ -511,6 +577,14 @@ struct WalletNodeClient {
         } catch {
             throw ClientError.transport("wallet-node returned invalid \(field): \(value)")
         }
+    }
+
+    private func normalizedHex(_ value: String) -> String {
+        let trimmed = value.lowercased()
+        if trimmed == "0x0" || trimmed == "0x00" {
+            return "0x"
+        }
+        return trimmed
     }
 
     private func parseGasPriceTier(_ value: Any?, field: String) throws -> UserOperationGasPriceTier {

@@ -7,6 +7,8 @@ struct ToolIntentCardView: View {
     let executionStatus: ChatIntentExecutionStatus
     let transferPreflightStatus: ChatTransferPreflightStatus?
     let swapPreflightStatus: ChatSwapPreflightStatus?
+    let requiresManualPreview: Bool
+    let onRefreshPreview: () -> Void
     let onConfirm: () -> Void
     let onReject: () -> Void
     let onEdit: ([String: String]) -> Void
@@ -51,6 +53,8 @@ struct ToolIntentCardView: View {
             transferPreflightRow
 
             swapPreflightRow
+
+            manualPreviewRow
 
             executionStatusRow
 
@@ -126,6 +130,9 @@ struct ToolIntentCardView: View {
     }
 
     private var canConfirm: Bool {
+        guard !requiresManualPreview else {
+            return false
+        }
         switch transferPreflightStatus {
         case .resolving, .failed:
             return false
@@ -139,6 +146,23 @@ struct ToolIntentCardView: View {
             return !preview.quote.requiresApproval
         case nil:
             return true
+        }
+    }
+
+    @ViewBuilder
+    private var manualPreviewRow: some View {
+        if requiresManualPreview {
+            HStack(alignment: .center, spacing: 10) {
+                Label("Saved intent. Run a fresh check before confirming.", systemImage: "clock.arrow.circlepath")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button("Check now", action: onRefreshPreview)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+            .padding(.vertical, 4)
         }
     }
 

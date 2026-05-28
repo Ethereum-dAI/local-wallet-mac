@@ -34,7 +34,7 @@ struct BundlerKeyStore {
 
         let generated = try WalletSignature.generateBundlerSecret()
         try add(keyRef: keyRef, secret: generated.secret)
-        return try read(keyRef: keyRef, reason: "Unlock the local relayer key")
+        return BundlerSecretRecord(keyRef: keyRef, secret: generated.secret)
     }
 
     func add(keyRef: String, secret: Data) throws {

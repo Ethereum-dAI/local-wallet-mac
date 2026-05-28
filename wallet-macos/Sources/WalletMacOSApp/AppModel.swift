@@ -36,13 +36,30 @@ final class AppModel: ObservableObject {
     @Published private(set) var isRotatingLocalRelayer = false
     @Published private(set) var isExportingLocalRelayer = false
     @Published private(set) var isDeletingLocalRelayer = false
+    @Published private(set) var unlockRelayerOnLaunch: Bool
 
     var activeChain: ChainConfiguration {
         configuration.activeChain
     }
 
+    var networkSettings: DemoNetworkSettings {
+        configuration.networkSettings
+    }
+
     var hasLocalRelayerClient: Bool {
         walletNodeClient != nil || WalletNodeClient.Configuration.fromEnvironment() == nil
+    }
+
+    var canChangeNetworkSettings: Bool {
+        !isBootstrapping
+            && !isRunningDemo
+            && !isRefreshingBalance
+            && !isBuildingUserOperation
+            && !isSendingUserOperation
+            && !isRefreshingLocalRelayer
+            && !isRotatingLocalRelayer
+            && !isExportingLocalRelayer
+            && !isDeletingLocalRelayer
     }
 
     private let keyStore: KeyStore
@@ -54,6 +71,11 @@ final class AppModel: ObservableObject {
     private var walletNodeDaemon: WalletNodeDaemon?
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
     private let userOperationBuilder: UserOperationBuilder
+    private static let relayerBalanceRetryDelays: [UInt64] = [
+        400_000_000,
+        900_000_000,
+        1_500_000_000,
+    ]
 
     init(
         keyStore: KeyStore = KeyStore(),
@@ -73,9 +95,8 @@ final class AppModel: ObservableObject {
         self.rpcClient = rpcClient
         self.walletNodeClient = walletNodeClient
         self.userOperationBuilder = userOperationBuilder
-        self.configuration = DemoAppConfiguration(
-            isTestnetModeEnabled: settingsStore.isTestnetModeEnabled
-        )
+        self.configuration = DemoAppConfiguration(networkSettings: settingsStore.networkSettings)
+        self.unlockRelayerOnLaunch = settingsStore.unlockRelayerOnLaunch
         self.localRelayerMessage = walletNodeClient == nil
             ? "Local wallet-node daemon will start on refresh."
             : "Local wallet-node daemon configured from environment."
@@ -193,7 +214,11 @@ final class AppModel: ObservableObject {
         if shouldInspectAfterBootstrap {
             runDemo()
         }
-        refreshLocalRelayerStatus()
+        if unlockRelayerOnLaunch {
+            refreshLocalRelayerStatus()
+        } else {
+            localRelayerMessage = "Local relayer unlock on launch is disabled."
+        }
     }
 
     private func createFreshWalletRecord(coordinates: PublicKeyCoordinates, now: Date) throws -> WalletRecord {
@@ -326,8 +351,14 @@ final class AppModel: ObservableObject {
         appendSection("Switch Chain")
         appendLog("chain: toggled testnet mode \(isEnabled ? "on" : "off")")
 
+        guard canChangeNetworkSettings else {
+            appendLog("chain: ignored because another wallet operation is still running")
+            return
+        }
+
         settingsStore.setTestnetModeEnabled(isEnabled)
-        configuration = DemoAppConfiguration(isTestnetModeEnabled: isEnabled)
+        configuration = DemoAppConfiguration(networkSettings: settingsStore.networkSettings)
+        resetWalletNodeConnectionAfterNetworkChange()
         accountInspection = nil
         builtUserOperationDraft = nil
         lastUserOperationBuildError = nil
@@ -335,6 +366,67 @@ final class AppModel: ObservableObject {
         lastSubmittedUserOperationHash = nil
         lastBundledTransactionHash = nil
         bootstrap()
+    }
+
+    func updateNetworkSettings(_ settings: DemoNetworkSettings) throws {
+        let validated = try settings.validated()
+        guard configuration.networkSettings != validated else {
+            return
+        }
+        guard canChangeNetworkSettings else {
+            throw AppError.walletOperationInProgress
+        }
+
+        appendSection("Update Network Settings")
+        appendLog("network: active profile \(validated.activeNetworkName)")
+        appendLog("network: execution RPC \(validated.activeRPCURL)")
+        settingsStore.setNetworkSettings(validated)
+        configuration = DemoAppConfiguration(networkSettings: validated)
+        resetWalletNodeConnectionAfterNetworkChange()
+        accountInspection = nil
+        builtUserOperationDraft = nil
+        lastUserOperationBuildError = nil
+        activeBundlerStatus = "Bundler not checked"
+        lastSubmittedUserOperationHash = nil
+        lastBundledTransactionHash = nil
+        bootstrap()
+    }
+
+    func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
+        guard unlockRelayerOnLaunch != isEnabled else {
+            return
+        }
+        settingsStore.setUnlockRelayerOnLaunch(isEnabled)
+        unlockRelayerOnLaunch = isEnabled
+        appendLog("security: unlock relayer on launch \(isEnabled ? "enabled" : "disabled")")
+        if isEnabled, localRelayerStatus == nil {
+            refreshLocalRelayerStatus()
+        } else if !isEnabled, localRelayerStatus == nil {
+            localRelayerMessage = "Local relayer unlock on launch is disabled."
+        }
+    }
+
+    func testNetworkSettings(_ settings: DemoNetworkSettings) async throws -> String {
+        let validated = try settings.validated()
+        let chain = validated.activeChain
+        let remoteChainID = try await rpcClient.chainID(rpcURL: chain.rpcURL)
+        guard remoteChainID == chain.id else {
+            throw DemoRPCClient.RPCError.rpcError("RPC returned chain ID \(remoteChainID), expected \(chain.id).")
+        }
+        return "\(chain.name) RPC responded with chain ID \(remoteChainID)."
+    }
+
+    private func resetWalletNodeConnectionAfterNetworkChange() {
+        walletNodeLaunchTask?.cancel()
+        walletNodeLaunchTask = nil
+        walletNodeDaemon = nil
+        walletNodeClient = WalletNodeClient.Configuration.fromEnvironment().map {
+            WalletNodeClient(configuration: $0)
+        }
+        localRelayerStatus = nil
+        localRelayerMessage = walletNodeClient == nil
+            ? "Local wallet-node daemon will restart with the selected network."
+            : "External wallet-node configured from environment."
     }
 
     func setTransactionKind(_ kind: DemoTransactionKind) {
@@ -366,12 +458,11 @@ final class AppModel: ObservableObject {
             return
         }
 
+        localRelayerMessage = "Checking local relayer status..."
         isRefreshingLocalRelayer = true
         Task {
             do {
-                let status = try await withWalletNodeClient(operation: "status") { client in
-                    try await client.bundlerStatus()
-                }
+                let status = try await fetchLocalRelayerStatusWithBalanceRetry()
                 localRelayerStatus = status
                 localRelayerMessage = status.ready
                     ? "Local relayer ready on \(status.networkProfile)."
@@ -384,6 +475,40 @@ final class AppModel: ObservableObject {
             }
             isRefreshingLocalRelayer = false
         }
+    }
+
+    private func fetchLocalRelayerStatusWithBalanceRetry() async throws -> WalletNodeClient.RelayerStatus {
+        var status = try await fetchLocalRelayerStatus()
+        for delay in Self.relayerBalanceRetryDelays where Self.isRelayerBalanceUnavailable(status.balance) {
+            localRelayerStatus = status
+            localRelayerMessage = "Checking local relayer balance..."
+            appendLog("relayer: status returned without balance; retrying")
+            try await Task.sleep(nanoseconds: delay)
+            try Task.checkCancellation()
+            status = try await fetchLocalRelayerStatus()
+        }
+        return status
+    }
+
+    private func fetchLocalRelayerStatus() async throws -> WalletNodeClient.RelayerStatus {
+        try await withWalletNodeClient(operation: "status") { client in
+            try await client.bundlerStatus()
+        }
+    }
+
+    func checkLocalRelayerStatusForDiagnostics() async throws -> WalletNodeClient.RelayerStatus {
+        let status = try await fetchLocalRelayerStatusWithBalanceRetry()
+        localRelayerStatus = status
+        localRelayerMessage = status.ready
+            ? "Local relayer ready on \(status.networkProfile)."
+            : "Local relayer needs attention."
+        appendLog("diagnostics: relayer status \(status.lifecycle) \(status.eoa.shortAddress)")
+        return status
+    }
+
+    private static func isRelayerBalanceUnavailable(_ balance: String) -> Bool {
+        let normalized = balance.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.isEmpty || normalized == "unavailable"
     }
 
     func rotateLocalRelayerKey() async throws {

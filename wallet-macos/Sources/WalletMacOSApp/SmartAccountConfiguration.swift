@@ -18,6 +18,8 @@ struct ChainConfiguration: Equatable {
     let shortName: String
     let isTestnet: Bool
     let rpcURL: URL
+    let archiveRPCURL: URL?
+    let consensusRPCURL: URL
     let bundlerURL: URL?
     let entryPoint: String
     let kernel: KernelContractAddresses
@@ -32,6 +34,8 @@ struct ChainConfiguration: Equatable {
         shortName: "mainnet",
         isTestnet: false,
         rpcURL: URL(string: "https://ethereum-rpc.publicnode.com")!,
+        archiveRPCURL: nil,
+        consensusRPCURL: URL(string: "https://lodestar-mainnet.chainsafe.io")!,
         bundlerURL: nil,
         entryPoint: "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
         kernel: KernelContractAddresses(
@@ -48,6 +52,8 @@ struct ChainConfiguration: Equatable {
         shortName: "sepolia",
         isTestnet: true,
         rpcURL: URL(string: "https://ethereum-sepolia-rpc.publicnode.com")!,
+        archiveRPCURL: nil,
+        consensusRPCURL: URL(string: "https://ethereum-sepolia-beacon-api.publicnode.com")!,
         bundlerURL: configuredSepoliaBundlerURL(),
         entryPoint: "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
         kernel: KernelContractAddresses(
@@ -80,6 +86,26 @@ struct ChainConfiguration: Equatable {
 
         return URL(string: trimmed)
     }
+
+    func overridingNetworkURLs(
+        rpcURL: URL,
+        archiveRPCURL: URL?,
+        consensusRPCURL: URL
+    ) -> ChainConfiguration {
+        ChainConfiguration(
+            id: id,
+            name: name,
+            shortName: shortName,
+            isTestnet: isTestnet,
+            rpcURL: rpcURL,
+            archiveRPCURL: archiveRPCURL,
+            consensusRPCURL: consensusRPCURL,
+            bundlerURL: bundlerURL,
+            entryPoint: entryPoint,
+            kernel: kernel,
+            abiResources: abiResources
+        )
+    }
 }
 
 extension ABIResource {
@@ -91,9 +117,13 @@ extension ABIResource {
 }
 
 struct DemoAppConfiguration {
-    let isTestnetModeEnabled: Bool
+    let networkSettings: DemoNetworkSettings
+
+    var isTestnetModeEnabled: Bool {
+        networkSettings.isTestnetModeEnabled
+    }
 
     var activeChain: ChainConfiguration {
-        isTestnetModeEnabled ? .ethereumSepolia : .ethereum
+        networkSettings.activeChain
     }
 }

@@ -80,6 +80,36 @@ struct DemoRPCClient {
         self.session = session
     }
 
+    func chainID(rpcURL: URL) async throws -> UInt64 {
+        let value = try await call(
+            method: "eth_chainId",
+            params: [],
+            rpcURL: rpcURL
+        )
+        let normalized = value.lowercased().hasPrefix("0x")
+            ? String(value.dropFirst(2))
+            : value
+        guard let chainID = UInt64(normalized, radix: 16) else {
+            throw RPCError.rpcError("RPC returned invalid eth_chainId: \(value)")
+        }
+        return chainID
+    }
+
+    func blockNumber(rpcURL: URL) async throws -> UInt64 {
+        let value = try await call(
+            method: "eth_blockNumber",
+            params: [],
+            rpcURL: rpcURL
+        )
+        let normalized = value.lowercased().hasPrefix("0x")
+            ? String(value.dropFirst(2))
+            : value
+        guard let blockNumber = UInt64(normalized, radix: 16) else {
+            throw RPCError.rpcError("RPC returned invalid eth_blockNumber: \(value)")
+        }
+        return blockNumber
+    }
+
     func inspectAccount(
         chain: ChainConfiguration,
         address: String

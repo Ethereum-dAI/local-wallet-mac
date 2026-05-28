@@ -46,17 +46,20 @@ private final class OnboardingState: ObservableObject {
     @Published var hardwareProfile: LocalHardwareProfile?
 
     private let settingsStore: OnboardingSettingsStore
+    private let demoSettingsStore: DemoSettingsStore
     private let provisioningService: OnboardingProvisioningService
     private let downloadManager: LocalAIModelDownloadManager
     private let hardwareInspector: LocalHardwareInspector
 
     init(
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
+        demoSettingsStore: DemoSettingsStore = DemoSettingsStore(),
         provisioningService: OnboardingProvisioningService = OnboardingProvisioningService(),
         downloadManager: LocalAIModelDownloadManager = LocalAIModelDownloadManager(),
         hardwareInspector: LocalHardwareInspector = LocalHardwareInspector()
     ) {
         self.settingsStore = settingsStore
+        self.demoSettingsStore = demoSettingsStore
         self.provisioningService = provisioningService
         self.downloadManager = downloadManager
         self.hardwareInspector = hardwareInspector
@@ -179,6 +182,13 @@ private final class OnboardingState: ObservableObject {
     private func persistNetwork() {
         settingsStore.rpcURL = rpcURL.trimmingCharacters(in: .whitespacesAndNewlines)
         settingsStore.archiveNodeURL = archiveNodeURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        var networkSettings = demoSettingsStore.networkSettings
+        networkSettings.isTestnetModeEnabled = true
+        networkSettings.sepoliaRPCURL = settingsStore.rpcURL
+        networkSettings.sepoliaArchiveNodeURL = settingsStore.archiveNodeURL
+        if let validated = try? networkSettings.validated() {
+            demoSettingsStore.setNetworkSettings(validated)
+        }
     }
 }
 
@@ -447,7 +457,7 @@ private struct NetworkStep: View {
         OnboardingTwoColumn(
             illustration: .network,
             headline: "Choose your nodes",
-            bodyText: "Set the RPC endpoint the wallet should use for reads and submission prep. Add an archive node if you have one; it can stay empty for now."
+            bodyText: "Set the RPC endpoint the wallet should use for reads and submission prep. Add a Helios archive node if you have one; it can stay empty for now."
         ) {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 14) {
@@ -457,7 +467,7 @@ private struct NetworkStep: View {
                         text: $state.rpcURL
                     )
                     OnboardingTextField(
-                        label: "Archive Node URL",
+                        label: "Helios Archive Node URL",
                         placeholder: "Optional",
                         text: $state.archiveNodeURL
                     )
@@ -466,7 +476,7 @@ private struct NetworkStep: View {
                 OnboardingGlassCard {
                     VStack(alignment: .leading, spacing: 10) {
                         InfoRow(icon: "network", title: "Primary RPC", detail: "Used for current chain state and transaction preparation.")
-                        InfoRow(icon: "clock.arrow.circlepath", title: "Archive node", detail: "Optional endpoint for historical reads and richer wallet timelines.")
+                        InfoRow(icon: "clock.arrow.circlepath", title: "Helios archive node", detail: "Optional endpoint for historical state reads. Helios is the wallet-node light client that verifies Ethereum reads instead of blindly trusting a normal RPC.")
                     }
                     .padding(16)
                 }

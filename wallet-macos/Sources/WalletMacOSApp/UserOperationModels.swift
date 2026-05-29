@@ -7,6 +7,16 @@ struct KernelExecutionRequest: Equatable {
     let callData: Data
 }
 
+extension KernelExecutionRequest {
+    static func zeroValueCall(target: String, callData: Data) -> KernelExecutionRequest {
+        KernelExecutionRequest(
+            target: target,
+            value: Data(repeating: 0, count: 32),
+            callData: callData
+        )
+    }
+}
+
 struct WalletToken: Equatable, Identifiable {
     enum Kind: Equatable {
         case native

@@ -602,6 +602,28 @@ final class AppModel: ObservableObject {
         )
     }
 
+    func buildUserOperationDraft(
+        executions: [KernelExecutionRequest],
+        isDeployedOverride: Bool? = nil
+    ) async throws -> UserOperationDraft {
+        guard let walletRecord else {
+            throw AppError.corruptedMetadataStore
+        }
+
+        let publicKey = PublicKeyCoordinates(
+            x: walletRecord.pubkeyX,
+            y: walletRecord.pubkeyY
+        )
+
+        return try await userOperationBuilder.buildDraft(
+            walletRecord: walletRecord,
+            publicKey: publicKey,
+            chain: activeChain,
+            isDeployed: isDeployedOverride ?? accountInspection?.isDeployed ?? walletRecord.isDeployed,
+            executions: executions
+        )
+    }
+
     func buildUserOperationDraftPreview() {
         guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
             appendLog("build: ignored because another wallet operation is still running")
@@ -783,17 +805,52 @@ final class AppModel: ObservableObject {
             tokenInIsNative: tokenIn.isNative,
             tokenOutIsNative: tokenOut.isNative
         )
+        let defaultSigningReason = quote.requiresApproval && !tokenIn.isNative
+            ? "Approve \(tokenIn.symbol) and authorize \(tokenIn.symbol) to \(tokenOut.symbol) swap on \(activeChain.name)"
+            : "Authorize \(tokenIn.symbol) to \(tokenOut.symbol) swap on \(activeChain.name)"
         return try await executeTransfer(
             intent: .exactInputSwap(request),
             logContext: logContext,
-            signingReason: signingReason ?? "Authorize \(tokenIn.symbol) to \(tokenOut.symbol) swap on \(activeChain.name)"
+            signingReason: signingReason ?? defaultSigningReason
         )
+    }
+
+    func executeBatch(
+        executions: [KernelExecutionRequest],
+        logContext: String = "batch",
+        signingReason: String? = nil
+    ) async throws -> UserOperationSendResult {
+        try await executeUserOperation(
+            logContext: logContext,
+            signingReason: signingReason ?? "Authorize \(executions.count) transaction batch on \(activeChain.name)"
+        ) { [self] isDeployed in
+            try await buildUserOperationDraft(
+                executions: executions,
+                isDeployedOverride: isDeployed
+            )
+        }
     }
 
     private func executeTransfer(
         intent: TransactionIntent,
         logContext: String,
         signingReason: String
+    ) async throws -> UserOperationSendResult {
+        try await executeUserOperation(
+            logContext: logContext,
+            signingReason: signingReason
+        ) { [self] isDeployed in
+            try await buildUserOperationDraft(
+                intent: intent,
+                isDeployedOverride: isDeployed
+            )
+        }
+    }
+
+    private func executeUserOperation(
+        logContext: String,
+        signingReason: String,
+        buildDraft: @escaping (_ isDeployed: Bool) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
             throw AppError.walletOperationInProgress
@@ -814,9 +871,9 @@ final class AppModel: ObservableObject {
 
         do {
             let result = try await sendUserOperation(
-                intent: intent,
                 logContext: logContext,
-                signingReason: signingReason
+                signingReason: signingReason,
+                buildDraft: buildDraft
             )
             isSendingUserOperation = false
             return result
@@ -827,19 +884,16 @@ final class AppModel: ObservableObject {
     }
 
     private func sendUserOperation(
-        intent: TransactionIntent,
         logContext: String,
-        signingReason: String
+        signingReason: String,
+        buildDraft: (_ isDeployed: Bool) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         appendLog("\(logContext): preparing transaction on \(activeChain.name)")
 
         let liveInspection = try await refreshAccountInspection(logContext: "\(logContext)-preflight")
         appendLog("\(logContext): using \(liveInspection.isDeployed ? "deployed" : "precomputed") account path")
 
-        let draft = try await buildUserOperationDraft(
-            intent: intent,
-            isDeployedOverride: liveInspection.isDeployed
-        )
+        let draft = try await buildDraft(liveInspection.isDeployed)
         appendDraftLogSummary(draft, context: logContext)
 
         let enrichedDraft = try await enrichDraftWithLocalBundlerEstimation(

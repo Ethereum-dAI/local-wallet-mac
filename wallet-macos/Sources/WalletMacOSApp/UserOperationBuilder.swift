@@ -7,21 +7,82 @@ import WalletSignature
 struct KernelCallEncoder {
     private static let executeSelector = Data(hex: "e9ae5c53")
     private static let execModeSingleDefault = Data(repeating: 0, count: 32)
+    private static let execModeBatchDefault = Data([0x01]) + Data(repeating: 0, count: 31)
+
+    func encodeExecute(_ requests: [KernelExecutionRequest]) throws -> Data {
+        guard !requests.isEmpty else {
+            throw AppError.invalidExecutionBatch
+        }
+        if requests.count == 1, let request = requests.first {
+            return try encodeExecuteSingle(request)
+        }
+        return try encodeExecuteBatch(requests)
+    }
 
     func encodeExecuteSingle(_ request: KernelExecutionRequest) throws -> Data {
-        let target = try Data(hexString: request.target)
+        let executionCalldata = try abiEncodePackedExecution(request)
+
+        return encodeExecute(
+            mode: Self.execModeSingleDefault,
+            executionCalldata: executionCalldata
+        )
+    }
+
+    func encodeExecuteBatch(_ requests: [KernelExecutionRequest]) throws -> Data {
+        guard !requests.isEmpty else {
+            throw AppError.invalidExecutionBatch
+        }
+
+        return encodeExecute(
+            mode: Self.execModeBatchDefault,
+            executionCalldata: try abiEncodeExecutionArray(requests)
+        )
+    }
+
+    private func encodeExecute(mode: Data, executionCalldata: Data) -> Data {
+        Self.executeSelector
+            + mode
+            + Data.fromBigEndian(UInt64(64)).leftPadded(to: 32)
+            + abiEncodeDynamicBytes(executionCalldata)
+    }
+
+    private func abiEncodePackedExecution(_ request: KernelExecutionRequest) throws -> Data {
+        try executionTargetData(request.target)
+            + request.value.leftPadded(to: 32)
+            + request.callData
+    }
+
+    private func abiEncodeExecutionArray(_ requests: [KernelExecutionRequest]) throws -> Data {
+        var encodedExecutions = Data()
+        var offsets = Data()
+        var nextOffset = requests.count * 32
+
+        for request in requests {
+            offsets += Data.fromBigEndian(UInt64(nextOffset)).leftPadded(to: 32)
+            let encoded = try abiEncodeExecutionTuple(request)
+            encodedExecutions += encoded
+            nextOffset += encoded.count
+        }
+
+        return Data.fromBigEndian(UInt64(32)).leftPadded(to: 32)
+            + Data.fromBigEndian(UInt64(requests.count)).leftPadded(to: 32)
+            + offsets
+            + encodedExecutions
+    }
+
+    private func abiEncodeExecutionTuple(_ request: KernelExecutionRequest) throws -> Data {
+        try executionTargetData(request.target).leftPadded(to: 32)
+            + request.value.leftPadded(to: 32)
+            + Data.fromBigEndian(UInt64(96)).leftPadded(to: 32)
+            + abiEncodeDynamicBytes(request.callData)
+    }
+
+    private func executionTargetData(_ target: String) throws -> Data {
+        let target = try Data(hexString: target)
         guard target.count == 20 else {
             throw AppError.invalidExecutionAddress
         }
-
-        let executionCalldata = target
-            + request.value.leftPadded(to: 32)
-            + request.callData
-
-        return Self.executeSelector
-            + Self.execModeSingleDefault
-            + Data.fromBigEndian(UInt64(64)).leftPadded(to: 32)
-            + abiEncodeDynamicBytes(executionCalldata)
+        return target
     }
 
     private func abiEncodeDynamicBytes(_ value: Data) -> Data {
@@ -43,6 +104,21 @@ struct ERC20TransferCallEncoder {
 
         return Self.transferSelector
             + recipientData.leftPadded(to: 32)
+            + amount.leftPadded(to: 32)
+    }
+}
+
+struct ERC20ApprovalCallEncoder {
+    private static let approveSelector = Data(hex: "095ea7b3")
+
+    func encodeApprove(spender: String, amount: Data) throws -> Data {
+        let spenderData = try Data(hexString: spender)
+        guard spenderData.count == 20 else {
+            throw AppError.invalidExecutionAddress
+        }
+
+        return Self.approveSelector
+            + spenderData.leftPadded(to: 32)
             + amount.leftPadded(to: 32)
     }
 }
@@ -159,6 +235,7 @@ struct UserOperationBuilder {
     private let rpcClient: DemoRPCClient
     private let kernelCallEncoder: KernelCallEncoder
     private let erc20TransferCallEncoder: ERC20TransferCallEncoder
+    private let erc20ApprovalCallEncoder: ERC20ApprovalCallEncoder
     private let swapRouterCallEncoder: SwapRouterCallEncoder
     private let deploymentEncoder: KernelDeploymentEncoder
 
@@ -166,12 +243,14 @@ struct UserOperationBuilder {
         rpcClient: DemoRPCClient = DemoRPCClient(),
         kernelCallEncoder: KernelCallEncoder = KernelCallEncoder(),
         erc20TransferCallEncoder: ERC20TransferCallEncoder = ERC20TransferCallEncoder(),
+        erc20ApprovalCallEncoder: ERC20ApprovalCallEncoder = ERC20ApprovalCallEncoder(),
         swapRouterCallEncoder: SwapRouterCallEncoder = SwapRouterCallEncoder(),
         deploymentEncoder: KernelDeploymentEncoder = KernelDeploymentEncoder()
     ) {
         self.rpcClient = rpcClient
         self.kernelCallEncoder = kernelCallEncoder
         self.erc20TransferCallEncoder = erc20TransferCallEncoder
+        self.erc20ApprovalCallEncoder = erc20ApprovalCallEncoder
         self.swapRouterCallEncoder = swapRouterCallEncoder
         self.deploymentEncoder = deploymentEncoder
     }
@@ -188,7 +267,7 @@ struct UserOperationBuilder {
             publicKey: publicKey,
             chain: chain,
             isDeployed: isDeployed,
-            execution: buildExecutionRequest(for: intent)
+            executions: buildExecutionRequests(for: intent)
         )
     }
 
@@ -199,11 +278,27 @@ struct UserOperationBuilder {
         isDeployed: Bool,
         execution: KernelExecutionRequest
     ) async throws -> UserOperationDraft {
+        try await buildDraft(
+            walletRecord: walletRecord,
+            publicKey: publicKey,
+            chain: chain,
+            isDeployed: isDeployed,
+            executions: [execution]
+        )
+    }
+
+    func buildDraft(
+        walletRecord: WalletRecord,
+        publicKey: PublicKeyCoordinates,
+        chain: ChainConfiguration,
+        isDeployed: Bool,
+        executions: [KernelExecutionRequest]
+    ) async throws -> UserOperationDraft {
         guard let sender = walletRecord.kernelAccountAddress else {
             throw AppError.invalidCounterfactualAddress
         }
 
-        let callData = try kernelCallEncoder.encodeExecuteSingle(execution)
+        let callData = try kernelCallEncoder.encodeExecute(executions)
         let nonceHex = try await rpcClient.entryPointNonce(
             chain: chain,
             accountAddress: sender,
@@ -234,7 +329,7 @@ struct UserOperationBuilder {
         )
     }
 
-    private func buildExecutionRequest(for intent: TransactionIntent) throws -> KernelExecutionRequest {
+    func buildExecutionRequests(for intent: TransactionIntent) throws -> [KernelExecutionRequest] {
         switch intent {
         case .nativeTransfer(let recipient, let amountETH):
             let addressData = try Data(hexString: recipient)
@@ -242,11 +337,11 @@ struct UserOperationBuilder {
                 throw AppError.invalidExecutionAddress
             }
 
-            return KernelExecutionRequest(
+            return [KernelExecutionRequest(
                 target: "0x" + addressData.hexEncodedString,
                 value: try EtherAmountParser.wei(fromETHString: amountETH),
                 callData: Data()
-            )
+            )]
         case .erc20Transfer(let token, let recipient, let amount):
             guard let tokenAddress = token.contractAddress else {
                 throw AppError.invalidExecutionAddress
@@ -260,18 +355,14 @@ struct UserOperationBuilder {
                 fromDecimalString: amount,
                 decimals: token.decimals
             )
-            return KernelExecutionRequest(
+            return [KernelExecutionRequest.zeroValueCall(
                 target: "0x" + tokenAddressData.hexEncodedString,
-                value: Data(repeating: 0, count: 32),
                 callData: try erc20TransferCallEncoder.encodeTransfer(
                     recipient: recipient,
                     amount: transferAmount
                 )
-            )
+            )]
         case .exactInputSwap(let request):
-            if request.quote.requiresApproval {
-                throw AppError.swapApprovalRequired("Input token")
-            }
             let routerData = try Data(hexString: request.quote.router)
             guard routerData.count == 20 else {
                 throw AppError.invalidExecutionAddress
@@ -299,12 +390,48 @@ struct UserOperationBuilder {
                 )
             }
 
-            return KernelExecutionRequest(
+            let routerExecution = KernelExecutionRequest(
                 target: "0x" + routerData.hexEncodedString,
                 value: request.tokenInIsNative ? request.quote.amountIn : Data(repeating: 0, count: 32),
                 callData: routerCallData
             )
+
+            return try approvalExecutionRequests(for: request) + [routerExecution]
         }
+    }
+
+    private func approvalExecutionRequests(for request: SwapExecutionRequest) throws -> [KernelExecutionRequest] {
+        guard request.quote.requiresApproval, !request.tokenInIsNative else {
+            return []
+        }
+
+        let tokenInData = try Data(hexString: request.quote.tokenIn)
+        guard tokenInData.count == 20 else {
+            throw AppError.invalidExecutionAddress
+        }
+
+        var requests: [KernelExecutionRequest] = []
+        if request.quote.allowance.hasNonZeroValue {
+            requests.append(
+                KernelExecutionRequest.zeroValueCall(
+                    target: "0x" + tokenInData.hexEncodedString,
+                    callData: try erc20ApprovalCallEncoder.encodeApprove(
+                        spender: request.quote.router,
+                        amount: Data(repeating: 0, count: 32)
+                    )
+                )
+            )
+        }
+        requests.append(
+            KernelExecutionRequest.zeroValueCall(
+                target: "0x" + tokenInData.hexEncodedString,
+                callData: try erc20ApprovalCallEncoder.encodeApprove(
+                    spender: request.quote.router,
+                    amount: request.quote.amountIn
+                )
+            )
+        )
+        return requests
     }
 }
 
@@ -317,5 +444,14 @@ private extension Data {
             let value = UInt8(normalized[start..<end], radix: 16) ?? 0
             data.append(value)
         }
+    }
+}
+
+private extension Optional where Wrapped == Data {
+    var hasNonZeroValue: Bool {
+        guard let self else {
+            return false
+        }
+        return self.contains { $0 != 0 }
     }
 }

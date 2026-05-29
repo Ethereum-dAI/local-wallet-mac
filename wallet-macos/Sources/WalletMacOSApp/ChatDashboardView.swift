@@ -312,6 +312,7 @@ private final class ChatDashboardModel: ObservableObject {
     private let chatStore: ChatSQLiteStore
     private let walletHistoryStore: WalletTransactionHistoryStore
     private let preferencesStore: ChatPreferencesStore
+    private let onboardingSettingsStore: OnboardingSettingsStore
     private let walletModel: AppModel
     private var executingIntentIDs: Set<UUID> = []
     private var lastTokenBalanceKey: String?
@@ -329,6 +330,7 @@ private final class ChatDashboardModel: ObservableObject {
         self.chatStore = chatStore
         self.walletHistoryStore = walletHistoryStore
         self.preferencesStore = preferencesStore
+        self.onboardingSettingsStore = settingsStore
         self.walletModel = walletModel ?? AppModel(walletHistoryStore: walletHistoryStore)
         self.runtimeStatus = inferenceService.runtimeStatus
         self.thinkingEnabled = preferencesStore.thinkingEnabled
@@ -383,6 +385,93 @@ private final class ChatDashboardModel: ObservableObject {
 
     var messages: [ChatMessage] {
         activeConversation?.messages ?? []
+    }
+
+    var settingsSnapshot: LocalWalletSettingsSnapshot {
+        let chain = walletModel.activeChain
+        let selectedModel = LocalAIModel.available.first { $0.id == onboardingSettingsStore.selectedModelID } ?? .recommended
+        let installedPath = onboardingSettingsStore.installedModelPath ?? ""
+        let modelFileExists = installedPath.isEmpty == false && FileManager.default.fileExists(atPath: installedPath)
+        let installStatus: String
+        if onboardingSettingsStore.installedModelID == selectedModel.id, modelFileExists {
+            installStatus = "Installed"
+        } else if onboardingSettingsStore.installedModelID == selectedModel.id {
+            installStatus = "Missing file"
+        } else {
+            installStatus = "Not installed"
+        }
+
+        let appBuild = LocalWalletSettingsSnapshot.appVersionText()
+        let networkSettings = walletModel.networkSettings
+        let relayerStatus = walletModel.localRelayerStatus
+        let walletNodeMode = WalletNodeClient.Configuration.fromEnvironment() == nil
+            ? "Managed local daemon"
+            : "External wallet-node"
+        let databaseSize = Self.byteFormatter.string(fromByteCount: Int64(chatStore.databaseFileSizeBytes()))
+        let rankingCount = (try? chatStore.loadToolIntentFeedbackExportRecords().count) ?? 0
+
+        return LocalWalletSettingsSnapshot(
+            capturedAt: Date(),
+            appVersion: appBuild.version,
+            appBuild: appBuild.build,
+            updateVersion: "0.2.0-preview",
+            updateStatus: "Preview build",
+            textModelName: selectedModel.name,
+            textModelIdentifier: selectedModel.id,
+            textModelSize: selectedModel.size,
+            textModelDetail: selectedModel.detail,
+            textModelArtifactRepo: selectedModel.artifactRepo,
+            textModelArtifactFileName: selectedModel.artifactFileName,
+            textModelRuntimeStatus: runtimeStatus,
+            textModelInstallStatus: installStatus,
+            textModelPath: installedPath.isEmpty ? "Not set" : installedPath,
+            contextWindow: "\(inferenceService.contextSize) tokens",
+            multimodalModelName: "Not configured",
+            multimodalModelStatus: "No local vision model selected",
+            networkSettings: networkSettings,
+            chainName: chain.name,
+            chainID: String(chain.id),
+            executionRPCURL: chain.rpcURL.absoluteString,
+            configuredRPCURL: networkSettings.activeRPCURL,
+            archiveNodeURL: chain.archiveRPCURL?.absoluteString ?? "Not set",
+            consensusRPCURL: chain.consensusRPCURL.absoluteString,
+            entryPointAddress: chain.entryPoint,
+            kernelFactoryAddress: chain.kernel.factory,
+            kernelImplementationAddress: chain.kernel.implementation,
+            validatorAddress: chain.kernel.webAuthnValidator,
+            kernelAccountAddress: accountIdentity.kernelAddress,
+            kernelAccountState: accountIdentity.kernelState,
+            kernelAccountBalance: accountIdentity.kernelBalance,
+            relayerAddress: accountIdentity.bundlerAddress,
+            relayerState: accountIdentity.bundlerState,
+            relayerBalance: accountIdentity.bundlerBalance,
+            relayerKeyRef: relayerStatus?.keyRef ?? "Not available",
+            relayerLifecycle: relayerStatus?.lifecycle.capitalized ?? accountIdentity.bundlerState,
+            relayerPendingFundingAddress: relayerStatus?.pendingFundingAddress ?? "None",
+            relayerPendingFundingCount: relayerStatus?.pendingFundingCount ?? 0,
+            relayerRetiringCount: relayerStatus?.retiringCount ?? 0,
+            relayerLatestAuditEvent: relayerStatus?.latestAuditEvent ?? "None",
+            relayerMessage: walletModel.localRelayerMessage,
+            databasePath: chatStore.databaseFileURL.path,
+            databaseSize: databaseSize,
+            conversationCount: conversations.count,
+            messageCount: conversations.reduce(0) { $0 + $1.messages.count },
+            rankingCount: rankingCount,
+            walletNodeMode: walletNodeMode,
+            walletNodeConfigPath: LocalWalletSettingsSnapshot.walletNodeConfigPath(),
+            unlockRelayerOnLaunch: walletModel.unlockRelayerOnLaunch,
+            walletKeyPolicy: "Secure Enclave P-256 key; local user presence required for signing.",
+            relayerKeyPolicy: "Keychain generic password protected by current biometric set.",
+            bridgeStatus: walletModel.bridgeStatus,
+            activeBundlerStatus: walletModel.activeBundlerStatus,
+            lastSubmittedUserOperationHash: walletModel.lastSubmittedUserOperationHash ?? "None",
+            lastBundledTransactionHash: walletModel.lastBundledTransactionHash ?? "None",
+            lastError: walletModel.lastError ?? "None",
+            releaseChannel: "Preview",
+            walletNodeVersion: "Managed by local wallet-node",
+            rustFFIBuild: "Linked libwallet_ffi",
+            localLLMBackend: "llama.cpp"
+        )
     }
 
     var selectedHistoryRecord: WalletTransactionRecord? {
@@ -1125,6 +1214,229 @@ private final class ChatDashboardModel: ObservableObject {
         }
     }
 
+    func exportChatDatabase() throws -> String {
+        let panel = NSSavePanel()
+        panel.title = "Export chat database"
+        panel.nameFieldStringValue = "local-wallet-chat-\(Self.exportDateStamp()).sqlite"
+        panel.allowedContentTypes = [.database]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return "Export cancelled."
+        }
+
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+        try FileManager.default.copyItem(at: chatStore.databaseFileURL, to: url)
+        return "Exported chat database to \(url.lastPathComponent)."
+    }
+
+    func revealChatDatabase() {
+        NSWorkspace.shared.activateFileViewerSelecting([chatStore.databaseFileURL])
+    }
+
+    func clearChatHistory() throws -> String {
+        guard !isGenerating else {
+            throw AppError.walletOperationInProgress
+        }
+        let conversation = ChatConversation(title: "New chat", messages: [])
+        try chatStore.replaceConversations([conversation])
+        conversations = [conversation]
+        activeConversationID = conversation.id
+        preferencesStore.activeConversationID = conversation.id
+        transferPreflightTasks.values.forEach { $0.cancel() }
+        swapPreflightTasks.values.forEach { $0.cancel() }
+        transferPreflightTasks = [:]
+        swapPreflightTasks = [:]
+        transferPreflightStatuses = [:]
+        swapPreflightStatuses = [:]
+        return "Cleared chat history."
+    }
+
+    func clearFeedbackRankings() throws -> String {
+        try chatStore.deleteAllToolIntentFeedback()
+        for conversationIndex in conversations.indices {
+            for messageIndex in conversations[conversationIndex].messages.indices {
+                conversations[conversationIndex].messages[messageIndex].toolFeedback = nil
+            }
+        }
+        return "Cleared tool rankings."
+    }
+
+    func revealModelFile() throws -> String {
+        let path = onboardingSettingsStore.installedModelPath ?? ""
+        guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else {
+            throw AppError.modelNotInstalled
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+        return "Revealed model file."
+    }
+
+    func saveNetworkSettings(_ settings: DemoNetworkSettings) throws -> String {
+        let validated = try settings.validated()
+        try walletModel.updateNetworkSettings(validated)
+        onboardingSettingsStore.rpcURL = validated.sepoliaRPCURL
+        onboardingSettingsStore.archiveNodeURL = validated.sepoliaArchiveNodeURL
+        refreshAccountIdentity()
+        return "Saved \(validated.activeNetworkName) network settings."
+    }
+
+    func testNetworkSettings(_ settings: DemoNetworkSettings) async throws -> String {
+        try await walletModel.testNetworkSettings(settings)
+    }
+
+    func runSettingsDiagnostics(_ settings: DemoNetworkSettings) async -> SettingsDiagnosticsReport {
+        var checks: [SettingsHealthCheck] = []
+        let validated: DemoNetworkSettings
+        do {
+            validated = try settings.validated()
+        } catch {
+            return SettingsDiagnosticsReport(
+                generatedAt: Date(),
+                checks: [
+                    SettingsHealthCheck(
+                        title: "Network settings",
+                        state: .failed,
+                        detail: error.localizedDescription,
+                        latencyMilliseconds: nil
+                    ),
+                ]
+            )
+        }
+
+        let chain = validated.activeChain
+
+        let executionStart = Date()
+        do {
+            let chainID = try await Self.probeExecutionChainID(rpcURL: chain.rpcURL)
+            let matches = chainID == chain.id
+            checks.append(SettingsHealthCheck(
+                title: "Execution RPC",
+                state: matches ? .healthy : .failed,
+                detail: matches
+                    ? "eth_chainId returned \(chainID). wallet-node/Helios will use this endpoint after save."
+                    : "RPC returned chain ID \(chainID), expected \(chain.id).",
+                latencyMilliseconds: Self.latencyMilliseconds(since: executionStart)
+            ))
+        } catch {
+            checks.append(SettingsHealthCheck(
+                title: "Execution RPC",
+                state: .failed,
+                detail: error.localizedDescription,
+                latencyMilliseconds: Self.latencyMilliseconds(since: executionStart)
+            ))
+        }
+
+        if let archiveURL = chain.archiveRPCURL {
+            let archiveStart = Date()
+            do {
+                let chainID = try await Self.probeExecutionChainID(rpcURL: archiveURL)
+                let matches = chainID == chain.id
+                checks.append(SettingsHealthCheck(
+                    title: "Archive RPC",
+                    state: matches ? .healthy : .warning,
+                    detail: matches
+                        ? "Archive endpoint responded for chain \(chainID)."
+                        : "Archive endpoint returned chain ID \(chainID), expected \(chain.id).",
+                    latencyMilliseconds: Self.latencyMilliseconds(since: archiveStart)
+                ))
+            } catch {
+                checks.append(SettingsHealthCheck(
+                    title: "Archive RPC",
+                    state: .failed,
+                    detail: error.localizedDescription,
+                    latencyMilliseconds: Self.latencyMilliseconds(since: archiveStart)
+                ))
+            }
+        } else {
+            checks.append(SettingsHealthCheck(
+                title: "Archive RPC",
+                state: .skipped,
+                detail: "No archive endpoint configured.",
+                latencyMilliseconds: nil
+            ))
+        }
+
+        let consensusStart = Date()
+        do {
+            let statusCode = try await Self.probeConsensusHealth(url: chain.consensusRPCURL)
+            checks.append(SettingsHealthCheck(
+                title: "Consensus RPC",
+                state: statusCode == 200 ? .healthy : .warning,
+                detail: "Beacon health endpoint returned HTTP \(statusCode).",
+                latencyMilliseconds: Self.latencyMilliseconds(since: consensusStart)
+            ))
+        } catch {
+            checks.append(SettingsHealthCheck(
+                title: "Consensus RPC",
+                state: .failed,
+                detail: error.localizedDescription,
+                latencyMilliseconds: Self.latencyMilliseconds(since: consensusStart)
+            ))
+        }
+
+        let relayerStart = Date()
+        do {
+            let status = try await walletModel.checkLocalRelayerStatusForDiagnostics()
+            let balanceUnavailable = Self.isUnavailableETHBalance(status.balance)
+            checks.append(SettingsHealthCheck(
+                title: "wallet-node relayer",
+                state: status.ready && !balanceUnavailable ? .healthy : .warning,
+                detail: "\(status.lifecycle.capitalized) \(status.eoa.walletDisplayShortAddress). Balance \(Self.displayETHBalance(status.balance)).",
+                latencyMilliseconds: Self.latencyMilliseconds(since: relayerStart)
+            ))
+            refreshAccountIdentity()
+        } catch {
+            checks.append(SettingsHealthCheck(
+                title: "wallet-node relayer",
+                state: .failed,
+                detail: error.localizedDescription,
+                latencyMilliseconds: Self.latencyMilliseconds(since: relayerStart)
+            ))
+        }
+
+        return SettingsDiagnosticsReport(generatedAt: Date(), checks: checks)
+    }
+
+    func refreshLocalRelayerFromSettings() {
+        walletModel.refreshLocalRelayerStatus()
+    }
+
+    func rotateLocalRelayerFromSettings() async throws -> String {
+        try await walletModel.rotateLocalRelayerKey()
+        refreshAccountIdentity()
+        return "Relayer rotation requested. The new key waits for top-up before it becomes active."
+    }
+
+    func exportLocalRelayerKeyFromSettings() async throws -> String {
+        try await walletModel.exportLocalRelayerKey()
+    }
+
+    func deleteLocalRelayerKeyFromSettings(unsafe: Bool) async throws -> String {
+        try await walletModel.deleteLocalRelayerKey(unsafeReset: unsafe)
+        refreshAccountIdentity()
+        return unsafe
+            ? "Relayer key reset. Submissions stay blocked until a funded relayer exists."
+            : "Relayer key deleted. Submissions stay blocked until a funded relayer exists."
+    }
+
+    func resetWalletFromSettings() throws -> String {
+        walletModel.resetDemoWallet()
+        refreshAccountIdentity()
+        return "Wallet reset requested. The app will create fresh local key material."
+    }
+
+    func clearDebugLogFromSettings() {
+        walletModel.clearDebugLog()
+    }
+
+    func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
+        walletModel.setUnlockRelayerOnLaunch(isEnabled)
+        refreshAccountIdentity()
+    }
+
     private func appendMessage(_ message: ChatMessage, to conversationID: UUID) {
         guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
             return
@@ -1172,6 +1484,65 @@ private final class ChatDashboardModel: ObservableObject {
             return "Balance unavailable"
         }
         return WeiFormatter.ethDisplayString(fromHexWei: rawBalance)
+    }
+
+    private static func isUnavailableETHBalance(_ rawBalance: String?) -> Bool {
+        guard let rawBalance else {
+            return true
+        }
+        return rawBalance.isEmpty || rawBalance == "unavailable"
+    }
+
+    private static func latencyMilliseconds(since start: Date) -> Int {
+        max(0, Int(Date().timeIntervalSince(start) * 1_000))
+    }
+
+    private static func probeExecutionChainID(rpcURL: URL) async throws -> UInt64 {
+        let response = try await jsonRPC(method: "eth_chainId", rpcURL: rpcURL)
+        guard let hexValue = response["result"] as? String,
+              let chainID = UInt64(hexValue.removingHexPrefix, radix: 16) else {
+            throw AppError.localDaemonLaunchFailed("Execution RPC returned an invalid eth_chainId response.")
+        }
+        return chainID
+    }
+
+    private static func jsonRPC(method: String, rpcURL: URL) async throws -> [String: Any] {
+        var request = URLRequest(url: rpcURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 12
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": [],
+        ])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              200..<300 ~= httpResponse.statusCode else {
+            throw AppError.localDaemonLaunchFailed("Execution RPC request failed.")
+        }
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AppError.localDaemonLaunchFailed("Execution RPC returned invalid JSON.")
+        }
+        if let error = object["error"] as? [String: Any] {
+            let message = error["message"] as? String ?? "Unknown RPC error"
+            throw AppError.localDaemonLaunchFailed(message)
+        }
+        return object
+    }
+
+    private static func probeConsensusHealth(url: URL) async throws -> Int {
+        let healthURL = url.appendingPathComponent("eth/v1/node/health")
+        var request = URLRequest(url: healthURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 12
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw AppError.localDaemonLaunchFailed("Consensus RPC returned an invalid response.")
+        }
+        return httpResponse.statusCode
     }
 
     private func updateIntent(
@@ -1653,6 +2024,13 @@ private final class ChatDashboardModel: ObservableObject {
         return formatter.string(from: Date())
     }
 
+    private static let byteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter
+    }()
+
     private func updateTitleIfNeeded(for conversationID: UUID, prompt: String) {
         guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
             return
@@ -1683,6 +2061,7 @@ private struct ChatBottomDistanceKey: PreferenceKey {
 private enum DashboardSection {
     case chat
     case history
+    case settings
 }
 
 private enum WalletHistoryFilter: String, CaseIterable, Identifiable {
@@ -1756,25 +2135,29 @@ struct LocalWalletChatDashboardView: View {
 
                 VStack(spacing: 0) {
                     toolbar
-                    accountHeader
-                    if selectedSection == .chat,
-                       let level = model.contextUsageLevel,
-                       let snapshot = model.contextUsageSnapshot {
-                        ContextUsageBanner(
-                            level: level,
-                            used: snapshot.used,
-                            total: snapshot.total,
-                            onNewChat: { model.createNewChat() }
-                        )
-                        .padding(.bottom, 8)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                    }
-                    if selectedSection == .chat {
-                        chatBody
-                        footerControls
-                        composer
+                    if selectedSection == .settings {
+                        settingsBody
                     } else {
-                        historyBody
+                        accountHeader
+                        if selectedSection == .chat,
+                           let level = model.contextUsageLevel,
+                           let snapshot = model.contextUsageSnapshot {
+                            ContextUsageBanner(
+                                level: level,
+                                used: snapshot.used,
+                                total: snapshot.total,
+                                onNewChat: { model.createNewChat() }
+                            )
+                            .padding(.bottom, 8)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+                        if selectedSection == .chat {
+                            chatBody
+                            footerControls
+                            composer
+                        } else {
+                            historyBody
+                        }
                     }
                 }
                 .animation(.easeInOut(duration: 0.18), value: model.contextUsageLevel)
@@ -1969,6 +2352,12 @@ struct LocalWalletChatDashboardView: View {
                             showHistory()
                         }
                     )
+                    DashboardSectionButton(
+                        title: "Settings",
+                        systemImage: "gearshape.fill",
+                        isSelected: selectedSection == .settings,
+                        action: { selectedSection = .settings }
+                    )
                 }
                 .padding(3)
                 .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1)))
@@ -2008,6 +2397,69 @@ struct LocalWalletChatDashboardView: View {
             .frame(width: 180, alignment: .trailing)
         }
         .frame(height: 42)
+    }
+
+    private var settingsBody: some View {
+        LocalWalletSettingsView(
+            snapshot: model.settingsSnapshot,
+            thinkingEnabled: $model.thinkingEnabled,
+            onExportRankings: {
+                model.exportFeedbackRankings()
+            },
+            onExportDatabase: {
+                try model.exportChatDatabase()
+            },
+            onRevealDatabase: {
+                model.revealChatDatabase()
+            },
+            onClearChatHistory: {
+                try model.clearChatHistory()
+            },
+            onClearRankings: {
+                try model.clearFeedbackRankings()
+            },
+            onRevealModelFile: {
+                try model.revealModelFile()
+            },
+            onSaveNetworkSettings: { settings in
+                try model.saveNetworkSettings(settings)
+            },
+            onTestNetworkSettings: { settings in
+                try await model.testNetworkSettings(settings)
+            },
+            onRunDiagnostics: { settings in
+                await model.runSettingsDiagnostics(settings)
+            },
+            onRefreshRelayer: {
+                model.refreshLocalRelayerFromSettings()
+            },
+            onRotateRelayer: {
+                try await model.rotateLocalRelayerFromSettings()
+            },
+            onExportRelayerKey: {
+                try await model.exportLocalRelayerKeyFromSettings()
+            },
+            onDeleteRelayerKey: { unsafe in
+                try await model.deleteLocalRelayerKeyFromSettings(unsafe: unsafe)
+            },
+            onResetWallet: {
+                try model.resetWalletFromSettings()
+            },
+            onClearDebugLog: {
+                model.clearDebugLogFromSettings()
+            },
+            onSetUnlockRelayerOnLaunch: { isEnabled in
+                model.setUnlockRelayerOnLaunch(isEnabled)
+            },
+            onClose: {
+                selectedSection = .chat
+            }
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(ChatPalette.border.opacity(0.65), lineWidth: 1)
+        )
     }
 
     private var accountHeader: some View {
@@ -3971,6 +4423,10 @@ private struct TransactionHashRow: View {
 }
 
 private extension String {
+    var removingHexPrefix: String {
+        hasPrefix("0x") ? String(dropFirst(2)) : self
+    }
+
     var walletDisplayShortAddress: String {
         guard hasPrefix("0x"), count > 18 else {
             return self

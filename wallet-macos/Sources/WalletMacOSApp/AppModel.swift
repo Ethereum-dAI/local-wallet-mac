@@ -37,13 +37,26 @@ final class AppModel: ObservableObject {
     @Published private(set) var isRotatingLocalRelayer = false
     @Published private(set) var isExportingLocalRelayer = false
     @Published private(set) var isDeletingLocalRelayer = false
+    @Published private(set) var unlockRelayerOnLaunch: Bool
 
     var activeChain: ChainConfiguration {
         configuration.activeChain
     }
 
+    var networkSettings: DemoNetworkSettings {
+        configuration.networkSettings
+    }
+
     var hasLocalRelayerClient: Bool {
         walletNodeClient != nil || WalletNodeClient.Configuration.fromEnvironment() == nil
+    }
+
+    var canChangeNetworkSettings: Bool {
+        !isBootstrapping
+            && !isRunningDemo
+            && !isRefreshingBalance
+            && !isBuildingUserOperation
+            && !isSendingUserOperation
     }
 
     private let keyStore: KeyStore
@@ -74,9 +87,8 @@ final class AppModel: ObservableObject {
         self.walletNodeClient = walletNodeClient
         self.userOperationBuilder = userOperationBuilder
         self.walletHistoryStore = walletHistoryStore
-        self.configuration = DemoAppConfiguration(
-            isTestnetModeEnabled: settingsStore.isTestnetModeEnabled
-        )
+        self.configuration = DemoAppConfiguration(networkSettings: settingsStore.networkSettings)
+        self.unlockRelayerOnLaunch = settingsStore.unlockRelayerOnLaunch
         self.localRelayerMessage = walletNodeClient == nil
             ? "Local wallet-node daemon will start on refresh."
             : "Local wallet-node daemon configured from environment."
@@ -194,7 +206,11 @@ final class AppModel: ObservableObject {
         if shouldInspectAfterBootstrap {
             runDemo()
         }
-        refreshLocalRelayerStatus()
+        if unlockRelayerOnLaunch {
+            refreshLocalRelayerStatus()
+        } else {
+            localRelayerMessage = "Local relayer unlock on launch is disabled."
+        }
     }
 
     private func createFreshWalletRecord(coordinates: PublicKeyCoordinates, now: Date) throws -> WalletRecord {
@@ -327,8 +343,11 @@ final class AppModel: ObservableObject {
         appendSection("Switch Chain")
         appendLog("chain: toggled testnet mode \(isEnabled ? "on" : "off")")
 
-        settingsStore.setTestnetModeEnabled(isEnabled)
-        configuration = DemoAppConfiguration(isTestnetModeEnabled: isEnabled)
+        var settings = networkSettings
+        settings.isTestnetModeEnabled = isEnabled
+        settingsStore.setNetworkSettings(settings)
+        configuration = DemoAppConfiguration(networkSettings: settings)
+        resetWalletNodeConnectionAfterNetworkChange()
         accountInspection = nil
         builtUserOperationDraft = nil
         lastUserOperationBuildError = nil
@@ -336,6 +355,67 @@ final class AppModel: ObservableObject {
         lastSubmittedUserOperationHash = nil
         lastBundledTransactionHash = nil
         bootstrap()
+    }
+
+    func updateNetworkSettings(_ settings: DemoNetworkSettings) throws {
+        let validated = try settings.validated()
+        guard configuration.networkSettings != validated else {
+            return
+        }
+        guard canChangeNetworkSettings else {
+            throw AppError.walletOperationInProgress
+        }
+
+        appendSection("Update Network Settings")
+        appendLog("network: active profile \(validated.activeNetworkName)")
+        appendLog("network: execution RPC \(validated.activeRPCURL)")
+        settingsStore.setNetworkSettings(validated)
+        configuration = DemoAppConfiguration(networkSettings: validated)
+        resetWalletNodeConnectionAfterNetworkChange()
+        accountInspection = nil
+        builtUserOperationDraft = nil
+        lastUserOperationBuildError = nil
+        activeBundlerStatus = "Bundler not checked"
+        lastSubmittedUserOperationHash = nil
+        lastBundledTransactionHash = nil
+        bootstrap()
+    }
+
+    func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
+        guard unlockRelayerOnLaunch != isEnabled else {
+            return
+        }
+        settingsStore.setUnlockRelayerOnLaunch(isEnabled)
+        unlockRelayerOnLaunch = isEnabled
+        appendLog("security: unlock relayer on launch \(isEnabled ? "enabled" : "disabled")")
+        if isEnabled, localRelayerStatus == nil {
+            refreshLocalRelayerStatus()
+        } else if !isEnabled, localRelayerStatus == nil {
+            localRelayerMessage = "Local relayer unlock on launch is disabled."
+        }
+    }
+
+    func testNetworkSettings(_ settings: DemoNetworkSettings) async throws -> String {
+        let validated = try settings.validated()
+        let chain = validated.activeChain
+        let remoteChainID = try await Self.probeExecutionChainID(rpcURL: chain.rpcURL)
+        guard remoteChainID == chain.id else {
+            throw AppError.localDaemonLaunchFailed("RPC returned chain ID \(remoteChainID), expected \(chain.id).")
+        }
+        return "\(chain.name) RPC responded with chain ID \(remoteChainID)."
+    }
+
+    private func resetWalletNodeConnectionAfterNetworkChange() {
+        walletNodeLaunchTask?.cancel()
+        walletNodeLaunchTask = nil
+        walletNodeDaemon = nil
+        walletNodeClient = WalletNodeClient.Configuration.fromEnvironment().map {
+            WalletNodeClient(configuration: $0)
+        }
+        localRelayerStatus = nil
+        localRelayerMessage = walletNodeClient == nil
+            ? "Local wallet-node daemon will restart with the selected network."
+            : "External wallet-node is configured from environment."
     }
 
     func setTransactionKind(_ kind: DemoTransactionKind) {
@@ -385,6 +465,18 @@ final class AppModel: ObservableObject {
             }
             isRefreshingLocalRelayer = false
         }
+    }
+
+    func checkLocalRelayerStatusForDiagnostics() async throws -> WalletNodeClient.RelayerStatus {
+        let status = try await withWalletNodeClient(operation: "diagnostic status") { client in
+            try await client.bundlerStatus()
+        }
+        localRelayerStatus = status
+        localRelayerMessage = status.ready
+            ? "Local relayer ready on \(status.networkProfile)."
+            : "Local relayer needs attention."
+        appendLog("relayer: diagnostic status \(status.lifecycle) \(status.eoa.shortAddress)")
+        return status
     }
 
     func rotateLocalRelayerKey() async throws {
@@ -1389,6 +1481,42 @@ final class AppModel: ObservableObject {
         debugLogText = entries.joined(separator: "\n")
     }
 
+    private static func probeExecutionChainID(rpcURL: URL) async throws -> UInt64 {
+        let response = try await jsonRPC(method: "eth_chainId", rpcURL: rpcURL)
+        guard let hexValue = response["result"] as? String,
+              let chainID = UInt64(hexValue.removingHexPrefix, radix: 16) else {
+            throw AppError.localDaemonLaunchFailed("Execution RPC returned an invalid eth_chainId response.")
+        }
+        return chainID
+    }
+
+    private static func jsonRPC(method: String, rpcURL: URL) async throws -> [String: Any] {
+        var request = URLRequest(url: rpcURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 12
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": [],
+        ])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              200..<300 ~= httpResponse.statusCode else {
+            throw AppError.localDaemonLaunchFailed("Execution RPC request failed.")
+        }
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AppError.localDaemonLaunchFailed("Execution RPC returned invalid JSON.")
+        }
+        if let error = object["error"] as? [String: Any] {
+            let message = error["message"] as? String ?? "Unknown RPC error"
+            throw AppError.localDaemonLaunchFailed(message)
+        }
+        return object
+    }
+
     private static let logTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
@@ -1407,6 +1535,10 @@ private extension Data {
 }
 
 private extension String {
+    var removingHexPrefix: String {
+        hasPrefix("0x") ? String(dropFirst(2)) : self
+    }
+
     var shortAddress: String {
         guard count > 14 else {
             return self

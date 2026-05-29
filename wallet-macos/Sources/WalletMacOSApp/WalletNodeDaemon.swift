@@ -149,7 +149,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
         )
         let configURL = directory.appendingPathComponent("config.toml")
         let executionRPC = tomlEscaped(chain.rpcURL.absoluteString)
-        let consensusRPC = tomlEscaped(consensusRPCURL(for: chain).absoluteString)
+        let consensusRPC = tomlEscaped(chain.consensusRPCURL.absoluteString)
         let entryPoint = tomlEscaped(chain.entryPoint)
         let body = """
         [network]
@@ -176,13 +176,6 @@ final class WalletNodeDaemon: @unchecked Sendable {
         return base
             .appendingPathComponent("Local Wallet", isDirectory: true)
             .appendingPathComponent("wallet-node", isDirectory: true)
-    }
-
-    private static func consensusRPCURL(for chain: ChainConfiguration) -> URL {
-        if chain.id == 11_155_111 {
-            return URL(string: "https://ethereum-sepolia-beacon-api.publicnode.com")!
-        }
-        return URL(string: "https://lodestar-mainnet.chainsafe.io")!
     }
 
     private static func tomlEscaped(_ value: String) -> String {

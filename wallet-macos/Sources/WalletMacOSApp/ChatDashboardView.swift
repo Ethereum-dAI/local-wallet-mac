@@ -412,6 +412,10 @@ private final class ChatDashboardModel: ObservableObject {
         selectedHistoryUserOpHash = userOpHash
     }
 
+    func clearSelectedHistoryRecord() {
+        selectedHistoryUserOpHash = nil
+    }
+
     func reloadWalletHistory() {
         let records = (try? walletHistoryStore.loadRecords(
             accountAddress: walletModel.walletRecord?.kernelAccountAddress,
@@ -421,9 +425,7 @@ private final class ChatDashboardModel: ObservableObject {
         walletHistoryRecords = records
         if let selectedHistoryUserOpHash,
            !records.contains(where: { $0.userOpHash.caseInsensitiveCompare(selectedHistoryUserOpHash) == .orderedSame }) {
-            self.selectedHistoryUserOpHash = records.first?.userOpHash
-        } else if selectedHistoryUserOpHash == nil {
-            selectedHistoryUserOpHash = records.first?.userOpHash
+            self.selectedHistoryUserOpHash = nil
         }
     }
 
@@ -437,9 +439,6 @@ private final class ChatDashboardModel: ObservableObject {
             guard let self else { return }
             do {
                 self.walletHistoryRecords = try await self.walletModel.refreshWalletHistoryReceipts()
-                if self.selectedHistoryUserOpHash == nil {
-                    self.selectedHistoryUserOpHash = self.walletHistoryRecords.first?.userOpHash
-                }
                 self.walletHistoryMessage = self.walletHistoryRecords.isEmpty
                     ? nil
                     : "History refreshed."
@@ -920,10 +919,8 @@ private final class ChatDashboardModel: ObservableObject {
             switch preflightStatus {
             case .quoting, .failed:
                 return
-            case .quoted(let preview):
-                if preview.quote.requiresApproval {
-                    return
-                }
+            case .quoted:
+                break
             }
         }
         if let intent = updateIntent(message, disposition: .confirmed, args: nil) {
@@ -1278,13 +1275,16 @@ private final class ChatDashboardModel: ObservableObject {
                     }
                     self.appendExecutionResult(result, for: intent, request: request)
                 case .swap:
-                    let request = try await self.swapRequest(from: intent)
+                    let request = try await self.swapRequest(from: intent, allowApprovalRequired: true)
+                    let signingAction = request.quote.requiresApproval && !request.fromToken.isNative
+                        ? "Approve \(request.amount) \(request.fromToken.symbol) and authorize \(request.fromToken.symbol) to \(request.toToken.symbol) swap"
+                        : "Authorize \(request.amount) \(request.fromToken.symbol) to \(request.toToken.symbol) swap"
                     let result = try await self.walletModel.executeExactInputSwap(
                         quote: request.quote,
                         from: request.fromToken,
                         to: request.toToken,
                         logContext: "chat-swap",
-                        signingReason: "Authorize \(request.amount) \(request.fromToken.symbol) to \(request.toToken.symbol) swap on \(self.walletModel.activeChain.name)"
+                        signingReason: "\(signingAction) on \(self.walletModel.activeChain.name)"
                     )
                     self.appendSwapExecutionResult(result, for: intent, request: request)
                 }
@@ -1490,6 +1490,7 @@ private final class ChatDashboardModel: ObservableObject {
             "amount_in": request.amount,
             "quote_amount_out": "0x" + request.quote.quoteAmountOut.hexEncodedString,
             "amount_out_minimum": "0x" + request.quote.amountOutMinimum.hexEncodedString,
+            "approval_batched": request.quote.requiresApproval && !request.fromToken.isNative,
         ]
         if let transactionHash = result.transactionHash {
             responsePayload["transaction_hash"] = transactionHash
@@ -1684,6 +1685,45 @@ private enum DashboardSection {
     case history
 }
 
+private enum WalletHistoryFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case done = "Done"
+    case pending = "Pending"
+    case reverted = "Reverted"
+
+    var id: String { rawValue }
+
+    var tint: Color {
+        switch self {
+        case .all:
+            return ChatPalette.secondaryText
+        case .done:
+            return ChatPalette.success
+        case .pending:
+            return ChatPalette.accent
+        case .reverted:
+            return ChatPalette.warning
+        }
+    }
+
+    func count(in records: [WalletTransactionRecord]) -> Int {
+        records.filter(includes).count
+    }
+
+    func includes(_ record: WalletTransactionRecord) -> Bool {
+        switch self {
+        case .all:
+            return true
+        case .done:
+            return record.status == .included
+        case .pending:
+            return record.status.requiresReceiptRefresh
+        case .reverted:
+            return record.status == .reverted || record.status == .failed
+        }
+    }
+}
+
 struct LocalWalletChatDashboardView: View {
     @StateObject private var model = ChatDashboardModel()
     @State private var conversationPendingDeletion: ChatConversation?
@@ -1691,6 +1731,19 @@ struct LocalWalletChatDashboardView: View {
     @State private var isAtBottomOfChat = true
     @State private var isAccountHeaderExpanded = true
     @State private var selectedSection: DashboardSection = .chat
+    @State private var historyFilter: WalletHistoryFilter = .all
+
+    private var filteredHistoryRecords: [WalletTransactionRecord] {
+        model.walletHistoryRecords.filter(historyFilter.includes)
+    }
+
+    private var visibleHistorySelection: WalletTransactionRecord? {
+        guard let selected = model.selectedHistoryRecord,
+              historyFilter.includes(selected) else {
+            return filteredHistoryRecords.first
+        }
+        return selected
+    }
 
     var body: some View {
         ZStack {
@@ -1913,8 +1966,7 @@ struct LocalWalletChatDashboardView: View {
                         systemImage: "clock.arrow.circlepath",
                         isSelected: selectedSection == .history,
                         action: {
-                            model.reloadWalletHistory()
-                            selectedSection = .history
+                            showHistory()
                         }
                     )
                 }
@@ -2207,24 +2259,14 @@ struct LocalWalletChatDashboardView: View {
     private var historyBody: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Wallet history")
-                        .font(.system(size: 24, weight: .heavy))
-                        .foregroundStyle(ChatPalette.primaryText)
-                    Text("App-initiated transactions only. A transaction is done only after its UserOperation receipt confirms success.")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(ChatPalette.secondaryText)
-                }
-                Spacer()
-                HistoryStatusSummary(records: model.walletHistoryRecords)
                 Button {
-                    model.exportWalletHistory()
+                    selectedSection = .chat
                 } label: {
-                    Label("Export", systemImage: "square.and.arrow.down")
+                    Label("Chat", systemImage: "chevron.left")
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundStyle(ChatPalette.primaryText)
-                        .padding(.horizontal, 12)
-                        .frame(height: 34)
+                        .lineLimit(1)
+                        .frame(width: 86, height: 34)
                         .background(
                             Capsule()
                                 .fill(ChatPalette.buttonCircle)
@@ -2232,6 +2274,35 @@ struct LocalWalletChatDashboardView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .help("Back to chat")
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("History")
+                        .font(.system(size: 22, weight: .heavy))
+                        .foregroundStyle(ChatPalette.primaryText)
+                    Text("App-submitted UserOperations. Done means the receipt confirmed success.")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Button {
+                    model.exportWalletHistory()
+                } label: {
+                    Label("Export", systemImage: "square.and.arrow.down")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundStyle(ChatPalette.primaryText)
+                        .lineLimit(1)
+                        .labelStyle(.iconOnly)
+                        .frame(width: 36, height: 34)
+                        .background(
+                            Capsule()
+                                .fill(ChatPalette.buttonCircle)
+                                .overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Export history")
                 Button {
                     model.refreshWalletHistory()
                 } label: {
@@ -2245,10 +2316,10 @@ struct LocalWalletChatDashboardView: View {
                         }
                         Text("Refresh")
                             .font(.system(size: 12, weight: .heavy))
+                            .lineLimit(1)
                     }
                     .foregroundStyle(ChatPalette.primaryText)
-                    .padding(.horizontal, 12)
-                    .frame(height: 34)
+                    .frame(width: 94, height: 34)
                     .background(
                         Capsule()
                             .fill(ChatPalette.buttonCircle)
@@ -2259,51 +2330,97 @@ struct LocalWalletChatDashboardView: View {
                 .disabled(model.isRefreshingWalletHistory)
             }
 
+            HistoryStatusSummary(
+                records: model.walletHistoryRecords,
+                selection: historyFilter,
+                onSelect: selectHistoryFilter
+            )
+
             if let message = model.walletHistoryMessage {
-                Text(message)
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(ChatPalette.secondaryText)
-                    .padding(.horizontal, 12)
-                    .frame(height: 32)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(ChatPalette.panel)
-                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(ChatPalette.border, lineWidth: 1))
-                    )
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle.fill")
+                        .font(.system(size: 12, weight: .bold))
+                    Text(message)
+                        .font(.system(size: 12, weight: .bold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(ChatPalette.secondaryText)
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .frame(maxWidth: 520)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(ChatPalette.panel)
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(ChatPalette.border, lineWidth: 1))
+                )
             }
 
             if model.walletHistoryRecords.isEmpty {
                 WalletHistoryEmptyState()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if filteredHistoryRecords.isEmpty {
+                WalletHistoryEmptyState(
+                    title: "No \(historyFilter.rawValue.lowercased()) records",
+                    message: "Choose another status filter or refresh history."
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                HStack(spacing: 14) {
-                    ScrollView {
-                        LazyVStack(spacing: 8) {
-                            ForEach(model.walletHistoryRecords) { record in
-                                WalletHistoryRow(
-                                    record: record,
-                                    isSelected: model.selectedHistoryRecord?.id == record.id,
-                                    onSelect: { model.selectHistoryRecord(record) }
-                                )
+                GeometryReader { proxy in
+                    let isCompact = proxy.size.width < 860
+                    if isCompact,
+                       model.selectedHistoryUserOpHash != nil,
+                       let selected = model.selectedHistoryRecord,
+                       historyFilter.includes(selected) {
+                        WalletHistoryDetailView(
+                            record: selected,
+                            showsBackButton: true,
+                            onBack: { model.clearSelectedHistoryRecord() }
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        HStack(spacing: 12) {
+                            WalletHistoryListView(
+                                records: filteredHistoryRecords,
+                                selectedRecord: visibleHistorySelection,
+                                onSelect: { model.selectHistoryRecord($0) }
+                            )
+                            .frame(minWidth: isCompact ? proxy.size.width : 320, idealWidth: 380, maxWidth: isCompact ? .infinity : 420)
+
+                            if !isCompact {
+                                if let selected = visibleHistorySelection {
+                                    WalletHistoryDetailView(record: selected)
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                } else {
+                                    WalletHistoryEmptyState()
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                }
                             }
                         }
-                        .padding(2)
-                    }
-                    .frame(minWidth: 330, idealWidth: 390, maxWidth: 430)
-
-                    if let selected = model.selectedHistoryRecord {
-                        WalletHistoryDetailView(record: selected)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        WalletHistoryEmptyState()
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .padding(.vertical, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func showHistory() {
+        model.reloadWalletHistory()
+        model.clearSelectedHistoryRecord()
+        selectedSection = .history
+    }
+
+    private func selectHistoryFilter(_ filter: WalletHistoryFilter) {
+        historyFilter = filter
+        guard let selected = model.selectedHistoryRecord,
+              filter.includes(selected) else {
+            model.clearSelectedHistoryRecord()
+            return
+        }
     }
 
     private var emptyState: some View {
@@ -3088,34 +3205,53 @@ private struct DashboardSectionButton: View {
 
 private struct HistoryStatusSummary: View {
     let records: [WalletTransactionRecord]
+    let selection: WalletHistoryFilter
+    let onSelect: (WalletHistoryFilter) -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            summaryPill("Done", records.filter { $0.status == .included }.count, ChatPalette.success)
-            summaryPill("Pending", records.filter { $0.status.requiresReceiptRefresh }.count, ChatPalette.accent)
-            summaryPill("Reverted", records.filter { $0.status == .reverted }.count, ChatPalette.warning)
+        HStack(spacing: 6) {
+            ForEach(WalletHistoryFilter.allCases) { filter in
+                Button {
+                    onSelect(filter)
+                } label: {
+                    summaryPill(filter)
+                }
+                .buttonStyle(.plain)
+                .help("Show \(filter.rawValue.lowercased()) records")
+            }
+            Spacer(minLength: 0)
         }
+        .frame(maxWidth: .infinity)
     }
 
-    private func summaryPill(_ title: String, _ count: Int, _ tint: Color) -> some View {
-        HStack(spacing: 6) {
+    private func summaryPill(_ filter: WalletHistoryFilter) -> some View {
+        let isSelected = selection == filter
+        return HStack(spacing: 6) {
             Circle()
-                .fill(tint)
+                .fill(filter.tint)
                 .frame(width: 7, height: 7)
-            Text("\(count)")
+            Text("\(filter.count(in: records))")
                 .font(.system(size: 12, weight: .heavy, design: .monospaced))
                 .foregroundStyle(ChatPalette.primaryText)
-            Text(title)
+                .frame(minWidth: 12, alignment: .trailing)
+            Text(filter.rawValue)
                 .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(ChatPalette.secondaryText)
+                .foregroundStyle(isSelected ? ChatPalette.primaryText : ChatPalette.secondaryText)
+                .lineLimit(1)
         }
-        .padding(.horizontal, 10)
-        .frame(height: 30)
-        .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1)))
+        .frame(width: 94, height: 30)
+        .background(
+            Capsule()
+                .fill(isSelected ? ChatPalette.selectedPanel : ChatPalette.panel)
+                .overlay(Capsule().stroke(isSelected ? filter.tint.opacity(0.8) : ChatPalette.border, lineWidth: 1))
+        )
     }
 }
 
 private struct WalletHistoryEmptyState: View {
+    var title = "No wallet history yet"
+    var message = "Transfers, swaps, and future batches submitted from this app will appear here."
+
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "clock.arrow.circlepath")
@@ -3123,14 +3259,49 @@ private struct WalletHistoryEmptyState: View {
                 .foregroundStyle(ChatPalette.secondaryText)
                 .frame(width: 84, height: 84)
                 .background(Circle().fill(ChatPalette.avatar))
-            Text("No wallet history yet")
+            Text(title)
                 .font(.system(size: 18, weight: .heavy))
                 .foregroundStyle(ChatPalette.primaryText)
-            Text("Transfers, swaps, and future batches submitted from this app will appear here.")
+            Text(message)
                 .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(ChatPalette.secondaryText)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 360)
+        }
+    }
+}
+
+private struct WalletHistoryListView: View {
+    let records: [WalletTransactionRecord]
+    let selectedRecord: WalletTransactionRecord?
+    let onSelect: (WalletTransactionRecord) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Transactions")
+                    .font(.system(size: 12, weight: .black))
+                    .foregroundStyle(ChatPalette.mutedText)
+                    .textCase(.uppercase)
+                Spacer()
+                Text("\(records.count)")
+                    .font(.system(size: 11, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(ChatPalette.secondaryText)
+            }
+            .padding(.horizontal, 4)
+
+            ScrollView {
+                LazyVStack(spacing: 7) {
+                    ForEach(records) { record in
+                        WalletHistoryRow(
+                            record: record,
+                            isSelected: selectedRecord?.id == record.id,
+                            onSelect: { onSelect(record) }
+                        )
+                    }
+                }
+                .padding(2)
+            }
         }
     }
 }
@@ -3144,9 +3315,9 @@ private struct WalletHistoryRow: View {
         Button(action: onSelect) {
             HStack(spacing: 12) {
                 Image(systemName: record.operationIcon)
-                    .font(.system(size: 15, weight: .black))
+                    .font(.system(size: 14, weight: .black))
                     .foregroundStyle(record.statusTint)
-                    .frame(width: 34, height: 34)
+                    .frame(width: 32, height: 32)
                     .background(Circle().fill(record.statusTint.opacity(0.14)))
 
                 VStack(alignment: .leading, spacing: 5) {
@@ -3155,6 +3326,7 @@ private struct WalletHistoryRow: View {
                             .font(.system(size: 13, weight: .heavy))
                             .foregroundStyle(ChatPalette.primaryText)
                             .lineLimit(1)
+                            .truncationMode(.tail)
                         Text(record.statusTitle)
                             .font(.system(size: 10, weight: .black))
                             .foregroundStyle(record.statusTint)
@@ -3166,20 +3338,24 @@ private struct WalletHistoryRow: View {
                         .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(ChatPalette.secondaryText)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                     Text(record.updatedAt, style: .relative)
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(ChatPalette.mutedText)
                 }
 
                 Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .black))
+                    .foregroundStyle(isSelected ? ChatPalette.secondaryText : ChatPalette.mutedText.opacity(0.7))
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 11)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 10)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(isSelected ? ChatPalette.selectedPanel : ChatPalette.panel.opacity(0.74))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .stroke(isSelected ? ChatPalette.accent.opacity(0.7) : ChatPalette.border.opacity(0.55), lineWidth: 1)
                     )
             )
@@ -3190,11 +3366,26 @@ private struct WalletHistoryRow: View {
 
 private struct WalletHistoryDetailView: View {
     let record: WalletTransactionRecord
+    var showsBackButton = false
+    var onBack: (() -> Void)? = nil
     @State private var copiedValue: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 12) {
+                if showsBackButton {
+                    Button {
+                        onBack?()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 12, weight: .black))
+                            .foregroundStyle(ChatPalette.secondaryText)
+                            .frame(width: 30, height: 30)
+                            .background(Circle().fill(ChatPalette.buttonCircle))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Back to transactions")
+                }
                 Image(systemName: record.statusIcon)
                     .font(.system(size: 20, weight: .black))
                     .foregroundStyle(record.statusTint)
@@ -3202,11 +3393,13 @@ private struct WalletHistoryDetailView: View {
                     .background(Circle().fill(record.statusTint.opacity(0.14)))
                 VStack(alignment: .leading, spacing: 5) {
                     Text(record.title)
-                        .font(.system(size: 22, weight: .heavy))
+                        .font(.system(size: 21, weight: .heavy))
                         .foregroundStyle(ChatPalette.primaryText)
+                        .lineLimit(1)
                     Text(record.statusExplanation)
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(ChatPalette.secondaryText)
+                        .lineLimit(2)
                 }
                 Spacer()
                 Text(record.chainName)
@@ -3217,51 +3410,53 @@ private struct WalletHistoryDetailView: View {
                     .background(Capsule().fill(ChatPalette.buttonCircle))
             }
 
-            VStack(spacing: 9) {
-                WalletHistoryFieldRow(title: "Status", value: record.statusTitle, copiedValue: $copiedValue, monospaced: false)
-                WalletHistoryFieldRow(title: "Operation", value: record.operation.rawValue.capitalized, copiedValue: $copiedValue, monospaced: false)
-                if let amountLabel = record.amountLabel {
-                    WalletHistoryFieldRow(title: "Amount", value: amountLabel, copiedValue: $copiedValue, monospaced: false)
-                }
-                if let amountOut = record.amountOut {
-                    WalletHistoryFieldRow(title: "Estimated out", value: amountOut, copiedValue: $copiedValue, monospaced: false)
-                }
-                if let minimumReceived = record.minimumReceived {
-                    WalletHistoryFieldRow(title: "Minimum out", value: minimumReceived, copiedValue: $copiedValue, monospaced: false)
-                }
-                if let route = record.route {
-                    WalletHistoryFieldRow(title: "Route", value: route, copiedValue: $copiedValue, monospaced: false)
-                }
-                if let counterparty = record.counterparty {
-                    WalletHistoryFieldRow(
-                        title: record.operation == .swap ? "Router" : "Recipient",
-                        value: record.counterpartyName ?? counterparty,
-                        copiedValue: $copiedValue,
-                        monospaced: record.counterpartyName == nil
-                    )
-                    if record.counterpartyName != nil {
-                        WalletHistoryFieldRow(title: "Address", value: counterparty, copiedValue: $copiedValue)
+            ScrollView {
+                VStack(spacing: 8) {
+                    WalletHistoryFieldRow(title: "Status", value: record.statusTitle, copiedValue: $copiedValue, monospaced: false)
+                    WalletHistoryFieldRow(title: "Operation", value: record.operation.rawValue.capitalized, copiedValue: $copiedValue, monospaced: false)
+                    if let amountLabel = record.amountLabel {
+                        WalletHistoryFieldRow(title: "Amount", value: amountLabel, copiedValue: $copiedValue, monospaced: false)
                     }
-                }
-                WalletHistoryFieldRow(title: "UserOperation", value: record.userOpHash, copiedValue: $copiedValue)
-                if let transactionHash = record.transactionHash {
-                    WalletHistoryFieldRow(
-                        title: "Transaction",
-                        value: transactionHash,
-                        copiedValue: $copiedValue,
-                        explorerURL: record.transactionExplorerURL
-                    )
-                } else {
-                    WalletHistoryFieldRow(title: "Transaction", value: "Waiting for receipt", copiedValue: $copiedValue, monospaced: false)
-                }
-                if let actualGasUsed = record.actualGasUsed {
-                    WalletHistoryFieldRow(title: "Gas used", value: actualGasUsed, copiedValue: $copiedValue)
-                }
-                if let actualGasCost = record.actualGasCost {
-                    WalletHistoryFieldRow(title: "Gas cost", value: actualGasCost, copiedValue: $copiedValue)
-                }
-                if let revertReason = record.revertReason, !revertReason.isEmpty {
-                    WalletHistoryFieldRow(title: "Revert reason", value: revertReason, copiedValue: $copiedValue, monospaced: false)
+                    if let amountOut = record.amountOut {
+                        WalletHistoryFieldRow(title: "Estimated out", value: amountOut, copiedValue: $copiedValue, monospaced: false)
+                    }
+                    if let minimumReceived = record.minimumReceived {
+                        WalletHistoryFieldRow(title: "Minimum out", value: minimumReceived, copiedValue: $copiedValue, monospaced: false)
+                    }
+                    if let route = record.route {
+                        WalletHistoryFieldRow(title: "Route", value: route, copiedValue: $copiedValue, monospaced: false)
+                    }
+                    if let counterparty = record.counterparty {
+                        WalletHistoryFieldRow(
+                            title: record.operation == .swap ? "Router" : "Recipient",
+                            value: record.counterpartyName ?? counterparty,
+                            copiedValue: $copiedValue,
+                            monospaced: record.counterpartyName == nil
+                        )
+                        if record.counterpartyName != nil {
+                            WalletHistoryFieldRow(title: "Address", value: counterparty, copiedValue: $copiedValue)
+                        }
+                    }
+                    WalletHistoryFieldRow(title: "UserOperation", value: record.userOpHash, copiedValue: $copiedValue)
+                    if let transactionHash = record.transactionHash {
+                        WalletHistoryFieldRow(
+                            title: "Transaction",
+                            value: transactionHash,
+                            copiedValue: $copiedValue,
+                            explorerURL: record.transactionExplorerURL
+                        )
+                    } else {
+                        WalletHistoryFieldRow(title: "Transaction", value: "Waiting for receipt", copiedValue: $copiedValue, monospaced: false)
+                    }
+                    if let actualGasUsed = record.actualGasUsed {
+                        WalletHistoryFieldRow(title: "Gas used", value: actualGasUsed, copiedValue: $copiedValue)
+                    }
+                    if let actualGasCost = record.actualGasCost {
+                        WalletHistoryFieldRow(title: "Gas cost", value: actualGasCost, copiedValue: $copiedValue)
+                    }
+                    if let revertReason = record.revertReason, !revertReason.isEmpty {
+                        WalletHistoryFieldRow(title: "Revert reason", value: revertReason, copiedValue: $copiedValue, monospaced: false)
+                    }
                 }
             }
 

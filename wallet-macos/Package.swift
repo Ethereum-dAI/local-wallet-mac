@@ -73,5 +73,10 @@ let package = Package(
             dependencies: ["WalletToolLayer"],
             path: "Tests/WalletToolLayerTests"
         ),
+        .testTarget(
+            name: "WalletMacOSAppTests",
+            dependencies: ["WalletMacOSApp"],
+            path: "Tests/WalletMacOSAppTests"
+        ),
     ]
 )

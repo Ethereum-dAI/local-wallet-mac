@@ -1,5 +1,6 @@
 import Foundation
 import LocalAuthentication
+import WalletToolLayer
 import WalletSignature
 
 // AppModel drives the signed macOS demo shell. It is intentionally opinionated
@@ -54,6 +55,7 @@ final class AppModel: ObservableObject {
     private var walletNodeDaemon: WalletNodeDaemon?
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
     private let userOperationBuilder: UserOperationBuilder
+    private let walletHistoryStore: WalletTransactionHistoryStore
 
     init(
         keyStore: KeyStore = KeyStore(),
@@ -64,7 +66,8 @@ final class AppModel: ObservableObject {
         walletNodeClient: WalletNodeClient? = WalletNodeClient.Configuration.fromEnvironment().map {
             WalletNodeClient(configuration: $0)
         },
-        userOperationBuilder: UserOperationBuilder = UserOperationBuilder()
+        userOperationBuilder: UserOperationBuilder = UserOperationBuilder(),
+        walletHistoryStore: WalletTransactionHistoryStore = WalletTransactionHistoryStore()
     ) {
         self.keyStore = keyStore
         self.metadataStore = metadataStore
@@ -73,6 +76,7 @@ final class AppModel: ObservableObject {
         self.rpcClient = rpcClient
         self.walletNodeClient = walletNodeClient
         self.userOperationBuilder = userOperationBuilder
+        self.walletHistoryStore = walletHistoryStore
         self.configuration = DemoAppConfiguration(
             isTestnetModeEnabled: settingsStore.isTestnetModeEnabled
         )
@@ -938,6 +942,12 @@ final class AppModel: ObservableObject {
         }
         lastSubmittedUserOperationHash = sentUserOpHash
         appendLog("\(logContext): local wallet-node accepted userOpHash \(sentUserOpHash)")
+        recordSubmittedHistory(
+            intent: intent,
+            userOpHash: sentUserOpHash,
+            accountAddress: enrichedDraft.sender,
+            logContext: logContext
+        )
 
         bridgeStatus = "UserOperation accepted by local wallet-node on \(activeChain.name). Waiting for inclusion..."
 
@@ -951,6 +961,7 @@ final class AppModel: ObservableObject {
             if let revertReason = receipt.revertReason, !revertReason.isEmpty {
                 appendLog("\(logContext): revert reason \(revertReason)")
             }
+            recordReceiptHistory(receipt, chainID: activeChain.id, logContext: logContext)
 
             bridgeStatus = receipt.success
                 ? "UserOperation included on \(activeChain.name)."
@@ -968,6 +979,7 @@ final class AppModel: ObservableObject {
         activeBundlerStatus = "Receipt pending"
         bridgeStatus = "UserOperation submitted to local wallet-node. Receipt still pending."
         appendLog("\(logContext): receipt still pending after polling window")
+        markPendingHistory(userOpHash: sentUserOpHash, chainID: activeChain.id, logContext: logContext)
         refreshLocalRelayerStatus()
         return UserOperationSendResult(
             userOpHash: sentUserOpHash,
@@ -1078,6 +1090,219 @@ final class AppModel: ObservableObject {
         }
 
         return nil
+    }
+
+    func loadWalletHistoryRecords(limit: Int = 200) -> [WalletTransactionRecord] {
+        do {
+            return try walletHistoryStore.loadRecords(
+                accountAddress: walletRecord?.kernelAccountAddress,
+                chainID: activeChain.id,
+                limit: limit
+            )
+        } catch {
+            appendLog("history: load failed — \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    func refreshWalletHistoryReceipts(limit: Int = 200) async throws -> [WalletTransactionRecord] {
+        let accountAddress = walletRecord?.kernelAccountAddress
+        let records = try walletHistoryStore.loadUnfinalizedRecords(
+            accountAddress: accountAddress,
+            chainID: activeChain.id,
+            limit: limit
+        )
+        guard !records.isEmpty else {
+            return try walletHistoryStore.loadRecords(
+                accountAddress: accountAddress,
+                chainID: activeChain.id,
+                limit: limit
+            )
+        }
+
+        appendLog("history: refreshing receipts for \(records.count) pending record\(records.count == 1 ? "" : "s")")
+        for record in records {
+            let receipt = try await withWalletNodeClient(operation: "history receipt refresh") { client in
+                try await client.getUserOperationReceipt(userOpHash: record.userOpHash)
+            }
+            if let receipt {
+                recordReceiptHistory(receipt, chainID: record.chainID, logContext: "history")
+            } else {
+                markPendingHistory(userOpHash: record.userOpHash, chainID: record.chainID, logContext: "history")
+            }
+        }
+
+        return try walletHistoryStore.loadRecords(
+            accountAddress: accountAddress,
+            chainID: activeChain.id,
+            limit: limit
+        )
+    }
+
+    private func recordSubmittedHistory(
+        intent: TransactionIntent,
+        userOpHash: String,
+        accountAddress: String,
+        logContext: String
+    ) {
+        do {
+            let draft = historyDraft(for: intent)
+            try walletHistoryStore.recordSubmitted(
+                draft,
+                userOpHash: userOpHash,
+                accountAddress: accountAddress,
+                chainID: activeChain.id,
+                chainName: activeChain.name
+            )
+            appendLog("\(logContext): wallet history recorded submitted operation")
+        } catch {
+            appendLog("\(logContext): wallet history record failed — \(error.localizedDescription)")
+        }
+    }
+
+    private func recordReceiptHistory(
+        _ receipt: WalletNodeClient.UserOperationReceipt,
+        chainID: UInt64,
+        logContext: String
+    ) {
+        do {
+            try walletHistoryStore.applyReceipt(WalletTransactionReceiptUpdate(
+                chainID: chainID,
+                userOpHash: receipt.userOpHash,
+                transactionHash: receipt.txHash,
+                success: receipt.success,
+                actualGasCost: receipt.actualGasCost,
+                actualGasUsed: receipt.actualGasUsed,
+                revertReason: receipt.revertReason
+            ))
+            appendLog("\(logContext): wallet history reconciled receipt \(receipt.success ? "included" : "reverted")")
+        } catch {
+            appendLog("\(logContext): wallet history receipt update failed — \(error.localizedDescription)")
+        }
+    }
+
+    private func markPendingHistory(userOpHash: String, chainID: UInt64, logContext: String) {
+        do {
+            try walletHistoryStore.markPending(userOpHash: userOpHash, chainID: chainID)
+            appendLog("\(logContext): wallet history left pending until receipt is available")
+        } catch {
+            appendLog("\(logContext): wallet history pending update failed — \(error.localizedDescription)")
+        }
+    }
+
+    private func historyDraft(for intent: TransactionIntent) -> WalletTransactionDraft {
+        switch intent {
+        case let .nativeTransfer(recipient, amountETH):
+            return WalletTransactionDraft(
+                operation: .transfer,
+                amount: amountETH,
+                token: "ETH",
+                counterparty: recipient
+            )
+        case let .erc20Transfer(token, recipient, amount):
+            return WalletTransactionDraft(
+                operation: .transfer,
+                amount: amount,
+                token: token.symbol,
+                counterparty: recipient
+            )
+        case let .exactInputSwap(request):
+            let input = historyToken(
+                address: request.quote.tokenIn,
+                isNative: request.tokenInIsNative
+            )
+            let output = historyToken(
+                address: request.quote.tokenOut,
+                isNative: request.tokenOutIsNative
+            )
+            let route = historyRouteLabel(
+                from: input.symbol,
+                quote: request.quote,
+                outputSymbol: output.symbol
+            )
+            let details = historyDetailsJSON([
+                "router": request.quote.router,
+                "recipient": request.recipient,
+                "tokenIn": request.quote.tokenIn,
+                "tokenOut": request.quote.tokenOut,
+                "amountIn": "0x" + request.quote.amountIn.hexEncodedString,
+                "quoteAmountOut": "0x" + request.quote.quoteAmountOut.hexEncodedString,
+                "amountOutMinimum": "0x" + request.quote.amountOutMinimum.hexEncodedString,
+                "slippageBps": String(request.quote.slippageBps),
+            ])
+            return WalletTransactionDraft(
+                operation: .swap,
+                amount: TokenAmountFormatter.displayString(
+                    rawUnits: request.quote.amountIn,
+                    decimals: input.decimals,
+                    symbol: input.symbol
+                ),
+                token: "\(input.symbol) -> \(output.symbol)",
+                counterparty: request.quote.router,
+                counterpartyName: "Uniswap SwapRouter02",
+                route: route,
+                amountOut: TokenAmountFormatter.displayString(
+                    rawUnits: request.quote.quoteAmountOut,
+                    decimals: output.decimals,
+                    symbol: output.symbol
+                ),
+                minimumReceived: TokenAmountFormatter.displayString(
+                    rawUnits: request.quote.amountOutMinimum,
+                    decimals: output.decimals,
+                    symbol: output.symbol
+                ),
+                detailsJSON: details
+            )
+        }
+    }
+
+    private func historyToken(
+        address: String,
+        isNative: Bool
+    ) -> (symbol: String, decimals: Int) {
+        if isNative {
+            return ("ETH", 18)
+        }
+        if let token = WalletTokenRegistry.token(matching: address, on: activeChain.id) {
+            return (token.symbol, token.decimals)
+        }
+        return (shortHistoryAddress(address), 18)
+    }
+
+    private func historyRouteLabel(
+        from inputSymbol: String,
+        quote: SwapQuote,
+        outputSymbol: String
+    ) -> String {
+        guard !quote.hops.isEmpty else {
+            return "\(inputSymbol) -> \(outputSymbol)"
+        }
+        var symbols = [inputSymbol]
+        for hop in quote.hops {
+            symbols.append(
+                WalletTokenRegistry.token(
+                    matching: hop.tokenOut,
+                    on: quote.chainID
+                )?.symbol ?? shortHistoryAddress(hop.tokenOut)
+            )
+        }
+        return symbols.joined(separator: " -> ")
+    }
+
+    private func shortHistoryAddress(_ value: String) -> String {
+        guard value.hasPrefix("0x"), value.count > 18 else {
+            return value
+        }
+        return "\(value.prefix(10))...\(value.suffix(8))"
+    }
+
+    private func historyDetailsJSON(_ fields: [String: String]) -> String? {
+        guard JSONSerialization.isValidJSONObject(fields),
+              let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])
+        else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
     }
 
     private func pack128(high: Data, low: Data) -> Data {

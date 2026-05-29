@@ -97,6 +97,16 @@ private struct ChatAccountIdentity: Equatable {
     }
 }
 
+private struct ChatTokenBalance: Identifiable, Equatable {
+    let token: WalletToken
+    let rawBalanceHex: String?
+    let displayBalance: String
+
+    var id: String {
+        token.id
+    }
+}
+
 struct OnchainTransactionSummary: Codable, Equatable {
     enum Operation: String, Codable {
         case transfer
@@ -283,6 +293,14 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var streamingText: String = ""
     @Published private(set) var streamingMessageID: UUID? = nil
     @Published var feedbackExportMessage: String? = nil
+    @Published private(set) var walletHistoryRecords: [WalletTransactionRecord] = []
+    @Published private(set) var isRefreshingWalletHistory = false
+    @Published var walletHistoryMessage: String? = nil
+    @Published var selectedHistoryUserOpHash: String? = nil
+    @Published private(set) var kernelTokenBalances: [ChatTokenBalance] = []
+    @Published private(set) var bundlerTokenBalances: [ChatTokenBalance] = []
+    @Published private(set) var isRefreshingTokenBalances = false
+    @Published private(set) var tokenBalanceMessage: String? = nil
     @Published private var transferPreflightStatuses: [UUID: ChatTransferPreflightStatus] = [:]
     @Published private var swapPreflightStatuses: [UUID: ChatSwapPreflightStatus] = [:]
 
@@ -292,22 +310,29 @@ private final class ChatDashboardModel: ObservableObject {
     private var walletModelCancellable: AnyCancellable?
     private let inferenceService: EmbeddedLlamaInferenceService
     private let chatStore: ChatSQLiteStore
+    private let walletHistoryStore: WalletTransactionHistoryStore
     private let preferencesStore: ChatPreferencesStore
     private let walletModel: AppModel
+    private let rpcClient: DemoRPCClient
     private var executingIntentIDs: Set<UUID> = []
+    private var lastTokenBalanceKey: String?
 
     init(
         inferenceService: EmbeddedLlamaInferenceService = EmbeddedLlamaInferenceService(),
         chatStore: ChatSQLiteStore = ChatSQLiteStore(),
+        walletHistoryStore: WalletTransactionHistoryStore = WalletTransactionHistoryStore(),
         preferencesStore: ChatPreferencesStore = ChatPreferencesStore(),
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
         metadataStore: WalletMetadataStore = WalletMetadataStore(),
-        walletModel: AppModel = AppModel()
+        rpcClient: DemoRPCClient = DemoRPCClient(),
+        walletModel: AppModel? = nil
     ) {
         self.inferenceService = inferenceService
         self.chatStore = chatStore
+        self.walletHistoryStore = walletHistoryStore
         self.preferencesStore = preferencesStore
-        self.walletModel = walletModel
+        self.rpcClient = rpcClient
+        self.walletModel = walletModel ?? AppModel(walletHistoryStore: walletHistoryStore)
         self.runtimeStatus = inferenceService.runtimeStatus
         self.thinkingEnabled = preferencesStore.thinkingEnabled
         self.isSidebarVisible = preferencesStore.sidebarVisible
@@ -335,18 +360,24 @@ private final class ChatDashboardModel: ObservableObject {
 
         let kernelAddress = (try? metadataStore.load())?.kernelAccountAddress ?? "Not available"
         self.accountIdentity = ChatAccountIdentity.placeholder(
-            chain: walletModel.activeChain,
+            chain: self.walletModel.activeChain,
             kernelAddress: kernelAddress,
             bundlerAddress: settingsStore.bundlerAddress ?? "Not available"
         )
         preferencesStore.activeConversationID = self.activeConversationID
-        walletModelCancellable = walletModel.objectWillChange.sink { [weak self] _ in
+        walletModelCancellable = self.walletModel.objectWillChange.sink { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshAccountIdentity()
+                self?.reloadWalletHistory()
+                self?.refreshTokenBalancesIfNeeded()
             }
         }
         refreshAccountIdentity()
-        walletModel.bootstrap()
+        self.walletModel.bootstrap()
+        backfillWalletHistoryFromChat()
+        reloadWalletHistory()
+        refreshWalletHistory()
+        refreshTokenBalancesIfNeeded()
     }
 
     var activeConversation: ChatConversation? {
@@ -357,6 +388,16 @@ private final class ChatDashboardModel: ObservableObject {
         activeConversation?.messages ?? []
     }
 
+    var selectedHistoryRecord: WalletTransactionRecord? {
+        if let selectedHistoryUserOpHash,
+           let record = walletHistoryRecords.first(where: {
+               $0.userOpHash.caseInsensitiveCompare(selectedHistoryUserOpHash) == .orderedSame
+           }) {
+            return record
+        }
+        return walletHistoryRecords.first
+    }
+
     var slashSuggestions: [SlashCommand] {
         SlashCatalog.suggestions(for: inputText)
     }
@@ -364,6 +405,216 @@ private final class ChatDashboardModel: ObservableObject {
     func insertSlashCommand(_ command: SlashCommand) {
         inputText = command.scaffold
         NotificationCenter.default.post(name: .chatComposerFocusRequested, object: nil)
+    }
+
+    func selectHistoryRecord(_ record: WalletTransactionRecord) {
+        selectedHistoryUserOpHash = record.userOpHash
+    }
+
+    func selectHistoryRecord(userOpHash: String) {
+        selectedHistoryUserOpHash = userOpHash
+    }
+
+    func clearSelectedHistoryRecord() {
+        selectedHistoryUserOpHash = nil
+    }
+
+    func reloadWalletHistory() {
+        let records = (try? walletHistoryStore.loadRecords(
+            accountAddress: walletModel.walletRecord?.kernelAccountAddress,
+            chainID: walletModel.activeChain.id,
+            limit: 200
+        )) ?? []
+        walletHistoryRecords = records
+        if let selectedHistoryUserOpHash,
+           !records.contains(where: { $0.userOpHash.caseInsensitiveCompare(selectedHistoryUserOpHash) == .orderedSame }) {
+            self.selectedHistoryUserOpHash = nil
+        }
+    }
+
+    func refreshWalletHistory() {
+        guard !isRefreshingWalletHistory else {
+            return
+        }
+        isRefreshingWalletHistory = true
+        walletHistoryMessage = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                self.walletHistoryRecords = try await self.walletModel.refreshWalletHistoryReceipts()
+                self.walletHistoryMessage = self.walletHistoryRecords.isEmpty
+                    ? nil
+                    : "History refreshed."
+            } catch {
+                self.walletHistoryMessage = "Could not refresh receipts: \(error.localizedDescription)"
+                self.reloadWalletHistory()
+            }
+            self.isRefreshingWalletHistory = false
+        }
+    }
+
+    func exportWalletHistory() {
+        reloadWalletHistory()
+        let records = walletHistoryRecords
+        guard !records.isEmpty else {
+            walletHistoryMessage = "No wallet history to export."
+            return
+        }
+
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(records)
+
+            let panel = NSSavePanel()
+            panel.title = "Download wallet history"
+            panel.nameFieldStringValue = "local-wallet-history-\(Self.exportDateStamp()).json"
+            panel.allowedContentTypes = [.json]
+            panel.canCreateDirectories = true
+            panel.isExtensionHidden = false
+
+            guard panel.runModal() == .OK, let url = panel.url else {
+                return
+            }
+
+            try data.write(to: url, options: [.atomic])
+            walletHistoryMessage = "Exported \(records.count) history record\(records.count == 1 ? "" : "s")."
+        } catch {
+            walletHistoryMessage = "Could not export wallet history: \(error.localizedDescription)"
+        }
+    }
+
+    func refreshTokenBalances(force: Bool = false) {
+        guard !isRefreshingTokenBalances else {
+            return
+        }
+        let chain = walletModel.activeChain
+        let kernelAddress = walletModel.walletRecord?.kernelAccountAddress ?? accountIdentity.kernelAddress
+        let bundlerAddress = walletModel.localRelayerStatus?.eoa ?? accountIdentity.bundlerAddress
+        guard kernelAddress.hasPrefix("0x"), bundlerAddress.hasPrefix("0x") else {
+            return
+        }
+
+        let key = "\(chain.id):\(kernelAddress.lowercased()):\(bundlerAddress.lowercased())"
+        guard force || key != lastTokenBalanceKey else {
+            return
+        }
+        lastTokenBalanceKey = key
+        isRefreshingTokenBalances = true
+        tokenBalanceMessage = nil
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            async let kernel = self.loadTokenBalances(address: kernelAddress, chain: chain)
+            async let bundler = self.loadTokenBalances(address: bundlerAddress, chain: chain)
+            let loaded = await (kernel, bundler)
+            self.kernelTokenBalances = loaded.0
+            self.bundlerTokenBalances = loaded.1
+            self.tokenBalanceMessage = nil
+            self.isRefreshingTokenBalances = false
+        }
+    }
+
+    private func refreshTokenBalancesIfNeeded() {
+        refreshTokenBalances(force: false)
+    }
+
+    private func loadTokenBalances(address: String, chain: ChainConfiguration) async -> [ChatTokenBalance] {
+        var balances: [ChatTokenBalance] = []
+        for token in WalletTokenRegistry.tokens(on: chain.id) {
+            do {
+                let balanceHex: String
+                if token.isNative {
+                    balanceHex = try await rpcClient.ethBalance(chain: chain, address: address)
+                } else if let tokenAddress = token.contractAddress {
+                    balanceHex = try await rpcClient.erc20Balance(
+                        chain: chain,
+                        tokenAddress: tokenAddress,
+                        ownerAddress: address
+                    )
+                } else {
+                    continue
+                }
+                let balanceData = (try? Data(hexString: balanceHex)) ?? Data()
+                balances.append(ChatTokenBalance(
+                    token: token,
+                    rawBalanceHex: balanceHex,
+                    displayBalance: TokenAmountFormatter.displayString(
+                        rawUnits: balanceData,
+                        decimals: token.decimals,
+                        symbol: token.symbol
+                    )
+                ))
+            } catch {
+                balances.append(ChatTokenBalance(
+                    token: token,
+                    rawBalanceHex: nil,
+                    displayBalance: "Unavailable"
+                ))
+            }
+        }
+        return balances
+    }
+
+    private func backfillWalletHistoryFromChat() {
+        let accountAddress = walletModel.walletRecord?.kernelAccountAddress ?? accountIdentity.kernelAddress
+        guard accountAddress.hasPrefix("0x") else {
+            return
+        }
+
+        for conversation in conversations {
+            for message in conversation.messages where message.kind == .onchainTransaction {
+                guard let summary = OnchainTransactionCard.summary(from: message) else {
+                    continue
+                }
+                let record = WalletTransactionRecord(
+                    chainID: summary.chainID,
+                    chainName: summary.chainName,
+                    accountAddress: accountAddress,
+                    operation: historyOperation(from: summary.operation),
+                    status: historyStatus(from: summary.status),
+                    userOpHash: summary.userOpHash,
+                    transactionHash: summary.transactionHash,
+                    amount: summary.amount,
+                    token: summary.token,
+                    counterparty: summary.recipient,
+                    counterpartyName: summary.recipientName,
+                    route: summary.route,
+                    amountOut: summary.amountOut,
+                    minimumReceived: summary.minimumReceived,
+                    conversationID: conversation.id,
+                    messageID: message.id,
+                    createdAt: summary.createdAt,
+                    updatedAt: summary.createdAt
+                )
+                try? walletHistoryStore.upsert(record)
+            }
+        }
+    }
+
+    private func historyOperation(from operation: OnchainTransactionSummary.Operation?) -> WalletTransactionOperation {
+        switch operation {
+        case .transfer:
+            return .transfer
+        case .swap:
+            return .swap
+        case nil:
+            return .unknown
+        }
+    }
+
+    private func historyStatus(from status: OnchainTransactionSummary.Status) -> WalletTransactionStatus {
+        switch status {
+        case .included:
+            return .included
+        case .submitted:
+            return .submitted
+        case .reverted:
+            return .reverted
+        case .pending:
+            return .pending
+        }
     }
 
     var contextUsageLevel: ContextUsageLevel? {
@@ -420,6 +671,7 @@ private final class ChatDashboardModel: ObservableObject {
 
     func refreshOnchainAccountStatus() {
         walletModel.refreshOnchainAccountStatus()
+        refreshTokenBalances(force: true)
     }
 
     func createNewChat() {
@@ -1221,6 +1473,7 @@ private final class ChatDashboardModel: ObservableObject {
             createdAt: Date()
         )
         appendMessage(.onchainTransaction(summary), to: conversationID)
+        reloadWalletHistory()
     }
 
     private func appendSwapExecutionResult(
@@ -1299,6 +1552,7 @@ private final class ChatDashboardModel: ObservableObject {
             createdAt: Date()
         )
         appendMessage(.onchainTransaction(summary), to: conversationID)
+        reloadWalletHistory()
     }
 
     private func swapRouteLabel(for request: ChatSwapRequest) -> String {
@@ -1430,12 +1684,70 @@ private struct ChatBottomDistanceKey: PreferenceKey {
     }
 }
 
+private enum DashboardSection {
+    case chat
+    case history
+}
+
+private enum WalletHistoryFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case done = "Done"
+    case pending = "Pending"
+    case reverted = "Reverted"
+
+    var id: String { rawValue }
+
+    var tint: Color {
+        switch self {
+        case .all:
+            return ChatPalette.secondaryText
+        case .done:
+            return ChatPalette.success
+        case .pending:
+            return ChatPalette.accent
+        case .reverted:
+            return ChatPalette.warning
+        }
+    }
+
+    func count(in records: [WalletTransactionRecord]) -> Int {
+        records.filter(includes).count
+    }
+
+    func includes(_ record: WalletTransactionRecord) -> Bool {
+        switch self {
+        case .all:
+            return true
+        case .done:
+            return record.status == .included
+        case .pending:
+            return record.status.requiresReceiptRefresh
+        case .reverted:
+            return record.status == .reverted || record.status == .failed
+        }
+    }
+}
+
 struct LocalWalletChatDashboardView: View {
     @StateObject private var model = ChatDashboardModel()
     @State private var conversationPendingDeletion: ChatConversation?
     @State private var isToolsPopoverPresented = false
     @State private var isAtBottomOfChat = true
     @State private var isAccountHeaderExpanded = true
+    @State private var selectedSection: DashboardSection = .chat
+    @State private var historyFilter: WalletHistoryFilter = .all
+
+    private var filteredHistoryRecords: [WalletTransactionRecord] {
+        model.walletHistoryRecords.filter(historyFilter.includes)
+    }
+
+    private var visibleHistorySelection: WalletTransactionRecord? {
+        guard let selected = model.selectedHistoryRecord,
+              historyFilter.includes(selected) else {
+            return filteredHistoryRecords.first
+        }
+        return selected
+    }
 
     var body: some View {
         ZStack {
@@ -1449,7 +1761,8 @@ struct LocalWalletChatDashboardView: View {
                 VStack(spacing: 0) {
                     toolbar
                     accountHeader
-                    if let level = model.contextUsageLevel,
+                    if selectedSection == .chat,
+                       let level = model.contextUsageLevel,
                        let snapshot = model.contextUsageSnapshot {
                         ContextUsageBanner(
                             level: level,
@@ -1460,9 +1773,13 @@ struct LocalWalletChatDashboardView: View {
                         .padding(.bottom, 8)
                         .transition(.move(edge: .top).combined(with: .opacity))
                     }
-                    chatBody
-                    footerControls
-                    composer
+                    if selectedSection == .chat {
+                        chatBody
+                        footerControls
+                        composer
+                    } else {
+                        historyBody
+                    }
                 }
                 .animation(.easeInOut(duration: 0.18), value: model.contextUsageLevel)
                 .padding(.horizontal, 22)
@@ -1640,17 +1957,38 @@ struct LocalWalletChatDashboardView: View {
 
             Spacer()
 
-            HStack(spacing: 8) {
-                Image(systemName: "person.crop.circle.fill")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(ChatPalette.secondaryText)
-                Text("Default")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(ChatPalette.primaryText)
+            HStack(spacing: 10) {
+                HStack(spacing: 4) {
+                    DashboardSectionButton(
+                        title: "Chat",
+                        systemImage: "bubble.left.and.bubble.right.fill",
+                        isSelected: selectedSection == .chat,
+                        action: { selectedSection = .chat }
+                    )
+                    DashboardSectionButton(
+                        title: "History",
+                        systemImage: "clock.arrow.circlepath",
+                        isSelected: selectedSection == .history,
+                        action: {
+                            showHistory()
+                        }
+                    )
+                }
+                .padding(3)
+                .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1)))
+
+                HStack(spacing: 8) {
+                    Image(systemName: "person.crop.circle.fill")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                    Text("Default")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(ChatPalette.primaryText)
+                }
+                .padding(.horizontal, 13)
+                .frame(height: 36)
+                .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1)))
             }
-            .padding(.horizontal, 13)
-            .frame(height: 36)
-            .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1)))
 
             Spacer()
 
@@ -1722,6 +2060,9 @@ struct LocalWalletChatDashboardView: View {
                         address: model.accountIdentity.kernelAddress,
                         balance: model.accountIdentity.kernelBalance,
                         state: model.accountIdentity.kernelState,
+                        tokenBalances: model.kernelTokenBalances,
+                        isRefreshingTokenBalances: model.isRefreshingTokenBalances,
+                        onRefreshTokenBalances: { model.refreshTokenBalances(force: true) },
                         explorerURL: explorerAddressURL(model.accountIdentity.kernelAddress)
                     )
                     AddressPill(
@@ -1730,6 +2071,9 @@ struct LocalWalletChatDashboardView: View {
                         address: model.accountIdentity.bundlerAddress,
                         balance: model.accountIdentity.bundlerBalance,
                         state: model.accountIdentity.bundlerState,
+                        tokenBalances: model.bundlerTokenBalances,
+                        isRefreshingTokenBalances: model.isRefreshingTokenBalances,
+                        onRefreshTokenBalances: { model.refreshTokenBalances(force: true) },
                         explorerURL: explorerAddressURL(model.accountIdentity.bundlerAddress)
                     )
                 }
@@ -1814,7 +2158,13 @@ struct LocalWalletChatDashboardView: View {
                                 case .onchainTransaction:
                                     if let summary = OnchainTransactionCard.summary(from: message) {
                                         HStack {
-                                            OnchainTransactionCard(summary: summary)
+                                            OnchainTransactionCard(
+                                                summary: summary,
+                                                onOpenHistory: { userOpHash in
+                                                    model.selectHistoryRecord(userOpHash: userOpHash)
+                                                    selectedSection = .history
+                                                }
+                                            )
                                             Spacer(minLength: 0)
                                         }
                                         .padding(.horizontal)
@@ -1907,6 +2257,173 @@ struct LocalWalletChatDashboardView: View {
                     .animation(.easeInOut(duration: 0.15), value: isAtBottomOfChat)
                 }
             }
+        }
+    }
+
+    private var historyBody: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                Button {
+                    selectedSection = .chat
+                } label: {
+                    Label("Chat", systemImage: "chevron.left")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundStyle(ChatPalette.primaryText)
+                        .lineLimit(1)
+                        .frame(width: 86, height: 34)
+                        .background(
+                            Capsule()
+                                .fill(ChatPalette.buttonCircle)
+                                .overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Back to chat")
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("History")
+                        .font(.system(size: 22, weight: .heavy))
+                        .foregroundStyle(ChatPalette.primaryText)
+                    Text("App-submitted UserOperations. Done means the receipt confirmed success.")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Button {
+                    model.exportWalletHistory()
+                } label: {
+                    Label("Export", systemImage: "square.and.arrow.down")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundStyle(ChatPalette.primaryText)
+                        .lineLimit(1)
+                        .labelStyle(.iconOnly)
+                        .frame(width: 36, height: 34)
+                        .background(
+                            Capsule()
+                                .fill(ChatPalette.buttonCircle)
+                                .overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Export history")
+                Button {
+                    model.refreshWalletHistory()
+                } label: {
+                    HStack(spacing: 8) {
+                        if model.isRefreshingWalletHistory {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12, weight: .black))
+                        }
+                        Text("Refresh")
+                            .font(.system(size: 12, weight: .heavy))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(ChatPalette.primaryText)
+                    .frame(width: 94, height: 34)
+                    .background(
+                        Capsule()
+                            .fill(ChatPalette.buttonCircle)
+                            .overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1))
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isRefreshingWalletHistory)
+            }
+
+            HistoryStatusSummary(
+                records: model.walletHistoryRecords,
+                selection: historyFilter,
+                onSelect: selectHistoryFilter
+            )
+
+            if let message = model.walletHistoryMessage {
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle.fill")
+                        .font(.system(size: 12, weight: .bold))
+                    Text(message)
+                        .font(.system(size: 12, weight: .bold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(ChatPalette.secondaryText)
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .frame(maxWidth: 520)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(ChatPalette.panel)
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(ChatPalette.border, lineWidth: 1))
+                )
+            }
+
+            if model.walletHistoryRecords.isEmpty {
+                WalletHistoryEmptyState()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if filteredHistoryRecords.isEmpty {
+                WalletHistoryEmptyState(
+                    title: "No \(historyFilter.rawValue.lowercased()) records",
+                    message: "Choose another status filter or refresh history."
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                GeometryReader { proxy in
+                    let isCompact = proxy.size.width < 860
+                    if isCompact,
+                       model.selectedHistoryUserOpHash != nil,
+                       let selected = model.selectedHistoryRecord,
+                       historyFilter.includes(selected) {
+                        WalletHistoryDetailView(
+                            record: selected,
+                            showsBackButton: true,
+                            onBack: { model.clearSelectedHistoryRecord() }
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        HStack(spacing: 12) {
+                            WalletHistoryListView(
+                                records: filteredHistoryRecords,
+                                selectedRecord: visibleHistorySelection,
+                                onSelect: { model.selectHistoryRecord($0) }
+                            )
+                            .frame(minWidth: isCompact ? proxy.size.width : 320, idealWidth: 380, maxWidth: isCompact ? .infinity : 420)
+
+                            if !isCompact {
+                                if let selected = visibleHistorySelection {
+                                    WalletHistoryDetailView(record: selected)
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                } else {
+                                    WalletHistoryEmptyState()
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .padding(.top, 10)
+        .padding(.bottom, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func showHistory() {
+        model.reloadWalletHistory()
+        model.clearSelectedHistoryRecord()
+        selectedSection = .history
+    }
+
+    private func selectHistoryFilter(_ filter: WalletHistoryFilter) {
+        historyFilter = filter
+        guard let selected = model.selectedHistoryRecord,
+              filter.includes(selected) else {
+            model.clearSelectedHistoryRecord()
+            return
         }
     }
 
@@ -2422,8 +2939,12 @@ private struct AddressPill: View {
     let address: String
     let balance: String
     let state: String
+    let tokenBalances: [ChatTokenBalance]
+    let isRefreshingTokenBalances: Bool
+    let onRefreshTokenBalances: () -> Void
     let explorerURL: URL?
     @State private var copied = false
+    @State private var isTokenListPresented = false
 
     var body: some View {
         HStack(spacing: 11) {
@@ -2461,6 +2982,38 @@ private struct AddressPill: View {
             Spacer(minLength: 0)
 
             HStack(spacing: 6) {
+                Button {
+                    if tokenBalances.isEmpty {
+                        onRefreshTokenBalances()
+                    }
+                    isTokenListPresented.toggle()
+                } label: {
+                    Group {
+                        if isRefreshingTokenBalances {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "list.bullet.rectangle.portrait")
+                                .font(.system(size: 12, weight: .black))
+                                .foregroundStyle(ChatPalette.secondaryText)
+                        }
+                    }
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(ChatPalette.buttonCircle))
+                }
+                .buttonStyle(.plain)
+                .disabled(!address.hasPrefix("0x"))
+                .help("Show token balances")
+                .popover(isPresented: $isTokenListPresented, arrowEdge: .bottom) {
+                    TokenBalancePopover(
+                        title: title,
+                        address: address,
+                        balances: tokenBalances,
+                        isRefreshing: isRefreshingTokenBalances,
+                        onRefresh: onRefreshTokenBalances
+                    )
+                }
+
                 Button {
                     copy(address)
                 } label: {
@@ -2518,8 +3071,613 @@ private struct AddressPill: View {
     }
 }
 
+private struct TokenBalancePopover: View {
+    let title: String
+    let address: String
+    let balances: [ChatTokenBalance]
+    let isRefreshing: Bool
+    let onRefresh: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .heavy))
+                        .foregroundStyle(ChatPalette.primaryText)
+                    Text(shortAddress(address))
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                }
+                Spacer()
+                Button {
+                    onRefresh()
+                } label: {
+                    Group {
+                        if isRefreshing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11, weight: .black))
+                                .foregroundStyle(ChatPalette.secondaryText)
+                        }
+                    }
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(ChatPalette.buttonCircle))
+                }
+                .buttonStyle(.plain)
+                .disabled(isRefreshing)
+            }
+
+            Divider()
+                .overlay(ChatPalette.border)
+
+            if balances.isEmpty {
+                HStack(spacing: 8) {
+                    if isRefreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Text(isRefreshing ? "Loading balances" : "No balances loaded")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                    Spacer()
+                }
+                .frame(height: 32)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 6) {
+                        ForEach(balances) { balance in
+                            TokenBalanceRow(balance: balance)
+                        }
+                    }
+                }
+                .frame(maxHeight: 300)
+            }
+        }
+        .padding(14)
+        .frame(width: 330)
+        .background(ChatPalette.panel)
+    }
+
+    private func shortAddress(_ value: String) -> String {
+        guard value.hasPrefix("0x"), value.count > 18 else {
+            return value
+        }
+        return "\(value.prefix(10))...\(value.suffix(8))"
+    }
+}
+
+private struct TokenBalanceRow: View {
+    let balance: ChatTokenBalance
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(String(balance.token.symbol.prefix(1)))
+                .font(.system(size: 11, weight: .black))
+                .foregroundStyle(ChatPalette.primaryText)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(ChatPalette.buttonCircle))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(balance.token.symbol)
+                    .font(.system(size: 12, weight: .heavy))
+                    .foregroundStyle(ChatPalette.primaryText)
+                Text(balance.token.name)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(ChatPalette.mutedText)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Text(balance.displayBalance)
+                .font(.system(size: 12, weight: .bold, design: balance.rawBalanceHex == nil ? .default : .monospaced))
+                .foregroundStyle(balance.rawBalanceHex == nil ? ChatPalette.warning : ChatPalette.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 42)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(ChatPalette.buttonCircle.opacity(0.55))
+                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(ChatPalette.border.opacity(0.5), lineWidth: 1))
+        )
+    }
+}
+
+private struct DashboardSectionButton: View {
+    let title: String
+    let systemImage: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 12, weight: .heavy))
+                .foregroundStyle(isSelected ? ChatPalette.primaryText : ChatPalette.secondaryText)
+                .padding(.horizontal, 11)
+                .frame(height: 30)
+                .background(Capsule().fill(isSelected ? ChatPalette.selectedPanel : Color.clear))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct HistoryStatusSummary: View {
+    let records: [WalletTransactionRecord]
+    let selection: WalletHistoryFilter
+    let onSelect: (WalletHistoryFilter) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(WalletHistoryFilter.allCases) { filter in
+                Button {
+                    onSelect(filter)
+                } label: {
+                    summaryPill(filter)
+                }
+                .buttonStyle(.plain)
+                .help("Show \(filter.rawValue.lowercased()) records")
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func summaryPill(_ filter: WalletHistoryFilter) -> some View {
+        let isSelected = selection == filter
+        return HStack(spacing: 6) {
+            Circle()
+                .fill(filter.tint)
+                .frame(width: 7, height: 7)
+            Text("\(filter.count(in: records))")
+                .font(.system(size: 12, weight: .heavy, design: .monospaced))
+                .foregroundStyle(ChatPalette.primaryText)
+                .frame(minWidth: 12, alignment: .trailing)
+            Text(filter.rawValue)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(isSelected ? ChatPalette.primaryText : ChatPalette.secondaryText)
+                .lineLimit(1)
+        }
+        .frame(width: 94, height: 30)
+        .background(
+            Capsule()
+                .fill(isSelected ? ChatPalette.selectedPanel : ChatPalette.panel)
+                .overlay(Capsule().stroke(isSelected ? filter.tint.opacity(0.8) : ChatPalette.border, lineWidth: 1))
+        )
+    }
+}
+
+private struct WalletHistoryEmptyState: View {
+    var title = "No wallet history yet"
+    var message = "Transfers, swaps, and future batches submitted from this app will appear here."
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 42, weight: .bold))
+                .foregroundStyle(ChatPalette.secondaryText)
+                .frame(width: 84, height: 84)
+                .background(Circle().fill(ChatPalette.avatar))
+            Text(title)
+                .font(.system(size: 18, weight: .heavy))
+                .foregroundStyle(ChatPalette.primaryText)
+            Text(message)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(ChatPalette.secondaryText)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
+        }
+    }
+}
+
+private struct WalletHistoryListView: View {
+    let records: [WalletTransactionRecord]
+    let selectedRecord: WalletTransactionRecord?
+    let onSelect: (WalletTransactionRecord) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Transactions")
+                    .font(.system(size: 12, weight: .black))
+                    .foregroundStyle(ChatPalette.mutedText)
+                    .textCase(.uppercase)
+                Spacer()
+                Text("\(records.count)")
+                    .font(.system(size: 11, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(ChatPalette.secondaryText)
+            }
+            .padding(.horizontal, 4)
+
+            ScrollView {
+                LazyVStack(spacing: 7) {
+                    ForEach(records) { record in
+                        WalletHistoryRow(
+                            record: record,
+                            isSelected: selectedRecord?.id == record.id,
+                            onSelect: { onSelect(record) }
+                        )
+                    }
+                }
+                .padding(2)
+            }
+        }
+    }
+}
+
+private struct WalletHistoryRow: View {
+    let record: WalletTransactionRecord
+    let isSelected: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 12) {
+                Image(systemName: record.operationIcon)
+                    .font(.system(size: 14, weight: .black))
+                    .foregroundStyle(record.statusTint)
+                    .frame(width: 32, height: 32)
+                    .background(Circle().fill(record.statusTint.opacity(0.14)))
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 7) {
+                        Text(record.title)
+                            .font(.system(size: 13, weight: .heavy))
+                            .foregroundStyle(ChatPalette.primaryText)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text(record.statusTitle)
+                            .font(.system(size: 10, weight: .black))
+                            .foregroundStyle(record.statusTint)
+                            .padding(.horizontal, 7)
+                            .frame(height: 20)
+                            .background(Capsule().fill(record.statusTint.opacity(0.14)))
+                    }
+                    Text(record.subtitle)
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(record.updatedAt, style: .relative)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(ChatPalette.mutedText)
+                }
+
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .black))
+                    .foregroundStyle(isSelected ? ChatPalette.secondaryText : ChatPalette.mutedText.opacity(0.7))
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isSelected ? ChatPalette.selectedPanel : ChatPalette.panel.opacity(0.74))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(isSelected ? ChatPalette.accent.opacity(0.7) : ChatPalette.border.opacity(0.55), lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct WalletHistoryDetailView: View {
+    let record: WalletTransactionRecord
+    var showsBackButton = false
+    var onBack: (() -> Void)? = nil
+    @State private var copiedValue: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                if showsBackButton {
+                    Button {
+                        onBack?()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 12, weight: .black))
+                            .foregroundStyle(ChatPalette.secondaryText)
+                            .frame(width: 30, height: 30)
+                            .background(Circle().fill(ChatPalette.buttonCircle))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Back to transactions")
+                }
+                Image(systemName: record.statusIcon)
+                    .font(.system(size: 20, weight: .black))
+                    .foregroundStyle(record.statusTint)
+                    .frame(width: 46, height: 46)
+                    .background(Circle().fill(record.statusTint.opacity(0.14)))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(record.title)
+                        .font(.system(size: 21, weight: .heavy))
+                        .foregroundStyle(ChatPalette.primaryText)
+                        .lineLimit(1)
+                    Text(record.statusExplanation)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Text(record.chainName)
+                    .font(.system(size: 11, weight: .black))
+                    .foregroundStyle(ChatPalette.secondaryText)
+                    .padding(.horizontal, 9)
+                    .frame(height: 26)
+                    .background(Capsule().fill(ChatPalette.buttonCircle))
+            }
+
+            ScrollView {
+                VStack(spacing: 8) {
+                    WalletHistoryFieldRow(title: "Status", value: record.statusTitle, copiedValue: $copiedValue, monospaced: false)
+                    WalletHistoryFieldRow(title: "Operation", value: record.operation.rawValue.capitalized, copiedValue: $copiedValue, monospaced: false)
+                    if let amountLabel = record.amountLabel {
+                        WalletHistoryFieldRow(title: "Amount", value: amountLabel, copiedValue: $copiedValue, monospaced: false)
+                    }
+                    if let amountOut = record.amountOut {
+                        WalletHistoryFieldRow(title: "Estimated out", value: amountOut, copiedValue: $copiedValue, monospaced: false)
+                    }
+                    if let minimumReceived = record.minimumReceived {
+                        WalletHistoryFieldRow(title: "Minimum out", value: minimumReceived, copiedValue: $copiedValue, monospaced: false)
+                    }
+                    if let route = record.route {
+                        WalletHistoryFieldRow(title: "Route", value: route, copiedValue: $copiedValue, monospaced: false)
+                    }
+                    if let counterparty = record.counterparty {
+                        WalletHistoryFieldRow(
+                            title: record.operation == .swap ? "Router" : "Recipient",
+                            value: record.counterpartyName ?? counterparty,
+                            copiedValue: $copiedValue,
+                            monospaced: record.counterpartyName == nil
+                        )
+                        if record.counterpartyName != nil {
+                            WalletHistoryFieldRow(title: "Address", value: counterparty, copiedValue: $copiedValue)
+                        }
+                    }
+                    WalletHistoryFieldRow(title: "UserOperation", value: record.userOpHash, copiedValue: $copiedValue)
+                    if let transactionHash = record.transactionHash {
+                        WalletHistoryFieldRow(
+                            title: "Transaction",
+                            value: transactionHash,
+                            copiedValue: $copiedValue,
+                            explorerURL: record.transactionExplorerURL
+                        )
+                    } else {
+                        WalletHistoryFieldRow(title: "Transaction", value: "Waiting for receipt", copiedValue: $copiedValue, monospaced: false)
+                    }
+                    if let actualGasUsed = record.actualGasUsed {
+                        WalletHistoryFieldRow(title: "Gas used", value: actualGasUsed, copiedValue: $copiedValue)
+                    }
+                    if let actualGasCost = record.actualGasCost {
+                        WalletHistoryFieldRow(title: "Gas cost", value: actualGasCost, copiedValue: $copiedValue)
+                    }
+                    if let revertReason = record.revertReason, !revertReason.isEmpty {
+                        WalletHistoryFieldRow(title: "Revert reason", value: revertReason, copiedValue: $copiedValue, monospaced: false)
+                    }
+                }
+            }
+
+            Spacer()
+
+            HStack {
+                Label("Created \(record.createdAt, style: .date) \(record.createdAt, style: .time)", systemImage: "calendar")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(ChatPalette.mutedText)
+                Spacer()
+                Label("Updated \(record.updatedAt, style: .relative)", systemImage: "clock")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(ChatPalette.mutedText)
+            }
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(ChatPalette.panel)
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(ChatPalette.border, lineWidth: 1))
+        )
+    }
+}
+
+private struct WalletHistoryFieldRow: View {
+    let title: String
+    let value: String
+    @Binding var copiedValue: String?
+    var explorerURL: URL? = nil
+    var monospaced = true
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.system(size: 11, weight: .black))
+                .foregroundStyle(ChatPalette.mutedText)
+                .frame(width: 116, alignment: .leading)
+            Text(value)
+                .font(.system(size: 12, weight: .bold, design: monospaced ? .monospaced : .default))
+                .foregroundStyle(ChatPalette.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(value, forType: .string)
+                copiedValue = value
+            } label: {
+                Image(systemName: copiedValue == value ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 11, weight: .black))
+                    .foregroundStyle(copiedValue == value ? ChatPalette.success : ChatPalette.secondaryText)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(ChatPalette.buttonCircle))
+            }
+            .buttonStyle(.plain)
+            .help(copiedValue == value ? "Copied" : "Copy")
+
+            if let explorerURL {
+                Link(destination: explorerURL) {
+                    Image(systemName: "safari")
+                        .font(.system(size: 11, weight: .black))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(ChatPalette.buttonCircle))
+                }
+                .buttonStyle(.plain)
+                .help("Open in explorer")
+            }
+        }
+        .frame(height: 31)
+    }
+}
+
+private extension WalletTransactionRecord {
+    var title: String {
+        switch operation {
+        case .transfer:
+            return "Transfer"
+        case .swap:
+            return "Swap"
+        case .approval:
+            return "Approval"
+        case .batch:
+            return "Batch"
+        case .deploy:
+            return "Deploy account"
+        case .unknown:
+            return "Transaction"
+        }
+    }
+
+    var subtitle: String {
+        if let amountLabel {
+            return amountLabel
+        }
+        if let counterpartyName {
+            return counterpartyName
+        }
+        if let counterparty {
+            return counterparty.walletDisplayShortAddress
+        }
+        return userOpHash.walletDisplayShortAddress
+    }
+
+    var amountLabel: String? {
+        guard let amount, !amount.isEmpty else {
+            return token
+        }
+        guard let token, !token.isEmpty else {
+            return amount
+        }
+        if token.contains("->") {
+            return "\(amount) · \(token)"
+        }
+        if amount.localizedCaseInsensitiveContains(token) {
+            return amount
+        }
+        return "\(amount) \(token)"
+    }
+
+    var operationIcon: String {
+        switch operation {
+        case .transfer:
+            return "arrow.up.right"
+        case .swap:
+            return "arrow.triangle.swap"
+        case .approval:
+            return "checkmark.seal.fill"
+        case .batch:
+            return "square.stack.3d.up.fill"
+        case .deploy:
+            return "shippingbox.fill"
+        case .unknown:
+            return "questionmark.circle.fill"
+        }
+    }
+
+    var statusIcon: String {
+        switch status {
+        case .included:
+            return "checkmark.circle.fill"
+        case .reverted:
+            return "xmark.octagon.fill"
+        case .failed:
+            return "exclamationmark.octagon.fill"
+        case .created:
+            return "circle.dotted"
+        case .submitted:
+            return "paperplane.circle.fill"
+        case .pending:
+            return "clock.fill"
+        case .unknown:
+            return "questionmark.circle.fill"
+        }
+    }
+
+    var statusTitle: String {
+        switch status {
+        case .created:
+            return "Created"
+        case .submitted:
+            return "Submitted"
+        case .pending:
+            return "Pending"
+        case .included:
+            return "Done"
+        case .reverted:
+            return "Reverted"
+        case .failed:
+            return "Failed"
+        case .unknown:
+            return "Unknown"
+        }
+    }
+
+    var statusExplanation: String {
+        switch status {
+        case .included:
+            return "Receipt found and execution succeeded."
+        case .reverted:
+            return "Receipt found, but execution reverted on-chain."
+        case .failed:
+            return "The app recorded a failed local submission."
+        case .created:
+            return "Created locally, not submitted yet."
+        case .submitted:
+            return "wallet-node accepted the UserOperation; receipt is not confirmed yet."
+        case .pending:
+            return "Receipt is still unavailable. This is not marked done."
+        case .unknown:
+            return "The app cannot currently reconcile this record."
+        }
+    }
+
+    var statusTint: Color {
+        switch status {
+        case .included:
+            return ChatPalette.success
+        case .reverted, .failed:
+            return ChatPalette.warning
+        case .created, .submitted, .pending, .unknown:
+            return ChatPalette.accent
+        }
+    }
+
+    var transactionExplorerURL: URL? {
+        guard let transactionHash, transactionHash.hasPrefix("0x") else {
+            return nil
+        }
+        let host = chainID == 11_155_111 ? "https://sepolia.etherscan.io" : "https://etherscan.io"
+        return URL(string: "\(host)/tx/\(transactionHash)")
+    }
+}
+
 private struct OnchainTransactionCard: View {
     let summary: OnchainTransactionSummary
+    var onOpenHistory: ((String) -> Void)? = nil
     @State private var copiedValue: String?
 
     var body: some View {
@@ -2662,6 +3820,19 @@ private struct OnchainTransactionCard: View {
                             .padding(.horizontal, 11)
                             .frame(height: 30)
                             .background(Capsule().fill(ChatPalette.accent.opacity(0.88)))
+                    }
+                    .buttonStyle(.plain)
+                }
+                if let onOpenHistory {
+                    Button {
+                        onOpenHistory(summary.userOpHash)
+                    } label: {
+                        Label("View history", systemImage: "clock.arrow.circlepath")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(ChatPalette.primaryText)
+                            .padding(.horizontal, 11)
+                            .frame(height: 30)
+                            .background(Capsule().fill(ChatPalette.buttonCircle))
                     }
                     .buttonStyle(.plain)
                 }

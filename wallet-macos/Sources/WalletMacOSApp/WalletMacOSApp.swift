@@ -1356,7 +1356,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
 
         2. Rust helpers compute the Kernel account setup, WebAuthn signing payload, UserOperation hash, and final validator signature encoding.
 
-        3. The app precomputes the Kernel smart-account address on Sepolia and checks its deployment state and balance over public RPC. A precomputed account is not deployed yet, but it can already receive ETH.
+        3. The app precomputes the Kernel smart-account address on Sepolia and checks its deployment state and balance through local wallet-node. A precomputed account is not deployed yet, but it can already receive ETH.
 
         4. If the account is still precomputed, the first UserOperation includes Kernel factory deployment initCode. The EntryPoint deploys the smart account and executes the requested call in the same flow.
 

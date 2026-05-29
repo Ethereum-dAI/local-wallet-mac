@@ -232,7 +232,6 @@ struct KernelDeploymentEncoder {
 }
 
 struct UserOperationBuilder {
-    private let rpcClient: DemoRPCClient
     private let kernelCallEncoder: KernelCallEncoder
     private let erc20TransferCallEncoder: ERC20TransferCallEncoder
     private let erc20ApprovalCallEncoder: ERC20ApprovalCallEncoder
@@ -240,14 +239,12 @@ struct UserOperationBuilder {
     private let deploymentEncoder: KernelDeploymentEncoder
 
     init(
-        rpcClient: DemoRPCClient = DemoRPCClient(),
         kernelCallEncoder: KernelCallEncoder = KernelCallEncoder(),
         erc20TransferCallEncoder: ERC20TransferCallEncoder = ERC20TransferCallEncoder(),
         erc20ApprovalCallEncoder: ERC20ApprovalCallEncoder = ERC20ApprovalCallEncoder(),
         swapRouterCallEncoder: SwapRouterCallEncoder = SwapRouterCallEncoder(),
         deploymentEncoder: KernelDeploymentEncoder = KernelDeploymentEncoder()
     ) {
-        self.rpcClient = rpcClient
         self.kernelCallEncoder = kernelCallEncoder
         self.erc20TransferCallEncoder = erc20TransferCallEncoder
         self.erc20ApprovalCallEncoder = erc20ApprovalCallEncoder
@@ -260,13 +257,15 @@ struct UserOperationBuilder {
         publicKey: PublicKeyCoordinates,
         chain: ChainConfiguration,
         isDeployed: Bool,
+        nonceHex: String,
         intent: TransactionIntent
-    ) async throws -> UserOperationDraft {
-        try await buildDraft(
+    ) throws -> UserOperationDraft {
+        try buildDraft(
             walletRecord: walletRecord,
             publicKey: publicKey,
             chain: chain,
             isDeployed: isDeployed,
+            nonceHex: nonceHex,
             executions: buildExecutionRequests(for: intent)
         )
     }
@@ -276,13 +275,15 @@ struct UserOperationBuilder {
         publicKey: PublicKeyCoordinates,
         chain: ChainConfiguration,
         isDeployed: Bool,
+        nonceHex: String,
         execution: KernelExecutionRequest
-    ) async throws -> UserOperationDraft {
-        try await buildDraft(
+    ) throws -> UserOperationDraft {
+        try buildDraft(
             walletRecord: walletRecord,
             publicKey: publicKey,
             chain: chain,
             isDeployed: isDeployed,
+            nonceHex: nonceHex,
             executions: [execution]
         )
     }
@@ -292,18 +293,14 @@ struct UserOperationBuilder {
         publicKey: PublicKeyCoordinates,
         chain: ChainConfiguration,
         isDeployed: Bool,
+        nonceHex: String,
         executions: [KernelExecutionRequest]
-    ) async throws -> UserOperationDraft {
+    ) throws -> UserOperationDraft {
         guard let sender = walletRecord.kernelAccountAddress else {
             throw AppError.invalidCounterfactualAddress
         }
 
         let callData = try kernelCallEncoder.encodeExecute(executions)
-        let nonceHex = try await rpcClient.entryPointNonce(
-            chain: chain,
-            accountAddress: sender,
-            nonceKey: 0
-        )
         let nonce = try Data(hexString: nonceHex).leftPadded(to: 32)
 
         let initCode: Data

@@ -68,6 +68,16 @@ final class AppModel: ObservableObject {
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
     private let userOperationBuilder: UserOperationBuilder
     private let walletHistoryStore: WalletTransactionHistoryStore
+    private static let startupInspectionRetryDelays: [UInt64] = [
+        500_000_000,
+        1_250_000_000,
+        2_000_000_000,
+    ]
+    private static let relayerBalanceRetryDelays: [UInt64] = [
+        400_000_000,
+        900_000_000,
+        1_500_000_000,
+    ]
 
     init(
         keyStore: KeyStore = KeyStore(),
@@ -287,7 +297,7 @@ final class AppModel: ObservableObject {
 
         Task {
             do {
-                let inspection = try await refreshAccountInspection(logContext: "inspect")
+                let inspection = try await refreshAccountInspectionWithRetry(logContext: "inspect")
 
                 bridgeStatus = inspection.isDeployed
                     ? "Account deployed on \(activeChain.name). Balance loaded."
@@ -450,9 +460,7 @@ final class AppModel: ObservableObject {
         isRefreshingLocalRelayer = true
         Task {
             do {
-                let status = try await withWalletNodeClient(operation: "status") { client in
-                    try await client.bundlerStatus()
-                }
+                let status = try await fetchLocalRelayerStatusWithBalanceRetry()
                 localRelayerStatus = status
                 localRelayerMessage = status.ready
                     ? "Local relayer ready on \(status.networkProfile)."
@@ -468,14 +476,28 @@ final class AppModel: ObservableObject {
     }
 
     func checkLocalRelayerStatusForDiagnostics() async throws -> WalletNodeClient.RelayerStatus {
-        let status = try await withWalletNodeClient(operation: "diagnostic status") { client in
-            try await client.bundlerStatus()
-        }
+        let status = try await fetchLocalRelayerStatusWithBalanceRetry()
         localRelayerStatus = status
         localRelayerMessage = status.ready
             ? "Local relayer ready on \(status.networkProfile)."
             : "Local relayer needs attention."
         appendLog("relayer: diagnostic status \(status.lifecycle) \(status.eoa.shortAddress)")
+        return status
+    }
+
+    private func fetchLocalRelayerStatusWithBalanceRetry() async throws -> WalletNodeClient.RelayerStatus {
+        var status = try await withWalletNodeClient(operation: "status") { client in
+            try await client.bundlerStatus()
+        }
+        for delay in Self.relayerBalanceRetryDelays where Self.isRelayerBalanceUnavailable(status.balance) {
+            localRelayerStatus = status
+            localRelayerMessage = "Checking local relayer balance..."
+            appendLog("relayer: status returned without balance; retrying")
+            try await Task.sleep(nanoseconds: delay)
+            status = try await withWalletNodeClient(operation: "status retry") { client in
+                try await client.bundlerStatus()
+            }
+        }
         return status
     }
 
@@ -1164,6 +1186,23 @@ final class AppModel: ObservableObject {
         return inspection
     }
 
+    private func refreshAccountInspectionWithRetry(logContext: String) async throws -> AccountInspection {
+        var lastError: Error?
+        for attempt in 0...Self.startupInspectionRetryDelays.count {
+            do {
+                return try await refreshAccountInspection(logContext: attempt == 0 ? logContext : "\(logContext)-retry-\(attempt)")
+            } catch {
+                lastError = error
+                guard attempt < Self.startupInspectionRetryDelays.count else {
+                    break
+                }
+                appendLog("\(logContext): account inspection unavailable; retrying")
+                try await Task.sleep(nanoseconds: Self.startupInspectionRetryDelays[attempt])
+            }
+        }
+        throw lastError ?? AppError.invalidCounterfactualAddress
+    }
+
     private func enrichDraftWithLocalBundlerEstimation(
         _ draft: UserOperationDraft,
         logContext: String
@@ -1515,6 +1554,13 @@ final class AppModel: ObservableObject {
             throw AppError.localDaemonLaunchFailed(message)
         }
         return object
+    }
+
+    private static func isRelayerBalanceUnavailable(_ rawBalance: String?) -> Bool {
+        guard let rawBalance else {
+            return true
+        }
+        return rawBalance.isEmpty || rawBalance == "unavailable"
     }
 
     private static let logTimeFormatter: DateFormatter = {

@@ -366,6 +366,7 @@ private final class ChatDashboardModel: ObservableObject {
         preferencesStore.activeConversationID = self.activeConversationID
         walletModelCancellable = self.walletModel.objectWillChange.sink { [weak self] _ in
             Task { @MainActor [weak self] in
+                await Task.yield()
                 self?.refreshAccountIdentity()
                 self?.reloadWalletHistory()
                 self?.refreshTokenBalancesIfNeeded()

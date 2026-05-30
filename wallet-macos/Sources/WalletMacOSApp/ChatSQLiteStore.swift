@@ -33,6 +33,18 @@ final class ChatSQLiteStore {
         self.databaseURL = directory.appendingPathComponent("chat.sqlite")
     }
 
+    var databaseFileURL: URL {
+        databaseURL
+    }
+
+    func databaseFileSizeBytes() -> UInt64 {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: databaseURL.path)
+        if let size = attributes?[.size] as? NSNumber {
+            return size.uint64Value
+        }
+        return 0
+    }
+
     func loadConversations() throws -> [ChatConversation] {
         let database = try openDatabase()
         defer {
@@ -268,6 +280,16 @@ final class ChatSQLiteStore {
         }
 
         return records
+    }
+
+    func deleteAllToolIntentFeedback() throws {
+        let database = try openDatabase()
+        defer {
+            sqlite3_close(database)
+        }
+
+        try createSchema(in: database)
+        try execute("DELETE FROM tool_intent_feedback", in: database)
     }
 
     func deleteMessage(_ messageID: UUID, from conversationID: UUID) throws {

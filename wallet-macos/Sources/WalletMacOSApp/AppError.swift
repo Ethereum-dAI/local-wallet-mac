@@ -14,6 +14,7 @@ enum AppError: LocalizedError {
     case localDaemonNotConfigured
     case localDaemonLaunchFailed(String)
     case localRelayerKeyMissing
+    case modelNotInstalled
     case metadataKeyMismatch
     case corruptedMetadataStore
     case unsupportedSigningAlgorithm
@@ -49,6 +50,8 @@ enum AppError: LocalizedError {
             return message
         case .localRelayerKeyMissing:
             return "The active local relayer key reference is not available."
+        case .modelNotInstalled:
+            return "The selected local model file is not installed."
         case .metadataKeyMismatch:
             return "Stored wallet metadata does not match the loaded Secure Enclave key."
         case .corruptedMetadataStore:

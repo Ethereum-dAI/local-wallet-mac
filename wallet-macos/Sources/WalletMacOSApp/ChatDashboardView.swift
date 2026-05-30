@@ -2456,11 +2456,8 @@ struct LocalWalletChatDashboardView: View {
                 selectedSection = .chat
             }
         )
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(ChatPalette.border.opacity(0.65), lineWidth: 1)
-        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.top, 10)
     }
 
     private var accountHeader: some View {

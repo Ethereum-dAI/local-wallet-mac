@@ -223,8 +223,8 @@ struct LocalWalletSettingsView: View {
                 .frame(width: 1)
             content
         }
-        .frame(minWidth: 980, minHeight: 720)
-        .background(SettingsPalette.background.ignoresSafeArea())
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(SettingsPalette.background)
         .task {
             guard hardwareProfile == nil else {
                 return

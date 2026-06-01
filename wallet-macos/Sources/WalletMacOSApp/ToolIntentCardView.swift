@@ -176,8 +176,8 @@ struct ToolIntentCardView: View {
 
     private var confirmedText: String {
         switch executionStatus {
-        case .running:
-            return "Signing and submitting onchain..."
+        case .running(let message):
+            return runningExecutionMessage(from: message)
         case .submitted(_, let txHash, let success):
             if success == true {
                 return "Included onchain at \(Self.timeFormatter.string(from: intent.updatedAt))"
@@ -296,13 +296,21 @@ struct ToolIntentCardView: View {
     @ViewBuilder
     private var executionStatusRow: some View {
         switch executionStatus {
-        case .running:
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Preparing gas, requesting signature, and relaying through local wallet-node.")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
+        case .running(let message):
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(runningExecutionTitle(from: message))
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                }
+                if let detail = runningExecutionDetail(from: message) {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(.vertical, 4)
         case .submitted(let userOpHash, let transactionHash, let success):
@@ -331,6 +339,33 @@ struct ToolIntentCardView: View {
                 .foregroundStyle(.secondary)
                 .italic()
         }
+    }
+
+    private func runningExecutionTitle(from message: String) -> String {
+        if message.localizedCaseInsensitiveContains("accepted")
+            || message.localizedCaseInsensitiveContains("waiting for inclusion")
+            || message.localizedCaseInsensitiveContains("receipt") {
+            return "Submitted to wallet-node. Waiting for onchain receipt."
+        }
+        if message.localizedCaseInsensitiveContains("submitting") {
+            return "Relaying through local wallet-node."
+        }
+        if message.localizedCaseInsensitiveContains("gas") {
+            return "Preparing gas estimate with local wallet-node."
+        }
+        return "Preparing, signing, and submitting onchain."
+    }
+
+    private func runningExecutionDetail(from message: String) -> String? {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private func runningExecutionMessage(from message: String) -> String {
+        runningExecutionTitle(from: message)
     }
 
     private func intentDetailRow(_ label: String, _ value: String) -> some View {

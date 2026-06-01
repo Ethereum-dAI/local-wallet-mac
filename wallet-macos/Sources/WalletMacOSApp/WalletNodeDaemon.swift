@@ -3,6 +3,105 @@ import Foundation
 import SpawnHelper
 
 final class WalletNodeDaemon: @unchecked Sendable {
+    enum GasPolicyError: LocalizedError {
+        case invalidGwei(field: String, value: String)
+        case priorityAboveMax(maxField: String, priorityField: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidGwei(let field, let value):
+                return "\(field) must be a positive gwei amount with up to 9 decimal places. Current value: \(value)"
+            case .priorityAboveMax(let maxField, let priorityField):
+                return "\(priorityField) must be less than or equal to \(maxField)."
+            }
+        }
+    }
+
+    struct GasPolicy: Equatable {
+        let maxFeePerGas: String
+        let maxPriorityFeePerGas: String
+        let maxFeePerGasGwei: String
+        let maxPriorityFeePerGasGwei: String
+
+        static let mainnet = GasPolicy(
+            maxFeePerGas: "0x2540be400",      // 10 gwei
+            maxPriorityFeePerGas: "0x3b9aca00", // 1 gwei
+            maxFeePerGasGwei: "10",
+            maxPriorityFeePerGasGwei: "1"
+        )
+        static let sepolia = GasPolicy(
+            maxFeePerGas: "0xba43b7400",       // 50 gwei
+            maxPriorityFeePerGas: "0x12a05f200", // 5 gwei
+            maxFeePerGasGwei: "50",
+            maxPriorityFeePerGasGwei: "5"
+        )
+
+        static func custom(
+            maxFeePerGasGwei: String,
+            maxPriorityFeePerGasGwei: String,
+            maxField: String = "Max fee cap",
+            priorityField: String = "Priority fee cap"
+        ) throws -> GasPolicy {
+            let normalizedMax = try normalizedGwei(maxFeePerGasGwei, field: maxField)
+            let normalizedPriority = try normalizedGwei(maxPriorityFeePerGasGwei, field: priorityField)
+            let maxWei = try wei(fromGwei: normalizedMax, field: maxField)
+            let priorityWei = try wei(fromGwei: normalizedPriority, field: priorityField)
+            guard priorityWei <= maxWei else {
+                throw GasPolicyError.priorityAboveMax(maxField: maxField, priorityField: priorityField)
+            }
+            return GasPolicy(
+                maxFeePerGas: "0x" + String(maxWei, radix: 16),
+                maxPriorityFeePerGas: "0x" + String(priorityWei, radix: 16),
+                maxFeePerGasGwei: normalizedMax,
+                maxPriorityFeePerGasGwei: normalizedPriority
+            )
+        }
+
+        static func normalizedGwei(_ value: String, field: String) throws -> String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            _ = try wei(fromGwei: trimmed, field: field)
+            return normalizeGweiText(trimmed)
+        }
+
+        private static func wei(fromGwei value: String, field: String) throws -> UInt64 {
+            let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+            guard parts.count == 1 || parts.count == 2 else {
+                throw GasPolicyError.invalidGwei(field: field, value: value)
+            }
+            let wholeText = String(parts[0])
+            guard wholeText.isEmpty == false, wholeText.allSatisfy(\.isNumber) else {
+                throw GasPolicyError.invalidGwei(field: field, value: value)
+            }
+            let fractionalText = parts.count == 2 ? String(parts[1]) : ""
+            guard fractionalText.allSatisfy(\.isNumber), fractionalText.count <= 9 else {
+                throw GasPolicyError.invalidGwei(field: field, value: value)
+            }
+            guard let whole = UInt64(wholeText), whole <= UInt64.max / 1_000_000_000 else {
+                throw GasPolicyError.invalidGwei(field: field, value: value)
+            }
+            let paddedFractional = fractionalText.padding(toLength: 9, withPad: "0", startingAt: 0)
+            guard let fractional = UInt64(paddedFractional) else {
+                throw GasPolicyError.invalidGwei(field: field, value: value)
+            }
+            let wei = whole * 1_000_000_000 + fractional
+            guard wei > 0 else {
+                throw GasPolicyError.invalidGwei(field: field, value: value)
+            }
+            return wei
+        }
+
+        private static func normalizeGweiText(_ value: String) -> String {
+            let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+            let whole = String(parts[0]).drop(while: { $0 == "0" })
+            let normalizedWhole = whole.isEmpty ? "0" : String(whole)
+            guard parts.count == 2 else {
+                return normalizedWhole
+            }
+            let fractional = String(parts[1]).reversed().drop(while: { $0 == "0" }).reversed()
+            return fractional.isEmpty ? normalizedWhole : "\(normalizedWhole).\(String(fractional))"
+        }
+    }
+
     struct ReadyEvent {
         let token: String
         let apiVersion: Int
@@ -32,12 +131,14 @@ final class WalletNodeDaemon: @unchecked Sendable {
     static func launch(
         bundlerSecret: BundlerSecretRecord,
         chain: ChainConfiguration,
+        gasPolicy: GasPolicy,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) async throws -> WalletNodeDaemon {
         try await Task.detached(priority: .userInitiated) {
             try launchBlocking(
                 bundlerSecret: bundlerSecret,
                 chain: chain,
+                gasPolicy: gasPolicy,
                 environment: environment
             )
         }.value
@@ -46,10 +147,11 @@ final class WalletNodeDaemon: @unchecked Sendable {
     private static func launchBlocking(
         bundlerSecret: BundlerSecretRecord,
         chain: ChainConfiguration,
+        gasPolicy: GasPolicy,
         environment: [String: String]
     ) throws -> WalletNodeDaemon {
         let execPath = try resolveExecutablePath(environment: environment)
-        try writeDaemonConfig(chain: chain)
+        try writeDaemonConfig(chain: chain, gasPolicy: gasPolicy)
 
         var readyPipe: [Int32] = [-1, -1]
         var alivePipe: [Int32] = [-1, -1]
@@ -143,7 +245,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
             .path
     }
 
-    private static func writeDaemonConfig(chain: ChainConfiguration) throws {
+    private static func writeDaemonConfig(chain: ChainConfiguration, gasPolicy: GasPolicy) throws {
         let directory = try daemonSupportDirectory()
         try FileManager.default.createDirectory(
             at: directory,
@@ -151,10 +253,22 @@ final class WalletNodeDaemon: @unchecked Sendable {
             attributes: [.posixPermissions: 0o700]
         )
         let configURL = directory.appendingPathComponent("config.toml")
+        try daemonConfigTOML(chain: chain, gasPolicy: gasPolicy).write(to: configURL, atomically: true, encoding: .utf8)
+    }
+
+    static func gasPolicy(for chain: ChainConfiguration) -> GasPolicy {
+        chain.isTestnet ? .sepolia : .mainnet
+    }
+
+    static func daemonConfigTOML(chain: ChainConfiguration) -> String {
+        daemonConfigTOML(chain: chain, gasPolicy: gasPolicy(for: chain))
+    }
+
+    static func daemonConfigTOML(chain: ChainConfiguration, gasPolicy: GasPolicy) -> String {
         let executionRPC = tomlEscaped(chain.rpcURL.absoluteString)
         let consensusRPC = tomlEscaped(chain.consensusRPCURL.absoluteString)
         let entryPoint = tomlEscaped(chain.entryPoint)
-        let body = """
+        return """
         [network]
         chain_id = \(chain.id)
         execution_rpc = "\(executionRPC)"
@@ -165,8 +279,19 @@ final class WalletNodeDaemon: @unchecked Sendable {
         submit_rpcs = ["\(executionRPC)"]
         use_precompiled = false
 
+        [policy]
+        max_user_ops_per_bundle = 1
+        max_call_gas_limit = "0x989680"
+        max_verification_gas_limit = "0x4c4b40"
+        max_pre_verification_gas = "0x0f4240"
+        max_fee_per_gas = "\(gasPolicy.maxFeePerGas)"
+        max_priority_fee_per_gas = "\(gasPolicy.maxPriorityFeePerGas)"
+        min_replacement_bump_pct = 12.5
+        max_request_body_bytes = 262144
+        max_user_ops_per_sender_per_minute = 10
+        max_gas_wei_per_sender_per_hour = "0x0"
+
         """
-        try body.write(to: configURL, atomically: true, encoding: .utf8)
     }
 
     private static func daemonSupportDirectory() throws -> URL {

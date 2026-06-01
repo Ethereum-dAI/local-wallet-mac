@@ -44,12 +44,14 @@ Pinned historical blocks require an archive-capable RPC. If `WALLET_FORK_BLOCK_N
 
 ### `package-macos-demo.sh`
 
-Builds the Swift/Rust bridge, builds the `LocalWalletApp` Xcode scheme for Apple Silicon, optionally injects the hosted Sepolia bundler URL, signs the copied app, and produces a zip under `dist/`.
+Builds the Swift/Rust bridge, builds the `LocalWalletApp` Xcode scheme for Apple Silicon, embeds the `wallet-node` daemon, optionally embeds the recommended GGUF model, copies llama.cpp/ggml dynamic libraries into the app bundle, optionally injects the hosted Sepolia bundler URL, signs the copied app, and produces a zip under `dist/`.
 
 ```bash
 LOCAL_WALLET_SEPOLIA_BUNDLER_URL=https://your-bundler.example \
 ./scripts/package-macos-demo.sh
 ```
+
+By default the script builds `wallet-node` from a sibling `../local-wallet-daemon` checkout and embeds the recommended model, downloading it if it is not already present in `~/Library/Application Support/LocalWallet/Models/`. Set `LOCAL_WALLET_EMBED_MODEL=0` to ship a smaller app and let onboarding install the model during setup. Override with `LOCAL_WALLET_DAEMON_REPO`, `LOCAL_WALLET_NODE_BIN`, `LOCAL_MODEL_PATH`, `LOCAL_LLAMA_LIB_DIR`, or `LOCAL_WALLET_MODEL_CACHE_DIR` as needed.
 
 The resulting demo build is not notarized.
 

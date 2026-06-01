@@ -113,6 +113,9 @@ final class WalletNodeDaemon: @unchecked Sendable {
         if let path = environment["WALLET_NODE_BIN"] {
             candidates.append(path)
         }
+        if let path = Bundle.main.url(forResource: "wallet-node", withExtension: nil, subdirectory: "bin")?.path {
+            candidates.append(path)
+        }
         if let path = Bundle.main.url(forResource: "wallet-node", withExtension: nil)?.path {
             candidates.append(path)
         }

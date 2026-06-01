@@ -391,12 +391,15 @@ private final class ChatDashboardModel: ObservableObject {
     var settingsSnapshot: LocalWalletSettingsSnapshot {
         let chain = walletModel.activeChain
         let selectedModel = LocalAIModel.available.first { $0.id == onboardingSettingsStore.selectedModelID } ?? .recommended
-        let installedPath = onboardingSettingsStore.installedModelPath ?? ""
+        let storedInstalledPath = onboardingSettingsStore.installedModelPath ?? ""
+        let bundledInstalledPath = LocalAIModelDownloadManager.bundledFileURL(for: selectedModel)?.path ?? ""
+        let installedPath = storedInstalledPath.isEmpty ? bundledInstalledPath : storedInstalledPath
+        let installedModelID = onboardingSettingsStore.installedModelID ?? (bundledInstalledPath.isEmpty ? nil : selectedModel.id)
         let modelFileExists = installedPath.isEmpty == false && FileManager.default.fileExists(atPath: installedPath)
         let installStatus: String
-        if onboardingSettingsStore.installedModelID == selectedModel.id, modelFileExists {
+        if installedModelID == selectedModel.id, modelFileExists {
             installStatus = "Installed"
-        } else if onboardingSettingsStore.installedModelID == selectedModel.id {
+        } else if installedModelID == selectedModel.id {
             installStatus = "Missing file"
         } else {
             installStatus = "Not installed"

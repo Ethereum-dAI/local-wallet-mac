@@ -220,7 +220,15 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
         if let path = settingsStore.installedModelPath, !path.isEmpty {
             return URL(fileURLWithPath: path)
         }
-        return try downloadManager.localFileURL(for: .recommended)
+        let localURL = try downloadManager.localFileURL(for: .recommended)
+        if FileManager.default.fileExists(atPath: localURL.path) {
+            return localURL
+        }
+        if let bundledURL = downloadManager.bundledFileURL(for: .recommended),
+           FileManager.default.fileExists(atPath: bundledURL.path) {
+            return bundledURL
+        }
+        return localURL
     }
 
     private func personaSystemPrompt() -> String {

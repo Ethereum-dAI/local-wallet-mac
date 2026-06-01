@@ -128,6 +128,8 @@ For packaged demo builds:
 LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..." ./scripts/package-macos-demo.sh
 ```
 
+The package script builds and embeds `wallet-node`, copies the llama.cpp/ggml dynamic libraries into the app bundle, and signs the copied app. By default it also embeds the recommended GGUF model for a fully self-contained demo. Set `LOCAL_WALLET_EMBED_MODEL=0` to ship a smaller app and let onboarding download/install the model during setup.
+
 ## Common Commands
 
 Build FFI artifacts:

@@ -47,7 +47,22 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
             .appendingPathComponent(model.artifactFileName, isDirectory: false)
     }
 
+    func bundledFileURL(for model: LocalAIModel) -> URL? {
+        Self.bundledFileURL(for: model)
+    }
+
+    static func bundledFileURL(for model: LocalAIModel, bundle: Bundle = .main) -> URL? {
+        let fileURL = URL(fileURLWithPath: model.artifactFileName)
+        let fileExtension = fileURL.pathExtension
+        let baseName = fileURL.deletingPathExtension().lastPathComponent
+        return bundle.url(forResource: baseName, withExtension: fileExtension, subdirectory: "Models")
+    }
+
     func isInstalled(_ model: LocalAIModel) -> Bool {
+        if let bundledURL = bundledFileURL(for: model),
+           FileManager.default.fileExists(atPath: bundledURL.path) {
+            return true
+        }
         guard let url = try? localFileURL(for: model) else {
             return false
         }
@@ -61,6 +76,10 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
         let destinationURL = try localFileURL(for: model)
         if FileManager.default.fileExists(atPath: destinationURL.path) {
             return destinationURL
+        }
+        if let bundledURL = bundledFileURL(for: model),
+           FileManager.default.fileExists(atPath: bundledURL.path) {
+            return bundledURL
         }
 
         try FileManager.default.createDirectory(

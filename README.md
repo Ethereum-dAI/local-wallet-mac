@@ -37,7 +37,7 @@ You need all three repos checked out as siblings:
 
 ```
 parent/
-  local-wallet/          ← this repo
+  local-wallet-mac/      ← this repo
   local-wallet-protocol/ ← SDK crates
   local-wallet-daemon/   ← daemon binary
 ```
@@ -74,6 +74,8 @@ cd ../local-wallet-daemon && cargo build -p wallet-node
 **Step 5: Open and run**
 
 Open `LocalWallet.xcodeproj` in Xcode, select the `LocalWalletApp` scheme, choose your Apple development team, and build and run.
+
+For a full fresh-clone walkthrough, see [LOCAL_MONOREPO_SETUP.md](LOCAL_MONOREPO_SETUP.md).
 
 ## Architecture
 
@@ -159,6 +161,7 @@ cargo run -p wallet-node -- --http 127.0.0.1:0 --print-ready --debug
 
 ## Documentation
 
+- `LOCAL_MONOREPO_SETUP.md` — fresh clone setup for the three local repositories and Xcode
 - `swift-bridge/README.md` — Swift FFI wrapper and local dev setup
 - `wallet-macos/README.md` — macOS demo app and signing
 - `wallet-macos/Sources/Spawn/README.md` — daemon spawn shim and fd contract

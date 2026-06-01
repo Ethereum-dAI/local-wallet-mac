@@ -73,6 +73,8 @@ struct LocalWalletSettingsSnapshot: Equatable {
     let configuredRPCURL: String
     let archiveNodeURL: String
     let consensusRPCURL: String
+    let maxFeePerGasCap: String
+    let maxPriorityFeePerGasCap: String
     let entryPointAddress: String
     let kernelFactoryAddress: String
     let kernelImplementationAddress: String
@@ -547,8 +549,27 @@ struct LocalWalletSettingsView: View {
                         placeholder: networkDraft.isTestnetModeEnabled
                             ? DemoNetworkSettings.defaults.sepoliaConsensusRPCURL
                             : DemoNetworkSettings.defaults.mainnetConsensusRPCURL,
+                        detail: "Required for Helios verification. Leave blank to restore the default for the selected network.",
                         text: activeConsensusRPCBinding
                     )
+                    HStack(alignment: .top, spacing: 12) {
+                        SettingsEditableField(
+                            title: "Max fee cap (gwei)",
+                            placeholder: networkDraft.isTestnetModeEnabled
+                                ? DemoNetworkSettings.defaults.sepoliaMaxFeePerGasGwei
+                                : DemoNetworkSettings.defaults.mainnetMaxFeePerGasGwei,
+                            detail: "Upper bound wallet-node accepts for chain gas price. Sepolia default is 50 gwei.",
+                            text: activeMaxFeeCapBinding
+                        )
+                        SettingsEditableField(
+                            title: "Priority fee cap (gwei)",
+                            placeholder: networkDraft.isTestnetModeEnabled
+                                ? DemoNetworkSettings.defaults.sepoliaMaxPriorityFeePerGasGwei
+                                : DemoNetworkSettings.defaults.mainnetMaxPriorityFeePerGasGwei,
+                            detail: "Tip cap for submitted raw transactions. Must be less than or equal to max fee cap.",
+                            text: activePriorityFeeCapBinding
+                        )
+                    }
 
                     if let networkMessage {
                         SettingsMessageBanner(message: networkMessage)
@@ -597,6 +618,8 @@ struct LocalWalletSettingsView: View {
                     SettingsKeyValue(title: "Execution RPC", value: snapshot.executionRPCURL),
                     SettingsKeyValue(title: "Helios archive node", value: snapshot.archiveNodeURL),
                     SettingsKeyValue(title: "Consensus RPC", value: snapshot.consensusRPCURL),
+                    SettingsKeyValue(title: "Max fee cap", value: snapshot.maxFeePerGasCap),
+                    SettingsKeyValue(title: "Priority fee cap", value: snapshot.maxPriorityFeePerGasCap),
                     SettingsKeyValue(title: "EntryPoint", value: snapshot.entryPointAddress),
                 ])
             }
@@ -651,6 +674,40 @@ struct LocalWalletSettingsView: View {
                     networkDraft.sepoliaConsensusRPCURL = value
                 } else {
                     networkDraft.mainnetConsensusRPCURL = value
+                }
+            }
+        )
+    }
+
+    private var activeMaxFeeCapBinding: Binding<String> {
+        Binding(
+            get: {
+                networkDraft.isTestnetModeEnabled
+                    ? networkDraft.sepoliaMaxFeePerGasGwei
+                    : networkDraft.mainnetMaxFeePerGasGwei
+            },
+            set: { value in
+                if networkDraft.isTestnetModeEnabled {
+                    networkDraft.sepoliaMaxFeePerGasGwei = value
+                } else {
+                    networkDraft.mainnetMaxFeePerGasGwei = value
+                }
+            }
+        )
+    }
+
+    private var activePriorityFeeCapBinding: Binding<String> {
+        Binding(
+            get: {
+                networkDraft.isTestnetModeEnabled
+                    ? networkDraft.sepoliaMaxPriorityFeePerGasGwei
+                    : networkDraft.mainnetMaxPriorityFeePerGasGwei
+            },
+            set: { value in
+                if networkDraft.isTestnetModeEnabled {
+                    networkDraft.sepoliaMaxPriorityFeePerGasGwei = value
+                } else {
+                    networkDraft.mainnetMaxPriorityFeePerGasGwei = value
                 }
             }
         )

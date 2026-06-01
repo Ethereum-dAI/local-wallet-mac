@@ -40,28 +40,33 @@ private final class OnboardingState: ObservableObject {
     @Published var step: OnboardingStep = .welcome
     @Published var rpcURL: String
     @Published var archiveNodeURL: String
+    @Published var consensusRPCURL: String
     @Published var selectedModelID: String
     @Published var installState: InstallState = .idle
     @Published var keyState: KeyState = .idle
     @Published var hardwareProfile: LocalHardwareProfile?
 
     private let settingsStore: OnboardingSettingsStore
+    private let networkSettingsStore: DemoSettingsStore
     private let provisioningService: OnboardingProvisioningService
     private let downloadManager: LocalAIModelDownloadManager
     private let hardwareInspector: LocalHardwareInspector
 
     init(
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
+        networkSettingsStore: DemoSettingsStore = DemoSettingsStore(),
         provisioningService: OnboardingProvisioningService = OnboardingProvisioningService(),
         downloadManager: LocalAIModelDownloadManager = LocalAIModelDownloadManager(),
         hardwareInspector: LocalHardwareInspector = LocalHardwareInspector()
     ) {
         self.settingsStore = settingsStore
+        self.networkSettingsStore = networkSettingsStore
         self.provisioningService = provisioningService
         self.downloadManager = downloadManager
         self.hardwareInspector = hardwareInspector
         self.rpcURL = settingsStore.rpcURL
         self.archiveNodeURL = settingsStore.archiveNodeURL
+        self.consensusRPCURL = settingsStore.consensusRPCURL
         let storedModelID = settingsStore.selectedModelID
         self.selectedModelID = LocalAIModel.available.contains { $0.id == storedModelID }
             ? storedModelID
@@ -81,7 +86,9 @@ private final class OnboardingState: ObservableObject {
     }
 
     var canContinueFromNetwork: Bool {
-        URL(string: rpcURL.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
+        Self.isValidRequiredURL(rpcURL)
+            && Self.isValidOptionalURL(consensusRPCURL)
+            && Self.isValidOptionalURL(archiveNodeURL)
     }
 
     var canContinueFromModel: Bool {
@@ -177,8 +184,42 @@ private final class OnboardingState: ObservableObject {
     }
 
     private func persistNetwork() {
-        settingsStore.rpcURL = rpcURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        settingsStore.archiveNodeURL = archiveNodeURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedRPC = rpcURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedArchive = archiveNodeURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedConsensus = consensusRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        settingsStore.rpcURL = trimmedRPC
+        settingsStore.archiveNodeURL = trimmedArchive
+        settingsStore.consensusRPCURL = trimmedConsensus
+
+        var networkSettings = networkSettingsStore.networkSettings
+        networkSettings.isTestnetModeEnabled = true
+        networkSettings.sepoliaRPCURL = trimmedRPC
+        networkSettings.sepoliaArchiveNodeURL = trimmedArchive
+        networkSettings.sepoliaConsensusRPCURL = trimmedConsensus.isEmpty
+            ? DemoNetworkSettings.defaults.sepoliaConsensusRPCURL
+            : trimmedConsensus
+        if let validated = try? networkSettings.validated() {
+            networkSettingsStore.setNetworkSettings(validated)
+        }
+    }
+
+    private static func isValidRequiredURL(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), url.scheme != nil, url.host != nil else {
+            return false
+        }
+        return true
+    }
+
+    private static func isValidOptionalURL(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            return true
+        }
+        guard let url = URL(string: trimmed), url.scheme != nil, url.host != nil else {
+            return false
+        }
+        return true
     }
 }
 
@@ -447,14 +488,20 @@ private struct NetworkStep: View {
         OnboardingTwoColumn(
             illustration: .network,
             headline: "Choose your nodes",
-            bodyText: "Set the RPC endpoint the wallet should use for reads and submission prep. Add an archive node if you have one; it can stay empty for now."
+            bodyText: "Set the execution RPC the wallet should use for reads and submission prep. Add a consensus RPC for Helios verification, or leave it empty to use the default shown here."
         ) {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 14) {
                     OnboardingTextField(
-                        label: "RPC URL",
-                        placeholder: "https://ethereum-sepolia-rpc.publicnode.com",
+                        label: "Execution RPC URL",
+                        placeholder: DemoNetworkSettings.defaults.sepoliaRPCURL,
                         text: $state.rpcURL
+                    )
+                    OnboardingTextField(
+                        label: "Consensus RPC URL",
+                        placeholder: DemoNetworkSettings.defaults.sepoliaConsensusRPCURL,
+                        detail: "Leave empty to use default: \(DemoNetworkSettings.defaults.sepoliaConsensusRPCURL)",
+                        text: $state.consensusRPCURL
                     )
                     OnboardingTextField(
                         label: "Archive Node URL",
@@ -465,7 +512,8 @@ private struct NetworkStep: View {
 
                 OnboardingGlassCard {
                     VStack(alignment: .leading, spacing: 10) {
-                        InfoRow(icon: "network", title: "Primary RPC", detail: "Used for current chain state and transaction preparation.")
+                        InfoRow(icon: "network", title: "Execution RPC", detail: "Used for current EVM state, transaction preparation, submission, balances, and receipts.")
+                        InfoRow(icon: "checkmark.shield", title: "Consensus RPC", detail: "Used by Helios to verify Ethereum reads against the canonical beacon chain. Defaults to PublicNode Sepolia if empty.")
                         InfoRow(icon: "clock.arrow.circlepath", title: "Archive node", detail: "Optional endpoint for historical reads and richer wallet timelines.")
                     }
                     .padding(16)
@@ -1255,6 +1303,7 @@ private struct InfoRow: View {
 private struct OnboardingTextField: View {
     let label: String
     let placeholder: String
+    var detail: String? = nil
     @Binding var text: String
 
     var body: some View {
@@ -1276,6 +1325,12 @@ private struct OnboardingTextField: View {
                                 .stroke(OnboardingPalette.border, lineWidth: 1.5)
                         )
                 )
+            if let detail {
+                Text(detail)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(OnboardingPalette.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }

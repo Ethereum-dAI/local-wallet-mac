@@ -168,7 +168,7 @@ struct OnchainTransactionSummary: Codable, Equatable {
 
 enum ChatIntentExecutionStatus: Equatable {
     case idle
-    case running
+    case running(String)
     case submitted(userOpHash: String, transactionHash: String?, success: Bool?)
     case failed(String)
 }
@@ -407,6 +407,7 @@ private final class ChatDashboardModel: ObservableObject {
 
         let appBuild = LocalWalletSettingsSnapshot.appVersionText()
         let networkSettings = walletModel.networkSettings
+        let gasPolicy = networkSettings.activeGasPolicy
         let relayerStatus = walletModel.localRelayerStatus
         let walletNodeMode = WalletNodeClient.Configuration.fromEnvironment() == nil
             ? "Managed local daemon"
@@ -439,6 +440,8 @@ private final class ChatDashboardModel: ObservableObject {
             configuredRPCURL: networkSettings.activeRPCURL,
             archiveNodeURL: chain.archiveRPCURL?.absoluteString ?? "Not set",
             consensusRPCURL: chain.consensusRPCURL.absoluteString,
+            maxFeePerGasCap: "\(gasPolicy.maxFeePerGasGwei) gwei",
+            maxPriorityFeePerGasCap: "\(gasPolicy.maxPriorityFeePerGasGwei) gwei",
             entryPointAddress: chain.entryPoint,
             kernelFactoryAddress: chain.kernel.factory,
             kernelImplementationAddress: chain.kernel.implementation,
@@ -739,7 +742,7 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     var executionStatusText: String {
-        hasExecutingIntent ? "Transaction in progress" : runtimeStatus
+        hasExecutingIntent ? walletModel.bridgeStatus : runtimeStatus
     }
 
     var isRefreshingAccountIdentity: Bool {
@@ -1072,7 +1075,7 @@ private final class ChatDashboardModel: ObservableObject {
 
     func executionStatus(for intent: ToolIntent) -> ChatIntentExecutionStatus {
         if executingIntentIDs.contains(intent.id) {
-            return .running
+            return .running(walletModel.bridgeStatus)
         }
 
         for message in messages.reversed()
@@ -1284,7 +1287,7 @@ private final class ChatDashboardModel: ObservableObject {
         onboardingSettingsStore.rpcURL = validated.sepoliaRPCURL
         onboardingSettingsStore.archiveNodeURL = validated.sepoliaArchiveNodeURL
         refreshAccountIdentity()
-        return "Saved \(validated.activeNetworkName) network settings."
+        return "Saved \(validated.activeNetworkName) network settings. wallet-node will use max \(validated.activeMaxFeePerGasGwei) gwei and priority \(validated.activeMaxPriorityFeePerGasGwei) gwei caps."
     }
 
     func testNetworkSettings(_ settings: DemoNetworkSettings) async throws -> String {
@@ -2381,24 +2384,8 @@ struct LocalWalletChatDashboardView: View {
 
             Spacer()
 
-            Menu {
-                Toggle("Show thinking", isOn: $model.thinkingEnabled)
-                Divider()
-                Button {
-                    model.exportFeedbackRankings()
-                } label: {
-                    Label("Download rankings", systemImage: "square.and.arrow.down")
-                }
-            } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(ChatPalette.secondaryText)
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(ChatPalette.buttonCircle))
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .frame(width: 180, alignment: .trailing)
+            Color.clear
+                .frame(width: 180, height: 1)
         }
         .frame(height: 42)
     }
@@ -3899,7 +3886,7 @@ private struct WalletHistoryDetailView: View {
                             explorerURL: record.transactionExplorerURL
                         )
                     } else {
-                        WalletHistoryFieldRow(title: "Transaction", value: "Waiting for receipt", copiedValue: $copiedValue, monospaced: false)
+                        WalletHistoryFieldRow(title: "Transaction", value: record.pendingTransactionStatusText, copiedValue: $copiedValue, monospaced: false)
                     }
                     if let actualGasUsed = record.actualGasUsed {
                         WalletHistoryFieldRow(title: "Gas used", value: actualGasUsed, copiedValue: $copiedValue)
@@ -3998,6 +3985,25 @@ private extension WalletTransactionRecord {
             return "Deploy account"
         case .unknown:
             return "Transaction"
+        }
+    }
+
+    var pendingTransactionStatusText: String {
+        switch status {
+        case .created:
+            return "Prepared locally"
+        case .submitted:
+            return "Waiting for receipt"
+        case .pending:
+            return "No transaction hash yet"
+        case .included:
+            return "Receipt missing"
+        case .reverted:
+            return "Reverted before receipt"
+        case .failed:
+            return "Submission failed"
+        case .unknown:
+            return "Status unknown"
         }
     }
 
@@ -4234,21 +4240,31 @@ private struct OnchainTransactionCard: View {
                         explorerURL: explorerTransactionURL(transactionHash)
                     )
                 } else {
-                    HStack {
-                        Text("Transaction")
-                            .font(.system(size: 11, weight: .black))
-                            .foregroundStyle(ChatPalette.mutedText)
-                            .frame(width: 108, alignment: .leading)
-                        HStack(spacing: 7) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Waiting for receipt")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(ChatPalette.secondaryText)
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack {
+                            Text("Transaction")
+                                .font(.system(size: 11, weight: .black))
+                                .foregroundStyle(ChatPalette.mutedText)
+                                .frame(width: 108, alignment: .leading)
+                            HStack(spacing: 7) {
+                                if summary.status == .submitted {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+                                Text(pendingTransactionText)
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(ChatPalette.secondaryText)
+                            }
+                            Spacer()
                         }
-                        Spacer()
+                        if let detail = pendingTransactionDetail {
+                            Text(detail)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(ChatPalette.mutedText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
-                    .frame(height: 30)
+                    .padding(.vertical, 2)
                 }
             }
 
@@ -4314,6 +4330,9 @@ private struct OnchainTransactionCard: View {
     }
 
     private var statusTitle: String {
+        if summary.status == .pending, summary.transactionHash == nil {
+            return isSwap ? "Swap UserOperation pending" : "UserOperation pending"
+        }
         guard isSwap else {
             return summary.status.title
         }
@@ -4330,10 +4349,33 @@ private struct OnchainTransactionCard: View {
     }
 
     private var subtitle: String {
+        if summary.status == .pending, summary.transactionHash == nil {
+            return "\(summary.amount) \(summary.token.uppercased()) accepted by wallet-node. No transaction hash yet."
+        }
         if isSwap {
             return "\(summary.amount) \(summary.token.uppercased()) on \(summary.chainName)"
         }
         return "\(summary.amount) \(summary.token.uppercased()) on \(summary.chainName)"
+    }
+
+    private var pendingTransactionText: String {
+        switch summary.status {
+        case .pending:
+            return "No transaction hash yet"
+        case .submitted:
+            return "Waiting for receipt"
+        case .reverted:
+            return "Reverted before receipt"
+        case .included:
+            return "Receipt missing"
+        }
+    }
+
+    private var pendingTransactionDetail: String? {
+        guard summary.status == .pending else {
+            return nil
+        }
+        return "The UserOperation was accepted locally, but no network transaction was found yet. wallet-node may retry, or the first broadcast may have been rejected by the RPC."
     }
 
     private var statusTint: Color {

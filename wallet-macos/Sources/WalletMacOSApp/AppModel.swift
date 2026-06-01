@@ -379,6 +379,7 @@ final class AppModel: ObservableObject {
         appendSection("Update Network Settings")
         appendLog("network: active profile \(validated.activeNetworkName)")
         appendLog("network: execution RPC \(validated.activeRPCURL)")
+        appendLog("network: gas caps max \(validated.activeMaxFeePerGasGwei) gwei, priority \(validated.activeMaxPriorityFeePerGasGwei) gwei")
         settingsStore.setNetworkSettings(validated)
         configuration = DemoAppConfiguration(networkSettings: validated)
         resetWalletNodeConnectionAfterNetworkChange()
@@ -622,11 +623,13 @@ final class AppModel: ObservableObject {
         localRelayerMessage = "Starting local wallet-node daemon..."
         let keyRef = "bundler-eoa:default:\(activeChain.id):1"
         let chain = activeChain
+        let gasPolicy = networkSettings.activeGasPolicy
         let launchTask = Task {
             let bundlerSecret = try BundlerKeyStore.shared.createIfNeeded(keyRef: keyRef)
             return try await WalletNodeDaemon.launch(
                 bundlerSecret: bundlerSecret,
-                chain: chain
+                chain: chain,
+                gasPolicy: gasPolicy
             )
         }
         walletNodeLaunchTask = launchTask

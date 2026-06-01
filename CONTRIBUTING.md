@@ -38,4 +38,4 @@ For release packaging:
 LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..." ./scripts/package-macos-demo.sh
 ```
 
-The bundled app is a non-notarized demo build unless a release process explicitly says otherwise.
+The package script embeds `wallet-node`, required llama.cpp/ggml dynamic libraries, and the recommended GGUF model by default. Set `LOCAL_WALLET_EMBED_MODEL=0` for a smaller package that installs the model during onboarding. The bundled app is a non-notarized demo build unless a release process explicitly says otherwise.

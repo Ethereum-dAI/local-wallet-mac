@@ -139,7 +139,7 @@ For packaged demo builds, use the same variable when running the package script:
 LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..." ./scripts/package-macos-demo.sh
 ```
 
-The package script injects the URL into the built app's `Info.plist` and re-signs that copied app bundle. If the variable is not set, the app still builds and the chat tool path can use local `wallet-node`; hosted composer submission is disabled.
+The package script builds the sibling `wallet-node` daemon, embeds it at `Contents/Resources/bin/wallet-node`, copies llama.cpp/ggml dynamic libraries into `Contents/Frameworks`, injects the URL into the built app's `Info.plist` when set, and re-signs that copied app bundle. By default it also embeds the recommended GGUF model at `Contents/Resources/Models/`; set `LOCAL_WALLET_EMBED_MODEL=0` to keep the package small and let onboarding install the model during setup. If the bundler URL variable is not set, the app still builds and the chat tool path can use local `wallet-node`; hosted composer submission is disabled.
 
 ---
 

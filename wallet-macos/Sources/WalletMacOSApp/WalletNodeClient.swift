@@ -106,6 +106,19 @@ struct WalletNodeClient {
         let fast: UserOperationGasPriceTier
     }
 
+    /// Daemon health snapshot (from `wallet_health`). `status` is the daemon's
+    /// top-level phase: `syncing_consensus`, `verified_reads_ready`, `bundler_ready`,
+    /// `degraded`, or `offline`.
+    struct NetworkHealth: Equatable {
+        let status: String
+        let reason: String?
+
+        /// The light client is still bootstrapping/catching up with consensus.
+        var isSyncing: Bool { status == "syncing_consensus" }
+        /// Verified reads (and likely sends) are available.
+        var isReady: Bool { status == "verified_reads_ready" || status == "bundler_ready" }
+    }
+
     struct UserOperationReceipt: Equatable {
         let userOpHash: String
         let txHash: String
@@ -291,6 +304,17 @@ struct WalletNodeClient {
             slow: try parseGasPriceTier(object["slow"], field: "slow"),
             standard: try parseGasPriceTier(object["standard"], field: "standard"),
             fast: try parseGasPriceTier(object["fast"], field: "fast")
+        )
+    }
+
+    func networkHealth() async throws -> NetworkHealth {
+        let result = try await call(method: "wallet_health", params: [])
+        guard let object = result as? [String: Any] else {
+            throw ClientError.invalidResponse
+        }
+        return NetworkHealth(
+            status: object["status"] as? String ?? "unknown",
+            reason: object["reason"] as? String
         )
     }
 

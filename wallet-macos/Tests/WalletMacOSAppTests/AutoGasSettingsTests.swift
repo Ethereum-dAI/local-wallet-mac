@@ -70,3 +70,16 @@ private func freshStore() -> DemoSettingsStore {
     ) == ((try? Data.quantityString(ceiling.maxPriorityFeePerGas).leftPadded(to: 32)) ?? Data()))
     #expect(Int(ceiling.maxFeePerGasGwei) ?? 0 >= 1000)
 }
+
+@Test func parseBaseFeeReadsBaseFeePerGas() throws {
+    let result: Any = ["baseFeePerGas": "0x3b9aca00", "number": "0x10"] // 1 gwei
+    let data = try WalletNodeClient.parseBaseFee(result)
+    #expect(GasPricing.gweiText(fromWei: data) == "1")
+}
+
+@Test func parseBaseFeeThrowsWhenMissing() {
+    let result: Any = ["number": "0x10"]
+    #expect(throws: (any Error).self) {
+        _ = try WalletNodeClient.parseBaseFee(result)
+    }
+}

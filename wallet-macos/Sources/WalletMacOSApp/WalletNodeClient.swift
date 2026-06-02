@@ -294,6 +294,22 @@ struct WalletNodeClient {
         )
     }
 
+    /// Current network base fee (latest block `baseFeePerGas`), via the daemon's
+    /// proxied execution RPC. Throws if the field is unavailable.
+    func ethLatestBaseFee() async throws -> Data {
+        let result = try await call(method: "eth_getBlockByNumber", params: ["latest", false])
+        return try WalletNodeClient.parseBaseFee(result)
+    }
+
+    static func parseBaseFee(_ result: Any) throws -> Data {
+        guard let object = result as? [String: Any],
+              let baseFee = object["baseFeePerGas"] as? String
+        else {
+            throw ClientError.invalidResponse
+        }
+        return try Data.quantityString(baseFee).leftPadded(to: 32)
+    }
+
     func inspectAccount(address: String) async throws -> AccountInspection {
         async let code = ethCode(address: address)
         async let balance = ethBalance(address: address)

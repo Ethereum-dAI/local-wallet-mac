@@ -19,9 +19,16 @@ enum GasTier: String, CaseIterable, Hashable {
 enum GasPricing {
     /// Resolve the (priority, maxFee) a userop should carry.
     ///
-    /// - Auto: the selected live tier, uncapped (the wallet follows the network).
-    /// - Manual: the live `standard` tier, clamped to the configured caps so it is
-    ///   never above them (and priority never above the resolved max fee).
+    /// `maxFeePerGas` is given EIP-1559 headroom — `baseFeeHeadroomMultiplier × baseFee
+    /// + tip` — so a base-fee rise between building and inclusion can't strand the tx
+    /// (the failure we saw: a 0.97 gwei maxFee left unmineable once the base fee rose to
+    /// 1.1 gwei). This raises only the *ceiling*; the effective fee paid is still
+    /// `baseFee + tip`, so it costs no more. baseFee is derived from the standard tier.
+    ///
+    /// - Auto: the selected tier's tip, with headroom on maxFee (uncapped — the daemon's
+    ///   generous launch ceiling is the only bound).
+    /// - Manual: the standard tier's tip clamped to the priority cap, with headroom on
+    ///   maxFee but never above the configured max-fee cap (priority never above maxFee).
     /// - `autoTier` is consulted only when `autoEnabled` is true.
     static func resolveUserOperationFees(
         gasPrice: WalletNodeClient.UserOperationGasPrice,
@@ -29,6 +36,12 @@ enum GasPricing {
         autoTier: GasTier,
         manualCap: WalletNodeDaemon.GasPolicy
     ) -> (maxPriorityFeePerGas: Data, maxFeePerGas: Data) {
+        let standard = gasPrice.standard
+        let baseFee = weiUInt64(baseFeeWei(
+            standardMaxFee: standard.maxFeePerGas,
+            standardPriority: standard.maxPriorityFeePerGas
+        ))
+
         if autoEnabled {
             let tier: WalletNodeClient.UserOperationGasPriceTier
             switch autoTier {
@@ -36,19 +49,32 @@ enum GasPricing {
             case .standard: tier = gasPrice.standard
             case .fast: tier = gasPrice.fast
             }
-            return (tier.maxPriorityFeePerGas, tier.maxFeePerGas)
+            let priority = tier.maxPriorityFeePerGas
+            return (priority, headroomMaxFee(baseFee: baseFee, priority: priority))
         }
 
-        let standard = gasPrice.standard
         // GasPolicy hex fields are always well-formed (built via custom()/defaults),
         // so quantityString cannot fail in practice; fall back to the live value if it ever does.
         let capMax = (try? Data.quantityString(manualCap.maxFeePerGas).leftPadded(to: 32)) ?? standard.maxFeePerGas
         let capPriority = (try? Data.quantityString(manualCap.maxPriorityFeePerGas).leftPadded(to: 32)) ?? standard.maxPriorityFeePerGas
 
-        let maxFee = minWei(standard.maxFeePerGas, capMax)
-        var priority = minWei(standard.maxPriorityFeePerGas, capPriority)
-        priority = minWei(priority, maxFee) // invariant: priority <= maxFee
-        return (priority, maxFee)
+        let priority = minWei(standard.maxPriorityFeePerGas, capPriority)
+        let maxFee = minWei(headroomMaxFee(baseFee: baseFee, priority: priority), capMax)
+        return (minWei(priority, maxFee), maxFee) // priority never above maxFee
+    }
+
+    /// Multiplier applied to the base fee when computing maxFeePerGas headroom. 2× base
+    /// fee survives ~6 blocks of maximum (12.5%/block) base-fee growth before stranding.
+    private static let baseFeeHeadroomMultiplier: UInt64 = 2
+
+    /// maxFeePerGas = `multiplier × baseFee + priorityTip`, in UInt64 with saturation
+    /// (realistic gas values fit in 64 bits). Returned as 32-byte big-endian wei.
+    private static func headroomMaxFee(baseFee: UInt64, priority: Data) -> Data {
+        let scaled = baseFee.multipliedReportingOverflow(by: baseFeeHeadroomMultiplier)
+        let scaledBase = scaled.overflow ? UInt64.max : scaled.partialValue
+        let sum = scaledBase.addingReportingOverflow(weiUInt64(priority))
+        let value = sum.overflow ? UInt64.max : sum.partialValue
+        return Data.fromBigEndian(value).leftPadded(to: 32)
     }
 
     /// Numeric minimum of two big-endian wei values. Inputs are padded to a common

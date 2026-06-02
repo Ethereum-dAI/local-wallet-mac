@@ -93,6 +93,21 @@ private func gwei(_ data: Data) -> String { GasPricing.gweiText(fromWei: data) }
     #expect(GasPricing.gweiText(fromWei: Data([0x01, 0, 0, 0, 0, 0, 0, 0, 0])) == "high")
 }
 
+@Test func baseFeeWeiDerivesExactlyFromStandardTier() {
+    // baseFee = gasPrice − priorityTip (geth: gasPrice = baseFee + tip), exact.
+    let maxFee = Data.fromBigEndian(UInt64(2_093_623_001)).leftPadded(to: 32)
+    let priority = Data.fromBigEndian(UInt64(1_000_000)).leftPadded(to: 32)
+    let base = GasPricing.baseFeeWei(standardMaxFee: maxFee, standardPriority: priority)
+    #expect(GasPricing.gweiText(fromWei: base) == "2.09") // 2.092623001 gwei → 2 dp
+}
+
+@Test func baseFeeWeiClampsToZeroWhenPriorityExceedsMaxFee() {
+    let maxFee = Data.fromBigEndian(UInt64(1_000_000)).leftPadded(to: 32)
+    let priority = Data.fromBigEndian(UInt64(2_000_000)).leftPadded(to: 32)
+    let base = GasPricing.baseFeeWei(standardMaxFee: maxFee, standardPriority: priority)
+    #expect(GasPricing.gweiText(fromWei: base) == "0")
+}
+
 @Test func gweiTextKeepsSmallSubCentiGweiValues() {
     // Mainnet's low-congestion priority floor is 0.001 gwei (1_000_000 wei).
     // It must NOT round to "0".

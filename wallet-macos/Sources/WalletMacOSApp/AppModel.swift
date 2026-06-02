@@ -1513,14 +1513,16 @@ final class AppModel: ObservableObject {
     /// Fetch the current live gas tiers + base fee for the chat indicator.
     func refreshLiveGasPrices() async {
         do {
-            // Acquire the client once; base fee is best-effort within the same connection.
-            let (price, baseFee) = try await withWalletNodeClient(operation: "gas indicator") { client in
-                let price = try await client.userOperationGasPrice()
-                let baseFee = try? await client.ethLatestBaseFee()
-                return (price, baseFee)
+            let price = try await withWalletNodeClient(operation: "gas indicator") { client in
+                try await client.userOperationGasPrice()
             }
             liveGasPrice = price
-            liveBaseFeeWei = baseFee
+            // Derive base fee from the standard tier (gasPrice − tip): exact and
+            // independent of the light client, which can't reliably serve blocks.
+            liveBaseFeeWei = GasPricing.baseFeeWei(
+                standardMaxFee: price.standard.maxFeePerGas,
+                standardPriority: price.standard.maxPriorityFeePerGas
+            )
             liveGasUpdatedAt = Date()
         } catch {
             appendLog("gas: live price refresh failed — \(error.localizedDescription)")

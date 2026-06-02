@@ -93,4 +93,25 @@ enum GasPricing {
         while fraction.hasSuffix("0") { fraction.removeLast() }
         return "\(whole).\(fraction)"
     }
+
+    /// Network base fee, derived from the standard tier as
+    /// `eth_gasPrice − eth_maxPriorityFeePerGas`. geth defines
+    /// `gasPrice = baseFee + priorityTip`, so this is exact and needs no extra
+    /// RPC — it stays correct even when the light client can't serve blocks.
+    /// Clamped to zero if the tip somehow exceeds the gas price.
+    static func baseFeeWei(standardMaxFee: Data, standardPriority: Data) -> Data {
+        let maxFee = weiUInt64(standardMaxFee)
+        let priority = weiUInt64(standardPriority)
+        let base = maxFee >= priority ? maxFee - priority : 0
+        return Data.fromBigEndian(base).leftPadded(to: 32)
+    }
+
+    /// Low-64-bit value of a big-endian wei blob (realistic gas values fit in UInt64).
+    private static func weiUInt64(_ data: Data) -> UInt64 {
+        var value: UInt64 = 0
+        for byte in Data(data.drop { $0 == 0 }).suffix(8) {
+            value = (value << 8) | UInt64(byte)
+        }
+        return value
+    }
 }

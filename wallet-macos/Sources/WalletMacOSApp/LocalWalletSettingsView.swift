@@ -552,6 +552,25 @@ struct LocalWalletSettingsView: View {
                         detail: "Required for Helios verification. Leave blank to restore the default for the selected network.",
                         text: activeConsensusRPCBinding
                     )
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle(isOn: $networkDraft.autoGasModeEnabled) {
+                            Text("Automatic gas pricing")
+                                .font(.system(size: 13, weight: .bold))
+                        }
+                        Text("Applies to all networks. When on, the wallet follows live network gas at the selected tier and the caps below are ignored.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        if networkDraft.autoGasModeEnabled {
+                            Picker("Speed tier", selection: $networkDraft.autoGasTier) {
+                                ForEach(GasTier.allCases, id: \.self) { tier in
+                                    Text(tier.label).tag(tier)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .frame(width: 280)
+                        }
+                    }
                     HStack(alignment: .top, spacing: 12) {
                         SettingsEditableField(
                             title: "Max fee cap (gwei)",
@@ -570,6 +589,8 @@ struct LocalWalletSettingsView: View {
                             text: activePriorityFeeCapBinding
                         )
                     }
+                    .disabled(networkDraft.autoGasModeEnabled)
+                    .opacity(networkDraft.autoGasModeEnabled ? 0.45 : 1)
 
                     if let networkMessage {
                         SettingsMessageBanner(message: networkMessage)

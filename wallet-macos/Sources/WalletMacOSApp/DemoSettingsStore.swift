@@ -26,6 +26,8 @@ struct DemoNetworkSettings: Equatable {
     var sepoliaConsensusRPCURL: String
     var sepoliaMaxFeePerGasGwei: String
     var sepoliaMaxPriorityFeePerGasGwei: String
+    var autoGasModeEnabled: Bool
+    var autoGasTier: GasTier
 
     static let defaults = DemoNetworkSettings(
         isTestnetModeEnabled: true,
@@ -38,7 +40,9 @@ struct DemoNetworkSettings: Equatable {
         sepoliaArchiveNodeURL: "",
         sepoliaConsensusRPCURL: ChainConfiguration.ethereumSepolia.consensusRPCURL.absoluteString,
         sepoliaMaxFeePerGasGwei: WalletNodeDaemon.GasPolicy.sepolia.maxFeePerGasGwei,
-        sepoliaMaxPriorityFeePerGasGwei: WalletNodeDaemon.GasPolicy.sepolia.maxPriorityFeePerGasGwei
+        sepoliaMaxPriorityFeePerGasGwei: WalletNodeDaemon.GasPolicy.sepolia.maxPriorityFeePerGasGwei,
+        autoGasModeEnabled: false,
+        autoGasTier: .standard
     )
 
     var activeChain: ChainConfiguration {
@@ -72,6 +76,12 @@ struct DemoNetworkSettings: Equatable {
             maxFeePerGasGwei: activeMaxFeePerGasGwei,
             maxPriorityFeePerGasGwei: activeMaxPriorityFeePerGasGwei
         )) ?? fallback
+    }
+
+    /// Caps written to the daemon `config.toml` at launch. Manual mode uses the
+    /// user's per-chain caps; auto mode uses a generous ceiling (live fee wins).
+    var resolvedDaemonGasPolicy: WalletNodeDaemon.GasPolicy {
+        autoGasModeEnabled ? WalletNodeDaemon.GasPolicy.autoCeiling : activeGasPolicy
     }
 
     var activeMaxFeePerGasGwei: String {
@@ -118,6 +128,8 @@ struct DemoNetworkSettings: Equatable {
     }
 
     func resettingActiveNetworkToDefaults() -> DemoNetworkSettings {
+        // Resets only the active network's endpoints and caps. autoGasModeEnabled /
+        // autoGasTier are global preferences and are intentionally preserved here.
         var settings = self
         if isTestnetModeEnabled {
             settings.sepoliaRPCURL = Self.defaults.sepoliaRPCURL
@@ -187,6 +199,8 @@ struct DemoSettingsStore {
         static let sepoliaConsensusRPCURL = "com.localwallet.demo.sepolia-consensus-rpc-url"
         static let sepoliaMaxFeePerGasGwei = "com.localwallet.demo.sepolia-max-fee-per-gas-gwei"
         static let sepoliaMaxPriorityFeePerGasGwei = "com.localwallet.demo.sepolia-max-priority-fee-per-gas-gwei"
+        static let autoGasModeEnabled = "com.localwallet.demo.auto-gas-mode-enabled"
+        static let autoGasTier = "com.localwallet.demo.auto-gas-tier"
         static let unlockRelayerOnLaunch = "com.localwallet.demo.unlock-relayer-on-launch"
         static let legacyOnboardingRPCURL = "com.localwallet.demo.onboarding.rpc-url"
         static let legacyOnboardingArchiveNodeURL = "com.localwallet.demo.onboarding.archive-node-url"
@@ -243,7 +257,10 @@ struct DemoSettingsStore {
             sepoliaMaxFeePerGasGwei: defaults.string(forKey: Keys.sepoliaMaxFeePerGasGwei)
                 ?? DemoNetworkSettings.defaults.sepoliaMaxFeePerGasGwei,
             sepoliaMaxPriorityFeePerGasGwei: defaults.string(forKey: Keys.sepoliaMaxPriorityFeePerGasGwei)
-                ?? DemoNetworkSettings.defaults.sepoliaMaxPriorityFeePerGasGwei
+                ?? DemoNetworkSettings.defaults.sepoliaMaxPriorityFeePerGasGwei,
+            autoGasModeEnabled: defaults.bool(forKey: Keys.autoGasModeEnabled),
+            autoGasTier: defaults.string(forKey: Keys.autoGasTier)
+                .flatMap(GasTier.init(rawValue:)) ?? .standard
         )
     }
 
@@ -259,5 +276,7 @@ struct DemoSettingsStore {
         defaults.set(settings.sepoliaConsensusRPCURL, forKey: Keys.sepoliaConsensusRPCURL)
         defaults.set(settings.sepoliaMaxFeePerGasGwei, forKey: Keys.sepoliaMaxFeePerGasGwei)
         defaults.set(settings.sepoliaMaxPriorityFeePerGasGwei, forKey: Keys.sepoliaMaxPriorityFeePerGasGwei)
+        defaults.set(settings.autoGasModeEnabled, forKey: Keys.autoGasModeEnabled)
+        defaults.set(settings.autoGasTier.rawValue, forKey: Keys.autoGasTier)
     }
 }

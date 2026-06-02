@@ -36,6 +36,15 @@ final class WalletNodeDaemon: @unchecked Sendable {
             maxPriorityFeePerGasGwei: "5"
         )
 
+        /// Generous ceiling used when automatic gas pricing is on, so the live
+        /// fee is never rejected by the daemon `[policy]` caps. Auto mode follows
+        /// the network; this is a safety bound, not a user-facing cap.
+        // The `?? mainnet` fallback is never reached (100 <= 1500 and both are valid
+        // gwei integers, so `custom` cannot throw). Do NOT change it to a low value
+        // without thought: mainnet's 10 gwei cap would reject live gas under auto mode.
+        static let autoCeiling: GasPolicy =
+            (try? custom(maxFeePerGasGwei: "1500", maxPriorityFeePerGasGwei: "100")) ?? mainnet
+
         static func custom(
             maxFeePerGasGwei: String,
             maxPriorityFeePerGasGwei: String,

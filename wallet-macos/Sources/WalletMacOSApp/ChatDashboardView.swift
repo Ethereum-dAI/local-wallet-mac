@@ -308,6 +308,7 @@ private final class ChatDashboardModel: ObservableObject {
     private var transferPreflightTasks: [UUID: Task<Void, Never>] = [:]
     private var swapPreflightTasks: [UUID: Task<Void, Never>] = [:]
     private var walletModelCancellable: AnyCancellable?
+    private var gasPollTask: Task<Void, Never>?
     private let inferenceService: EmbeddedLlamaInferenceService
     private let chatStore: ChatSQLiteStore
     private let walletHistoryStore: WalletTransactionHistoryStore
@@ -367,6 +368,7 @@ private final class ChatDashboardModel: ObservableObject {
         walletModelCancellable = self.walletModel.objectWillChange.sink { [weak self] _ in
             Task { @MainActor [weak self] in
                 await Task.yield()
+                self?.objectWillChange.send()
                 self?.refreshAccountIdentity()
                 self?.reloadWalletHistory()
                 self?.refreshTokenBalancesIfNeeded()
@@ -374,10 +376,21 @@ private final class ChatDashboardModel: ObservableObject {
         }
         refreshAccountIdentity()
         self.walletModel.bootstrap()
+        // Capture the AppModel, not self: the poll loop runs until cancelled, so a
+        // strong self-capture would keep this model alive forever and prevent deinit
+        // (hence the cancel) from ever running.
+        let gasModel = self.walletModel
+        gasPollTask = Task {
+            await gasModel.runGasPriceUpdates()
+        }
         backfillWalletHistoryFromChat()
         reloadWalletHistory()
         refreshWalletHistory()
         refreshTokenBalancesIfNeeded()
+    }
+
+    deinit {
+        gasPollTask?.cancel()
     }
 
     var activeConversation: ChatConversation? {
@@ -386,6 +399,52 @@ private final class ChatDashboardModel: ObservableObject {
 
     var messages: [ChatMessage] {
         activeConversation?.messages ?? []
+    }
+
+    var gasPillText: String {
+        guard let price = walletModel.liveGasPrice else { return "— gwei" }
+        let headWei = walletModel.liveBaseFeeWei ?? price.standard.maxFeePerGas
+        let head = GasPricing.gweiText(fromWei: headWei)
+        let priority = GasPricing.gweiText(fromWei: price.standard.maxPriorityFeePerGas)
+        return "\(head) / \(priority) gwei"
+    }
+
+    var gasBreakdown: GasBreakdownDisplay {
+        let price = walletModel.liveGasPrice
+        func row(_ id: String, _ name: String, _ tier: WalletNodeClient.UserOperationGasPriceTier?) -> GasTierRow {
+            GasTierRow(
+                id: id,
+                name: name,
+                maxFee: tier.map { GasPricing.gweiText(fromWei: $0.maxFeePerGas) } ?? "—",
+                priority: tier.map { GasPricing.gweiText(fromWei: $0.maxPriorityFeePerGas) } ?? "—"
+            )
+        }
+        let baseFee = walletModel.liveBaseFeeWei.map { GasPricing.gweiText(fromWei: $0) }
+        let updated: String
+        if let at = walletModel.liveGasUpdatedAt {
+            let seconds = max(0, Int(Date().timeIntervalSince(at)))
+            updated = seconds < 5 ? "Updated just now" : "Updated \(seconds)s ago"
+        } else {
+            updated = "Not loaded yet"
+        }
+        let settings = walletModel.networkSettings
+        let mode = settings.autoGasModeEnabled
+            ? "Auto · \(settings.autoGasTier.label.lowercased()) tier"
+            : "Manual · capped at \(settings.activeMaxFeePerGasGwei)/\(settings.activeMaxPriorityFeePerGasGwei) gwei"
+        return GasBreakdownDisplay(
+            baseFee: baseFee,
+            tiers: [
+                row("slow", "Slow", price?.slow),
+                row("standard", "Standard", price?.standard),
+                row("fast", "Fast", price?.fast),
+            ],
+            modeText: mode,
+            updatedText: updated
+        )
+    }
+
+    func refreshGasPricesNow() {
+        Task { await walletModel.refreshLiveGasPrices() }
     }
 
     var settingsSnapshot: LocalWalletSettingsSnapshot {
@@ -2114,6 +2173,7 @@ struct LocalWalletChatDashboardView: View {
     @StateObject private var model = ChatDashboardModel()
     @State private var conversationPendingDeletion: ChatConversation?
     @State private var isToolsPopoverPresented = false
+    @State private var isGasPopoverPresented = false
     @State private var isAtBottomOfChat = true
     @State private var isAccountHeaderExpanded = true
     @State private var selectedSection: DashboardSection = .chat
@@ -2942,6 +3002,17 @@ struct LocalWalletChatDashboardView: View {
                 text: model.executionStatusText,
                 tint: model.hasExecutingIntent ? ChatPalette.accent : ChatPalette.secondaryText
             )
+            Button {
+                isGasPopoverPresented.toggle()
+                model.refreshGasPricesNow()
+            } label: {
+                StatusPill(icon: "fuelpump.fill", text: model.gasPillText, tint: ChatPalette.secondaryText)
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $isGasPopoverPresented, arrowEdge: .top) {
+                GasBreakdownPopover(display: model.gasBreakdown)
+            }
+            .help("Current network gas price")
             Button {
                 isToolsPopoverPresented.toggle()
             } label: {

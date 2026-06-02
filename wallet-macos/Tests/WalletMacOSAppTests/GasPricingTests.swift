@@ -1,0 +1,94 @@
+import Foundation
+import Testing
+@testable import WalletMacOSApp
+
+private func tier(maxFeeGwei: UInt64, priorityGwei: UInt64) -> WalletNodeClient.UserOperationGasPriceTier {
+    WalletNodeClient.UserOperationGasPriceTier(
+        maxFeePerGas: Data.fromBigEndian(maxFeeGwei * 1_000_000_000).leftPadded(to: 32),
+        maxPriorityFeePerGas: Data.fromBigEndian(priorityGwei * 1_000_000_000).leftPadded(to: 32)
+    )
+}
+
+private func price(slow: (UInt64, UInt64), standard: (UInt64, UInt64), fast: (UInt64, UInt64))
+    -> WalletNodeClient.UserOperationGasPrice {
+    WalletNodeClient.UserOperationGasPrice(
+        slow: tier(maxFeeGwei: slow.0, priorityGwei: slow.1),
+        standard: tier(maxFeeGwei: standard.0, priorityGwei: standard.1),
+        fast: tier(maxFeeGwei: fast.0, priorityGwei: fast.1)
+    )
+}
+
+private func gwei(_ data: Data) -> String { GasPricing.gweiText(fromWei: data) }
+
+@Test func autoModeReturnsSelectedTierVerbatim() throws {
+    let p = price(slow: (10, 1), standard: (20, 2), fast: (40, 4))
+    let cap = try WalletNodeDaemon.GasPolicy.custom(maxFeePerGasGwei: "5", maxPriorityFeePerGasGwei: "1")
+
+    let fast = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: true, autoTier: .fast, manualCap: cap)
+    #expect(gwei(fast.maxFeePerGas) == "40")
+    #expect(gwei(fast.maxPriorityFeePerGas) == "4")
+
+    let slow = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: true, autoTier: .slow, manualCap: cap)
+    #expect(gwei(slow.maxFeePerGas) == "10")
+    #expect(gwei(slow.maxPriorityFeePerGas) == "1")
+
+    let standard = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: true, autoTier: .standard, manualCap: cap)
+    #expect(gwei(standard.maxFeePerGas) == "20")
+    #expect(gwei(standard.maxPriorityFeePerGas) == "2")
+}
+
+@Test func manualModeBelowCapPassesStandardThrough() throws {
+    let p = price(slow: (10, 1), standard: (20, 2), fast: (40, 4))
+    let cap = try WalletNodeDaemon.GasPolicy.custom(maxFeePerGasGwei: "100", maxPriorityFeePerGasGwei: "10")
+
+    let r = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: false, autoTier: .standard, manualCap: cap)
+    #expect(gwei(r.maxFeePerGas) == "20")
+    #expect(gwei(r.maxPriorityFeePerGas) == "2")
+}
+
+@Test func manualModeClampsStandardToCaps() throws {
+    let p = price(slow: (10, 1), standard: (50, 8), fast: (80, 12))
+    let cap = try WalletNodeDaemon.GasPolicy.custom(maxFeePerGasGwei: "30", maxPriorityFeePerGasGwei: "3")
+
+    let r = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: false, autoTier: .standard, manualCap: cap)
+    #expect(gwei(r.maxFeePerGas) == "30")        // clamped to max cap
+    #expect(gwei(r.maxPriorityFeePerGas) == "3") // clamped to priority cap
+}
+
+@Test func manualClampKeepsPriorityNotAboveMaxFee() {
+    // standard priority below max cap but above the (low) max-fee cap
+    let p = price(slow: (1, 1), standard: (50, 9), fast: (80, 12))
+    // Use memberwise init directly: priority cap (20) intentionally exceeds max-fee cap (5)
+    // to test that GasPricing clamps priority down to the resolved max fee.
+    let cap = WalletNodeDaemon.GasPolicy(
+        maxFeePerGas: "0x" + String(5 * 1_000_000_000, radix: 16),
+        maxPriorityFeePerGas: "0x" + String(20 * 1_000_000_000, radix: 16),
+        maxFeePerGasGwei: "5",
+        maxPriorityFeePerGasGwei: "20"
+    )
+
+    let r = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: false, autoTier: .standard, manualCap: cap)
+    #expect(gwei(r.maxFeePerGas) == "5")
+    // priority must not exceed the resolved max fee (5), even though priority cap is 20
+    #expect(gwei(r.maxPriorityFeePerGas) == "5")
+}
+
+@Test func minWeiPicksSmaller() {
+    let a = Data.fromBigEndian(UInt64(100)).leftPadded(to: 32)
+    let b = Data.fromBigEndian(UInt64(250)).leftPadded(to: 32)
+    #expect(GasPricing.minWei(a, b) == a)
+    #expect(GasPricing.minWei(b, a) == a)
+}
+
+@Test func gweiTextFormatsCompactly() {
+    #expect(GasPricing.gweiText(fromWei: Data.fromBigEndian(UInt64(24_000_000_000)).leftPadded(to: 32)) == "24")
+    #expect(GasPricing.gweiText(fromWei: Data.fromBigEndian(UInt64(1_500_000_000)).leftPadded(to: 32)) == "1.5")
+    #expect(GasPricing.gweiText(fromWei: Data.fromBigEndian(UInt64(500_000_000)).leftPadded(to: 32)) == "0.5")
+    #expect(GasPricing.gweiText(fromWei: Data.fromBigEndian(UInt64(1_234_000_000)).leftPadded(to: 32)) == "1.23")
+    #expect(GasPricing.gweiText(fromWei: Data([0])) == "0")
+}
+
+@Test func gweiTextReturnsSentinelForOversizedValues() {
+    // 9 significant bytes — exceeds 64-bit range, not a realistic gas value.
+    #expect(GasPricing.gweiText(fromWei: Data([0x01, 0, 0, 0, 0, 0, 0, 0, 0])) == "high")
+}

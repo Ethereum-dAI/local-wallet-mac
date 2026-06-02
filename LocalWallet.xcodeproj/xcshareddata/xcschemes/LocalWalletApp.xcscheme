@@ -61,8 +61,13 @@
       </BuildableProductRunnable>
       <EnvironmentVariables>
          <EnvironmentVariable
+            key = "LOCAL_WALLET_NODE_BIN"
+            value = "$(SRCROOT)/../../local-wallet-daemon/target/release/wallet-node"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
             key = "WALLET_NODE_BIN"
-            value = "$(SRCROOT)/../../local-wallet-daemon/target/debug/wallet-node"
+            value = "$(SRCROOT)/../../local-wallet-daemon/target/release/wallet-node"
             isEnabled = "YES">
          </EnvironmentVariable>
       </EnvironmentVariables>

@@ -1175,6 +1175,14 @@ private final class ChatDashboardModel: ObservableObject {
         guard let intent = message.toolIntent else {
             return
         }
+        // Only preview intents still awaiting a decision. Once an intent is
+        // confirmed/edited/rejected — including restored historical cards after
+        // the app reopens — there's nothing to preview, and re-running the
+        // quote/resolve would surface a stale failure (e.g. "Swap quote failed"
+        // or a Helios "Internal error") on a transaction that already executed.
+        guard intent.disposition == .pending else {
+            return
+        }
         if intent.tool == .swap {
             prepareSwapPreview(intent)
             return

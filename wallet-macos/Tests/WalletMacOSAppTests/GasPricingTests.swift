@@ -92,3 +92,15 @@ private func gwei(_ data: Data) -> String { GasPricing.gweiText(fromWei: data) }
     // 9 significant bytes — exceeds 64-bit range, not a realistic gas value.
     #expect(GasPricing.gweiText(fromWei: Data([0x01, 0, 0, 0, 0, 0, 0, 0, 0])) == "high")
 }
+
+@Test func gweiTextKeepsSmallSubCentiGweiValues() {
+    // Mainnet's low-congestion priority floor is 0.001 gwei (1_000_000 wei).
+    // It must NOT round to "0".
+    #expect(GasPricing.gweiText(fromWei: Data.fromBigEndian(UInt64(1_000_000)).leftPadded(to: 32)) == "0.001")
+    // Sub-gwei values keep up to 3 decimals.
+    #expect(GasPricing.gweiText(fromWei: Data.fromBigEndian(UInt64(425_000_000)).leftPadded(to: 32)) == "0.425")
+    // A non-zero tip below display precision shows a floor sentinel, not "0".
+    #expect(GasPricing.gweiText(fromWei: Data.fromBigEndian(UInt64(100_000)).leftPadded(to: 32)) == "<0.001")
+    // Exactly zero is still "0".
+    #expect(GasPricing.gweiText(fromWei: Data.fromBigEndian(UInt64(0)).leftPadded(to: 32)) == "0")
+}

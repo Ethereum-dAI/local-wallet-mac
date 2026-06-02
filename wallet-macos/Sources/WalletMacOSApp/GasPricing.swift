@@ -64,19 +64,33 @@ enum GasPricing {
         return pa
     }
 
-    /// Compact gwei text from a big-endian wei value, e.g. "24", "1.5", "1.23".
+    /// Compact gwei text from a big-endian wei value, e.g. "24", "1.5", "1.23",
+    /// "0.001". Precision scales with magnitude: 2 decimals at/above 1 gwei, 3
+    /// below so small tips (mainnet's 0.001 gwei priority floor) stay visible.
+    /// A non-zero value too small for that precision renders as "<0.001", never "0".
     static func gweiText(fromWei data: Data) -> String {
         let trimmed = Data(data.drop { $0 == 0 })
         guard trimmed.count <= 8 else { return "high" }
         var wei: UInt64 = 0
         for byte in trimmed { wei = (wei << 8) | UInt64(byte) }
+        if wei == 0 { return "0" }
 
         var whole = wei / 1_000_000_000
         let frac = wei % 1_000_000_000
-        var hundredths = (frac + 5_000_000) / 10_000_000 // round to 1/100 gwei
-        if hundredths >= 100 { whole += 1; hundredths = 0 }
-        if hundredths == 0 { return String(whole) }
-        if hundredths % 10 == 0 { return "\(whole).\(hundredths / 10)" }
-        return "\(whole).\(String(format: "%02d", hundredths))"
+        // 2 decimals (1/100 gwei) at/above 1 gwei, 3 (1/1000 gwei) below.
+        let decimals = whole >= 1 ? 2 : 3
+        let scale: UInt64 = decimals == 2 ? 10_000_000 : 1_000_000
+        let limit: UInt64 = decimals == 2 ? 100 : 1_000
+        var units = (frac + scale / 2) / scale // rounded fractional units
+        if units >= limit { whole += 1; units = 0 }
+
+        if units == 0 {
+            // Below display precision: a real but tiny tip must not read as "0".
+            return whole == 0 ? "<0.001" : String(whole)
+        }
+        var fraction = String(units)
+        while fraction.count < decimals { fraction = "0" + fraction }
+        while fraction.hasSuffix("0") { fraction.removeLast() }
+        return "\(whole).\(fraction)"
     }
 }

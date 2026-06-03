@@ -21,42 +21,42 @@ private func price(slow: (UInt64, UInt64), standard: (UInt64, UInt64), fast: (UI
 private func gwei(_ data: Data) -> String { GasPricing.gweiText(fromWei: data) }
 
 @Test func autoModeUsesTierTipWithBaseFeeHeadroom() throws {
-    // baseFee = standard.maxFee - standard.priority = 20 - 2 = 18; headroom maxFee = 2*18 + tip.
+    // baseFee = standard.maxFee - standard.priority = 20 - 2 = 18; headroom maxFee = 18*3/2 + tip = 27 + tip.
     let p = price(slow: (10, 1), standard: (20, 2), fast: (40, 4))
     let cap = try WalletNodeDaemon.GasPolicy.custom(maxFeePerGasGwei: "5", maxPriorityFeePerGasGwei: "1")
 
     let fast = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: true, autoTier: .fast, manualCap: cap)
-    #expect(gwei(fast.maxFeePerGas) == "40")          // 2*18 + 4
+    #expect(gwei(fast.maxFeePerGas) == "31")          // 27 + 4
     #expect(gwei(fast.maxPriorityFeePerGas) == "4")   // tip verbatim
 
     let slow = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: true, autoTier: .slow, manualCap: cap)
-    #expect(gwei(slow.maxFeePerGas) == "37")          // 2*18 + 1
+    #expect(gwei(slow.maxFeePerGas) == "28")          // 27 + 1
     #expect(gwei(slow.maxPriorityFeePerGas) == "1")
 
     let standard = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: true, autoTier: .standard, manualCap: cap)
-    #expect(gwei(standard.maxFeePerGas) == "38")      // 2*18 + 2
+    #expect(gwei(standard.maxFeePerGas) == "29")      // 27 + 2
     #expect(gwei(standard.maxPriorityFeePerGas) == "2")
 }
 
 @Test func manualModeAddsMaxFeeHeadroomUnderCap() throws {
-    // baseFee 18; headroom maxFee = 2*18 + 2 = 38 (below the 100 cap); tip = standard tip.
+    // baseFee 18; headroom maxFee = 18*3/2 + 2 = 29 (below the 100 cap); tip = standard tip.
     let p = price(slow: (10, 1), standard: (20, 2), fast: (40, 4))
     let cap = try WalletNodeDaemon.GasPolicy.custom(maxFeePerGasGwei: "100", maxPriorityFeePerGasGwei: "10")
 
     let r = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: false, autoTier: .standard, manualCap: cap)
-    #expect(gwei(r.maxFeePerGas) == "38")
+    #expect(gwei(r.maxFeePerGas) == "29")
     #expect(gwei(r.maxPriorityFeePerGas) == "2")
 }
 
 @Test func maxFeeGetsHeadroomSoRisingBaseFeeDoesNotStrand() throws {
     // Reproduces the stranded-tx bug: spot gas ~10 gwei (baseFee 9 + 1 tip). Without
     // headroom maxFee would be ~10 and a base-fee rise past it strands the tx; with
-    // headroom maxFee = 2*9 + 1 = 19, leaving room for the base fee to roughly double.
+    // headroom maxFee = 9*3/2 + 1 = 14.5 gwei (computed in wei), ~50% room above base fee.
     let p = price(slow: (8, 1), standard: (10, 1), fast: (12, 1))
     let cap = try WalletNodeDaemon.GasPolicy.custom(maxFeePerGasGwei: "50", maxPriorityFeePerGasGwei: "5")
 
     let r = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: true, autoTier: .standard, manualCap: cap)
-    #expect(gwei(r.maxFeePerGas) == "19")
+    #expect(gwei(r.maxFeePerGas) == "14.5")
     #expect(gwei(r.maxPriorityFeePerGas) == "1")
 }
 

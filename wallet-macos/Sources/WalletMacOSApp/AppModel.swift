@@ -38,6 +38,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var isExportingLocalRelayer = false
     @Published private(set) var isDeletingLocalRelayer = false
     @Published private(set) var unlockRelayerOnLaunch: Bool
+    @Published private(set) var liveGasPrice: WalletNodeClient.UserOperationGasPrice?
+    @Published private(set) var liveBaseFeeWei: Data?
+    @Published private(set) var liveGasUpdatedAt: Date?
 
     var activeChain: ChainConfiguration {
         configuration.activeChain
@@ -623,7 +626,7 @@ final class AppModel: ObservableObject {
         localRelayerMessage = "Starting local wallet-node daemon..."
         let keyRef = "bundler-eoa:default:\(activeChain.id):1"
         let chain = activeChain
-        let gasPolicy = networkSettings.activeGasPolicy
+        let gasPolicy = networkSettings.resolvedDaemonGasPolicy
         let launchTask = Task {
             let bundlerSecret = try BundlerKeyStore.shared.createIfNeeded(keyRef: keyRef)
             return try await WalletNodeDaemon.launch(
@@ -1496,11 +1499,42 @@ final class AppModel: ObservableObject {
         let gasPrice = try await withWalletNodeClient(operation: "\(logContext) gas price") { client in
             try await client.userOperationGasPrice()
         }
-        appendLog("\(logContext): using local wallet-node gas price tier 'standard'")
-        return (
-            maxPriorityFeePerGas: gasPrice.standard.maxPriorityFeePerGas,
-            maxFeePerGas: gasPrice.standard.maxFeePerGas
+        let settings = networkSettings
+        let resolved = GasPricing.resolveUserOperationFees(
+            gasPrice: gasPrice,
+            autoEnabled: settings.autoGasModeEnabled,
+            autoTier: settings.autoGasTier,
+            manualCap: settings.activeGasPolicy
         )
+        appendLog("\(logContext): gas fee mode \(settings.autoGasModeEnabled ? "auto/\(settings.autoGasTier.rawValue)" : "manual(capped to \(settings.activeMaxFeePerGasGwei)/\(settings.activeMaxPriorityFeePerGasGwei) gwei)")")
+        return resolved
+    }
+
+    /// Fetch the current live gas tiers + base fee for the chat indicator.
+    func refreshLiveGasPrices() async {
+        do {
+            let price = try await withWalletNodeClient(operation: "gas indicator") { client in
+                try await client.userOperationGasPrice()
+            }
+            liveGasPrice = price
+            // Derive base fee from the standard tier (gasPrice − tip): exact and
+            // independent of the light client, which can't reliably serve blocks.
+            liveBaseFeeWei = GasPricing.baseFeeWei(
+                standardMaxFee: price.standard.maxFeePerGas,
+                standardPriority: price.standard.maxPriorityFeePerGas
+            )
+            liveGasUpdatedAt = Date()
+        } catch {
+            appendLog("gas: live price refresh failed — \(error.localizedDescription)")
+        }
+    }
+
+    /// Long-lived poll driving the chat gas indicator. Cancelled with its Task.
+    func runGasPriceUpdates() async {
+        while !Task.isCancelled {
+            await refreshLiveGasPrices()
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+        }
     }
 
     private func appendDraftLogSummary(_ draft: UserOperationDraft, context: String) {

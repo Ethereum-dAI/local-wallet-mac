@@ -63,15 +63,15 @@ enum GasPricing {
         return (minWei(priority, maxFee), maxFee) // priority never above maxFee
     }
 
-    /// Multiplier applied to the base fee when computing maxFeePerGas headroom. 2× base
-    /// fee survives ~6 blocks of maximum (12.5%/block) base-fee growth before stranding.
-    private static let baseFeeHeadroomMultiplier: UInt64 = 2
-
-    /// maxFeePerGas = `multiplier × baseFee + priorityTip`, in UInt64 with saturation
-    /// (realistic gas values fit in 64 bits). Returned as 32-byte big-endian wei.
+    /// maxFeePerGas headroom = `baseFee × 3/2 + priorityTip`, in UInt64 with saturation.
+    /// 1.5× survives ~3 blocks of maximum (12.5%/block) base-fee growth — enough to avoid
+    /// the stranding we hit — while keeping the ERC-4337 prefund requirement modest. The
+    /// account must hold `gasLimit × maxFee` in full (even though it only pays the actual
+    /// fee), so an over-large multiplier (2×) caused gas_shortfall on heavy ops when the
+    /// base fee was high.
     private static func headroomMaxFee(baseFee: UInt64, priority: Data) -> Data {
-        let scaled = baseFee.multipliedReportingOverflow(by: baseFeeHeadroomMultiplier)
-        let scaledBase = scaled.overflow ? UInt64.max : scaled.partialValue
+        let tripled = baseFee.multipliedReportingOverflow(by: 3)
+        let scaledBase = (tripled.overflow ? UInt64.max : tripled.partialValue) / 2
         let sum = scaledBase.addingReportingOverflow(weiUInt64(priority))
         let value = sum.overflow ? UInt64.max : sum.partialValue
         return Data.fromBigEndian(value).leftPadded(to: 32)

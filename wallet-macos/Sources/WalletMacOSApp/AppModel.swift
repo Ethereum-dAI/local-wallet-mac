@@ -41,6 +41,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveGasPrice: WalletNodeClient.UserOperationGasPrice?
     @Published private(set) var liveBaseFeeWei: Data?
     @Published private(set) var liveGasUpdatedAt: Date?
+    @Published private(set) var networkHealth: WalletNodeClient.NetworkHealth?
 
     var activeChain: ChainConfiguration {
         configuration.activeChain
@@ -1534,6 +1535,29 @@ final class AppModel: ObservableObject {
         while !Task.isCancelled {
             await refreshLiveGasPrices()
             try? await Task.sleep(nanoseconds: 30_000_000_000)
+        }
+    }
+
+    /// Fetch the daemon health snapshot for the light-client sync indicator.
+    func refreshNetworkHealth() async {
+        do {
+            let health = try await withWalletNodeClient(operation: "network health") { client in
+                try await client.networkHealth()
+            }
+            networkHealth = health
+        } catch {
+            // Leave the prior value; a transient health miss shouldn't flap the UI.
+        }
+    }
+
+    /// Long-lived health poll: fast (5s) while syncing, slow (30s) once verified-ready.
+    func runNetworkHealthUpdates() async {
+        while !Task.isCancelled {
+            await refreshNetworkHealth()
+            let interval: UInt64 = (networkHealth?.isReady == true)
+                ? 30_000_000_000
+                : 5_000_000_000
+            try? await Task.sleep(nanoseconds: interval)
         }
     }
 

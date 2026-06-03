@@ -309,6 +309,7 @@ private final class ChatDashboardModel: ObservableObject {
     private var swapPreflightTasks: [UUID: Task<Void, Never>] = [:]
     private var walletModelCancellable: AnyCancellable?
     private var gasPollTask: Task<Void, Never>?
+    private var healthPollTask: Task<Void, Never>?
     private let inferenceService: EmbeddedLlamaInferenceService
     private let chatStore: ChatSQLiteStore
     private let walletHistoryStore: WalletTransactionHistoryStore
@@ -383,6 +384,9 @@ private final class ChatDashboardModel: ObservableObject {
         gasPollTask = Task {
             await gasModel.runGasPriceUpdates()
         }
+        healthPollTask = Task {
+            await gasModel.runNetworkHealthUpdates()
+        }
         backfillWalletHistoryFromChat()
         reloadWalletHistory()
         refreshWalletHistory()
@@ -391,6 +395,7 @@ private final class ChatDashboardModel: ObservableObject {
 
     deinit {
         gasPollTask?.cancel()
+        healthPollTask?.cancel()
     }
 
     var activeConversation: ChatConversation? {
@@ -399,6 +404,10 @@ private final class ChatDashboardModel: ObservableObject {
 
     var messages: [ChatMessage] {
         activeConversation?.messages ?? []
+    }
+
+    var isLightClientSyncing: Bool {
+        walletModel.networkHealth?.isSyncing ?? false
     }
 
     var gasPillText: String {
@@ -3021,6 +3030,10 @@ struct LocalWalletChatDashboardView: View {
                 GasBreakdownPopover(display: model.gasBreakdown)
             }
             .help("Current network gas price")
+            if model.isLightClientSyncing {
+                StatusPill(icon: "arrow.triangle.2.circlepath", text: "Syncing", tint: ChatPalette.warning)
+                    .help("Light client is syncing with Ethereum consensus")
+            }
             Button {
                 isToolsPopoverPresented.toggle()
             } label: {

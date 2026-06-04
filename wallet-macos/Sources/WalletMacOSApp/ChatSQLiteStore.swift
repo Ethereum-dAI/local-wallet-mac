@@ -33,6 +33,14 @@ final class ChatSQLiteStore {
         self.databaseURL = directory.appendingPathComponent("chat.sqlite")
     }
 
+    init(databaseURL: URL, fileManager: FileManager = .default) {
+        try? fileManager.createDirectory(
+            at: databaseURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        self.databaseURL = databaseURL
+    }
+
     var databaseFileURL: URL {
         databaseURL
     }

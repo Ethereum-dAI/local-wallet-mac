@@ -72,6 +72,15 @@ struct WalletNodeClient {
             }
         }
 
+        struct ReplacementStatus: Equatable {
+            let eligible: Bool
+            let blocked: Bool
+            let blockedReason: String?
+            let txHash: String?
+            let userOpHash: String?
+            let nonce: Int?
+        }
+
         let ready: Bool
         let ownerScope: String
         let chainId: Int
@@ -87,6 +96,7 @@ struct WalletNodeClient {
         let retiringCount: Int
         let keyHistory: [KeyHistoryEntry]
         let latestAuditEvent: String?
+        let replacement: ReplacementStatus?
     }
 
     struct UserOperationGasEstimate: Equatable {
@@ -150,7 +160,7 @@ struct WalletNodeClient {
     enum ClientError: LocalizedError {
         case invalidResponse
         case transport(String)
-        case rpcError(code: Int, message: String, reason: String?)
+        case rpcError(method: String, code: Int, message: String, reason: String?)
 
         var errorDescription: String? {
             switch self {
@@ -158,11 +168,11 @@ struct WalletNodeClient {
                 return "wallet-node returned an invalid response"
             case let .transport(message):
                 return message
-            case let .rpcError(code, message, reason):
+            case let .rpcError(method, code, message, reason):
                 if let reason {
-                    return "wallet-node RPC \(code): \(message) (\(reason))"
+                    return "wallet-node RPC \(method) \(code): \(message) (\(reason))"
                 }
-                return "wallet-node RPC \(code): \(message)"
+                return "wallet-node RPC \(method) \(code): \(message)"
             }
         }
     }
@@ -471,6 +481,38 @@ struct WalletNodeClient {
         )
     }
 
+    func cancelPendingOperation(userOpHash: String) async throws -> String? {
+        let result = try await call(
+            method: "wallet_cancelPendingOperation",
+            params: [userOpHash],
+            allowsNullResult: true
+        )
+        return try replacementTxHash(from: result)
+    }
+
+    func speedUpPendingOperation(userOpHash: String) async throws -> String? {
+        let result = try await call(
+            method: "wallet_speedUpPendingOperation",
+            params: [userOpHash],
+            allowsNullResult: true
+        )
+        return try replacementTxHash(from: result)
+    }
+
+    private func replacementTxHash(from result: Any) throws -> String? {
+        if result is NSNull {
+            return nil
+        }
+        if let txHash = result as? String {
+            return txHash
+        }
+        if let object = result as? [String: Any],
+           let txHash = object["txHash"] as? String {
+            return txHash
+        }
+        throw ClientError.invalidResponse
+    }
+
     private func call(
         method: String,
         params: [Any],
@@ -514,7 +556,7 @@ struct WalletNodeClient {
             let code = error["code"] as? Int ?? 0
             let message = error["message"] as? String ?? "RPC error"
             let reason = (error["data"] as? [String: Any])?["reason"] as? String
-            throw ClientError.rpcError(code: code, message: message, reason: reason)
+            throw ClientError.rpcError(method: method, code: code, message: message, reason: reason)
         }
         guard let result = object["result"] else {
             throw ClientError.invalidResponse
@@ -739,7 +781,7 @@ private extension String {
     }
 }
 
-private extension WalletNodeClient.RelayerStatus {
+extension WalletNodeClient.RelayerStatus {
     init(json: [String: Any]) throws {
         guard let ready = json["ready"] as? Bool,
               let ownerScope = json["ownerScope"] as? String,
@@ -762,6 +804,9 @@ private extension WalletNodeClient.RelayerStatus {
         }
         let auditEvents = json["auditEvents"] as? [[String: Any]] ?? []
         let latestAuditEvent = auditEvents.first?["event_type"] as? String
+        let replacement = (json["replacement"] as? [String: Any]).flatMap {
+            WalletNodeClient.RelayerStatus.ReplacementStatus(json: $0)
+        }
 
         self.init(
             ready: ready,
@@ -778,7 +823,8 @@ private extension WalletNodeClient.RelayerStatus {
             pendingFundingCount: pendingFunding.count,
             retiringCount: retiring.count,
             keyHistory: keyHistory,
-            latestAuditEvent: latestAuditEvent
+            latestAuditEvent: latestAuditEvent,
+            replacement: replacement
         )
     }
 }
@@ -800,6 +846,24 @@ private extension WalletNodeClient.RelayerStatus.KeyHistoryEntry {
             retiredAt: json["retiredAt"] as? Int,
             deletedAt: json["deletedAt"] as? Int,
             lastExportedAt: json["lastExportedAt"] as? Int
+        )
+    }
+}
+
+extension WalletNodeClient.RelayerStatus.ReplacementStatus {
+    init?(json: [String: Any]) {
+        guard let eligible = json["eligible"] as? Bool,
+              let blocked = json["blocked"] as? Bool
+        else {
+            return nil
+        }
+        self.init(
+            eligible: eligible,
+            blocked: blocked,
+            blockedReason: json["blockedReason"] as? String,
+            txHash: json["txHash"] as? String,
+            userOpHash: json["userOpHash"] as? String,
+            nonce: json["nonce"] as? Int
         )
     }
 }

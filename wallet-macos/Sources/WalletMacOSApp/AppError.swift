@@ -49,7 +49,7 @@ enum AppError: LocalizedError {
         case let .localDaemonLaunchFailed(message):
             return message
         case .localRelayerKeyMissing:
-            return "The active local relayer key reference is not available."
+            return "The active local relayer private key is missing from Keychain. The app will not generate a replacement during daemon launch."
         case .modelNotInstalled:
             return "The selected local model file is not installed."
         case .metadataKeyMismatch:

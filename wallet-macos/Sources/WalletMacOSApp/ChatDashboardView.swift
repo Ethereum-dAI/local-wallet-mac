@@ -118,6 +118,7 @@ struct OnchainTransactionSummary: Codable, Equatable {
         case submitted
         case reverted
         case pending
+        case cancelled
 
         var title: String {
             switch self {
@@ -129,6 +130,8 @@ struct OnchainTransactionSummary: Codable, Equatable {
                 return "Transaction reverted"
             case .pending:
                 return "Transaction pending"
+            case .cancelled:
+                return "Transaction cancelled"
             }
         }
 
@@ -142,6 +145,8 @@ struct OnchainTransactionSummary: Codable, Equatable {
                 return "xmark.octagon.fill"
             case .pending:
                 return "clock.fill"
+            case .cancelled:
+                return "xmark.circle.fill"
             }
         }
     }
@@ -164,6 +169,151 @@ struct OnchainTransactionSummary: Codable, Equatable {
     let transactionHash: String?
     let status: Status
     let createdAt: Date
+}
+
+enum OnchainTransactionActions {
+    static func canEscape(status: OnchainTransactionSummary.Status, blocked: Bool) -> Bool {
+        status == .submitted || status == .pending
+    }
+
+    static func displayBlockedReason(blocked: Bool, reason: String?) -> String? {
+        guard blocked else { return nil }
+        switch reason {
+        case "gas_relay_stuck":
+            return "Speed up unavailable: gas exceeds cap. Cancel is still available."
+        case let reason?:
+            return reason
+        case nil:
+            return "Replacement unavailable"
+        }
+    }
+}
+
+private enum ReplacementActionState: Equatable {
+    case speedingUp
+    case cancelling
+    case speedUpSubmitted
+    case cancelSubmitted
+
+    var title: String {
+        switch self {
+        case .speedingUp:
+            return "Speeding up..."
+        case .cancelling:
+            return "Cancelling..."
+        case .speedUpSubmitted:
+            return "Speed-up submitted"
+        case .cancelSubmitted:
+            return "Cancellation submitted"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .speedingUp, .speedUpSubmitted:
+            return "bolt.fill"
+        case .cancelling, .cancelSubmitted:
+            return "xmark.circle"
+        }
+    }
+
+    var showsProgress: Bool {
+        switch self {
+        case .speedingUp, .cancelling:
+            return true
+        case .speedUpSubmitted, .cancelSubmitted:
+            return false
+        }
+    }
+}
+
+extension OnchainTransactionSummary.Status {
+    init(historyStatus: WalletTransactionStatus) {
+        switch historyStatus {
+        case .included:
+            self = .included
+        case .reverted, .failed, .dropped:
+            self = .reverted
+        case .cancelled:
+            self = .cancelled
+        case .submitted:
+            self = .submitted
+        case .created, .pending, .looksIncluded, .unknown:
+            self = .pending
+        }
+    }
+}
+
+extension OnchainTransactionSummary {
+    static func decode(from message: ChatMessage) -> OnchainTransactionSummary? {
+        guard let data = message.text?.data(using: .utf8) else {
+            return nil
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(OnchainTransactionSummary.self, from: data)
+    }
+
+    func reconciled(with record: WalletTransactionRecord) -> OnchainTransactionSummary {
+        guard record.userOpHash.caseInsensitiveCompare(userOpHash) == .orderedSame else {
+            return self
+        }
+        let newStatus = OnchainTransactionSummary.Status(historyStatus: record.status)
+        if isTerminalStatus(status), !isTerminalStatus(newStatus) {
+            return with(status: status, transactionHash: record.transactionHash ?? transactionHash)
+        }
+        return with(status: newStatus, transactionHash: record.transactionHash ?? transactionHash)
+    }
+
+    func with(status: Status, transactionHash: String?) -> OnchainTransactionSummary {
+        OnchainTransactionSummary(
+            chainName: chainName,
+            chainID: chainID,
+            amount: amount,
+            token: token,
+            recipient: recipient,
+            recipientName: recipientName,
+            resolvedRecipient: resolvedRecipient,
+            resolutionChainName: resolutionChainName,
+            resolutionChainID: resolutionChainID,
+            ccipReadUsed: ccipReadUsed,
+            operation: operation,
+            amountOut: amountOut,
+            minimumReceived: minimumReceived,
+            route: route,
+            userOpHash: userOpHash,
+            transactionHash: transactionHash,
+            status: status,
+            createdAt: createdAt
+        )
+    }
+
+    private func isTerminalStatus(_ status: Status) -> Bool {
+        status == .included || status == .reverted || status == .cancelled
+    }
+}
+
+func reconcileMessages(
+    _ messages: [ChatMessage],
+    with records: [WalletTransactionRecord]
+) -> [ChatMessage] {
+    messages.map { message in
+        guard message.kind == .onchainTransaction,
+              let summary = OnchainTransactionSummary.decode(from: message),
+              let record = records.first(where: {
+                  $0.userOpHash.caseInsensitiveCompare(summary.userOpHash) == .orderedSame
+              })
+        else {
+            return message
+        }
+        let reconciled = summary.reconciled(with: record)
+        guard reconciled != summary else {
+            return message
+        }
+        var updated = message
+        updated.text = ChatMessage.onchainTransaction(reconciled).text
+        return updated
+    }
 }
 
 enum ChatIntentExecutionStatus: Equatable {
@@ -303,12 +453,14 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var tokenBalanceMessage: String? = nil
     @Published private var transferPreflightStatuses: [UUID: ChatTransferPreflightStatus] = [:]
     @Published private var swapPreflightStatuses: [UUID: ChatSwapPreflightStatus] = [:]
+    @Published private var replacementActionStates: [String: ReplacementActionState] = [:]
 
     private var generationTask: Task<Void, Never>? = nil
     private var transferPreflightTasks: [UUID: Task<Void, Never>] = [:]
     private var swapPreflightTasks: [UUID: Task<Void, Never>] = [:]
     private var walletModelCancellable: AnyCancellable?
     private var gasPollTask: Task<Void, Never>?
+    private var reconcilerTask: Task<Void, Never>?
     private let inferenceService: EmbeddedLlamaInferenceService
     private let chatStore: ChatSQLiteStore
     private let walletHistoryStore: WalletTransactionHistoryStore
@@ -332,7 +484,10 @@ private final class ChatDashboardModel: ObservableObject {
         self.walletHistoryStore = walletHistoryStore
         self.preferencesStore = preferencesStore
         self.onboardingSettingsStore = settingsStore
-        self.walletModel = walletModel ?? AppModel(walletHistoryStore: walletHistoryStore)
+        self.walletModel = walletModel ?? AppModel(
+            onboardingSettingsStore: settingsStore,
+            walletHistoryStore: walletHistoryStore
+        )
         self.runtimeStatus = inferenceService.runtimeStatus
         self.thinkingEnabled = preferencesStore.thinkingEnabled
         self.isSidebarVisible = preferencesStore.sidebarVisible
@@ -383,6 +538,9 @@ private final class ChatDashboardModel: ObservableObject {
         gasPollTask = Task {
             await gasModel.runGasPriceUpdates()
         }
+        reconcilerTask = Task {
+            await gasModel.runUserOperationReconciler()
+        }
         backfillWalletHistoryFromChat()
         reloadWalletHistory()
         refreshWalletHistory()
@@ -391,6 +549,7 @@ private final class ChatDashboardModel: ObservableObject {
 
     deinit {
         gasPollTask?.cancel()
+        reconcilerTask?.cancel()
     }
 
     var activeConversation: ChatConversation? {
@@ -578,9 +737,24 @@ private final class ChatDashboardModel: ObservableObject {
             limit: 200
         )) ?? []
         walletHistoryRecords = records
+        reconcileOnchainCards(with: records)
         if let selectedHistoryUserOpHash,
            !records.contains(where: { $0.userOpHash.caseInsensitiveCompare(selectedHistoryUserOpHash) == .orderedSame }) {
             self.selectedHistoryUserOpHash = nil
+        }
+    }
+
+    private func reconcileOnchainCards(with records: [WalletTransactionRecord]) {
+        for conversationIndex in conversations.indices {
+            let updatedMessages = reconcileMessages(conversations[conversationIndex].messages, with: records)
+            for messageIndex in conversations[conversationIndex].messages.indices
+                where conversations[conversationIndex].messages[messageIndex].text != updatedMessages[messageIndex].text {
+                conversations[conversationIndex].messages[messageIndex].text = updatedMessages[messageIndex].text
+                try? chatStore.updateMessage(
+                    conversations[conversationIndex].messages[messageIndex],
+                    in: conversations[conversationIndex].id
+                )
+            }
         }
     }
 
@@ -593,7 +767,9 @@ private final class ChatDashboardModel: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                self.walletHistoryRecords = try await self.walletModel.refreshWalletHistoryReceipts()
+                let records = try await self.walletModel.refreshWalletHistoryReceipts()
+                self.walletHistoryRecords = records
+                self.reconcileOnchainCards(with: records)
                 self.walletHistoryMessage = self.walletHistoryRecords.isEmpty
                     ? nil
                     : "History refreshed."
@@ -602,6 +778,73 @@ private final class ChatDashboardModel: ObservableObject {
                 self.reloadWalletHistory()
             }
             self.isRefreshingWalletHistory = false
+        }
+    }
+
+    func speedUpPendingOperation(_ userOpHash: String) {
+        let key = replacementActionKey(for: userOpHash)
+        guard replacementActionStates[key] == nil else {
+            return
+        }
+        replacementActionStates[key] = .speedingUp
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let didSubmit = await self.walletModel.speedUpPendingOperation(userOpHash: userOpHash)
+            self.reloadWalletHistory()
+            if didSubmit {
+                self.replacementActionStates[key] = .speedUpSubmitted
+                self.clearReplacementAction(key, matching: .speedUpSubmitted)
+            } else {
+                self.replacementActionStates[key] = nil
+            }
+        }
+    }
+
+    func cancelPendingOperation(_ userOpHash: String) {
+        let key = replacementActionKey(for: userOpHash)
+        guard replacementActionStates[key] == nil else {
+            return
+        }
+        replacementActionStates[key] = .cancelling
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let didSubmit = await self.walletModel.cancelPendingOperation(userOpHash: userOpHash)
+            self.reloadWalletHistory()
+            if didSubmit {
+                self.replacementActionStates[key] = .cancelSubmitted
+                self.clearReplacementAction(key, matching: .cancelSubmitted)
+            } else {
+                self.replacementActionStates[key] = nil
+            }
+        }
+    }
+
+    func replacementStatus(for summary: OnchainTransactionSummary) -> WalletNodeClient.RelayerStatus.ReplacementStatus? {
+        guard let replacement = walletModel.localRelayerStatus?.replacement else {
+            return nil
+        }
+        if let replacementHash = replacement.userOpHash,
+           replacementHash.caseInsensitiveCompare(summary.userOpHash) != .orderedSame {
+            return nil
+        }
+        return replacement
+    }
+
+    func replacementActionState(for userOpHash: String) -> ReplacementActionState? {
+        replacementActionStates[replacementActionKey(for: userOpHash)]
+    }
+
+    private func replacementActionKey(for userOpHash: String) -> String {
+        userOpHash.lowercased()
+    }
+
+    private func clearReplacementAction(_ key: String, matching state: ReplacementActionState) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard let self, self.replacementActionStates[key] == state else {
+                return
+            }
+            self.replacementActionStates[key] = nil
         }
     }
 
@@ -765,6 +1008,8 @@ private final class ChatDashboardModel: ObservableObject {
             return .reverted
         case .pending:
             return .pending
+        case .cancelled:
+            return .cancelled
         }
     }
 
@@ -2661,13 +2906,19 @@ struct LocalWalletChatDashboardView: View {
                                     }
                                 case .onchainTransaction:
                                     if let summary = OnchainTransactionCard.summary(from: message) {
+                                        let replacement = model.replacementStatus(for: summary)
                                         HStack {
                                             OnchainTransactionCard(
                                                 summary: summary,
+                                                replacementBlocked: replacement?.blocked ?? false,
+                                                replacementBlockedReason: replacement?.blockedReason,
+                                                replacementActionState: model.replacementActionState(for: summary.userOpHash),
                                                 onOpenHistory: { userOpHash in
                                                     model.selectHistoryRecord(userOpHash: userOpHash)
                                                     selectedSection = .history
-                                                }
+                                                },
+                                                onSpeedUp: { model.speedUpPendingOperation($0) },
+                                                onCancel: { model.cancelPendingOperation($0) }
                                             )
                                             Spacer(minLength: 0)
                                         }
@@ -4075,12 +4326,18 @@ private extension WalletTransactionRecord {
             return "Waiting for receipt"
         case .pending:
             return "No transaction hash yet"
+        case .looksIncluded:
+            return "Looks included; verifying"
         case .included:
             return "Receipt missing"
         case .reverted:
             return "Reverted before receipt"
         case .failed:
             return "Submission failed"
+        case .cancelled:
+            return "Cancelled"
+        case .dropped:
+            return "Dropped"
         case .unknown:
             return "Status unknown"
         }
@@ -4146,8 +4403,14 @@ private extension WalletTransactionRecord {
             return "paperplane.circle.fill"
         case .pending:
             return "clock.fill"
+        case .looksIncluded:
+            return "hourglass.circle.fill"
         case .unknown:
             return "questionmark.circle.fill"
+        case .cancelled:
+            return "xmark.circle.fill"
+        case .dropped:
+            return "arrow.down.circle.fill"
         }
     }
 
@@ -4159,12 +4422,18 @@ private extension WalletTransactionRecord {
             return "Submitted"
         case .pending:
             return "Pending"
+        case .looksIncluded:
+            return "Verifying"
         case .included:
             return "Done"
         case .reverted:
             return "Reverted"
         case .failed:
             return "Failed"
+        case .cancelled:
+            return "Cancelled"
+        case .dropped:
+            return "Dropped"
         case .unknown:
             return "Unknown"
         }
@@ -4184,6 +4453,12 @@ private extension WalletTransactionRecord {
             return "wallet-node accepted the UserOperation; receipt is not confirmed yet."
         case .pending:
             return "Receipt is still unavailable. This is not marked done."
+        case .looksIncluded:
+            return "A tentative receipt was found; wallet-node is still verifying it."
+        case .cancelled:
+            return "The operation was cancelled before a UserOperation receipt appeared."
+        case .dropped:
+            return "wallet-node marked the operation dropped after it left the pending path."
         case .unknown:
             return "The app cannot currently reconcile this record."
         }
@@ -4193,9 +4468,9 @@ private extension WalletTransactionRecord {
         switch status {
         case .included:
             return ChatPalette.success
-        case .reverted, .failed:
+        case .reverted, .failed, .cancelled, .dropped:
             return ChatPalette.warning
-        case .created, .submitted, .pending, .unknown:
+        case .created, .submitted, .pending, .looksIncluded, .unknown:
             return ChatPalette.accent
         }
     }
@@ -4211,7 +4486,12 @@ private extension WalletTransactionRecord {
 
 private struct OnchainTransactionCard: View {
     let summary: OnchainTransactionSummary
+    var replacementBlocked = false
+    var replacementBlockedReason: String? = nil
+    var replacementActionState: ReplacementActionState? = nil
     var onOpenHistory: ((String) -> Void)? = nil
+    var onSpeedUp: ((String) -> Void)? = nil
+    var onCancel: ((String) -> Void)? = nil
     @State private var copiedValue: String?
 
     var body: some View {
@@ -4347,6 +4627,10 @@ private struct OnchainTransactionCard: View {
                 }
             }
 
+            if let replacementActionState {
+                ReplacementActionStatusPill(state: replacementActionState)
+            }
+
             HStack(spacing: 8) {
                 Image(systemName: "clock")
                     .font(.system(size: 11, weight: .bold))
@@ -4380,6 +4664,47 @@ private struct OnchainTransactionCard: View {
                     }
                     .buttonStyle(.plain)
                 }
+                if OnchainTransactionActions.canEscape(status: summary.status, blocked: replacementBlocked) {
+                    if let onSpeedUp, !replacementBlocked {
+                        Button {
+                            onSpeedUp(summary.userOpHash)
+                        } label: {
+                            Label("Speed up", systemImage: "bolt.fill")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(ChatPalette.primaryText)
+                                .padding(.horizontal, 11)
+                                .frame(height: 30)
+                                .background(Capsule().fill(ChatPalette.buttonCircle))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(replacementActionState != nil)
+                        .opacity(replacementActionState == nil ? 1 : 0.55)
+                    } else if let reason = OnchainTransactionActions.displayBlockedReason(
+                        blocked: replacementBlocked,
+                        reason: replacementBlockedReason
+                    ) {
+                        Text(reason)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(ChatPalette.warning)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    if let onCancel {
+                        Button {
+                            onCancel(summary.userOpHash)
+                        } label: {
+                            Label("Cancel", systemImage: "xmark.circle")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(ChatPalette.primaryText)
+                                .padding(.horizontal, 11)
+                                .frame(height: 30)
+                                .background(Capsule().fill(ChatPalette.buttonCircle))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(replacementActionState != nil)
+                        .opacity(replacementActionState == nil ? 1 : 0.55)
+                    }
+                }
             }
         }
         .padding(16)
@@ -4394,14 +4719,7 @@ private struct OnchainTransactionCard: View {
     }
 
     static func summary(from message: ChatMessage) -> OnchainTransactionSummary? {
-        guard let text = message.text,
-              let data = text.data(using: .utf8)
-        else {
-            return nil
-        }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try? decoder.decode(OnchainTransactionSummary.self, from: data)
+        OnchainTransactionSummary.decode(from: message)
     }
 
     private var isSwap: Bool {
@@ -4424,6 +4742,8 @@ private struct OnchainTransactionCard: View {
             return "Swap reverted"
         case .pending:
             return "Swap pending"
+        case .cancelled:
+            return "Swap cancelled"
         }
     }
 
@@ -4447,6 +4767,8 @@ private struct OnchainTransactionCard: View {
             return "Reverted before receipt"
         case .included:
             return "Receipt missing"
+        case .cancelled:
+            return "Cancelled"
         }
     }
 
@@ -4463,7 +4785,7 @@ private struct OnchainTransactionCard: View {
             return ChatPalette.success
         case .submitted, .pending:
             return ChatPalette.accent
-        case .reverted:
+        case .reverted, .cancelled:
             return ChatPalette.warning
         }
     }
@@ -4474,6 +4796,30 @@ private struct OnchainTransactionCard: View {
         }
         let host = summary.chainID == 11_155_111 ? "https://sepolia.etherscan.io" : "https://etherscan.io"
         return URL(string: "\(host)/tx/\(hash)")
+    }
+}
+
+private struct ReplacementActionStatusPill: View {
+    let state: ReplacementActionState
+
+    var body: some View {
+        HStack(spacing: 7) {
+            if state.showsProgress {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(ChatPalette.accent)
+            } else {
+                Image(systemName: state.iconName)
+                    .font(.system(size: 11, weight: .black))
+            }
+            Text(state.title)
+                .font(.system(size: 12, weight: .bold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(ChatPalette.primaryText)
+        .padding(.horizontal, 11)
+        .frame(height: 30)
+        .background(Capsule().fill(ChatPalette.accent.opacity(0.24)))
     }
 }
 

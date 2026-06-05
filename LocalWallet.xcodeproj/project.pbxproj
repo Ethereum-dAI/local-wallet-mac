@@ -44,6 +44,7 @@
 		D22634FEBE836B433F07F764 /* LocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 81F620ED9BB03B9080324735 /* LocalLLM */; };
 		D612FF089828F9AA74757307 /* HexEncoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71F6CC5F8F55F7C5D22BBD6F /* HexEncoding.swift */; };
 		D720097E3C1CA355A0CB0B69 /* BundlerKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 338C3CE5B2A1B13400716881 /* BundlerKeyStore.swift */; };
+		DF8B4BA895AD063762850096 /* OnboardingChainReadiness.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEECD58404A5DC1C3FDA0D73 /* OnboardingChainReadiness.swift */; };
 		E1C3DCD8C60EB9C2062460DB /* LocalHardwareInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A65A9349550912C759EED6DC /* LocalHardwareInspector.swift */; };
 		EABBBB4361487720CC466308 /* KernelAccountAddressPredictor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6220284599C5BA1AD595394 /* KernelAccountAddressPredictor.swift */; };
 		F090CBF43D86C2A57BC2D110 /* QRCodeImageFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A23DA49317E3EDDFC173857 /* QRCodeImageFactory.swift */; };
@@ -91,6 +92,7 @@
 		D0BC22C212DB57DCEC672193 /* KeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyStore.swift; sourceTree = "<group>"; };
 		DB20A1FAB1133686554EA1F8 /* swift-bridge */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "swift-bridge"; path = "swift-bridge"; sourceTree = SOURCE_ROOT; };
 		DB254515D29EBD3388AD3FFA /* ChainReadCallData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChainReadCallData.swift; sourceTree = "<group>"; };
+		DEECD58404A5DC1C3FDA0D73 /* OnboardingChainReadiness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingChainReadiness.swift; sourceTree = "<group>"; };
 		DF0CD621D86FF51807777FFF /* ChatSQLiteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSQLiteStore.swift; sourceTree = "<group>"; };
 		E4918C4C23C14A6A28B3460D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		ED2B1ADEF8D6A75E702D54E0 /* LocalWalletApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LocalWalletApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -190,6 +192,7 @@
 				87B7492C00C0FC4BF364591F /* LocalAIModelDownloadManager.swift */,
 				A65A9349550912C759EED6DC /* LocalHardwareInspector.swift */,
 				4DC4ED3DF868F54EF472978A /* LocalWalletSettingsView.swift */,
+				DEECD58404A5DC1C3FDA0D73 /* OnboardingChainReadiness.swift */,
 				80EEACA183C6F7A248A93A62 /* OnboardingProvisioningService.swift */,
 				CE4F3CE27EE12DD30DC489C5 /* OnboardingSettingsStore.swift */,
 				88B8477E49E875FE72789134 /* OnboardingView.swift */,
@@ -315,6 +318,7 @@
 				4D68E3171DC04C53AFBF1B08 /* LocalAIModelDownloadManager.swift in Sources */,
 				E1C3DCD8C60EB9C2062460DB /* LocalHardwareInspector.swift in Sources */,
 				687188C3574A4EB38F617EDF /* LocalWalletSettingsView.swift in Sources */,
+				DF8B4BA895AD063762850096 /* OnboardingChainReadiness.swift in Sources */,
 				615AE4DBE68ECDD43606DDD8 /* OnboardingProvisioningService.swift in Sources */,
 				F916BD7F05D51CA7EB4824E0 /* OnboardingSettingsStore.swift in Sources */,
 				358609ACFFB38A364EA64D18 /* OnboardingView.swift in Sources */,

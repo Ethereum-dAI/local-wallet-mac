@@ -35,9 +35,18 @@ struct BundlerKeyStore {
         try loadForDaemonLaunch(keyRef: keyRef, createIfMissing: false)
     }
 
+    func unlockForOnboardingDaemonLaunch(keyRef: String) throws -> BundlerSecretRecord {
+        try loadForDaemonLaunch(
+            keyRef: keyRef,
+            createIfMissing: false,
+            successTTL: BundlerSecretPromptReusePolicy.onboardingHandoffCacheTTL
+        )
+    }
+
     private func loadForDaemonLaunch(
         keyRef: String,
-        createIfMissing: Bool
+        createIfMissing: Bool,
+        successTTL: TimeInterval = BundlerSecretPromptReusePolicy.cacheTTL
     ) throws -> BundlerSecretRecord {
         if let cached = try BundlerSecretPromptCache.shared.begin(keyRef: keyRef) {
             return cached
@@ -63,7 +72,11 @@ struct BundlerKeyStore {
                     allowAuthenticationReuse: true
                 )
             }
-            BundlerSecretPromptCache.shared.finish(keyRef: keyRef, result: .success(record))
+            BundlerSecretPromptCache.shared.finish(
+                keyRef: keyRef,
+                result: .success(record),
+                successTTL: successTTL
+            )
             return record
         } catch {
             BundlerSecretPromptCache.shared.finish(keyRef: keyRef, result: .failure(error))
@@ -169,6 +182,7 @@ struct BundlerKeyStore {
 
 enum BundlerSecretPromptReusePolicy {
     static let cacheTTL: TimeInterval = 10
+    static let onboardingHandoffCacheTTL: TimeInterval = 150
     static let failureCooldown: TimeInterval = 4
     static let authenticationReuseDuration: TimeInterval = 10
 
@@ -237,13 +251,18 @@ private final class BundlerSecretPromptCache: @unchecked Sendable {
         }
     }
 
-    func finish(keyRef: String, result: Result<BundlerSecretRecord, Error>, now: Date = Date()) {
+    func finish(
+        keyRef: String,
+        result: Result<BundlerSecretRecord, Error>,
+        successTTL: TimeInterval = BundlerSecretPromptReusePolicy.cacheTTL,
+        now: Date = Date()
+    ) {
         condition.lock()
         switch result {
         case .success(let record):
             records[keyRef] = CachedRecord(
                 record: record,
-                expiresAt: BundlerSecretPromptReusePolicy.expiry(now: now)
+                expiresAt: BundlerSecretPromptReusePolicy.expiry(now: now, ttl: successTTL)
             )
             failures.removeValue(forKey: keyRef)
         case .failure(let error):

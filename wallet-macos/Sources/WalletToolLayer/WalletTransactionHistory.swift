@@ -14,25 +14,37 @@ public enum WalletTransactionStatus: String, Codable, Equatable, Sendable, CaseI
     case created
     case submitted
     case pending
+    case looksIncluded = "looks_included"
     case included
     case reverted
     case failed
+    case cancelled
+    case dropped
     case unknown
 
     public var isTerminal: Bool {
         switch self {
-        case .included, .reverted, .failed:
+        case .included, .reverted, .failed, .cancelled, .dropped:
             return true
-        case .created, .submitted, .pending, .unknown:
+        case .created, .submitted, .pending, .looksIncluded, .unknown:
             return false
         }
     }
 
     public var requiresReceiptRefresh: Bool {
         switch self {
-        case .created, .submitted, .pending, .unknown:
+        case .created, .submitted, .pending, .looksIncluded, .unknown:
             return true
-        case .included, .reverted, .failed:
+        case .included, .reverted, .failed, .cancelled, .dropped:
+            return false
+        }
+    }
+
+    public var hasFinalReceipt: Bool {
+        switch self {
+        case .included, .reverted:
+            return true
+        case .created, .submitted, .pending, .looksIncluded, .failed, .cancelled, .dropped, .unknown:
             return false
         }
     }
@@ -87,6 +99,8 @@ public struct WalletTransactionReceiptUpdate: Equatable, Sendable {
     public var actualGasCost: String?
     public var actualGasUsed: String?
     public var revertReason: String?
+    public var tentative: Bool
+    public var invalidated: Bool
     public var updatedAt: Date
 
     public init(
@@ -98,6 +112,8 @@ public struct WalletTransactionReceiptUpdate: Equatable, Sendable {
         actualGasCost: String? = nil,
         actualGasUsed: String? = nil,
         revertReason: String? = nil,
+        tentative: Bool = false,
+        invalidated: Bool = false,
         updatedAt: Date = Date()
     ) {
         self.chainID = chainID
@@ -108,6 +124,8 @@ public struct WalletTransactionReceiptUpdate: Equatable, Sendable {
         self.actualGasCost = actualGasCost
         self.actualGasUsed = actualGasUsed
         self.revertReason = revertReason
+        self.tentative = tentative
+        self.invalidated = invalidated
         self.updatedAt = updatedAt
     }
 }
@@ -269,7 +287,21 @@ public final class WalletTransactionHistoryStore {
         guard var record = try loadRecord(userOpHash: update.userOpHash, chainID: update.chainID) else {
             return nil
         }
-        record.status = update.success ? .included : .reverted
+        if update.invalidated {
+            guard !record.status.isTerminal else {
+                return record
+            }
+            record.status = .submitted
+            record.transactionHash = nil
+            record.blockNumber = nil
+            record.actualGasCost = nil
+            record.actualGasUsed = nil
+            record.revertReason = nil
+            record.updatedAt = update.updatedAt
+            try upsert(record)
+            return try loadRecord(userOpHash: update.userOpHash, chainID: update.chainID)
+        }
+        record.status = update.tentative ? .looksIncluded : (update.success ? .included : .reverted)
         record.transactionHash = update.transactionHash
         record.blockNumber = update.blockNumber
         record.actualGasCost = update.actualGasCost
@@ -302,12 +334,37 @@ public final class WalletTransactionHistoryStore {
         return try loadRecord(userOpHash: userOpHash, chainID: chainID)
     }
 
+    @discardableResult
+    public func markCancelled(
+        userOpHash: String,
+        chainID: UInt64,
+        transactionHash: String? = nil,
+        updatedAt: Date = Date()
+    ) throws -> WalletTransactionRecord? {
+        guard var record = try loadRecord(userOpHash: userOpHash, chainID: chainID) else {
+            return nil
+        }
+        if record.status == .included || (record.status.isTerminal && transactionHash == nil) {
+            return record
+        }
+        record.status = .cancelled
+        if let transactionHash {
+            record.transactionHash = transactionHash
+        }
+        record.updatedAt = updatedAt
+        try upsert(record)
+        return try loadRecord(userOpHash: userOpHash, chainID: chainID)
+    }
+
     public func upsert(_ incoming: WalletTransactionRecord) throws {
         var record = incoming
         if let existing = try loadRecord(userOpHash: incoming.userOpHash, chainID: incoming.chainID) {
             record.id = existing.id
             record.createdAt = existing.createdAt
-            if existing.status.isTerminal && !incoming.status.isTerminal {
+            let isCancellationCorrection = existing.status == .reverted
+                && incoming.status == .cancelled
+                && incoming.transactionHash != nil
+            if existing.status.hasFinalReceipt && !incoming.status.hasFinalReceipt && !isCancellationCorrection {
                 record.status = existing.status
                 record.transactionHash = existing.transactionHash
                 record.blockNumber = existing.blockNumber
@@ -416,6 +473,19 @@ public final class WalletTransactionHistoryStore {
     ) throws -> [WalletTransactionRecord] {
         try loadRecords(accountAddress: accountAddress, chainID: chainID, limit: limit)
             .filter { $0.status.requiresReceiptRefresh }
+    }
+
+    public func loadReceiptRefreshCandidates(
+        accountAddress: String? = nil,
+        chainID: UInt64? = nil,
+        limit: Int = 200
+    ) throws -> [WalletTransactionRecord] {
+        try loadRecords(accountAddress: accountAddress, chainID: chainID, limit: limit)
+            .filter { record in
+                record.status.requiresReceiptRefresh
+                    || record.status == .cancelled
+                    || record.status == .dropped
+            }
     }
 
     public func deleteAll() throws {

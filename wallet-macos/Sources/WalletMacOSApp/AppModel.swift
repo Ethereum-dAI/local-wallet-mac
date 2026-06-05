@@ -41,6 +41,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveGasPrice: WalletNodeClient.UserOperationGasPrice?
     @Published private(set) var liveBaseFeeWei: Data?
     @Published private(set) var liveGasUpdatedAt: Date?
+    @Published private(set) var reconcilerUpdatedAt: Date?
 
     var activeChain: ChainConfiguration {
         configuration.activeChain
@@ -55,20 +56,26 @@ final class AppModel: ObservableObject {
     }
 
     var canChangeNetworkSettings: Bool {
-        !isBootstrapping
-            && !isRunningDemo
-            && !isRefreshingBalance
-            && !isBuildingUserOperation
-            && !isSendingUserOperation
+        NetworkSettingsGate.allowed(
+            isBootstrapping: isBootstrapping,
+            isRunningDemo: isRunningDemo,
+            isRefreshingBalance: isRefreshingBalance,
+            isBuildingUserOperation: isBuildingUserOperation,
+            isSendingUserOperation: isSendingUserOperation
+        )
     }
 
     private let keyStore: KeyStore
     private let metadataStore: WalletMetadataStore
     private let settingsStore: DemoSettingsStore
+    private let onboardingSettingsStore: OnboardingSettingsStore
     private let kernelAccountAddressPredictor: KernelAccountAddressPredictor
     private var walletNodeClient: WalletNodeClient?
     private var walletNodeDaemon: WalletNodeDaemon?
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
+    private var walletNodeLaunchFailure: WalletNodeLaunchFailure?
+    private var optimisticNextNonce: [String: UInt64] = [:]
+    private var reconcilerTask: Task<Void, Never>?
     private let userOperationBuilder: UserOperationBuilder
     private let walletHistoryStore: WalletTransactionHistoryStore
     private static let startupInspectionRetryDelays: [UInt64] = [
@@ -76,16 +83,34 @@ final class AppModel: ObservableObject {
         1_250_000_000,
         2_000_000_000,
     ]
+    private static let walletNodeWarmupRetryDelays: [UInt64] = [
+        500_000_000,
+        1_250_000_000,
+        2_000_000_000,
+    ]
+    private static let walletNodeLaunchFailureCooldownSeconds: TimeInterval = 4
     private static let relayerBalanceRetryDelays: [UInt64] = [
         400_000_000,
         900_000_000,
         1_500_000_000,
     ]
+    static let reconcilerBackoffDelays: [UInt64] = [
+        2_000_000_000,
+        4_000_000_000,
+        8_000_000_000,
+        15_000_000_000,
+        30_000_000_000,
+    ]
+
+    static func reconcilerDelay(forAttempt attempt: Int) -> UInt64 {
+        reconcilerBackoffDelays[min(max(attempt, 0), reconcilerBackoffDelays.count - 1)]
+    }
 
     init(
         keyStore: KeyStore = KeyStore(),
         metadataStore: WalletMetadataStore = WalletMetadataStore(),
         settingsStore: DemoSettingsStore = DemoSettingsStore(),
+        onboardingSettingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
         kernelAccountAddressPredictor: KernelAccountAddressPredictor = KernelAccountAddressPredictor(),
         walletNodeClient: WalletNodeClient? = WalletNodeClient.Configuration.fromEnvironment().map {
             WalletNodeClient(configuration: $0)
@@ -96,6 +121,7 @@ final class AppModel: ObservableObject {
         self.keyStore = keyStore
         self.metadataStore = metadataStore
         self.settingsStore = settingsStore
+        self.onboardingSettingsStore = onboardingSettingsStore
         self.kernelAccountAddressPredictor = kernelAccountAddressPredictor
         self.walletNodeClient = walletNodeClient
         self.userOperationBuilder = userOperationBuilder
@@ -422,10 +448,12 @@ final class AppModel: ObservableObject {
     private func resetWalletNodeConnectionAfterNetworkChange() {
         walletNodeLaunchTask?.cancel()
         walletNodeLaunchTask = nil
+        walletNodeLaunchFailure = nil
         walletNodeDaemon = nil
         walletNodeClient = WalletNodeClient.Configuration.fromEnvironment().map {
             WalletNodeClient(configuration: $0)
         }
+        optimisticNextNonce.removeAll()
         localRelayerStatus = nil
         localRelayerMessage = walletNodeClient == nil
             ? "Local wallet-node daemon will restart with the selected network."
@@ -612,6 +640,104 @@ final class AppModel: ObservableObject {
         refreshLocalRelayerStatus()
     }
 
+    @discardableResult
+    func cancelPendingOperation(userOpHash: String) async -> Bool {
+        defer { refreshLocalRelayerStatus() }
+        do {
+            appendSection("Cancel Pending Operation")
+            let txHash = try await withWalletNodeClient(operation: "cancel pending") {
+                try await $0.cancelPendingOperation(userOpHash: userOpHash)
+            }
+            appendLog("relayer: cancel submitted tx \(txHash ?? "<none>")")
+            markCancellationSubmittedInHistory(userOpHash: userOpHash, txHash: txHash)
+            clearOptimisticNonceForActiveWallet()
+            bridgeStatus = "Cancellation submitted."
+        } catch {
+            let message = ReplacementActionFailurePolicy.displayMessage(
+                action: "Cancellation",
+                error: error
+            )
+            lastError = message
+            bridgeStatus = message
+            appendLog("relayer: cancel failed - \(message)")
+            markReplacementUnavailableInHistory(
+                userOpHash: userOpHash,
+                error: error,
+                logContext: "cancel"
+            )
+            return false
+        }
+        return true
+    }
+
+    private func markCancellationSubmittedInHistory(userOpHash: String, txHash: String?) {
+        do {
+            _ = try walletHistoryStore.markCancelled(
+                userOpHash: userOpHash,
+                chainID: activeChain.id,
+                transactionHash: txHash
+            )
+            appendLog("cancel: marked local history cancelled")
+        } catch {
+            appendLog("cancel: local history cancellation mark failed - \(error.localizedDescription)")
+        }
+    }
+
+    @discardableResult
+    func speedUpPendingOperation(userOpHash: String) async -> Bool {
+        defer { refreshLocalRelayerStatus() }
+        do {
+            appendSection("Speed Up Pending Operation")
+            let txHash = try await withWalletNodeClient(operation: "speed up pending") {
+                try await $0.speedUpPendingOperation(userOpHash: userOpHash)
+            }
+            appendLog("relayer: speed-up submitted tx \(txHash ?? "<none>")")
+            bridgeStatus = "Speed-up submitted."
+        } catch {
+            let message = ReplacementActionFailurePolicy.displayMessage(
+                action: "Speed-up",
+                error: error
+            )
+            lastError = message
+            bridgeStatus = message
+            appendLog("relayer: speed-up failed - \(message)")
+            markReplacementUnavailableInHistory(
+                userOpHash: userOpHash,
+                error: error,
+                logContext: "speed-up"
+            )
+            return false
+        }
+        return true
+    }
+
+    private func markReplacementUnavailableInHistory(
+        userOpHash: String,
+        error: Error,
+        logContext: String
+    ) {
+        guard ReplacementActionFailurePolicy.shouldMarkLocalHistoryFailed(error) else {
+            return
+        }
+        do {
+            guard var record = try walletHistoryStore.loadRecord(
+                userOpHash: userOpHash,
+                chainID: activeChain.id
+            ) else {
+                return
+            }
+            guard !record.status.isTerminal else {
+                return
+            }
+            record.status = .failed
+            record.updatedAt = Date()
+            try walletHistoryStore.upsert(record)
+            appendLog("\(logContext): marked local history failed because replacement cannot be signed")
+        } catch {
+            appendLog("\(logContext): local history failure mark failed - \(error.localizedDescription)")
+        }
+    }
+
     private func ensureWalletNodeClient() async throws -> WalletNodeClient {
         if let walletNodeClient {
             return walletNodeClient
@@ -622,13 +748,24 @@ final class AppModel: ObservableObject {
             walletNodeClient = daemon.client
             return daemon.client
         }
+        if let walletNodeLaunchFailure {
+            let now = Date()
+            if WalletNodeLaunchFailureGate.shouldBlockRetry(
+                now: now,
+                retryAfter: walletNodeLaunchFailure.retryAfter
+            ) {
+                throw walletNodeLaunchFailure.error
+            }
+            self.walletNodeLaunchFailure = nil
+        }
 
         localRelayerMessage = "Starting local wallet-node daemon..."
         let keyRef = "bundler-eoa:default:\(activeChain.id):1"
         let chain = activeChain
         let gasPolicy = networkSettings.resolvedDaemonGasPolicy
         let launchTask = Task {
-            let bundlerSecret = try BundlerKeyStore.shared.createIfNeeded(keyRef: keyRef)
+            let bundlerSecret = try BundlerKeyStore.shared.unlockForDaemonLaunch(keyRef: keyRef)
+            syncUnlockedRelayerAddress(keyRef: keyRef, secret: bundlerSecret.secret)
             return try await WalletNodeDaemon.launch(
                 bundlerSecret: bundlerSecret,
                 chain: chain,
@@ -640,6 +777,7 @@ final class AppModel: ObservableObject {
         do {
             let daemon = try await launchTask.value
             walletNodeLaunchTask = nil
+            walletNodeLaunchFailure = nil
             walletNodeDaemon = daemon
             walletNodeClient = daemon.client
             localRelayerMessage = "Local wallet-node daemon connected."
@@ -647,7 +785,32 @@ final class AppModel: ObservableObject {
             return daemon.client
         } catch {
             walletNodeLaunchTask = nil
+            walletNodeLaunchFailure = WalletNodeLaunchFailure(
+                error: error,
+                retryAfter: WalletNodeLaunchFailureGate.retryAfter(
+                    now: Date(),
+                    cooldown: Self.walletNodeLaunchFailureCooldownSeconds
+                )
+            )
             throw error
+        }
+    }
+
+    private func syncUnlockedRelayerAddress(keyRef: String, secret: Data) {
+        do {
+            let address = try RelayerAddressCachePolicy.address(fromSecret: secret)
+            onboardingSettingsStore.bundlerKeyRef = keyRef
+            guard RelayerAddressCachePolicy.shouldUpdate(
+                cached: onboardingSettingsStore.bundlerAddress,
+                unlocked: address
+            ) else {
+                return
+            }
+
+            onboardingSettingsStore.bundlerAddress = address
+            appendLog("relayer: synced cached relayer address \(address.shortAddress)")
+        } catch {
+            appendLog("relayer: could not sync cached relayer address - \(error.localizedDescription)")
         }
     }
 
@@ -675,6 +838,29 @@ final class AppModel: ObservableObject {
             let relaunchedClient = try await ensureWalletNodeClient()
             return try await body(relaunchedClient)
         }
+    }
+
+    private func withWalletNodeWarmupRetry<T>(
+        operation: String,
+        _ body: () async throws -> T
+    ) async throws -> T {
+        var lastError: Error?
+        for attempt in 0...Self.walletNodeWarmupRetryDelays.count {
+            do {
+                return try await body()
+            } catch {
+                lastError = error
+                guard attempt < Self.walletNodeWarmupRetryDelays.count,
+                      WalletNodeWarmupRetryPolicy.isWarmupError(error)
+                else {
+                    throw error
+                }
+
+                appendLog("relayer: \(operation) waiting for verified wallet-node reads; retrying")
+                try await Task.sleep(nanoseconds: Self.walletNodeWarmupRetryDelays[attempt])
+            }
+        }
+        throw lastError ?? AppError.localDaemonLaunchFailed("wallet-node warm-up retry ended without an error")
     }
 
     private func authorizeLocalRelayerAdminAction(summary: String) async throws {
@@ -718,13 +904,7 @@ final class AppModel: ObservableObject {
         }
 
         appendLog("build: reading EntryPoint nonce through local wallet-node")
-        let nonceHex = try await withWalletNodeClient(operation: "EntryPoint nonce read") { client in
-            try await client.entryPointNonce(
-                entryPoint: activeChain.entryPoint,
-                accountAddress: sender,
-                nonceKey: 0
-            )
-        }
+        let nonceHex = try await resolvedNonceHex(entryPoint: activeChain.entryPoint, sender: sender)
 
         return try userOperationBuilder.buildDraft(
             walletRecord: walletRecord,
@@ -753,13 +933,7 @@ final class AppModel: ObservableObject {
         }
 
         appendLog("build: reading EntryPoint nonce through local wallet-node")
-        let nonceHex = try await withWalletNodeClient(operation: "EntryPoint nonce read") { client in
-            try await client.entryPointNonce(
-                entryPoint: activeChain.entryPoint,
-                accountAddress: sender,
-                nonceKey: 0
-            )
-        }
+        let nonceHex = try await resolvedNonceHex(entryPoint: activeChain.entryPoint, sender: sender)
 
         return try userOperationBuilder.buildDraft(
             walletRecord: walletRecord,
@@ -769,6 +943,53 @@ final class AppModel: ObservableObject {
             nonceHex: nonceHex,
             executions: executions
         )
+    }
+
+    private func resolvedNonceHex(entryPoint: String, sender: String) async throws -> String {
+        let onChainHex = try await withWalletNodeWarmupRetry(operation: "EntryPoint nonce read") {
+            try await withWalletNodeClient(operation: "EntryPoint nonce read") { client in
+                try await client.entryPointNonce(entryPoint: entryPoint, accountAddress: sender, nonceKey: 0)
+            }
+        }
+        let onChain = try nonceSequence(from: onChainHex)
+        let key = nonceCacheKey(chainID: activeChain.id, sender: sender)
+        let effective = NonceClamp.effective(onChain: onChain, optimistic: optimisticNextNonce[key])
+        return nonceHex(fromSequence: effective)
+    }
+
+    private func recordOptimisticNonce(after draft: UserOperationDraft) {
+        guard let used = try? nonceSequence(from: draft.nonce) else {
+            return
+        }
+        let key = nonceCacheKey(chainID: activeChain.id, sender: draft.sender)
+        optimisticNextNonce[key] = NonceClamp.next(after: used)
+    }
+
+    private func clearOptimisticNonceForActiveWallet() {
+        guard let sender = walletRecord?.kernelAccountAddress else {
+            return
+        }
+        optimisticNextNonce.removeValue(forKey: nonceCacheKey(chainID: activeChain.id, sender: sender))
+    }
+
+    private func nonceCacheKey(chainID: UInt64, sender: String) -> String {
+        "\(chainID):\(sender.lowercased())"
+    }
+
+    private func nonceSequence(from hex: String) throws -> UInt64 {
+        try nonceSequence(from: Data(hexString: hex))
+    }
+
+    private func nonceSequence(from nonce: Data) throws -> UInt64 {
+        let full = nonce.leftPadded(to: 32)
+        guard full.count >= 8 else {
+            throw AppError.invalidHexString
+        }
+        return full.suffix(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+    }
+
+    private func nonceHex(fromSequence sequence: UInt64) -> String {
+        "0x" + Data.fromBigEndian(sequence).leftPadded(to: 32).hexEncodedString
     }
 
     func buildUserOperationDraftPreview() {
@@ -1049,6 +1270,7 @@ final class AppModel: ObservableObject {
             return result
         } catch {
             isSendingUserOperation = false
+            clearOptimisticNonceForActiveWallet()
             throw error
         }
     }
@@ -1061,7 +1283,7 @@ final class AppModel: ObservableObject {
     ) async throws -> UserOperationSendResult {
         appendLog("\(logContext): preparing transaction on \(activeChain.name)")
 
-        let liveInspection = try await refreshAccountInspection(logContext: "\(logContext)-preflight")
+        let liveInspection = try await refreshAccountInspectionWithRetry(logContext: "\(logContext)-preflight")
         appendLog("\(logContext): using \(liveInspection.isDeployed ? "deployed" : "precomputed") account path")
 
         let draft = try await buildDraft(liveInspection.isDeployed)
@@ -1108,6 +1330,7 @@ final class AppModel: ObservableObject {
             )
         }
         lastSubmittedUserOperationHash = sentUserOpHash
+        recordOptimisticNonce(after: enrichedDraft)
         appendLog("\(logContext): local wallet-node accepted userOpHash \(sentUserOpHash)")
         if let historyDraft {
             recordSubmittedHistory(
@@ -1118,38 +1341,10 @@ final class AppModel: ObservableObject {
             )
         }
 
-        bridgeStatus = "UserOperation accepted by local wallet-node on \(activeChain.name). Waiting for inclusion..."
-
-        let receipt = try await pollForLocalReceipt(userOpHash: sentUserOpHash, logContext: logContext)
-        if let receipt {
-            lastBundledTransactionHash = receipt.txHash
-            activeBundlerStatus = receipt.success ? "UserOperation included" : "UserOperation reverted on-chain"
-
-            appendLog("\(logContext): receipt success=\(receipt.success) actualGasUsed=\(receipt.actualGasUsed ?? "nil") actualGasCost=\(receipt.actualGasCost ?? "nil")")
-            appendLog("\(logContext): bundle transaction hash \(receipt.txHash)")
-            if let revertReason = receipt.revertReason, !revertReason.isEmpty {
-                appendLog("\(logContext): revert reason \(revertReason)")
-            }
-            recordReceiptHistory(receipt, chainID: activeChain.id, logContext: logContext)
-
-            bridgeStatus = receipt.success
-                ? "UserOperation included on \(activeChain.name)."
-                : "UserOperation included on \(activeChain.name), but execution reverted."
-
-            _ = try? await refreshAccountInspection(logContext: "post-send-refresh")
-            refreshLocalRelayerStatus()
-            return UserOperationSendResult(
-                userOpHash: sentUserOpHash,
-                transactionHash: receipt.txHash,
-                success: receipt.success
-            )
-        }
-
-        activeBundlerStatus = "Receipt pending"
-        bridgeStatus = "UserOperation submitted to local wallet-node. Receipt still pending."
-        appendLog("\(logContext): receipt still pending after polling window")
-        markPendingHistory(userOpHash: sentUserOpHash, chainID: activeChain.id, logContext: logContext)
+        activeBundlerStatus = "UserOperation submitted"
+        bridgeStatus = "Accepted by local wallet-node. Waiting for inclusion."
         refreshLocalRelayerStatus()
+        startUserOperationReconcilerIfNeeded()
         return UserOperationSendResult(
             userOpHash: sentUserOpHash,
             transactionHash: nil,
@@ -1222,11 +1417,13 @@ final class AppModel: ObservableObject {
         let dummySignature = try WalletSignature.abiEncodeDummySignature(usePrecompiled: false)
         appendLog("\(logContext): generated dummy signature for estimation (\(dummySignature.count) bytes)")
 
-        let estimate = try await withWalletNodeClient(operation: "\(logContext) gas estimate") { client in
-            try await client.estimateUserOperationGas(
-                draft: draft,
-                dummySignature: dummySignature
-            )
+        let estimate = try await withWalletNodeWarmupRetry(operation: "\(logContext) gas estimate") {
+            try await withWalletNodeClient(operation: "\(logContext) gas estimate") { client in
+                try await client.estimateUserOperationGas(
+                    draft: draft,
+                    dummySignature: dummySignature
+                )
+            }
         }
         appendLog(
             "\(logContext): gas estimate call=\(estimate.callGasLimit.shortHex) verification=\(estimate.verificationGasLimit.shortHex) preVerification=\(estimate.preVerificationGas.shortHex)"
@@ -1292,7 +1489,7 @@ final class AppModel: ObservableObject {
 
     func refreshWalletHistoryReceipts(limit: Int = 200) async throws -> [WalletTransactionRecord] {
         let accountAddress = walletRecord?.kernelAccountAddress
-        let records = try walletHistoryStore.loadUnfinalizedRecords(
+        let records = try walletHistoryStore.loadReceiptRefreshCandidates(
             accountAddress: accountAddress,
             chainID: activeChain.id,
             limit: limit
@@ -1307,14 +1504,7 @@ final class AppModel: ObservableObject {
 
         appendLog("history: refreshing receipts for \(records.count) pending record\(records.count == 1 ? "" : "s")")
         for record in records {
-            let receipt = try await withWalletNodeClient(operation: "history receipt refresh") { client in
-                try await client.getUserOperationReceipt(userOpHash: record.userOpHash)
-            }
-            if let receipt {
-                recordReceiptHistory(receipt, chainID: record.chainID, logContext: "history")
-            } else {
-                markPendingHistory(userOpHash: record.userOpHash, chainID: record.chainID, logContext: "history")
-            }
+            await reconcile(record: record)
         }
 
         return try walletHistoryStore.loadRecords(
@@ -1322,6 +1512,63 @@ final class AppModel: ObservableObject {
             chainID: activeChain.id,
             limit: limit
         )
+    }
+
+    func reconcile(record: WalletTransactionRecord) async {
+        let nestedReceipt = try? await withWalletNodeClient(operation: "reconcile") { client in
+            try await client.getUserOperationReceipt(userOpHash: record.userOpHash)
+        }
+        switch ReconcileDecision.next(for: record, receipt: nestedReceipt ?? nil) {
+        case .applyReceipt(let receipt):
+            recordReceiptHistory(receipt, chainID: record.chainID, logContext: "reconcile")
+        case .markPending:
+            // Conservative until the daemon/app persists each UserOperation nonce:
+            // nil receipt alone can mean pending, cancelled, dropped, or RPC lag.
+            markPendingHistory(userOpHash: record.userOpHash, chainID: record.chainID, logContext: "reconcile")
+        case .keep:
+            break
+        }
+        reconcilerUpdatedAt = Date()
+    }
+
+    func startUserOperationReconcilerIfNeeded() {
+        guard reconcilerTask == nil else {
+            return
+        }
+        reconcilerTask = Task { [weak self] in
+            await self?.runUserOperationReconciler()
+            await MainActor.run {
+                self?.reconcilerTask = nil
+            }
+        }
+    }
+
+    func runUserOperationReconciler() async {
+        var attempt = 0
+        while !Task.isCancelled {
+            let accountAddress = walletRecord?.kernelAccountAddress
+            let pending = (try? walletHistoryStore.loadUnfinalizedRecords(
+                accountAddress: accountAddress,
+                chainID: activeChain.id
+            )) ?? []
+            guard ReconcilerLoopStep.shouldContinue(pendingCount: pending.count) else {
+                return
+            }
+
+            for record in pending {
+                await reconcile(record: record)
+            }
+
+            let stillPending = !((try? walletHistoryStore.loadUnfinalizedRecords(
+                accountAddress: accountAddress,
+                chainID: activeChain.id
+            )) ?? []).isEmpty
+            attempt = ReconcilerLoopStep.nextAttempt(current: attempt, stillPending: stillPending)
+            guard stillPending else {
+                return
+            }
+            try? await Task.sleep(nanoseconds: Self.reconcilerDelay(forAttempt: attempt))
+        }
     }
 
     private func recordSubmittedHistory(
@@ -1357,7 +1604,9 @@ final class AppModel: ObservableObject {
                 success: receipt.success,
                 actualGasCost: receipt.actualGasCost,
                 actualGasUsed: receipt.actualGasUsed,
-                revertReason: receipt.revertReason
+                revertReason: receipt.revertReason,
+                tentative: receipt.tentative,
+                invalidated: receipt.invalidated
             ))
             appendLog("\(logContext): wallet history reconciled receipt \(receipt.success ? "included" : "reverted")")
         } catch {
@@ -1496,8 +1745,10 @@ final class AppModel: ObservableObject {
     private func suggestedUserOperationFees(
         logContext: String
     ) async throws -> (maxPriorityFeePerGas: Data, maxFeePerGas: Data) {
-        let gasPrice = try await withWalletNodeClient(operation: "\(logContext) gas price") { client in
-            try await client.userOperationGasPrice()
+        let gasPrice = try await withWalletNodeWarmupRetry(operation: "\(logContext) gas price") {
+            try await withWalletNodeClient(operation: "\(logContext) gas price") { client in
+                try await client.userOperationGasPrice()
+            }
         }
         let settings = networkSettings
         let resolved = GasPricing.resolveUserOperationFees(
@@ -1605,6 +1856,169 @@ final class AppModel: ObservableObject {
         formatter.dateFormat = "HH:mm:ss"
         return formatter
     }()
+}
+
+private struct WalletNodeLaunchFailure {
+    let error: Error
+    let retryAfter: Date
+}
+
+enum NetworkSettingsGate {
+    static func allowed(
+        isBootstrapping: Bool,
+        isRunningDemo: Bool,
+        isRefreshingBalance: Bool,
+        isBuildingUserOperation: Bool,
+        isSendingUserOperation: Bool
+    ) -> Bool {
+        !isBootstrapping
+            && !isRunningDemo
+            && !isRefreshingBalance
+            && !isBuildingUserOperation
+            && !isSendingUserOperation
+    }
+}
+
+enum WalletNodeLaunchFailureGate {
+    static func shouldBlockRetry(now: Date, retryAfter: Date) -> Bool {
+        now < retryAfter
+    }
+
+    static func retryAfter(now: Date, cooldown: TimeInterval) -> Date {
+        now.addingTimeInterval(cooldown)
+    }
+}
+
+enum ReconcileOutcome: Equatable {
+    case applyReceipt(WalletNodeClient.UserOperationReceipt)
+    case markPending
+    case keep
+}
+
+enum ReconcileDecision {
+    static func next(
+        for record: WalletTransactionRecord,
+        receipt: WalletNodeClient.UserOperationReceipt?
+    ) -> ReconcileOutcome {
+        if let receipt {
+            return .applyReceipt(receipt)
+        }
+        if record.status.isTerminal {
+            return .keep
+        }
+        return .markPending
+    }
+}
+
+enum ReplacementActionFailurePolicy {
+    static func shouldMarkLocalHistoryFailed(_ error: Error) -> Bool {
+        guard case let WalletNodeClient.ClientError.rpcError(_, code, _, reason) = error,
+              code == -32011
+        else {
+            return false
+        }
+        return reason == "bundler_account_lifecycle_not_signable"
+    }
+
+    static func displayMessage(action: String, error: Error) -> String {
+        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason) = error,
+              code == -32011
+        else {
+            return "\(action) failed: \(error.localizedDescription)"
+        }
+
+        switch reason {
+        case "bundler_account_lifecycle_not_signable":
+            return "\(action) unavailable: the relayer key for that transaction is retired."
+        case "terminal_state":
+            return "\(action) unavailable: the operation is already terminal."
+        case "no_pending_bundler_transaction":
+            return "\(action) unavailable: wallet-node has no pending transaction to replace."
+        case "gas_relay_stuck":
+            return "\(action) unavailable: replacement gas would exceed the configured cap."
+        case let reason?:
+            return "\(action) unavailable: \(reason)."
+        case nil:
+            return "\(action) unavailable: \(message)."
+        }
+    }
+}
+
+enum RelayerAddressCachePolicy {
+    static func address(fromSecret secret: Data) throws -> String {
+        "0x" + (try WalletSignature.bundlerAddress(fromSecret: secret)).hexEncodedString
+    }
+
+    static func shouldUpdate(cached: String?, unlocked: String) -> Bool {
+        guard let unlocked = normalized(unlocked) else {
+            return false
+        }
+        guard let cached = normalized(cached) else {
+            return true
+        }
+        return cached != unlocked
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count == 42, trimmed.hasPrefix("0x") else {
+            return nil
+        }
+        return trimmed.lowercased()
+    }
+}
+
+enum ReconcilerLoopStep {
+    static func shouldContinue(pendingCount: Int) -> Bool {
+        pendingCount > 0
+    }
+
+    static func nextAttempt(current: Int, stillPending: Bool) -> Int {
+        stillPending ? current + 1 : 0
+    }
+}
+
+enum WalletNodeWarmupRetryPolicy {
+    static func isWarmupError(_ error: Error) -> Bool {
+        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason) = error else {
+            return false
+        }
+        if code == -32010 {
+            return true
+        }
+        guard code == -32002 else {
+            return false
+        }
+        switch reason {
+        case "verified_reads_not_ready",
+             "verified_reads_stale",
+             "helios_error",
+             "rpc_error",
+             "block_not_found",
+             "chain_internal_error",
+             "state_override_smoke_pending":
+            return true
+        case nil:
+            return message.localizedCaseInsensitiveContains("verified")
+                || message.localizedCaseInsensitiveContains("helios")
+                || message.localizedCaseInsensitiveContains("block_not_found")
+        default:
+            return false
+        }
+    }
+}
+
+enum NonceClamp {
+    static func effective(onChain: UInt64, optimistic: UInt64?) -> UInt64 {
+        max(onChain, optimistic ?? onChain)
+    }
+
+    static func next(after used: UInt64) -> UInt64 {
+        used + 1
+    }
 }
 
 private extension Data {

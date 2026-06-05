@@ -498,6 +498,61 @@ import Testing
     #expect(updated?.status.requiresReceiptRefresh == true)
 }
 
+@Test func storeMarksDroppedWithoutReceiptAndStopsRefreshing() throws {
+    let (store, url) = temporaryHistoryStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    _ = try store.recordSubmitted(
+        WalletTransactionDraft(operation: .swap, amount: "2", token: "USDC -> ETH"),
+        userOpHash: "0xdropped",
+        accountAddress: "0xabc0000000000000000000000000000000000000",
+        chainID: 1,
+        chainName: "Ethereum Mainnet"
+    )
+    let updated = try store.markTerminalWithoutReceipt(
+        userOpHash: "0xdropped",
+        chainID: 1,
+        status: .dropped,
+        reason: "auto_dropped_aged_no_receipt"
+    )
+
+    #expect(updated?.status == .dropped)
+    #expect(updated?.revertReason == "auto_dropped_aged_no_receipt")
+    #expect(try store.loadUnfinalizedRecords(
+        accountAddress: "0xabc0000000000000000000000000000000000000",
+        chainID: 1
+    ).isEmpty)
+}
+
+@Test func terminalWithoutReceiptDoesNotOverrideFinalReceipt() throws {
+    let (store, url) = temporaryHistoryStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    _ = try store.recordSubmitted(
+        WalletTransactionDraft(operation: .transfer, amount: "1", token: "ETH"),
+        userOpHash: "0xincluded",
+        accountAddress: "0xabc0000000000000000000000000000000000000",
+        chainID: 1,
+        chainName: "Ethereum Mainnet"
+    )
+    _ = try store.applyReceipt(WalletTransactionReceiptUpdate(
+        chainID: 1,
+        userOpHash: "0xincluded",
+        transactionHash: "0xtx",
+        success: true
+    ))
+    let updated = try store.markTerminalWithoutReceipt(
+        userOpHash: "0xincluded",
+        chainID: 1,
+        status: .dropped,
+        reason: "late_drop"
+    )
+
+    #expect(updated?.status == .included)
+    #expect(updated?.transactionHash == "0xtx")
+    #expect(updated?.revertReason == nil)
+}
+
 @Test func submittedRowIsRefreshableUntilReceiptThenDropsOut() throws {
     let (store, url) = temporaryHistoryStore()
     defer { try? FileManager.default.removeItem(at: url) }

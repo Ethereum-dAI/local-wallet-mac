@@ -10,17 +10,20 @@ ARCHIVE_DIR="$BUILD_DIR/archive"
 PRODUCTS_DIR="$BUILD_DIR/products"
 RELEASE_DIR="$REPO_ROOT/dist"
 APP_NAME="Local Wallet.app"
-ZIP_NAME="LocalWallet-Demo-macOS-AppleSilicon.zip"
+ZIP_NAME="${LOCAL_WALLET_ZIP_NAME:-LocalWallet-v0.1.0-alpha-macOS-AppleSilicon-no-LLM.zip}"
+DEPLOYMENT_TARGET="${LOCAL_WALLET_DEPLOYMENT_TARGET:-14.0}"
 BUNDLER_URL="${LOCAL_WALLET_SEPOLIA_BUNDLER_URL:-}"
 DAEMON_REPO="${LOCAL_WALLET_DAEMON_REPO:-$REPO_ROOT/../local-wallet-daemon}"
-EMBED_MODEL="${LOCAL_WALLET_EMBED_MODEL:-1}"
+EMBED_MODEL="${LOCAL_WALLET_EMBED_MODEL:-0}"
 MODEL_FILE_NAME="gemma-4-E4B-it-Q4_K_M.gguf"
 MODEL_SHA256="90ce98129eb3e8cc57e62433d500c97c624b1e3af1fcc85dd3b55ad7e0313e9f"
 MODEL_URL="${LOCAL_WALLET_MODEL_URL:-https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/$MODEL_FILE_NAME?download=true}"
 APP_SUPPORT_MODEL="$HOME/Library/Application Support/LocalWallet/Models/$MODEL_FILE_NAME"
 MODEL_CACHE_DIR="${LOCAL_WALLET_MODEL_CACHE_DIR:-$REPO_ROOT/build/model-cache}"
+LLAMA_PREFIX="${LOCAL_LLAMA_PREFIX:-}"
 LLAMA_SEARCH_DIRS=(
   "${LOCAL_LLAMA_LIB_DIR:-}"
+  "${LLAMA_PREFIX:+$LLAMA_PREFIX/lib}"
   "/opt/homebrew/opt/llama.cpp/lib"
   "/opt/homebrew/opt/ggml/lib"
   "/opt/homebrew/lib"
@@ -102,6 +105,7 @@ resolve_wallet_node_binary() {
   echo "=== Building wallet-node daemon ===" >&2
   (
     cd "$DAEMON_REPO"
+    export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
     cargo build -p wallet-node --release
   )
 
@@ -128,7 +132,7 @@ find_dylib() {
 is_embeddable_llama_dependency() {
   local dependency="$1"
   case "$dependency" in
-    /opt/homebrew/*/lib/libllama*.dylib|/opt/homebrew/*/lib/libggml*.dylib|/opt/homebrew/lib/libllama*.dylib|/opt/homebrew/lib/libggml*.dylib|@rpath/libllama*.dylib|@rpath/libggml*.dylib)
+    @rpath/libllama*.dylib|@rpath/libggml*.dylib|/opt/homebrew/*/lib/libllama*.dylib|/opt/homebrew/*/lib/libggml*.dylib|/opt/homebrew/lib/libllama*.dylib|/opt/homebrew/lib/libggml*.dylib|*/lib/libllama*.dylib|*/lib/libggml*.dylib)
       return 0
       ;;
     *)
@@ -142,6 +146,49 @@ is_mach_o_file() {
   local file_type
   file_type="$(file -b "$file_path")"
   [[ "$file_type" == *"Mach-O"* ]]
+}
+
+version_leq() {
+  local left="$1"
+  local right="$2"
+  awk -v left="$left" -v right="$right" '
+    BEGIN {
+      split(left, l, ".")
+      split(right, r, ".")
+      for (i = 1; i <= 3; i++) {
+        lv = (l[i] == "" ? 0 : l[i]) + 0
+        rv = (r[i] == "" ? 0 : r[i]) + 0
+        if (lv < rv) exit 0
+        if (lv > rv) exit 1
+      }
+      exit 0
+    }
+  '
+}
+
+verify_mach_o_deployment_targets() {
+  local app_path="$1"
+  local max_target="$2"
+  local failures=0
+  local binary_path
+
+  while IFS= read -r -d '' binary_path; do
+    if ! is_mach_o_file "$binary_path"; then
+      continue
+    fi
+
+    local min_os
+    min_os="$(vtool -show-build "$binary_path" 2>/dev/null | awk '/minos / { print $2; exit }')"
+    if [[ -z "$min_os" ]]; then
+      continue
+    fi
+    if ! version_leq "$min_os" "$max_target"; then
+      echo "Mach-O deployment target too new: $binary_path has minos $min_os, expected <= $max_target" >&2
+      failures=1
+    fi
+  done < <(find "$app_path/Contents/MacOS" "$app_path/Contents/Frameworks" "$app_path/Contents/Resources/bin" -type f -print0 2>/dev/null || true)
+
+  return $failures
 }
 
 copy_dylib_with_dependencies() {
@@ -243,7 +290,7 @@ verify_no_external_llama_dependencies() {
     fi
 
     local external_refs
-    external_refs="$(otool -L "$binary_path" | awk 'NR > 1 && $1 ~ /^\/opt\/homebrew\/.*\/lib\/lib(llama|ggml).*\.dylib$/ { print $1 }')"
+    external_refs="$(otool -L "$binary_path" | awk 'NR > 1 && $1 ~ /^\/.*\/lib\/lib(llama|ggml).*\.dylib$/ { print $1 }')"
     if [[ -n "$external_refs" ]]; then
       echo "External llama.cpp dependencies remain in $binary_path:" >&2
       printf '%s\n' "$external_refs" >&2
@@ -303,6 +350,7 @@ else
 fi
 
 echo "=== Building Rust FFI bridge ==="
+export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
 "$REPO_ROOT/scripts/build-ffi.sh"
 
 echo "=== Cleaning package output ==="
@@ -317,6 +365,7 @@ xcodebuild \
   -destination "platform=macOS,arch=arm64" \
   -derivedDataPath "$ARCHIVE_DIR" \
   CODE_SIGN_STYLE=Automatic \
+  MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
   ARCHS=arm64 \
   EXCLUDED_ARCHS=x86_64 \
   build
@@ -362,6 +411,9 @@ fi
 
 echo "=== Re-signing packaged app ==="
 sign_packaged_app "$APP_PATH" "$PACKAGED_APP"
+
+echo "=== Verifying Mach-O deployment targets (<= macOS $DEPLOYMENT_TARGET) ==="
+verify_mach_o_deployment_targets "$PACKAGED_APP" "$DEPLOYMENT_TARGET"
 
 echo "=== Creating zip ==="
 rm -f "$RELEASE_DIR/$ZIP_NAME"

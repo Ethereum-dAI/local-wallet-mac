@@ -127,6 +127,14 @@ struct WalletNodeClient {
         let invalidated: Bool
     }
 
+    struct UserOperationStatus: Equatable {
+        let userOpHash: String
+        let status: String
+        let lastError: String?
+        let createdAt: Int
+        let updatedAt: Int
+    }
+
     struct ResolvedName: Equatable {
         let input: String
         let normalizedName: String
@@ -290,6 +298,21 @@ struct WalletNodeClient {
             throw ClientError.invalidResponse
         }
         return try UserOperationReceipt(json: object)
+    }
+
+    func getUserOperationStatus(userOpHash: String) async throws -> UserOperationStatus? {
+        let result = try await call(
+            method: "localwallet_getUserOperationStatus",
+            params: [userOpHash],
+            allowsNullResult: true
+        )
+        if result is NSNull {
+            return nil
+        }
+        guard let object = result as? [String: Any] else {
+            throw ClientError.invalidResponse
+        }
+        return try UserOperationStatus(json: object)
     }
 
     func userOperationGasPrice() async throws -> UserOperationGasPrice {
@@ -982,6 +1005,26 @@ private extension WalletNodeClient.UserOperationReceipt {
             revertReason: json["revertReason"] as? String,
             tentative: tentative,
             invalidated: invalidated
+        )
+    }
+}
+
+private extension WalletNodeClient.UserOperationStatus {
+    init(json: [String: Any]) throws {
+        guard let userOpHash = json["userOpHash"] as? String,
+              let status = json["status"] as? String,
+              let createdAt = json["createdAt"] as? Int,
+              let updatedAt = json["updatedAt"] as? Int
+        else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+
+        self.init(
+            userOpHash: userOpHash,
+            status: status,
+            lastError: json["lastError"] as? String,
+            createdAt: createdAt,
+            updatedAt: updatedAt
         )
     }
 }

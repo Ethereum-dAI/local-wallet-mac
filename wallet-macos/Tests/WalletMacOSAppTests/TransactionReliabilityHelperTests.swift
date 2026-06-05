@@ -27,6 +27,20 @@ private func receipt(_ hash: String, success: Bool, tentative: Bool) -> WalletNo
     )
 }
 
+private func userOpStatus(
+    _ hash: String,
+    status: String,
+    lastError: String? = nil
+) -> WalletNodeClient.UserOperationStatus {
+    WalletNodeClient.UserOperationStatus(
+        userOpHash: hash,
+        status: status,
+        lastError: lastError,
+        createdAt: 1,
+        updatedAt: 2
+    )
+}
+
 @Test func gateAllowsChangesWhenNoOperationInFlight() {
     #expect(NetworkSettingsGate.allowed(
         isBootstrapping: false,
@@ -80,6 +94,30 @@ private func receipt(_ hash: String, success: Bool, tentative: Bool) -> WalletNo
     #expect(ReconcileDecision.next(for: record("0xrec2"), receipt: nil) == .markPending)
 }
 
+@Test func decisionMarksDroppedWhenDaemonFailedWithDroppedDiagnostic() {
+    #expect(ReconcileDecision.next(
+        for: record("0xrec2"),
+        receipt: nil,
+        status: userOpStatus("0xrec2", status: "failed", lastError: "auto_dropped_aged_no_receipt")
+    ) == .markTerminal(.dropped, reason: "auto_dropped_aged_no_receipt"))
+}
+
+@Test func decisionMarksFailedWhenDaemonFailedWithoutDroppedDiagnostic() {
+    #expect(ReconcileDecision.next(
+        for: record("0xrec2"),
+        receipt: nil,
+        status: userOpStatus("0xrec2", status: "failed", lastError: "raw_transaction_first_submit_failed")
+    ) == .markTerminal(.failed, reason: "raw_transaction_first_submit_failed"))
+}
+
+@Test func decisionKeepsPendingWhenDaemonStatusIsNonTerminal() {
+    #expect(ReconcileDecision.next(
+        for: record("0xrec2"),
+        receipt: nil,
+        status: userOpStatus("0xrec2", status: "submitted", lastError: "raw_transaction_first_submit_failed")
+    ) == .markPending)
+}
+
 @Test func decisionKeepsTerminalRowWhenNoReceipt() {
     #expect(ReconcileDecision.next(for: record("0xrec2", status: .cancelled), receipt: nil) == .keep)
 }
@@ -118,6 +156,20 @@ private func receipt(_ hash: String, success: Bool, tentative: Bool) -> WalletNo
 @Test func loopAttemptIncrementsWhileStillPending() {
     #expect(ReconcilerLoopStep.nextAttempt(current: 0, stillPending: true) == 1)
     #expect(ReconcilerLoopStep.nextAttempt(current: 4, stillPending: true) == 5)
+}
+
+@Test func automaticReconcilerSkipsOldUnfinalizedRecords() {
+    let now = Date(timeIntervalSince1970: 10_000)
+    var fresh = record("0xfresh", status: .pending)
+    fresh.updatedAt = now.addingTimeInterval(-60)
+    var old = record("0xold", status: .pending)
+    old.updatedAt = now.addingTimeInterval(-3_600)
+    var terminal = record("0xterminal", status: .included)
+    terminal.updatedAt = now
+
+    #expect(ReconcilerEligibility.shouldPoll(fresh, now: now, maxAge: 15 * 60))
+    #expect(ReconcilerEligibility.shouldPoll(old, now: now, maxAge: 15 * 60) == false)
+    #expect(ReconcilerEligibility.shouldPoll(terminal, now: now, maxAge: 15 * 60) == false)
 }
 
 @Test func warmupPolicyRetriesVerifiedReadStartupErrors() {

@@ -356,6 +356,32 @@ public final class WalletTransactionHistoryStore {
         return try loadRecord(userOpHash: userOpHash, chainID: chainID)
     }
 
+    @discardableResult
+    public func markTerminalWithoutReceipt(
+        userOpHash: String,
+        chainID: UInt64,
+        status: WalletTransactionStatus,
+        reason: String? = nil,
+        updatedAt: Date = Date()
+    ) throws -> WalletTransactionRecord? {
+        guard status == .failed || status == .dropped else {
+            return try loadRecord(userOpHash: userOpHash, chainID: chainID)
+        }
+        guard var record = try loadRecord(userOpHash: userOpHash, chainID: chainID) else {
+            return nil
+        }
+        guard !record.status.isTerminal else {
+            return record
+        }
+        record.status = status
+        if let reason, !reason.isEmpty {
+            record.revertReason = reason
+        }
+        record.updatedAt = updatedAt
+        try upsert(record)
+        return try loadRecord(userOpHash: userOpHash, chainID: chainID)
+    }
+
     public func upsert(_ incoming: WalletTransactionRecord) throws {
         var record = incoming
         if let existing = try loadRecord(userOpHash: incoming.userOpHash, chainID: incoming.chainID) {

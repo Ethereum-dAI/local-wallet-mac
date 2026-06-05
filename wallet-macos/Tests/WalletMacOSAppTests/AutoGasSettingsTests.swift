@@ -7,11 +7,19 @@ private func freshStore() -> DemoSettingsStore {
     return DemoSettingsStore(defaults: suite)
 }
 
-@Test func autoGasDefaultsAreOffAndStandard() {
+@Test func autoGasDefaultsAreOnAndStandard() {
     let store = freshStore()
     let settings = store.networkSettings
-    #expect(settings.autoGasModeEnabled == false)
+    #expect(settings.autoGasModeEnabled == true)
     #expect(settings.autoGasTier == .standard)
+}
+
+@Test func persistedAutoGasOffOverridesDefault() {
+    let suite = UserDefaults(suiteName: "auto-gas-tests-\(UUID().uuidString)")!
+    suite.set(false, forKey: "com.localwallet.demo.auto-gas-mode-enabled")
+    let store = DemoSettingsStore(defaults: suite)
+
+    #expect(store.networkSettings.autoGasModeEnabled == false)
 }
 
 @Test func autoGasSettingsRoundTrip() {
@@ -59,6 +67,34 @@ private func freshStore() -> DemoSettingsStore {
     var settings = DemoNetworkSettings.defaults
     settings.autoGasModeEnabled = true
     #expect(settings.resolvedDaemonGasPolicy.maxFeePerGas == WalletNodeDaemon.GasPolicy.autoCeiling.maxFeePerGas)
+}
+
+@Test func autoGasTierChangeDoesNotRequireWalletNodeRestart() {
+    var old = DemoNetworkSettings.defaults
+    old.autoGasModeEnabled = true
+    old.autoGasTier = .standard
+    var new = old
+    new.autoGasTier = .fast
+
+    #expect(NetworkSettingsChangePolicy.requiresWalletNodeRestart(from: old, to: new) == false)
+}
+
+@Test func gasPolicyModeChangeRequiresWalletNodeRestart() {
+    var old = DemoNetworkSettings.defaults
+    old.autoGasModeEnabled = false
+    var new = old
+    new.autoGasModeEnabled = true
+
+    #expect(NetworkSettingsChangePolicy.requiresWalletNodeRestart(from: old, to: new))
+}
+
+@Test func inactiveNetworkGasChangeDoesNotRequireWalletNodeRestart() {
+    var old = DemoNetworkSettings.defaults
+    old.isTestnetModeEnabled = true
+    var new = old
+    new.mainnetMaxFeePerGasGwei = "123"
+
+    #expect(NetworkSettingsChangePolicy.requiresWalletNodeRestart(from: old, to: new) == false)
 }
 
 @Test func autoCeilingIsValidAndGenerous() {

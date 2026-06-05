@@ -41,7 +41,7 @@ struct DemoNetworkSettings: Equatable {
         sepoliaConsensusRPCURL: ChainConfiguration.ethereumSepolia.consensusRPCURL.absoluteString,
         sepoliaMaxFeePerGasGwei: WalletNodeDaemon.GasPolicy.sepolia.maxFeePerGasGwei,
         sepoliaMaxPriorityFeePerGasGwei: WalletNodeDaemon.GasPolicy.sepolia.maxPriorityFeePerGasGwei,
-        autoGasModeEnabled: false,
+        autoGasModeEnabled: true,
         autoGasTier: .standard
     )
 
@@ -258,7 +258,8 @@ struct DemoSettingsStore {
                 ?? DemoNetworkSettings.defaults.sepoliaMaxFeePerGasGwei,
             sepoliaMaxPriorityFeePerGasGwei: defaults.string(forKey: Keys.sepoliaMaxPriorityFeePerGasGwei)
                 ?? DemoNetworkSettings.defaults.sepoliaMaxPriorityFeePerGasGwei,
-            autoGasModeEnabled: defaults.bool(forKey: Keys.autoGasModeEnabled),
+            autoGasModeEnabled: defaults.object(forKey: Keys.autoGasModeEnabled) as? Bool
+                ?? DemoNetworkSettings.defaults.autoGasModeEnabled,
             autoGasTier: defaults.string(forKey: Keys.autoGasTier)
                 .flatMap(GasTier.init(rawValue:)) ?? .standard
         )

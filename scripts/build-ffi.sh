@@ -4,6 +4,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_DIR="$REPO_ROOT/rust-core"
 BRIDGE_DIR="$REPO_ROOT/swift-bridge"
+DEPLOYMENT_TARGET="${LOCAL_WALLET_DEPLOYMENT_TARGET:-14.0}"
+
+export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
 
 echo "=== Building wallet-ffi (transitively materializes wallet-node-api) ==="
 cd "$RUST_DIR"

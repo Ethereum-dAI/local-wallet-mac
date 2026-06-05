@@ -398,12 +398,17 @@ final class AppModel: ObservableObject {
 
     func updateNetworkSettings(_ settings: DemoNetworkSettings) throws {
         let validated = try settings.validated()
-        guard configuration.networkSettings != validated else {
+        let currentSettings = configuration.networkSettings
+        guard currentSettings != validated else {
             return
         }
         guard canChangeNetworkSettings else {
             throw AppError.walletOperationInProgress
         }
+        let requiresWalletNodeRestart = NetworkSettingsChangePolicy.requiresWalletNodeRestart(
+            from: currentSettings,
+            to: validated
+        )
 
         appendSection("Update Network Settings")
         appendLog("network: active profile \(validated.activeNetworkName)")
@@ -411,10 +416,17 @@ final class AppModel: ObservableObject {
         appendLog("network: gas caps max \(validated.activeMaxFeePerGasGwei) gwei, priority \(validated.activeMaxPriorityFeePerGasGwei) gwei")
         settingsStore.setNetworkSettings(validated)
         configuration = DemoAppConfiguration(networkSettings: validated)
-        resetWalletNodeConnectionAfterNetworkChange()
-        accountInspection = nil
         builtUserOperationDraft = nil
         lastUserOperationBuildError = nil
+
+        guard requiresWalletNodeRestart else {
+            appendLog("network: applied app-only settings without restarting wallet-node")
+            Task { await refreshLiveGasPrices() }
+            return
+        }
+
+        resetWalletNodeConnectionAfterNetworkChange()
+        accountInspection = nil
         activeBundlerStatus = "Bundler not checked"
         lastSubmittedUserOperationHash = nil
         lastBundledTransactionHash = nil
@@ -454,6 +466,9 @@ final class AppModel: ObservableObject {
             WalletNodeClient(configuration: $0)
         }
         optimisticNextNonce.removeAll()
+        liveGasPrice = nil
+        liveBaseFeeWei = nil
+        liveGasUpdatedAt = nil
         localRelayerStatus = nil
         localRelayerMessage = walletNodeClient == nil
             ? "Local wallet-node daemon will restart with the selected network."
@@ -1518,9 +1533,25 @@ final class AppModel: ObservableObject {
         let nestedReceipt = try? await withWalletNodeClient(operation: "reconcile") { client in
             try await client.getUserOperationReceipt(userOpHash: record.userOpHash)
         }
-        switch ReconcileDecision.next(for: record, receipt: nestedReceipt ?? nil) {
+        let operationStatus: WalletNodeClient.UserOperationStatus?
+        if nestedReceipt == nil {
+            operationStatus = try? await withWalletNodeClient(operation: "reconcile status") { client in
+                try await client.getUserOperationStatus(userOpHash: record.userOpHash)
+            }
+        } else {
+            operationStatus = nil
+        }
+        switch ReconcileDecision.next(for: record, receipt: nestedReceipt ?? nil, status: operationStatus) {
         case .applyReceipt(let receipt):
             recordReceiptHistory(receipt, chainID: record.chainID, logContext: "reconcile")
+        case .markTerminal(let status, let reason):
+            markTerminalHistory(
+                userOpHash: record.userOpHash,
+                chainID: record.chainID,
+                status: status,
+                reason: reason,
+                logContext: "reconcile"
+            )
         case .markPending:
             // Conservative until the daemon/app persists each UserOperation nonce:
             // nil receipt alone can mean pending, cancelled, dropped, or RPC lag.
@@ -1547,10 +1578,14 @@ final class AppModel: ObservableObject {
         var attempt = 0
         while !Task.isCancelled {
             let accountAddress = walletRecord?.kernelAccountAddress
-            let pending = (try? walletHistoryStore.loadUnfinalizedRecords(
+            let candidates = (try? walletHistoryStore.loadUnfinalizedRecords(
                 accountAddress: accountAddress,
                 chainID: activeChain.id
             )) ?? []
+            let now = Date()
+            let pending = candidates.filter {
+                ReconcilerEligibility.shouldPoll($0, now: now)
+            }
             guard ReconcilerLoopStep.shouldContinue(pendingCount: pending.count) else {
                 return
             }
@@ -1559,10 +1594,13 @@ final class AppModel: ObservableObject {
                 await reconcile(record: record)
             }
 
-            let stillPending = !((try? walletHistoryStore.loadUnfinalizedRecords(
+            let stillPendingCandidates = (try? walletHistoryStore.loadUnfinalizedRecords(
                 accountAddress: accountAddress,
                 chainID: activeChain.id
-            )) ?? []).isEmpty
+            )) ?? []
+            let stillPending = stillPendingCandidates.contains {
+                ReconcilerEligibility.shouldPoll($0)
+            }
             attempt = ReconcilerLoopStep.nextAttempt(current: attempt, stillPending: stillPending)
             guard stillPending else {
                 return
@@ -1620,6 +1658,26 @@ final class AppModel: ObservableObject {
             appendLog("\(logContext): wallet history left pending until receipt is available")
         } catch {
             appendLog("\(logContext): wallet history pending update failed — \(error.localizedDescription)")
+        }
+    }
+
+    private func markTerminalHistory(
+        userOpHash: String,
+        chainID: UInt64,
+        status: WalletTransactionStatus,
+        reason: String?,
+        logContext: String
+    ) {
+        do {
+            try walletHistoryStore.markTerminalWithoutReceipt(
+                userOpHash: userOpHash,
+                chainID: chainID,
+                status: status,
+                reason: reason
+            )
+            appendLog("\(logContext): wallet history marked \(status.rawValue) without receipt")
+        } catch {
+            appendLog("\(logContext): wallet history terminal update failed — \(error.localizedDescription)")
         }
     }
 
@@ -1879,6 +1937,23 @@ enum NetworkSettingsGate {
     }
 }
 
+enum NetworkSettingsChangePolicy {
+    static func requiresWalletNodeRestart(
+        from old: DemoNetworkSettings,
+        to new: DemoNetworkSettings
+    ) -> Bool {
+        if old.isTestnetModeEnabled != new.isTestnetModeEnabled {
+            return true
+        }
+        if old.activeRPCURL != new.activeRPCURL
+            || old.activeArchiveNodeURL != new.activeArchiveNodeURL
+            || old.activeConsensusRPCURL != new.activeConsensusRPCURL {
+            return true
+        }
+        return old.resolvedDaemonGasPolicy != new.resolvedDaemonGasPolicy
+    }
+}
+
 enum WalletNodeLaunchFailureGate {
     static func shouldBlockRetry(now: Date, retryAfter: Date) -> Bool {
         now < retryAfter
@@ -1889,8 +1964,24 @@ enum WalletNodeLaunchFailureGate {
     }
 }
 
+enum ReconcilerEligibility {
+    static let maxAutomaticAge: TimeInterval = 15 * 60
+
+    static func shouldPoll(
+        _ record: WalletTransactionRecord,
+        now: Date = Date(),
+        maxAge: TimeInterval = maxAutomaticAge
+    ) -> Bool {
+        guard record.status.requiresReceiptRefresh else {
+            return false
+        }
+        return now.timeIntervalSince(record.updatedAt) <= maxAge
+    }
+}
+
 enum ReconcileOutcome: Equatable {
     case applyReceipt(WalletNodeClient.UserOperationReceipt)
+    case markTerminal(WalletTransactionStatus, reason: String?)
     case markPending
     case keep
 }
@@ -1898,7 +1989,8 @@ enum ReconcileOutcome: Equatable {
 enum ReconcileDecision {
     static func next(
         for record: WalletTransactionRecord,
-        receipt: WalletNodeClient.UserOperationReceipt?
+        receipt: WalletNodeClient.UserOperationReceipt?,
+        status: WalletNodeClient.UserOperationStatus? = nil
     ) -> ReconcileOutcome {
         if let receipt {
             return .applyReceipt(receipt)
@@ -1906,7 +1998,32 @@ enum ReconcileDecision {
         if record.status.isTerminal {
             return .keep
         }
+        if let terminal = TerminalUserOperationStatus.historyStatus(from: status) {
+            return .markTerminal(terminal.status, reason: terminal.reason)
+        }
         return .markPending
+    }
+}
+
+enum TerminalUserOperationStatus {
+    static func historyStatus(
+        from status: WalletNodeClient.UserOperationStatus?
+    ) -> (status: WalletTransactionStatus, reason: String?)? {
+        guard let status else {
+            return nil
+        }
+        switch status.status {
+        case "failed":
+            let reason = status.lastError
+            if reason?.localizedCaseInsensitiveContains("dropped") == true {
+                return (.dropped, reason)
+            }
+            return (.failed, reason)
+        case "reverted":
+            return (.failed, status.lastError)
+        default:
+            return nil
+        }
     }
 }
 

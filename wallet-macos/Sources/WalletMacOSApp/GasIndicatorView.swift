@@ -10,6 +10,9 @@ struct GasTierRow: Identifiable {
 struct GasBreakdownDisplay {
     let baseFee: String?
     let tiers: [GasTierRow]
+    let policyTitle: String
+    let policyMaxFee: String
+    let policyPriority: String
     let modeText: String
     let updatedText: String
 }
@@ -22,6 +25,10 @@ struct GasBreakdownPopover: View {
             Text("Network gas")
                 .font(.system(size: 13, weight: .bold))
 
+            Text("Live market")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.secondary)
+
             if let baseFee = display.baseFee {
                 HStack {
                     Text("Base fee")
@@ -30,6 +37,15 @@ struct GasBreakdownPopover: View {
                 }
                 .font(.system(size: 12))
             }
+
+            Divider()
+
+            HStack {
+                Text(display.policyTitle)
+                Spacer()
+                Text("\(display.policyMaxFee) / \(display.policyPriority) gwei").bold()
+            }
+            .font(.system(size: 12))
 
             Divider()
 

@@ -21,6 +21,24 @@ private enum OnboardingStep: Int, CaseIterable {
     }
 }
 
+private enum OnboardingNetwork: String, CaseIterable, Identifiable {
+    case sepolia = "Sepolia"
+    case mainnet = "Mainnet"
+
+    var id: String {
+        rawValue
+    }
+
+    var displayName: String {
+        switch self {
+        case .sepolia:
+            return "Ethereum Sepolia"
+        case .mainnet:
+            return "Ethereum Mainnet"
+        }
+    }
+}
+
 @MainActor
 private final class OnboardingState: ObservableObject {
     enum InstallState: Equatable {
@@ -38,9 +56,13 @@ private final class OnboardingState: ObservableObject {
     }
 
     @Published var step: OnboardingStep = .welcome
-    @Published var rpcURL: String
-    @Published var archiveNodeURL: String
-    @Published var consensusRPCURL: String
+    @Published var selectedNetworkID: String
+    @Published var mainnetRPCURL: String
+    @Published var mainnetArchiveNodeURL: String
+    @Published var mainnetConsensusRPCURL: String
+    @Published var sepoliaRPCURL: String
+    @Published var sepoliaArchiveNodeURL: String
+    @Published var sepoliaConsensusRPCURL: String
     @Published var selectedModelID: String
     @Published var installState: InstallState = .idle
     @Published var keyState: KeyState = .idle
@@ -64,9 +86,14 @@ private final class OnboardingState: ObservableObject {
         self.provisioningService = provisioningService
         self.downloadManager = downloadManager
         self.hardwareInspector = hardwareInspector
-        self.rpcURL = settingsStore.rpcURL
-        self.archiveNodeURL = settingsStore.archiveNodeURL
-        self.consensusRPCURL = settingsStore.consensusRPCURL
+        let networkSettings = networkSettingsStore.networkSettings
+        self.selectedNetworkID = OnboardingNetwork.sepolia.rawValue
+        self.mainnetRPCURL = networkSettings.mainnetRPCURL
+        self.mainnetArchiveNodeURL = networkSettings.mainnetArchiveNodeURL
+        self.mainnetConsensusRPCURL = networkSettings.mainnetConsensusRPCURL
+        self.sepoliaRPCURL = networkSettings.sepoliaRPCURL
+        self.sepoliaArchiveNodeURL = networkSettings.sepoliaArchiveNodeURL
+        self.sepoliaConsensusRPCURL = networkSettings.sepoliaConsensusRPCURL
         let storedModelID = settingsStore.selectedModelID
         self.selectedModelID = LocalAIModel.available.contains { $0.id == storedModelID }
             ? storedModelID
@@ -85,10 +112,17 @@ private final class OnboardingState: ObservableObject {
         LocalAIModel.available.first { $0.id == selectedModelID } ?? .recommended
     }
 
+    var selectedNetwork: OnboardingNetwork {
+        OnboardingNetwork(rawValue: selectedNetworkID) ?? .sepolia
+    }
+
     var canContinueFromNetwork: Bool {
-        Self.isValidRequiredURL(rpcURL)
-            && Self.isValidOptionalURL(consensusRPCURL)
-            && Self.isValidOptionalURL(archiveNodeURL)
+        Self.isValidRequiredURL(sepoliaRPCURL)
+            && Self.isValidOptionalURL(sepoliaConsensusRPCURL)
+            && Self.isValidOptionalURL(sepoliaArchiveNodeURL)
+            && Self.isValidRequiredURL(mainnetRPCURL)
+            && Self.isValidOptionalURL(mainnetConsensusRPCURL)
+            && Self.isValidOptionalURL(mainnetArchiveNodeURL)
     }
 
     var canContinueFromModel: Bool {
@@ -184,20 +218,24 @@ private final class OnboardingState: ObservableObject {
     }
 
     private func persistNetwork() {
-        let trimmedRPC = rpcURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedArchive = archiveNodeURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedConsensus = consensusRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        settingsStore.rpcURL = trimmedRPC
-        settingsStore.archiveNodeURL = trimmedArchive
-        settingsStore.consensusRPCURL = trimmedConsensus
+        let trimmedMainnetRPC = mainnetRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMainnetArchive = mainnetArchiveNodeURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMainnetConsensus = mainnetConsensusRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSepoliaRPC = sepoliaRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSepoliaArchive = sepoliaArchiveNodeURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSepoliaConsensus = sepoliaConsensusRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        settingsStore.rpcURL = trimmedSepoliaRPC
+        settingsStore.archiveNodeURL = trimmedSepoliaArchive
+        settingsStore.consensusRPCURL = trimmedSepoliaConsensus
 
         var networkSettings = networkSettingsStore.networkSettings
         networkSettings.isTestnetModeEnabled = true
-        networkSettings.sepoliaRPCURL = trimmedRPC
-        networkSettings.sepoliaArchiveNodeURL = trimmedArchive
-        networkSettings.sepoliaConsensusRPCURL = trimmedConsensus.isEmpty
-            ? DemoNetworkSettings.defaults.sepoliaConsensusRPCURL
-            : trimmedConsensus
+        networkSettings.mainnetRPCURL = trimmedMainnetRPC
+        networkSettings.mainnetArchiveNodeURL = trimmedMainnetArchive
+        networkSettings.mainnetConsensusRPCURL = trimmedMainnetConsensus
+        networkSettings.sepoliaRPCURL = trimmedSepoliaRPC
+        networkSettings.sepoliaArchiveNodeURL = trimmedSepoliaArchive
+        networkSettings.sepoliaConsensusRPCURL = trimmedSepoliaConsensus
         if let validated = try? networkSettings.validated() {
             networkSettingsStore.setNetworkSettings(validated)
         }
@@ -488,37 +526,69 @@ private struct NetworkStep: View {
         OnboardingTwoColumn(
             illustration: .network,
             headline: "Choose your nodes",
-            bodyText: "Set the execution RPC the wallet should use for reads and submission prep. Add a consensus RPC for Helios verification, or leave it empty to use the default shown here."
+            bodyText: "Configure Sepolia and Mainnet RPCs for reads, submission prep, and Helios verification. Sepolia is shown first; both profiles are stored locally."
         ) {
             VStack(alignment: .leading, spacing: 18) {
+                OnboardingSegmentedControl(
+                    selection: $state.selectedNetworkID,
+                    options: OnboardingNetwork.allCases.map(\.rawValue)
+                )
+                .frame(height: 54)
+
                 VStack(alignment: .leading, spacing: 14) {
-                    OnboardingTextField(
-                        label: "Execution RPC URL",
-                        placeholder: DemoNetworkSettings.defaults.sepoliaRPCURL,
-                        text: $state.rpcURL
-                    )
-                    OnboardingTextField(
-                        label: "Consensus RPC URL",
-                        placeholder: DemoNetworkSettings.defaults.sepoliaConsensusRPCURL,
-                        detail: "Leave empty to use default: \(DemoNetworkSettings.defaults.sepoliaConsensusRPCURL)",
-                        text: $state.consensusRPCURL
-                    )
-                    OnboardingTextField(
-                        label: "Archive Node URL",
-                        placeholder: "Optional",
-                        text: $state.archiveNodeURL
-                    )
+                    Text(state.selectedNetwork.displayName)
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(OnboardingPalette.primaryText)
+                    networkFields(for: state.selectedNetwork)
                 }
 
                 OnboardingGlassCard {
                     VStack(alignment: .leading, spacing: 10) {
                         InfoRow(icon: "network", title: "Execution RPC", detail: "Used for current EVM state, transaction preparation, submission, balances, and receipts.")
-                        InfoRow(icon: "checkmark.shield", title: "Consensus RPC", detail: "Used by Helios to verify Ethereum reads against the canonical beacon chain. Defaults to PublicNode Sepolia if empty.")
+                        InfoRow(icon: "checkmark.shield", title: "Consensus RPC", detail: "Used by Helios to verify Ethereum reads against the canonical beacon chain.")
                         InfoRow(icon: "clock.arrow.circlepath", title: "Archive node", detail: "Optional endpoint for historical reads and richer wallet timelines.")
                     }
                     .padding(16)
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func networkFields(for network: OnboardingNetwork) -> some View {
+        switch network {
+        case .sepolia:
+            OnboardingTextField(
+                label: "Execution RPC URL",
+                placeholder: "Required",
+                text: $state.sepoliaRPCURL
+            )
+            OnboardingTextField(
+                label: "Consensus RPC URL",
+                placeholder: "Consensus RPC URL",
+                text: $state.sepoliaConsensusRPCURL
+            )
+            OnboardingTextField(
+                label: "Archive Node URL",
+                placeholder: "Optional",
+                text: $state.sepoliaArchiveNodeURL
+            )
+        case .mainnet:
+            OnboardingTextField(
+                label: "Execution RPC URL",
+                placeholder: "Required",
+                text: $state.mainnetRPCURL
+            )
+            OnboardingTextField(
+                label: "Consensus RPC URL",
+                placeholder: "Consensus RPC URL",
+                text: $state.mainnetConsensusRPCURL
+            )
+            OnboardingTextField(
+                label: "Archive Node URL",
+                placeholder: "Optional",
+                text: $state.mainnetArchiveNodeURL
+            )
         }
     }
 }
@@ -1346,7 +1416,7 @@ private struct OnboardingSegmentedControl: View {
                     selection = option
                 } label: {
                     HStack(spacing: 8) {
-                        Image(systemName: option == "Local" ? "externaldrive.fill" : "globe")
+                        Image(systemName: systemImage(for: option))
                         Text(option)
                     }
                     .font(.system(size: 18, weight: .bold))
@@ -1369,6 +1439,19 @@ private struct OnboardingSegmentedControl: View {
                         .stroke(OnboardingPalette.border, lineWidth: 1.5)
                 )
         )
+    }
+
+    private func systemImage(for option: String) -> String {
+        switch option {
+        case "Local":
+            return "externaldrive.fill"
+        case "Sepolia":
+            return "testtube.2"
+        case "Mainnet":
+            return "globe"
+        default:
+            return "circle.grid.cross"
+        }
     }
 }
 

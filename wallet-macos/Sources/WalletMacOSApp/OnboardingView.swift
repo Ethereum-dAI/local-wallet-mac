@@ -6,6 +6,7 @@ private enum OnboardingStep: Int, CaseIterable {
     case network
     case model
     case keys
+    case sync
 
     var title: String? {
         switch self {
@@ -17,6 +18,8 @@ private enum OnboardingStep: Int, CaseIterable {
             return "Configure your AI"
         case .keys:
             return "Create your wallet"
+        case .sync:
+            return "Prepare verified reads"
         }
     }
 }
@@ -55,6 +58,15 @@ private final class OnboardingState: ObservableObject {
         case failed(String)
     }
 
+    enum ChainReadinessState {
+        case idle
+        case preparing
+        case syncing(WalletNodeClient.NetworkStatus?)
+        case ready(WalletNodeClient.NetworkStatus)
+        case timedOut(WalletNodeClient.NetworkStatus?)
+        case failed(String)
+    }
+
     @Published var step: OnboardingStep = .welcome
     @Published var selectedNetworkID: String
     @Published var mainnetRPCURL: String
@@ -66,6 +78,8 @@ private final class OnboardingState: ObservableObject {
     @Published var selectedModelID: String
     @Published var installState: InstallState = .idle
     @Published var keyState: KeyState = .idle
+    @Published var chainReadinessState: ChainReadinessState = .idle
+    @Published var chainReadinessElapsed: TimeInterval = 0
     @Published var hardwareProfile: LocalHardwareProfile?
 
     private let settingsStore: OnboardingSettingsStore
@@ -73,19 +87,31 @@ private final class OnboardingState: ObservableObject {
     private let provisioningService: OnboardingProvisioningService
     private let downloadManager: LocalAIModelDownloadManager
     private let hardwareInspector: LocalHardwareInspector
+    private let chainReadinessService: OnboardingChainReadinessService
+    let chainReadinessTiming: OnboardingChainReadinessTiming
+    private var chainReadinessTask: Task<Void, Never>?
+    private var chainReadinessTimerTask: Task<Void, Never>?
+    private var chainReadinessRunID: UUID?
 
     init(
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
         networkSettingsStore: DemoSettingsStore = DemoSettingsStore(),
         provisioningService: OnboardingProvisioningService = OnboardingProvisioningService(),
         downloadManager: LocalAIModelDownloadManager = LocalAIModelDownloadManager(),
-        hardwareInspector: LocalHardwareInspector = LocalHardwareInspector()
+        hardwareInspector: LocalHardwareInspector = LocalHardwareInspector(),
+        chainReadinessService: OnboardingChainReadinessService? = nil,
+        chainReadinessTiming: OnboardingChainReadinessTiming = .default
     ) {
         self.settingsStore = settingsStore
         self.networkSettingsStore = networkSettingsStore
         self.provisioningService = provisioningService
         self.downloadManager = downloadManager
         self.hardwareInspector = hardwareInspector
+        self.chainReadinessService = chainReadinessService ?? OnboardingChainReadinessService(
+            onboardingSettingsStore: settingsStore,
+            networkSettingsStore: networkSettingsStore
+        )
+        self.chainReadinessTiming = chainReadinessTiming
         let networkSettings = networkSettingsStore.networkSettings
         self.selectedNetworkID = OnboardingNetwork.sepolia.rawValue
         self.mainnetRPCURL = networkSettings.mainnetRPCURL
@@ -106,6 +132,11 @@ private final class OnboardingState: ObservableObject {
         Task {
             hardwareProfile = await hardwareInspector.inspect()
         }
+    }
+
+    deinit {
+        chainReadinessTask?.cancel()
+        chainReadinessTimerTask?.cancel()
     }
 
     var selectedModel: LocalAIModel {
@@ -140,9 +171,53 @@ private final class OnboardingState: ObservableObject {
         return false
     }
 
+    var chainReadinessIsRunning: Bool {
+        switch chainReadinessState {
+        case .preparing, .syncing:
+            return true
+        case .idle, .ready, .timedOut, .failed:
+            return false
+        }
+    }
+
+    var chainReadinessIsTakingLonger: Bool {
+        chainReadinessIsRunning
+            && chainReadinessTiming.isTakingLonger(elapsed: chainReadinessElapsed)
+    }
+
+    var canOpenWalletAfterReadiness: Bool {
+        if case .ready = chainReadinessState {
+            return true
+        }
+        return false
+    }
+
+    var canRetryChainReadiness: Bool {
+        switch chainReadinessState {
+        case .timedOut, .failed, .idle:
+            return true
+        case .preparing, .syncing, .ready:
+            return false
+        }
+    }
+
+    var latestChainReadinessStatus: WalletNodeClient.NetworkStatus? {
+        switch chainReadinessState {
+        case .syncing(let status), .timedOut(let status):
+            return status
+        case .ready(let status):
+            return status
+        case .idle, .preparing, .failed:
+            return nil
+        }
+    }
+
     func back() {
         guard step.rawValue > 0 else {
             return
+        }
+        if step == .sync {
+            cancelChainReadiness(reset: true)
         }
         step = OnboardingStep(rawValue: step.rawValue - 1) ?? .welcome
     }
@@ -153,7 +228,7 @@ private final class OnboardingState: ObservableObject {
             persistNetwork()
         case .model:
             settingsStore.selectedModelID = selectedModelID
-        case .welcome, .keys:
+        case .welcome, .keys, .sync:
             break
         }
 
@@ -196,6 +271,7 @@ private final class OnboardingState: ObservableObject {
             return
         }
 
+        cancelChainReadiness(reset: true)
         keyState = .creating
         Task {
             do {
@@ -211,10 +287,123 @@ private final class OnboardingState: ObservableObject {
         }
     }
 
+    func startChainReadinessIfNeeded(force: Bool = false) {
+        if chainReadinessIsRunning {
+            guard force else {
+                return
+            }
+            cancelChainReadiness(reset: false)
+        }
+        if canOpenWalletAfterReadiness && !force {
+            return
+        }
+
+        guard case let .ready(kernelAddress, _, isPreview) = keyState else {
+            chainReadinessState = .failed("Create keys before syncing verified reads.")
+            return
+        }
+
+        persistNetwork()
+
+        if isPreview {
+            chainReadinessElapsed = 0
+            chainReadinessState = .ready(
+                WalletNodeClient.NetworkStatus.onboardingPreviewReady(
+                    chain: networkSettingsStore.networkSettings.activeChain
+                )
+            )
+            return
+        }
+
+        let runID = UUID()
+        let startedAt = Date()
+        let service = chainReadinessService
+        let timing = chainReadinessTiming
+        chainReadinessRunID = runID
+        chainReadinessElapsed = 0
+        chainReadinessState = .preparing
+        startChainReadinessTimer(startedAt: startedAt, runID: runID)
+
+        chainReadinessTask = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+
+            do {
+                let status = try await service.waitForHeliosReady(
+                    kernelAddress: kernelAddress,
+                    timing: timing
+                ) { [weak self] status in
+                    guard let self, self.chainReadinessRunID == runID else {
+                        return
+                    }
+                    self.chainReadinessState = .syncing(status)
+                }
+                guard self.chainReadinessRunID == runID, !Task.isCancelled else {
+                    return
+                }
+                self.chainReadinessElapsed = Date().timeIntervalSince(startedAt)
+                self.chainReadinessState = .ready(status)
+                self.stopChainReadinessTimer(runID: runID)
+            } catch is CancellationError {
+            } catch OnboardingChainReadinessError.timedOut(let lastStatus) {
+                guard self.chainReadinessRunID == runID else {
+                    return
+                }
+                self.chainReadinessElapsed = Date().timeIntervalSince(startedAt)
+                self.chainReadinessState = .timedOut(lastStatus)
+                self.stopChainReadinessTimer(runID: runID)
+            } catch {
+                guard self.chainReadinessRunID == runID else {
+                    return
+                }
+                self.chainReadinessElapsed = Date().timeIntervalSince(startedAt)
+                self.chainReadinessState = .failed(error.localizedDescription)
+                self.stopChainReadinessTimer(runID: runID)
+            }
+        }
+    }
+
     func complete() {
+        cancelChainReadiness(reset: false)
         persistNetwork()
         settingsStore.selectedModelID = selectedModelID
         settingsStore.markCompleted()
+    }
+
+    private func cancelChainReadiness(reset: Bool) {
+        chainReadinessRunID = nil
+        chainReadinessTask?.cancel()
+        chainReadinessTask = nil
+        chainReadinessTimerTask?.cancel()
+        chainReadinessTimerTask = nil
+        if reset {
+            chainReadinessElapsed = 0
+            chainReadinessState = .idle
+        }
+    }
+
+    private func startChainReadinessTimer(startedAt: Date, runID: UUID) {
+        chainReadinessTimerTask?.cancel()
+        chainReadinessTimerTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.chainReadinessRunID == runID else {
+                    return
+                }
+                self.chainReadinessElapsed = Date().timeIntervalSince(startedAt)
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+    }
+
+    private func stopChainReadinessTimer(runID: UUID) {
+        guard chainReadinessRunID == runID else {
+            return
+        }
+        chainReadinessRunID = nil
+        chainReadinessTask = nil
+        chainReadinessTimerTask?.cancel()
+        chainReadinessTimerTask = nil
     }
 
     private func persistNetwork() {
@@ -342,6 +531,9 @@ struct LocalWalletOnboardingView: View {
             case .keys:
                 KeysStep(state: state)
                     .transition(stepTransition)
+            case .sync:
+                SyncStep(state: state)
+                    .transition(stepTransition)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -380,6 +572,14 @@ struct LocalWalletOnboardingView: View {
                     enabled: keysButtonEnabled,
                     action: keysPrimaryAction
                 )
+            case .sync:
+                wizardFooter(
+                    caption: syncFooterCaption,
+                    primaryTitle: syncButtonTitle,
+                    systemImage: syncButtonSystemImage,
+                    enabled: syncButtonEnabled,
+                    action: syncPrimaryAction
+                )
             }
         }
         .frame(height: 112)
@@ -395,6 +595,7 @@ struct LocalWalletOnboardingView: View {
     private func wizardFooter(
         caption: String,
         primaryTitle: String,
+        systemImage: String = "arrow.right",
         enabled: Bool,
         action: @escaping () -> Void
     ) -> some View {
@@ -406,7 +607,7 @@ struct LocalWalletOnboardingView: View {
 
             HStack {
                 Spacer()
-                OnboardingBrandButton(title: primaryTitle, systemImage: "arrow.right", action: action)
+                OnboardingBrandButton(title: primaryTitle, systemImage: systemImage, action: action)
                     .disabled(!enabled)
                     .frame(width: 310)
                     .padding(.trailing, 26)
@@ -479,7 +680,7 @@ struct LocalWalletOnboardingView: View {
         case .creating:
             return "Creating..."
         case .ready:
-            return "Open Wallet"
+            return "Continue"
         }
     }
 
@@ -489,10 +690,60 @@ struct LocalWalletOnboardingView: View {
 
     private func keysPrimaryAction() {
         if state.canComplete {
+            state.advance()
+        } else {
+            state.provisionKeys()
+        }
+    }
+
+    private var syncFooterCaption: String {
+        switch state.chainReadinessState {
+        case .ready:
+            return "Verified reads are ready. The dashboard can load live wallet state."
+        case .timedOut:
+            return "Helios did not report ready within about two minutes. Check RPC settings or retry."
+        case .failed:
+            return "Sync failed. You can retry or go back to update RPC settings."
+        case .idle, .preparing, .syncing:
+            if state.chainReadinessIsTakingLonger {
+                return "This is taking longer than usual. Keep the app open; the step stops after about two minutes."
+            }
+            return "Starting wallet-node and waiting for Helios verified reads before opening the dashboard."
+        }
+    }
+
+    private var syncButtonTitle: String {
+        switch state.chainReadinessState {
+        case .ready:
+            return "Open Wallet"
+        case .timedOut, .failed:
+            return "Retry Sync"
+        case .idle:
+            return "Start Sync"
+        case .preparing, .syncing:
+            return "Syncing..."
+        }
+    }
+
+    private var syncButtonSystemImage: String {
+        switch state.chainReadinessState {
+        case .timedOut, .failed:
+            return "arrow.clockwise"
+        case .idle, .preparing, .syncing, .ready:
+            return "arrow.right"
+        }
+    }
+
+    private var syncButtonEnabled: Bool {
+        state.canOpenWalletAfterReadiness || state.canRetryChainReadiness
+    }
+
+    private func syncPrimaryAction() {
+        if state.canOpenWalletAfterReadiness {
             state.complete()
             onComplete()
         } else {
-            state.provisionKeys()
+            state.startChainReadinessIfNeeded(force: true)
         }
     }
 }
@@ -770,6 +1021,317 @@ private struct KeysStep: View {
     }
 }
 
+private struct SyncStep: View {
+    @ObservedObject var state: OnboardingState
+
+    var body: some View {
+        OnboardingTwoColumn(
+            illustration: .sync,
+            headline: "Sync verified reads",
+            bodyText: "Local wallet-node starts Helios and waits until Ethereum reads are verified before the dashboard opens."
+        ) {
+            VStack(alignment: .leading, spacing: 16) {
+                ReadinessStatusCard(state: state)
+                OnboardingGlassCard {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ReadinessProgressRow(
+                            icon: "terminal",
+                            title: "wallet-node",
+                            detail: daemonRowDetail,
+                            badge: daemonBadge,
+                            color: daemonColor
+                        )
+                        ReadinessProgressRow(
+                            icon: "checkmark.shield",
+                            title: "Helios",
+                            detail: heliosRowDetail,
+                            badge: heliosBadge,
+                            color: heliosColor
+                        )
+                        ReadinessProgressRow(
+                            icon: "wallet.pass",
+                            title: "Wallet state",
+                            detail: walletRowDetail,
+                            badge: walletBadge,
+                            color: walletColor
+                        )
+                    }
+                    .padding(16)
+                }
+            }
+        }
+        .task {
+            state.startChainReadinessIfNeeded()
+        }
+    }
+
+    private var daemonRowDetail: String {
+        switch state.chainReadinessState {
+        case .idle:
+            return "Waiting to start the local daemon."
+        case .preparing:
+            return "Unlocking the bundler key and starting the local daemon."
+        case .failed:
+            return "Daemon startup or readiness check ended with an error."
+        case .syncing, .ready, .timedOut:
+            return "Local daemon is reachable over the authenticated local transport."
+        }
+    }
+
+    private var daemonBadge: String {
+        switch state.chainReadinessState {
+        case .idle:
+            return "WAITING"
+        case .preparing:
+            return "STARTING"
+        case .failed:
+            return "ERROR"
+        case .syncing, .ready, .timedOut:
+            return "DONE"
+        }
+    }
+
+    private var daemonColor: Color {
+        switch state.chainReadinessState {
+        case .failed:
+            return OnboardingPalette.warning
+        case .ready, .syncing, .timedOut:
+            return OnboardingPalette.success
+        case .idle, .preparing:
+            return OnboardingPalette.accent
+        }
+    }
+
+    private var heliosRowDetail: String {
+        if let status = state.latestChainReadinessStatus {
+            if let head = status.helios.head {
+                return "Verified head #\(head.number) on \(status.networkProfile)."
+            }
+            return "Status: \(status.status.replacingOccurrences(of: "_", with: " "))."
+        }
+        switch state.chainReadinessState {
+        case .timedOut:
+            return "Helios did not report ready before the onboarding timeout."
+        case .failed(let message):
+            return message
+        default:
+            return "Waiting for Helios to report verified reads ready."
+        }
+    }
+
+    private var heliosBadge: String {
+        switch state.chainReadinessState {
+        case .ready:
+            return "READY"
+        case .timedOut:
+            return "TIMEOUT"
+        case .failed:
+            return "ERROR"
+        case .idle, .preparing, .syncing:
+            return state.chainReadinessIsTakingLonger ? "STILL SYNCING" : "SYNCING"
+        }
+    }
+
+    private var heliosColor: Color {
+        switch state.chainReadinessState {
+        case .ready:
+            return OnboardingPalette.success
+        case .timedOut, .failed:
+            return OnboardingPalette.warning
+        case .idle, .preparing, .syncing:
+            return OnboardingPalette.accent
+        }
+    }
+
+    private var walletRowDetail: String {
+        switch state.chainReadinessState {
+        case .ready:
+            return "Account inspection and gas read run after Helios is ready."
+        case .timedOut, .failed:
+            return "Dashboard warm-up is blocked until Helios is ready."
+        default:
+            return "Runs after Helios is ready, so the first dashboard reads do not race sync."
+        }
+    }
+
+    private var walletBadge: String {
+        switch state.chainReadinessState {
+        case .ready:
+            return "DONE"
+        case .timedOut, .failed:
+            return "BLOCKED"
+        default:
+            return "PENDING"
+        }
+    }
+
+    private var walletColor: Color {
+        switch state.chainReadinessState {
+        case .ready:
+            return OnboardingPalette.success
+        case .timedOut, .failed:
+            return OnboardingPalette.warning
+        default:
+            return OnboardingPalette.mutedText
+        }
+    }
+}
+
+private struct ReadinessStatusCard: View {
+    @ObservedObject var state: OnboardingState
+
+    var body: some View {
+        OnboardingGlassCard {
+            VStack(alignment: .leading, spacing: 15) {
+                HStack(spacing: 14) {
+                    statusIcon
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(title)
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundStyle(OnboardingPalette.primaryText)
+                        Text(detail)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(OnboardingPalette.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Text(elapsedText)
+                        .font(.system(size: 17, weight: .black, design: .monospaced))
+                        .foregroundStyle(OnboardingPalette.primaryText)
+                }
+
+                ProgressView(value: min(state.chainReadinessElapsed, state.chainReadinessTiming.timeout), total: state.chainReadinessTiming.timeout)
+                    .progressViewStyle(.linear)
+                    .tint(progressColor)
+
+                if state.chainReadinessIsTakingLonger {
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock.badge.exclamationmark")
+                            .foregroundStyle(OnboardingPalette.warning)
+                        Text("Taking longer than usual. The app will stop this attempt around two minutes.")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(OnboardingPalette.secondaryText)
+                    }
+                }
+            }
+            .padding(18)
+        }
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch state.chainReadinessState {
+        case .ready:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 24, weight: .bold))
+                .foregroundStyle(OnboardingPalette.success)
+                .frame(width: 30, height: 30)
+        case .timedOut, .failed:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(OnboardingPalette.warning)
+                .frame(width: 30, height: 30)
+        case .idle, .preparing, .syncing:
+            ProgressView()
+                .scaleEffect(0.82)
+                .frame(width: 30, height: 30)
+        }
+    }
+
+    private var title: String {
+        switch state.chainReadinessState {
+        case .idle:
+            return "Ready to start"
+        case .preparing:
+            return "Starting local daemon"
+        case .syncing:
+            return state.chainReadinessIsTakingLonger ? "Still syncing Helios" : "Syncing Helios"
+        case .ready:
+            return "Verified reads ready"
+        case .timedOut:
+            return "Sync timed out"
+        case .failed:
+            return "Sync failed"
+        }
+    }
+
+    private var detail: String {
+        switch state.chainReadinessState {
+        case .idle:
+            return "The app will start wallet-node before opening the dashboard."
+        case .preparing:
+            return "macOS may ask for biometric authentication to unlock the local bundler key."
+        case .syncing(let status):
+            if let status {
+                return "wallet-node reports \(status.status.replacingOccurrences(of: "_", with: " ")) on \(status.networkProfile)."
+            }
+            return "Waiting for wallet-node to report Helios readiness."
+        case .ready(let status):
+            if let head = status.helios.head {
+                return "Helios is ready on \(status.networkProfile) at block #\(head.number)."
+            }
+            return "Helios is ready on \(status.networkProfile)."
+        case .timedOut:
+            return "This attempt reached the onboarding timeout. Retry, or go back and check the RPC URLs."
+        case .failed(let message):
+            return message
+        }
+    }
+
+    private var elapsedText: String {
+        let elapsed = max(0, Int(state.chainReadinessElapsed.rounded(.down)))
+        let minutes = elapsed / 60
+        let seconds = elapsed % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    private var progressColor: Color {
+        switch state.chainReadinessState {
+        case .ready:
+            return OnboardingPalette.success
+        case .timedOut, .failed:
+            return OnboardingPalette.warning
+        case .idle, .preparing, .syncing:
+            return OnboardingPalette.accent
+        }
+    }
+}
+
+private struct ReadinessProgressRow: View {
+    let icon: String
+    let title: String
+    let detail: String
+    let badge: String
+    let color: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(color)
+                .frame(width: 24, height: 24)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(OnboardingPalette.primaryText)
+                    Text(badge)
+                        .font(.system(size: 9, weight: .black, design: .monospaced))
+                        .foregroundStyle(color)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(color.opacity(0.12)))
+                }
+                Text(detail)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(OnboardingPalette.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+    }
+}
+
 private struct OnboardingTwoColumn<Content: View>: View {
     let illustration: EthereumIllustrationKind
     let headline: String
@@ -807,6 +1369,7 @@ private enum EthereumIllustrationKind {
     case network
     case model
     case keys
+    case sync
 }
 
 private struct EthereumConstellation: View {
@@ -865,6 +1428,8 @@ private struct EthereumIllustration: View {
                 ModelCore()
             case .keys:
                 KeyOrbit()
+            case .sync:
+                SyncOrbit()
             }
         }
     }
@@ -877,6 +1442,8 @@ private struct EthereumIllustration: View {
             return OnboardingPalette.ethereumViolet
         case .keys:
             return OnboardingPalette.ethereumGold
+        case .sync:
+            return OnboardingPalette.success
         }
     }
 }
@@ -1008,6 +1575,55 @@ private struct KeyOrbit: View {
             }
             .rotationEffect(.degrees(-18))
             .offset(x: 62, y: 96)
+        }
+    }
+}
+
+private struct SyncOrbit: View {
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(OnboardingPalette.success.opacity(0.54), style: StrokeStyle(lineWidth: 3, dash: [10, 10]))
+                .frame(width: 278, height: 278)
+
+            ForEach(0..<4, id: \.self) { index in
+                ZStack {
+                    Circle()
+                        .fill(OnboardingPalette.panel)
+                        .overlay(Circle().stroke(OnboardingPalette.success, lineWidth: 2))
+                        .frame(width: 54, height: 54)
+                    Image(systemName: symbol(for: index))
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(OnboardingPalette.success)
+                }
+                .offset(offset(for: index))
+            }
+        }
+    }
+
+    private func symbol(for index: Int) -> String {
+        switch index {
+        case 0:
+            return "server.rack"
+        case 1:
+            return "checkmark.shield"
+        case 2:
+            return "link"
+        default:
+            return "wallet.pass"
+        }
+    }
+
+    private func offset(for index: Int) -> CGSize {
+        switch index {
+        case 0:
+            return CGSize(width: -132, height: -4)
+        case 1:
+            return CGSize(width: 0, height: -136)
+        case 2:
+            return CGSize(width: 132, height: -4)
+        default:
+            return CGSize(width: 0, height: 136)
         }
     }
 }

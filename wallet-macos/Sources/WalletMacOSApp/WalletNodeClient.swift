@@ -99,6 +99,34 @@ struct WalletNodeClient {
         let replacement: ReplacementStatus?
     }
 
+    struct NetworkStatus: Equatable {
+        struct BlockHead: Equatable {
+            let number: UInt64
+            let hash: String
+        }
+
+        struct Helios: Equatable {
+            let ready: Bool
+            let checkpointLoaded: Bool
+            let checkpointAgeDays: Double?
+            let head: BlockHead?
+        }
+
+        struct Bundler: Equatable {
+            let ready: Bool
+            let needsTopup: Bool?
+            let reason: String?
+            let eoa: String?
+        }
+
+        let status: String
+        let reason: String?
+        let chainId: UInt64
+        let networkProfile: String
+        let helios: Helios
+        let bundler: Bundler?
+    }
+
     struct UserOperationGasEstimate: Equatable {
         let callGasLimit: Data
         let verificationGasLimit: Data
@@ -217,6 +245,14 @@ struct WalletNodeClient {
             throw ClientError.invalidResponse
         }
         return try RelayerStatus(json: object)
+    }
+
+    func networkStatus() async throws -> NetworkStatus {
+        let result = try await call(method: "wallet_networkStatus", params: [])
+        guard let object = result as? [String: Any] else {
+            throw ClientError.invalidResponse
+        }
+        return try NetworkStatus(json: object)
     }
 
     func supportedEntryPoints() async throws -> [String] {
@@ -849,6 +885,117 @@ extension WalletNodeClient.RelayerStatus {
             latestAuditEvent: latestAuditEvent,
             replacement: replacement
         )
+    }
+}
+
+extension WalletNodeClient.NetworkStatus {
+    init(json: [String: Any]) throws {
+        guard let status = json["status"] as? String,
+              let chainId = Self.uint64(from: json["chainId"]),
+              let networkProfile = json["networkProfile"] as? String,
+              let heliosJSON = json["helios"] as? [String: Any]
+        else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+
+        self.init(
+            status: status,
+            reason: Self.optionalString(json["reason"]),
+            chainId: chainId,
+            networkProfile: networkProfile,
+            helios: try Helios(json: heliosJSON),
+            bundler: (json["bundler"] as? [String: Any]).flatMap { Bundler(json: $0) }
+        )
+    }
+
+    private static func optionalString(_ value: Any?) -> String? {
+        if value == nil || value is NSNull {
+            return nil
+        }
+        return value as? String
+    }
+
+    private static func uint64(from value: Any?) -> UInt64? {
+        if let value = value as? UInt64 {
+            return value
+        }
+        if let value = value as? Int, value >= 0 {
+            return UInt64(value)
+        }
+        if let value = value as? NSNumber {
+            return value.uint64Value
+        }
+        if let value = value as? String {
+            return UInt64(value)
+        }
+        return nil
+    }
+}
+
+extension WalletNodeClient.NetworkStatus.Helios {
+    init(json: [String: Any]) throws {
+        guard let ready = json["ready"] as? Bool,
+              let checkpointLoaded = json["checkpointLoaded"] as? Bool
+        else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+
+        self.init(
+            ready: ready,
+            checkpointLoaded: checkpointLoaded,
+            checkpointAgeDays: json["checkpointAgeDays"] as? Double,
+            head: (json["head"] as? [String: Any]).flatMap {
+                WalletNodeClient.NetworkStatus.BlockHead(json: $0)
+            }
+        )
+    }
+}
+
+extension WalletNodeClient.NetworkStatus.BlockHead {
+    init?(json: [String: Any]) {
+        guard let number = Self.uint64(from: json["number"]),
+              let hash = json["hash"] as? String
+        else {
+            return nil
+        }
+        self.init(number: number, hash: hash)
+    }
+
+    private static func uint64(from value: Any?) -> UInt64? {
+        if let value = value as? UInt64 {
+            return value
+        }
+        if let value = value as? Int, value >= 0 {
+            return UInt64(value)
+        }
+        if let value = value as? NSNumber {
+            return value.uint64Value
+        }
+        if let value = value as? String {
+            return UInt64(value)
+        }
+        return nil
+    }
+}
+
+extension WalletNodeClient.NetworkStatus.Bundler {
+    init?(json: [String: Any]) {
+        guard let ready = json["ready"] as? Bool else {
+            return nil
+        }
+        self.init(
+            ready: ready,
+            needsTopup: json["needsTopup"] as? Bool,
+            reason: Self.optionalString(json["reason"]),
+            eoa: Self.optionalString(json["eoa"])
+        )
+    }
+
+    private static func optionalString(_ value: Any?) -> String? {
+        if value == nil || value is NSNull {
+            return nil
+        }
+        return value as? String
     }
 }
 

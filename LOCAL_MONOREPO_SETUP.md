@@ -16,8 +16,9 @@ The macOS app is developed as a local monorepo made of three sibling Git checkou
 
 Install these before opening the app in Xcode:
 
-- macOS on Apple Silicon.
-- Xcode, with Command Line Tools installed.
+- macOS 14.0 or newer on Apple Silicon.
+- 16 GB RAM minimum for the local Gemma 4 E4B model setup.
+- Xcode 16 or newer, with Command Line Tools installed.
 - An Apple Development team selected in Xcode for local app signing.
 - Homebrew.
 - Rust, preferably installed with `rustup`.
@@ -36,6 +37,8 @@ If `rustup` is not installed yet, install it from `https://rustup.rs/`, open a n
 ```bash
 brew install ggml
 ```
+
+The packaged v0.1 alpha app is built for macOS 14+. For release packaging, do not assume the Homebrew `llama.cpp`/`ggml` bottles on your current machine are macOS 14-compatible; use `LOCAL_LLAMA_PREFIX` with dylibs compiled for `CMAKE_OSX_DEPLOYMENT_TARGET=14.0` as described in `scripts/README.md`.
 
 ## Clone The Local Monorepo
 
@@ -117,23 +120,17 @@ Build `wallet-node` from the sibling daemon repository:
 
 ```bash
 cd ../local-wallet-daemon
-cargo build -p wallet-node
-cd ../local-wallet-mac
-```
-
-The Xcode app can discover the daemon at the default sibling path:
-
-```text
-../local-wallet-daemon/target/debug/wallet-node
-```
-
-For a release daemon:
-
-```bash
-cd ../local-wallet-daemon
 cargo build -p wallet-node --release
 cd ../local-wallet-mac
 ```
+
+The checked-in Xcode scheme points at the release daemon by default:
+
+```text
+../local-wallet-daemon/target/release/wallet-node
+```
+
+The app can also fall back to `../local-wallet-daemon/target/debug/wallet-node`, but release is the recommended local path because it matches the Xcode scheme and packaged app behavior.
 
 If your daemon is somewhere else, set an absolute path before launching Xcode from the same shell:
 
@@ -168,6 +165,8 @@ Local Xcode development does not require the GGUF model to be embedded in the ap
 ```
 
 If the model is already present there, the app will reuse it. Packaged demo builds may embed the model, but normal Xcode development should treat the model as a local runtime asset installed during setup.
+
+The recommended Gemma 4 E4B Q4_K_M GGUF is a 5.34 GB download and local setup is blocked on Macs with less than 16 GB RAM.
 
 ## Optional Hosted Bundler Endpoint
 
@@ -211,7 +210,7 @@ Build the daemon first:
 
 ```bash
 cd ../local-wallet-daemon
-cargo build -p wallet-node
+cargo build -p wallet-node --release
 cd ../local-wallet-mac
 ```
 
@@ -228,7 +227,7 @@ Open and run `LocalWallet.xcodeproj` in Xcode. The GUI app needs a signed macOS 
 
 ### llama.cpp or ggml linker errors
 
-Install or reinstall the Homebrew libraries:
+For local Xcode development, install or reinstall the Homebrew libraries:
 
 ```bash
 brew install llama.cpp ggml
@@ -236,6 +235,8 @@ brew reinstall llama.cpp
 ```
 
 Then rebuild the FFI bridge and app.
+
+For release packaging, verify the embedded `llama.cpp`/`ggml` dylibs are built for macOS 14.0 or older. Recent Homebrew bottles can be built with a newer deployment target on newer macOS versions; in that case, build a local macOS 14-compatible prefix and pass it with `LOCAL_LLAMA_PREFIX`.
 
 ### Xcode project is out of date
 

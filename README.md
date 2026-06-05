@@ -19,6 +19,25 @@ This is not the final product wallet UX. Treat it as an experimental working imp
 | `local-wallet-daemon` | `wallet-node`, `wallet-bundler`, `wallet-chain`, `wallet-node-api`, `wallet-node-store` — daemon binary and supporting libraries |
 | `local-wallet-mac` (this repo) | macOS app, `wallet-ffi`, `swift-bridge`, Xcode project, scripts |
 
+## Requirements
+
+Runtime requirements for the v0.1 alpha app:
+
+- macOS 14.0 or newer.
+- Apple Silicon Mac (`arm64`).
+- 16 GB RAM minimum for the local Gemma 4 E4B model setup.
+- Network access for Ethereum RPC/consensus endpoints and first-run model download.
+- A signed macOS app bundle for Secure Enclave and Keychain flows.
+
+Additional requirements for local development:
+
+- Xcode 16 or newer with Command Line Tools installed.
+- An Apple Development team selected in Xcode for local app signing.
+- Homebrew.
+- Rust via `rustup`, with the `aarch64-apple-darwin` target installed.
+- `cbindgen`, `xcodegen`, `llama.cpp`, and `ggml`.
+- Sibling checkouts of `local-wallet-protocol` and `local-wallet-daemon`.
+
 ## Repository Map
 
 | Path | Purpose |
@@ -68,7 +87,7 @@ This compiles `wallet-ffi` for `aarch64-apple-darwin`, runs `cbindgen`, and stag
 **Step 4: Build the daemon**
 
 ```bash
-cd ../local-wallet-daemon && cargo build -p wallet-node
+cd ../local-wallet-daemon && cargo build -p wallet-node --release
 ```
 
 **Step 5: Open and run**

@@ -1,7 +1,10 @@
 // swift-tools-version: 6.0
+import Foundation
 import PackageDescription
 
-let homebrewPrefix = "/opt/homebrew"
+let llamaPrefix = ProcessInfo.processInfo.environment["LOCAL_LLAMA_PREFIX"] ?? "/opt/homebrew"
+let llamaIncludeDir = ProcessInfo.processInfo.environment["LOCAL_LLAMA_INCLUDE_DIR"] ?? "\(llamaPrefix)/include"
+let llamaLibDir = ProcessInfo.processInfo.environment["LOCAL_LLAMA_LIB_DIR"] ?? "\(llamaPrefix)/lib"
 
 let package = Package(
     name: "LocalLLM",
@@ -16,7 +19,7 @@ let package = Package(
             path: "Sources/CLlamaBridge",
             publicHeadersPath: "include",
             cxxSettings: [
-                .unsafeFlags(["-I\(homebrewPrefix)/include", "-std=c++17"]),
+                .unsafeFlags(["-I\(llamaIncludeDir)", "-std=c++17"]),
                 // Headers vendored from llama.cpp common/ are ready for Task 1.1+
                 // (chat_render / parse_assistant_turn). CLlamaBridge.cpp does not
                 // yet consume them; the search path is in place so the next task
@@ -25,7 +28,7 @@ let package = Package(
                 .define("LLAMA_USE_CURL", to: "0"),
             ],
             linkerSettings: [
-                .unsafeFlags(["-L\(homebrewPrefix)/lib"]),
+                .unsafeFlags(["-L\(llamaLibDir)"]),
                 .linkedLibrary("llama"),
                 .linkedLibrary("llama-common"),
                 .linkedLibrary("ggml"),

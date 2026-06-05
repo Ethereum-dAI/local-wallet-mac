@@ -139,7 +139,7 @@ For packaged demo builds, use the same variable when running the package script:
 LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..." ./scripts/package-macos-demo.sh
 ```
 
-The package script builds the sibling `wallet-node` daemon, embeds it at `Contents/Resources/bin/wallet-node`, copies llama.cpp/ggml dynamic libraries into `Contents/Frameworks`, injects the URL into the built app's `Info.plist` when set, and re-signs that copied app bundle. The v0.1 alpha zip does not embed the recommended GGUF model by default; onboarding installs the model during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` only for a large self-contained demo build. If the bundler URL variable is not set, the app still builds and the chat tool path can use local `wallet-node`; hosted composer submission is disabled.
+The package script builds the sibling `wallet-node` daemon, embeds it at `Contents/Resources/bin/wallet-node`, copies llama.cpp/ggml dynamic libraries into `Contents/Frameworks`, verifies embedded Mach-O deployment targets, injects the URL into the built app's `Info.plist` when set, and re-signs that copied app bundle. The v0.1 alpha zip targets macOS 14+ on Apple Silicon and does not embed the recommended GGUF model by default; onboarding installs the model during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` only for a large self-contained demo build. If the bundler URL variable is not set, the app still builds and the chat tool path can use local `wallet-node`; hosted composer submission is disabled. If Homebrew llama.cpp/ggml was built for a newer macOS, point `LOCAL_LLAMA_PREFIX` at a macOS 14-compatible local build before packaging.
 
 ---
 

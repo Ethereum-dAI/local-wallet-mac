@@ -1,15 +1,15 @@
 # LocalLLM
 
-Swift package providing a local LLM inference bridge for the Local Wallet macOS app, backed by llama.cpp via Homebrew.
+Swift package providing a local LLM inference bridge for the Local Wallet macOS app, backed by llama.cpp.
 
 ## llama.cpp linkage
 
-`libllama`, `libggml`, `libggml-base`, `libllama-common` come from Homebrew (`/opt/homebrew/lib`). The `common/` C++ headers we need (`common_chat_parse`, `common_chat_templates_init`, `common_chat_templates_apply`, the modular jinja renderer) are vendored under `Sources/CLlamaBridge/third_party/llama_cpp_common/` (**headers only** — the implementations live in `libllama-common.dylib` from Homebrew, so we don't recompile them). Both the Homebrew artifacts and the vendored headers must originate from the **same upstream commit**, recorded here:
+`libllama`, `libggml`, `libggml-base`, and `libllama-common` are resolved from `LOCAL_LLAMA_PREFIX`, `LOCAL_LLAMA_INCLUDE_DIR`, or `LOCAL_LLAMA_LIB_DIR` when set, falling back to Homebrew (`/opt/homebrew`). The `common/` C++ headers we need (`common_chat_parse`, `common_chat_templates_init`, `common_chat_templates_apply`, the modular jinja renderer) are vendored under `Sources/CLlamaBridge/third_party/llama_cpp_common/` (**headers only** — the implementations live in `libllama-common.dylib`). Both the linked llama.cpp artifacts and the vendored headers must originate from the **same upstream commit**, recorded here:
 
 - llama.cpp pinned commit: `3e12fbdea5c1ac4225c7dcf79506d30950283fc3` (Homebrew bottle b9200)
 - Vendored from: `https://github.com/ggml-org/llama.cpp/tree/3e12fbdea5c1ac4225c7dcf79506d30950283fc3/common`
 
-When Homebrew bumps `llama.cpp`, re-vendor the `common/` headers from the matching commit and run `swift test` to catch ABI drift early (see `Sources/CLlamaBridge/third_party/llama_cpp_common/COMMIT` for the step-by-step procedure).
+When Homebrew or the release build prefix bumps `llama.cpp`, re-vendor the `common/` headers from the matching commit and run `swift test` to catch ABI drift early (see `Sources/CLlamaBridge/third_party/llama_cpp_common/COMMIT` for the step-by-step procedure). For release packaging, prefer a local llama.cpp/ggml prefix compiled with `CMAKE_OSX_DEPLOYMENT_TARGET=14.0` and `CMAKE_OSX_ARCHITECTURES=arm64`.
 
 ## Minja / template-render spike (2026-05-18)
 

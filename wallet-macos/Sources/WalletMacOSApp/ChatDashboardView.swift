@@ -334,12 +334,31 @@ struct ChatSwapPreview: Equatable {
     let toToken: WalletToken
     let amount: String
     let quote: SwapQuote
+    let quotedAt: Date
 }
 
 enum ChatSwapPreflightStatus: Equatable {
     case quoting
     case quoted(ChatSwapPreview)
     case failed(String)
+}
+
+enum ChatPreflightReusePolicy {
+    static let swapQuoteTTL: TimeInterval = 30
+
+    static func canReuseSwapQuote(
+        preview: ChatSwapPreview,
+        fromToken: WalletToken,
+        toToken: WalletToken,
+        amount: String,
+        now: Date = Date(),
+        ttl: TimeInterval = swapQuoteTTL
+    ) -> Bool {
+        preview.fromToken == fromToken
+            && preview.toToken == toToken
+            && preview.amount.trimmingCharacters(in: .whitespacesAndNewlines) == amount.trimmingCharacters(in: .whitespacesAndNewlines)
+            && now.timeIntervalSince(preview.quotedAt) <= ttl
+    }
 }
 
 private enum ChatIntentExecutionError: LocalizedError {
@@ -469,6 +488,9 @@ private final class ChatDashboardModel: ObservableObject {
     private let walletModel: AppModel
     private var executingIntentIDs: Set<UUID> = []
     private var lastTokenBalanceKey: String?
+    private var lastTokenBalanceAttemptKey: String?
+    private var lastTokenBalanceAttemptAt: Date?
+    private static let tokenBalanceRetryCooldown: TimeInterval = 20
 
     init(
         inferenceService: EmbeddedLlamaInferenceService = EmbeddedLlamaInferenceService(),
@@ -543,7 +565,6 @@ private final class ChatDashboardModel: ObservableObject {
         }
         backfillWalletHistoryFromChat()
         reloadWalletHistory()
-        refreshWalletHistory()
         refreshTokenBalancesIfNeeded()
     }
 
@@ -565,7 +586,11 @@ private final class ChatDashboardModel: ObservableObject {
         let headWei = walletModel.liveBaseFeeWei ?? price.standard.maxFeePerGas
         let head = GasPricing.gweiText(fromWei: headWei)
         let priority = GasPricing.gweiText(fromWei: price.standard.maxPriorityFeePerGas)
-        return "\(head) / \(priority) gwei"
+        let policy = walletModel.networkSettings
+        let policyText = policy.autoGasModeEnabled
+            ? "Auto \(policy.autoGasTier.label)"
+            : "Cap \(policy.activeMaxFeePerGasGwei)/\(policy.activeMaxPriorityFeePerGasGwei)"
+        return "Live \(head)/\(priority) · \(policyText)"
     }
 
     var gasBreakdown: GasBreakdownDisplay {
@@ -590,6 +615,17 @@ private final class ChatDashboardModel: ObservableObject {
         let mode = settings.autoGasModeEnabled
             ? "Auto · \(settings.autoGasTier.label.lowercased()) tier"
             : "Manual · capped at \(settings.activeMaxFeePerGasGwei)/\(settings.activeMaxPriorityFeePerGasGwei) gwei"
+        let appliedFee: (maxPriorityFeePerGas: Data, maxFeePerGas: Data)?
+        if let price {
+            appliedFee = GasPricing.resolveUserOperationFees(
+                gasPrice: price,
+                autoEnabled: settings.autoGasModeEnabled,
+                autoTier: settings.autoGasTier,
+                manualCap: settings.activeGasPolicy
+            )
+        } else {
+            appliedFee = nil
+        }
         return GasBreakdownDisplay(
             baseFee: baseFee,
             tiers: [
@@ -597,6 +633,9 @@ private final class ChatDashboardModel: ObservableObject {
                 row("standard", "Standard", price?.standard),
                 row("fast", "Fast", price?.fast),
             ],
+            policyTitle: "Applied userOp fee",
+            policyMaxFee: appliedFee.map { GasPricing.gweiText(fromWei: $0.maxFeePerGas) } ?? "—",
+            policyPriority: appliedFee.map { GasPricing.gweiText(fromWei: $0.maxPriorityFeePerGas) } ?? "—",
             modeText: mode,
             updatedText: updated
         )
@@ -890,12 +929,28 @@ private final class ChatDashboardModel: ObservableObject {
         guard kernelAddress.hasPrefix("0x"), bundlerAddress.hasPrefix("0x") else {
             return
         }
-
-        let key = "\(chain.id):\(kernelAddress.lowercased()):\(bundlerAddress.lowercased())"
-        guard force || key != lastTokenBalanceKey else {
+        if !force,
+           accountIdentity.kernelBalance == "Balance unavailable"
+            || accountIdentity.bundlerBalance == "Balance unavailable" {
             return
         }
-        lastTokenBalanceKey = key
+
+        let key = "\(chain.id):\(kernelAddress.lowercased()):\(bundlerAddress.lowercased())"
+        let hasIncompleteBalances = Self.hasIncompleteTokenBalances(kernelTokenBalances)
+            || Self.hasIncompleteTokenBalances(bundlerTokenBalances)
+        if !force,
+           let attemptKey = lastTokenBalanceAttemptKey,
+           attemptKey == key,
+           let attemptAt = lastTokenBalanceAttemptAt,
+           Date().timeIntervalSince(attemptAt) < Self.tokenBalanceRetryCooldown,
+           key != lastTokenBalanceKey {
+            return
+        }
+        guard force || key != lastTokenBalanceKey || hasIncompleteBalances else {
+            return
+        }
+        lastTokenBalanceAttemptKey = key
+        lastTokenBalanceAttemptAt = Date()
         isRefreshingTokenBalances = true
         tokenBalanceMessage = nil
 
@@ -906,7 +961,13 @@ private final class ChatDashboardModel: ObservableObject {
             let loaded = await (kernel, bundler)
             self.kernelTokenBalances = loaded.0
             self.bundlerTokenBalances = loaded.1
-            self.tokenBalanceMessage = nil
+            if Self.hasIncompleteTokenBalances(loaded.0) || Self.hasIncompleteTokenBalances(loaded.1) {
+                self.lastTokenBalanceKey = nil
+                self.tokenBalanceMessage = "Some token balances are unavailable."
+            } else {
+                self.lastTokenBalanceKey = key
+                self.tokenBalanceMessage = nil
+            }
             self.isRefreshingTokenBalances = false
         }
     }
@@ -1305,8 +1366,17 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     func confirmIntent(_ message: ChatMessage) {
-        if let intent = message.toolIntent,
-           let preflightStatus = transferPreflightStatuses[intent.id] {
+        let transferPreflightStatus = message.toolIntent.flatMap {
+            transferPreflightStatuses[$0.id]
+        }
+        let swapPreview: ChatSwapPreview? = message.toolIntent.flatMap { intent in
+            if case .quoted(let preview) = swapPreflightStatuses[intent.id] {
+                return preview
+            }
+            return nil
+        }
+        if message.toolIntent != nil,
+           let preflightStatus = transferPreflightStatus {
             switch preflightStatus {
             case .resolving, .failed:
                 return
@@ -1324,7 +1394,11 @@ private final class ChatDashboardModel: ObservableObject {
             }
         }
         if let intent = updateIntent(message, disposition: .confirmed, args: nil) {
-            executeIfSupported(intent)
+            executeIfSupported(
+                intent,
+                transferPreflightStatus: transferPreflightStatus,
+                swapPreview: swapPreview
+            )
         }
     }
 
@@ -1496,7 +1570,8 @@ private final class ChatDashboardModel: ObservableObject {
                         fromToken: request.fromToken,
                         toToken: request.toToken,
                         amount: request.amount,
-                        quote: request.quote
+                        quote: request.quote,
+                        quotedAt: Date()
                     )
                 )
             } catch is CancellationError {
@@ -1595,10 +1670,17 @@ private final class ChatDashboardModel: ObservableObject {
 
     func saveNetworkSettings(_ settings: DemoNetworkSettings) throws -> String {
         let validated = try settings.validated()
+        let requiresRestart = NetworkSettingsChangePolicy.requiresWalletNodeRestart(
+            from: walletModel.networkSettings,
+            to: validated
+        )
         try walletModel.updateNetworkSettings(validated)
         onboardingSettingsStore.rpcURL = validated.sepoliaRPCURL
         onboardingSettingsStore.archiveNodeURL = validated.sepoliaArchiveNodeURL
         refreshAccountIdentity()
+        if !requiresRestart {
+            return "Saved \(validated.activeNetworkName) network settings. No wallet-node restart was needed."
+        }
         return "Saved \(validated.activeNetworkName) network settings. wallet-node will use max \(validated.activeMaxFeePerGasGwei) gwei and priority \(validated.activeMaxPriorityFeePerGasGwei) gwei caps."
     }
 
@@ -1812,6 +1894,10 @@ private final class ChatDashboardModel: ObservableObject {
         return rawBalance.isEmpty || rawBalance == "unavailable"
     }
 
+    private static func hasIncompleteTokenBalances(_ balances: [ChatTokenBalance]) -> Bool {
+        balances.isEmpty || balances.contains { $0.rawBalanceHex == nil }
+    }
+
     private static func latencyMilliseconds(since start: Date) -> Int {
         max(0, Int(Date().timeIntervalSince(start) * 1_000))
     }
@@ -1923,7 +2009,11 @@ private final class ChatDashboardModel: ObservableObject {
         return intent
     }
 
-    private func executeIfSupported(_ intent: ToolIntent) {
+    private func executeIfSupported(
+        _ intent: ToolIntent,
+        transferPreflightStatus: ChatTransferPreflightStatus? = nil,
+        swapPreview: ChatSwapPreview? = nil
+    ) {
         guard intent.tool == .transfer || intent.tool == .swap else {
             return
         }
@@ -1941,7 +2031,10 @@ private final class ChatDashboardModel: ObservableObject {
             do {
                 switch intent.tool {
                 case .transfer:
-                    let request = try await self.transferRequest(from: intent)
+                    let request = try await self.transferRequest(
+                        from: intent,
+                        preflightStatus: transferPreflightStatus
+                    )
                     let result: AppModel.UserOperationSendResult
                     let recipientLabel = request.recipientName.map {
                         "\($0) (\(request.recipient.walletDisplayShortAddress))"
@@ -1965,7 +2058,11 @@ private final class ChatDashboardModel: ObservableObject {
                     }
                     self.appendExecutionResult(result, for: intent, request: request)
                 case .swap:
-                    let request = try await self.swapRequest(from: intent, allowApprovalRequired: true)
+                    let request = try await self.swapRequest(
+                        from: intent,
+                        allowApprovalRequired: true,
+                        preview: swapPreview
+                    )
                     let signingAction = request.quote.requiresApproval && !request.fromToken.isNative
                         ? "Approve \(request.amount) \(request.fromToken.symbol) and authorize \(request.fromToken.symbol) to \(request.toToken.symbol) swap"
                         : "Authorize \(request.amount) \(request.fromToken.symbol) to \(request.toToken.symbol) swap"
@@ -1985,7 +2082,8 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     private func transferRequest(
-        from intent: ToolIntent
+        from intent: ToolIntent,
+        preflightStatus: ChatTransferPreflightStatus? = nil
     ) async throws -> ChatTransferRequest {
         guard !WalletTokenRegistry.tokens(on: walletModel.activeChain.id).isEmpty else {
             throw ChatIntentExecutionError.unsupportedChain
@@ -2025,6 +2123,20 @@ private final class ChatDashboardModel: ObservableObject {
             throw ChatIntentExecutionError.invalidTransferRecipient
         }
 
+        if case .resolved(let resolvedName) = preflightStatus {
+            let recipientBytes = try Data(hexString: resolvedName.address)
+            guard recipientBytes.count == 20 else {
+                throw ChatIntentExecutionError.unsupportedENSRecipient
+            }
+            return ChatTransferRequest(
+                recipient: "0x" + recipientBytes.hexEncodedString,
+                recipientName: resolvedName.normalizedName,
+                resolvedName: resolvedName,
+                amount: rawAmount,
+                token: token
+            )
+        }
+
         do {
             let resolvedName = try await walletModel.resolveName(rawRecipient)
             let recipientBytes = try Data(hexString: resolvedName.address)
@@ -2048,7 +2160,8 @@ private final class ChatDashboardModel: ObservableObject {
 
     private func swapRequest(
         from intent: ToolIntent,
-        allowApprovalRequired: Bool = false
+        allowApprovalRequired: Bool = false,
+        preview: ChatSwapPreview? = nil
     ) async throws -> ChatSwapRequest {
         guard !WalletTokenRegistry.tokens(on: walletModel.activeChain.id).isEmpty else {
             throw ChatIntentExecutionError.unsupportedChain
@@ -2077,11 +2190,22 @@ private final class ChatDashboardModel: ObservableObject {
             throw ChatIntentExecutionError.unsupportedSwapAmount
         }
         _ = try EtherAmountParser.units(fromDecimalString: rawAmount, decimals: fromToken.decimals)
-        let quote = try await walletModel.quoteExactInputSwap(
-            from: fromToken,
-            to: toToken,
+        let quote: SwapQuote
+        if let preview,
+           ChatPreflightReusePolicy.canReuseSwapQuote(
+            preview: preview,
+            fromToken: fromToken,
+            toToken: toToken,
             amount: rawAmount
-        )
+           ) {
+            quote = preview.quote
+        } else {
+            quote = try await walletModel.quoteExactInputSwap(
+                from: fromToken,
+                to: toToken,
+                amount: rawAmount
+            )
+        }
         if quote.requiresApproval && !allowApprovalRequired {
             throw AppError.swapApprovalRequired(fromToken.symbol)
         }

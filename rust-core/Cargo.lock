@@ -1871,7 +1871,7 @@ dependencies = [
 [[package]]
 name = "wallet-node-api"
 version = "0.1.0"
-source = "git+https://github.com/Ethereum-dAI/local-wallet-daemon.git?rev=f33bfb48477ba253bba5238ac1dbe088ab6a8de7#f33bfb48477ba253bba5238ac1dbe088ab6a8de7"
+source = "git+https://github.com/Ethereum-dAI/local-wallet-daemon.git?rev=ce2d9812ee55f532fe58bb615273a82964353bb5#ce2d9812ee55f532fe58bb615273a82964353bb5"
 dependencies = [
  "hex",
  "serde",

@@ -2,14 +2,14 @@
 
 Self-custodial Ethereum wallet for macOS with Secure Enclave key custody and ERC-4337 Kernel smart accounts.
 
-This is the macOS app repo. It is pre-1.0, open source (MIT/Apache-2.0), and paired with two sibling repositories:
+This is the macOS app repo. The current release line is **v0.1 alpha**: pre-1.0, under active development, not independently audited, and not production-ready custody software. It is open source (MIT/Apache-2.0) and paired with two sibling repositories:
 
 - **Protocol SDK** (`wallet-signature`, `wallet-kernel`, `wallet-addresses`): https://github.com/Ethereum-dAI/local-wallet-protocol
 - **Daemon** (`wallet-node` and supporting crates): https://github.com/Ethereum-dAI/local-wallet-daemon
 
 The mac app handles key custody (Secure Enclave + Keychain) and delegates verified chain reads, ERC-4337 bundling, and receipt tracking to the daemon process. The FFI bridge in `rust-core/crates/ffi/` connects them in-process for deterministic crypto operations.
 
-This is not the final product wallet UX. Treat it as a working implementation and reference app.
+This is not the final product wallet UX. Treat it as an experimental working implementation and reference app for early testers.
 
 ## Sibling Repos
 
@@ -130,7 +130,7 @@ For packaged demo builds:
 LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..." ./scripts/package-macos-demo.sh
 ```
 
-The package script builds and embeds `wallet-node`, copies the llama.cpp/ggml dynamic libraries into the app bundle, and signs the copied app. By default it also embeds the recommended GGUF model for a fully self-contained demo. Set `LOCAL_WALLET_EMBED_MODEL=0` to ship a smaller app and let onboarding download/install the model during setup.
+The package script builds and embeds `wallet-node`, copies the llama.cpp/ggml dynamic libraries into the app bundle, and signs the copied app. The v0.1 alpha zip does not embed the recommended GGUF model by default; onboarding downloads/installs it during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` only when you explicitly want a large self-contained demo build.
 
 ## Common Commands
 

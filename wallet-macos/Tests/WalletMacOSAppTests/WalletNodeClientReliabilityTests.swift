@@ -32,6 +32,14 @@ final class StubURLProtocol: URLProtocol {
                     "replacementOf": "0xoldSpeedTx",
                     "nonce": 7,
                 ]
+            case "localwallet_getUserOperationStatus":
+                result = [
+                    "userOpHash": "0xbeef",
+                    "status": "failed",
+                    "lastError": "auto_dropped_aged_no_receipt",
+                    "createdAt": 10,
+                    "updatedAt": 20,
+                ]
             default:
                 throw URLError(.badServerResponse)
             }
@@ -164,4 +172,14 @@ private func stubbedClient() -> WalletNodeClient {
 @Test func speedUpPendingOperationSendsRpcAndReturnsTxHash() async throws {
     let txHash = try await stubbedClient().speedUpPendingOperation(userOpHash: "0xbeef")
     #expect(txHash == "0xspeedTx")
+}
+
+@Test func getUserOperationStatusDecodesTerminalFailure() async throws {
+    let decoded = try await stubbedClient().getUserOperationStatus(userOpHash: "0xbeef")
+    let status = try #require(decoded)
+    #expect(status.userOpHash == "0xbeef")
+    #expect(status.status == "failed")
+    #expect(status.lastError == "auto_dropped_aged_no_receipt")
+    #expect(status.createdAt == 10)
+    #expect(status.updatedAt == 20)
 }

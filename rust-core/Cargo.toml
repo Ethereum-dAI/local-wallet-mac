@@ -14,7 +14,7 @@ wallet-kernel    = { git = "https://github.com/Ethereum-dAI/local-wallet-protoco
 wallet-addresses = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "221144d9b4ab95999c98c3fce40c8bc69b13a9e8" }
 
 # wallet-node-api from daemon (forces cbindgen materialization in build-ffi.sh).
-wallet-node-api  = { git = "https://github.com/Ethereum-dAI/local-wallet-daemon.git", rev = "f33bfb48477ba253bba5238ac1dbe088ab6a8de7" }
+wallet-node-api  = { git = "https://github.com/Ethereum-dAI/local-wallet-daemon.git", rev = "ce2d9812ee55f532fe58bb615273a82964353bb5" }
 
 # Other deps used by wallet-ffi (subset of monorepo):
 alloy-primitives = { version = "1.5", features = ["serde"] }

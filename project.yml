@@ -25,6 +25,8 @@ targets:
       properties:
         CFBundleDisplayName: Local Wallet
         CFBundleName: Local Wallet
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSApplicationCategoryType: public.app-category.finance
         NSPrincipalClass: NSApplication
     settings:
@@ -39,8 +41,8 @@ targets:
         MACOSX_DEPLOYMENT_TARGET: 14.0
         ARCHS: arm64
         EXCLUDED_ARCHS: x86_64
-        MARKETING_VERSION: 0.2.0
-        CURRENT_PROJECT_VERSION: 2
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
         OTHER_LDFLAGS: "$(inherited) -lsqlite3"
     dependencies:
       - package: WalletBridge
@@ -59,6 +61,7 @@ schemes:
     run:
       config: Debug
       environmentVariables:
-        WALLET_NODE_BIN: $(SRCROOT)/../local-wallet-daemon/target/debug/wallet-node
+        LOCAL_WALLET_NODE_BIN: $(SRCROOT)/../local-wallet-daemon/target/release/wallet-node
+        WALLET_NODE_BIN: $(SRCROOT)/../local-wallet-daemon/target/release/wallet-node
     archive:
       config: Release

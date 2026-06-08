@@ -722,12 +722,12 @@ struct LocalWalletOnboardingView: View {
         case .ready:
             return "Verified reads are ready. The dashboard can load live wallet state."
         case .timedOut:
-            return "Helios did not report ready within about two minutes. Check RPC settings or retry."
+            return "Helios did not report ready within 30 minutes. Check RPC settings or retry."
         case .failed:
             return "Sync failed. You can retry or go back to update RPC settings."
         case .idle, .preparing, .syncing:
             if state.chainReadinessIsTakingLonger {
-                return "This is taking longer than usual. Keep the app open; the step stops after about two minutes."
+                return "This is taking longer than usual. Keep the app open; the step stops after 30 minutes."
             }
             return "Starting wallet-node and waiting for Helios verified reads before opening the dashboard."
         }
@@ -1206,7 +1206,7 @@ private struct ReadinessStatusCard: View {
                     HStack(spacing: 8) {
                         Image(systemName: "clock.badge.exclamationmark")
                             .foregroundStyle(OnboardingPalette.warning)
-                        Text("Taking longer than usual. The app will stop this attempt around two minutes.")
+                        Text("Taking longer than usual. The app will stop this attempt after 30 minutes.")
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(OnboardingPalette.secondaryText)
                     }

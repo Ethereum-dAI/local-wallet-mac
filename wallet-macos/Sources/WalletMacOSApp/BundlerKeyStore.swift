@@ -182,7 +182,7 @@ struct BundlerKeyStore {
 
 enum BundlerSecretPromptReusePolicy {
     static let cacheTTL: TimeInterval = 10
-    static let onboardingHandoffCacheTTL: TimeInterval = 150
+    static let onboardingHandoffCacheTTL: TimeInterval = 31 * 60
     static let failureCooldown: TimeInterval = 4
     static let authenticationReuseDuration: TimeInterval = 10
 

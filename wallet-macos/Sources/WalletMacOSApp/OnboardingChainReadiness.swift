@@ -7,7 +7,7 @@ struct OnboardingChainReadinessTiming: Equatable {
 
     static let `default` = OnboardingChainReadinessTiming(
         takingLongerDelay: 60,
-        timeout: 120,
+        timeout: 30 * 60,
         pollInterval: 2
     )
 
@@ -27,7 +27,7 @@ enum OnboardingChainReadinessError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .timedOut:
-            return "Helios did not finish syncing within two minutes."
+            return "Helios did not finish syncing within 30 minutes."
         case let .probeFailed(step, message, _):
             return "Verified-read probe failed during \(step): \(message)"
         }

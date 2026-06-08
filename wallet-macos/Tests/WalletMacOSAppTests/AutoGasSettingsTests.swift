@@ -14,28 +14,47 @@ private func freshStore() -> DemoSettingsStore {
     #expect(settings.autoGasTier == .standard)
 }
 
-@Test func defaultSepoliaConsensusRPCUsesChainSafeLodestar() {
+@Test func defaultSepoliaRPCsUseDrpcAndNimbus() {
     let store = freshStore()
 
-    #expect(store.networkSettings.sepoliaConsensusRPCURL == "https://lodestar-sepolia.chainsafe.io")
+    #expect(store.networkSettings.sepoliaRPCURL == "https://sepolia.drpc.org")
+    #expect(store.networkSettings.sepoliaConsensusRPCURL == "http://unstable.sepolia.beacon-api.nimbus.team")
 }
 
-@Test func previousSepoliaConsensusDefaultMigratesToChainSafeLodestar() {
+@Test func previousSepoliaExecutionDefaultMigratesToDrpc() {
     let suite = UserDefaults(suiteName: "auto-gas-tests-\(UUID().uuidString)")!
     suite.set(
-        DemoNetworkSettings.previousDefaultSepoliaConsensusRPCURL,
+        DemoNetworkSettings.previousDefaultSepoliaRPCURLs[0],
+        forKey: "com.localwallet.demo.sepolia-rpc-url"
+    )
+    let store = DemoSettingsStore(defaults: suite)
+
+    #expect(store.networkSettings.sepoliaRPCURL == "https://sepolia.drpc.org")
+}
+
+@Test func previousSepoliaConsensusDefaultsMigrateToNimbus() {
+    for previousDefault in DemoNetworkSettings.previousDefaultSepoliaConsensusRPCURLs {
+        let suite = UserDefaults(suiteName: "auto-gas-tests-\(UUID().uuidString)")!
+        suite.set(
+            previousDefault,
+            forKey: "com.localwallet.demo.sepolia-consensus-rpc-url"
+        )
+        let store = DemoSettingsStore(defaults: suite)
+
+        #expect(store.networkSettings.sepoliaConsensusRPCURL == "http://unstable.sepolia.beacon-api.nimbus.team")
+    }
+}
+
+@Test func customSepoliaRPCsArePreserved() {
+    let suite = UserDefaults(suiteName: "auto-gas-tests-\(UUID().uuidString)")!
+    suite.set("https://example.com/execution", forKey: "com.localwallet.demo.sepolia-rpc-url")
+    suite.set(
+        "https://example.com/beacon",
         forKey: "com.localwallet.demo.sepolia-consensus-rpc-url"
     )
     let store = DemoSettingsStore(defaults: suite)
 
-    #expect(store.networkSettings.sepoliaConsensusRPCURL == "https://lodestar-sepolia.chainsafe.io")
-}
-
-@Test func customSepoliaConsensusRPCIsPreserved() {
-    let suite = UserDefaults(suiteName: "auto-gas-tests-\(UUID().uuidString)")!
-    suite.set("https://example.com/beacon", forKey: "com.localwallet.demo.sepolia-consensus-rpc-url")
-    let store = DemoSettingsStore(defaults: suite)
-
+    #expect(store.networkSettings.sepoliaRPCURL == "https://example.com/execution")
     #expect(store.networkSettings.sepoliaConsensusRPCURL == "https://example.com/beacon")
 }
 

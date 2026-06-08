@@ -80,6 +80,7 @@ private final class OnboardingState: ObservableObject {
     @Published var keyState: KeyState = .idle
     @Published var chainReadinessState: ChainReadinessState = .idle
     @Published var chainReadinessElapsed: TimeInterval = 0
+    @Published var chainReadinessLog: [String] = []
     @Published var hardwareProfile: LocalHardwareProfile?
 
     private let settingsStore: OnboardingSettingsStore
@@ -310,7 +311,9 @@ private final class OnboardingState: ObservableObject {
         let timing = chainReadinessTiming
         chainReadinessRunID = runID
         chainReadinessElapsed = 0
+        chainReadinessLog = []
         chainReadinessState = .preparing
+        appendChainReadinessLog("sync: starting readiness check", startedAt: startedAt)
         startChainReadinessTimer(startedAt: startedAt, runID: runID)
 
         chainReadinessTask = Task { @MainActor [weak self] in
@@ -321,26 +324,44 @@ private final class OnboardingState: ObservableObject {
             do {
                 let status = try await service.waitForHeliosReady(
                     kernelAddress: kernelAddress,
-                    timing: timing
-                ) { [weak self] status in
-                    guard let self, self.chainReadinessRunID == runID else {
-                        return
+                    timing: timing,
+                    onEvent: { [weak self] message in
+                        guard let self, self.chainReadinessRunID == runID else {
+                            return
+                        }
+                        self.appendChainReadinessLog(message, startedAt: startedAt)
+                    },
+                    onStatus: { [weak self] status in
+                        guard let self, self.chainReadinessRunID == runID else {
+                            return
+                        }
+                        self.chainReadinessState = .syncing(status)
                     }
-                    self.chainReadinessState = .syncing(status)
-                }
+                )
                 guard self.chainReadinessRunID == runID, !Task.isCancelled else {
                     return
                 }
                 self.chainReadinessElapsed = Date().timeIntervalSince(startedAt)
                 self.chainReadinessState = .ready(status)
+                self.appendChainReadinessLog("sync: completed successfully", startedAt: startedAt)
                 self.stopChainReadinessTimer(runID: runID)
             } catch is CancellationError {
-            } catch OnboardingChainReadinessError.timedOut(let lastStatus) {
+            } catch let readinessError as OnboardingChainReadinessError {
                 guard self.chainReadinessRunID == runID else {
                     return
                 }
                 self.chainReadinessElapsed = Date().timeIntervalSince(startedAt)
-                self.chainReadinessState = .timedOut(lastStatus)
+                switch readinessError {
+                case .timedOut(let lastStatus):
+                    self.chainReadinessState = .timedOut(lastStatus)
+                    self.appendChainReadinessLog("sync: timed out waiting for verified reads", startedAt: startedAt)
+                case .probeFailed(_, _, let lastStatus):
+                    self.chainReadinessState = .failed(readinessError.localizedDescription)
+                    if let lastStatus {
+                        self.appendChainReadinessLog("sync: last status before probe failure \(lastStatus.onboardingDebugSummary)", startedAt: startedAt)
+                    }
+                    self.appendChainReadinessLog("sync: failed - \(readinessError.localizedDescription)", startedAt: startedAt)
+                }
                 self.stopChainReadinessTimer(runID: runID)
             } catch {
                 guard self.chainReadinessRunID == runID else {
@@ -348,6 +369,7 @@ private final class OnboardingState: ObservableObject {
                 }
                 self.chainReadinessElapsed = Date().timeIntervalSince(startedAt)
                 self.chainReadinessState = .failed(error.localizedDescription)
+                self.appendChainReadinessLog("sync: failed - \(error.localizedDescription)", startedAt: startedAt)
                 self.stopChainReadinessTimer(runID: runID)
             }
         }
@@ -368,6 +390,7 @@ private final class OnboardingState: ObservableObject {
         chainReadinessTimerTask = nil
         if reset {
             chainReadinessElapsed = 0
+            chainReadinessLog = []
             chainReadinessState = .idle
         }
     }
@@ -393,6 +416,15 @@ private final class OnboardingState: ObservableObject {
         chainReadinessTask = nil
         chainReadinessTimerTask?.cancel()
         chainReadinessTimerTask = nil
+    }
+
+    private func appendChainReadinessLog(_ message: String, startedAt: Date) {
+        let elapsed = Date().timeIntervalSince(startedAt)
+        let line = String(format: "[%06.2fs] %@", elapsed, message)
+        chainReadinessLog.append(line)
+        if chainReadinessLog.count > 80 {
+            chainReadinessLog.removeFirst(chainReadinessLog.count - 80)
+        }
     }
 
     private func persistNetwork() {
@@ -1023,6 +1055,7 @@ private struct SyncStep: View {
                     }
                     .padding(16)
                 }
+                ReadinessLogCard(entries: state.chainReadinessLog)
             }
         }
         .task {
@@ -1258,6 +1291,55 @@ private struct ReadinessStatusCard: View {
             return OnboardingPalette.warning
         case .idle, .preparing, .syncing:
             return OnboardingPalette.accent
+        }
+    }
+}
+
+private struct ReadinessLogCard: View {
+    let entries: [String]
+
+    var body: some View {
+        OnboardingGlassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(OnboardingPalette.accent)
+                    Text("Readiness log")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(OnboardingPalette.primaryText)
+                    Spacer()
+                }
+
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 5) {
+                            if entries.isEmpty {
+                                Text("No readiness events yet.")
+                                    .foregroundStyle(OnboardingPalette.mutedText)
+                                    .id("empty")
+                            } else {
+                                ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
+                                    Text(entry)
+                                        .textSelection(.enabled)
+                                        .id(index)
+                                }
+                            }
+                        }
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(OnboardingPalette.secondaryText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(height: 112)
+                    .onChange(of: entries.count) { _, count in
+                        guard count > 0 else {
+                            return
+                        }
+                        proxy.scrollTo(count - 1, anchor: .bottom)
+                    }
+                }
+            }
+            .padding(14)
         }
     }
 }

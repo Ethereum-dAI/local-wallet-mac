@@ -53,7 +53,7 @@ struct ChainConfiguration: Equatable {
         isTestnet: true,
         rpcURL: URL(string: "https://ethereum-sepolia-rpc.publicnode.com")!,
         archiveRPCURL: nil,
-        consensusRPCURL: URL(string: "https://ethereum-sepolia-beacon-api.publicnode.com")!,
+        consensusRPCURL: URL(string: "https://lodestar-sepolia.chainsafe.io")!,
         bundlerURL: configuredSepoliaBundlerURL(),
         entryPoint: "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
         kernel: KernelContractAddresses(

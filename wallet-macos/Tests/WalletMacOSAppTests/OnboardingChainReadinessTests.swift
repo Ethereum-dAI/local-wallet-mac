@@ -78,3 +78,35 @@ import Testing
     #expect(status.helios.head == nil)
     #expect(status.bundler?.reason == "verified_reads_not_ready")
 }
+
+@Test func onboardingDebugSummaryIncludesHeliosHeadAndBundlerReason() throws {
+    let status = try WalletNodeClient.NetworkStatus(json: [
+        "status": "degraded",
+        "reason": "helios_lagging",
+        "chainId": 11_155_111,
+        "networkProfile": "sepolia",
+        "helios": [
+            "ready": true,
+            "checkpointLoaded": true,
+            "checkpointAgeDays": 0.125,
+            "head": [
+                "number": 7_654_321,
+                "hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+            ],
+        ],
+        "bundler": [
+            "ready": false,
+            "eoa": "0x1111111111111111111111111111111111111111",
+            "needsTopup": true,
+            "reason": "bundler_eoa_needs_topup",
+        ],
+    ])
+
+    let summary = status.onboardingDebugSummary
+
+    #expect(summary.contains("status=degraded"))
+    #expect(summary.contains("helios.ready=true"))
+    #expect(summary.contains("head=#7654321"))
+    #expect(summary.contains("bundler.reason=bundler_eoa_needs_topup"))
+    #expect(summary.contains("reason=helios_lagging"))
+}

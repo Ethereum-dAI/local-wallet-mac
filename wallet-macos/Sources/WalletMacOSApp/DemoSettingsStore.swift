@@ -45,6 +45,8 @@ struct DemoNetworkSettings: Equatable {
         autoGasTier: .standard
     )
 
+    static let previousDefaultSepoliaConsensusRPCURL = "https://ethereum-sepolia-beacon-api.publicnode.com"
+
     var activeChain: ChainConfiguration {
         let base = isTestnetModeEnabled ? ChainConfiguration.ethereumSepolia : ChainConfiguration.ethereum
         return base.overridingNetworkURLs(
@@ -177,6 +179,20 @@ struct DemoNetworkSettings: Equatable {
         return url.absoluteString
     }
 
+    static func defaultingSepoliaConsensusRPCURL(_ value: String?) -> String {
+        guard let value else {
+            return defaults.sepoliaConsensusRPCURL
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            return defaults.sepoliaConsensusRPCURL
+        }
+        if trimmed == previousDefaultSepoliaConsensusRPCURL {
+            return defaults.sepoliaConsensusRPCURL
+        }
+        return trimmed
+    }
+
     private static func url(from value: String) -> URL? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.isEmpty == false else {
@@ -251,9 +267,10 @@ struct DemoSettingsStore {
             sepoliaArchiveNodeURL: defaults.string(forKey: Keys.sepoliaArchiveNodeURL)
                 ?? defaults.string(forKey: Keys.legacyOnboardingArchiveNodeURL)
                 ?? DemoNetworkSettings.defaults.sepoliaArchiveNodeURL,
-            sepoliaConsensusRPCURL: defaults.string(forKey: Keys.sepoliaConsensusRPCURL)
-                ?? defaults.string(forKey: Keys.legacyOnboardingConsensusRPCURL)
-                ?? DemoNetworkSettings.defaults.sepoliaConsensusRPCURL,
+            sepoliaConsensusRPCURL: DemoNetworkSettings.defaultingSepoliaConsensusRPCURL(
+                defaults.string(forKey: Keys.sepoliaConsensusRPCURL)
+                    ?? defaults.string(forKey: Keys.legacyOnboardingConsensusRPCURL)
+            ),
             sepoliaMaxFeePerGasGwei: defaults.string(forKey: Keys.sepoliaMaxFeePerGasGwei)
                 ?? DemoNetworkSettings.defaults.sepoliaMaxFeePerGasGwei,
             sepoliaMaxPriorityFeePerGasGwei: defaults.string(forKey: Keys.sepoliaMaxPriorityFeePerGasGwei)

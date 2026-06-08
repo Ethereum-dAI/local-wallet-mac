@@ -18,10 +18,11 @@ Install these before opening the app in Xcode:
 
 - macOS 14.0 or newer on Apple Silicon.
 - 16 GB RAM minimum for the local Gemma 4 E4B model setup.
-- Xcode 16 or newer, with Command Line Tools installed.
+- Xcode 16 or newer, with Command Line Tools installed. Use the latest stable Xcode when possible; the app target is built with Swift 6.
 - An Apple Development team selected in Xcode for local app signing.
 - Homebrew.
-- Rust, preferably installed with `rustup`.
+- Rust 1.91 or newer, preferably installed with `rustup`. Latest stable Rust is recommended.
+- `cbindgen`; current known-good local version is 0.29.2.
 - Access to the three GitHub repositories.
 
 ```bash
@@ -31,6 +32,34 @@ rustup target add aarch64-apple-darwin
 ```
 
 If `rustup` is not installed yet, install it from `https://rustup.rs/`, open a new shell, and rerun the `rustup target add` command.
+
+Check toolchain versions before debugging build issues:
+
+```bash
+xcodebuild -version
+swift --version
+xcode-select -p
+rustc --version
+cargo --version
+rustup show active-toolchain
+cbindgen --version
+```
+
+Expected Rust baseline:
+
+```text
+rustc >= 1.91
+cargo >= 1.91
+```
+
+The current known-good local Rust toolchain is:
+
+```text
+rustc 1.95.0
+cargo 1.95.0
+stable-aarch64-apple-darwin
+cbindgen 0.29.2
+```
 
 `llama.cpp` provides the local inference libraries used by the app. If Homebrew does not install `ggml` as a dependency on your machine, install or reinstall it with:
 
@@ -77,6 +106,48 @@ The final layout must look like this:
 ```
 
 Do not nest `local-wallet-protocol` or `local-wallet-daemon` inside `local-wallet-mac`. The macOS repo expects them to be siblings.
+
+If you already cloned only `local-wallet-mac`, verify the parent directory before continuing:
+
+```bash
+cd ..
+pwd
+ls
+```
+
+You should see:
+
+```text
+local-wallet-mac  local-wallet-protocol  local-wallet-daemon
+```
+
+If `local-wallet-protocol` or `local-wallet-daemon` is missing, clone them as siblings and build the local artifacts:
+
+```bash
+git clone https://github.com/Ethereum-dAI/local-wallet-protocol.git
+git clone https://github.com/Ethereum-dAI/local-wallet-daemon.git
+
+cd local-wallet-mac
+cp rust-core/.cargo/config.toml.example rust-core/.cargo/config.toml
+./scripts/build-ffi.sh
+
+cd ../local-wallet-daemon
+cargo build -p wallet-node --release
+
+cd ../local-wallet-mac
+open LocalWallet.xcodeproj
+```
+
+Then run the `LocalWalletApp` scheme again in Xcode.
+
+Quick verification:
+
+```bash
+ls -l ../local-wallet-daemon/target/release/wallet-node
+cargo metadata --manifest-path rust-core/Cargo.toml --format-version 1 >/dev/null
+```
+
+If both commands pass, the "wallet-node binary was not found" onboarding error should be gone.
 
 ## Enable Local Rust Path Overrides
 

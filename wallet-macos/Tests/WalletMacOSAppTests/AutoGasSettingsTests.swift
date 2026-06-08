@@ -14,6 +14,31 @@ private func freshStore() -> DemoSettingsStore {
     #expect(settings.autoGasTier == .standard)
 }
 
+@Test func defaultSepoliaConsensusRPCUsesChainSafeLodestar() {
+    let store = freshStore()
+
+    #expect(store.networkSettings.sepoliaConsensusRPCURL == "https://lodestar-sepolia.chainsafe.io")
+}
+
+@Test func previousSepoliaConsensusDefaultMigratesToChainSafeLodestar() {
+    let suite = UserDefaults(suiteName: "auto-gas-tests-\(UUID().uuidString)")!
+    suite.set(
+        DemoNetworkSettings.previousDefaultSepoliaConsensusRPCURL,
+        forKey: "com.localwallet.demo.sepolia-consensus-rpc-url"
+    )
+    let store = DemoSettingsStore(defaults: suite)
+
+    #expect(store.networkSettings.sepoliaConsensusRPCURL == "https://lodestar-sepolia.chainsafe.io")
+}
+
+@Test func customSepoliaConsensusRPCIsPreserved() {
+    let suite = UserDefaults(suiteName: "auto-gas-tests-\(UUID().uuidString)")!
+    suite.set("https://example.com/beacon", forKey: "com.localwallet.demo.sepolia-consensus-rpc-url")
+    let store = DemoSettingsStore(defaults: suite)
+
+    #expect(store.networkSettings.sepoliaConsensusRPCURL == "https://example.com/beacon")
+}
+
 @Test func persistedAutoGasOffOverridesDefault() {
     let suite = UserDefaults(suiteName: "auto-gas-tests-\(UUID().uuidString)")!
     suite.set(false, forKey: "com.localwallet.demo.auto-gas-mode-enabled")

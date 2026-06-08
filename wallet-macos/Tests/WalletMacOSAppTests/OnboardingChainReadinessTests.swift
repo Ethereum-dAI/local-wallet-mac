@@ -2,15 +2,15 @@ import Foundation
 import Testing
 @testable import WalletMacOSApp
 
-@Test func onboardingReadinessTimingUsesOneAndTwoMinuteThresholds() {
+@Test func onboardingReadinessTimingUsesOneAndThirtyMinuteThresholds() {
     let timing = OnboardingChainReadinessTiming.default
 
     #expect(timing.takingLongerDelay == 60)
-    #expect(timing.timeout == 120)
+    #expect(timing.timeout == 30 * 60)
     #expect(timing.isTakingLonger(elapsed: 59.9) == false)
     #expect(timing.isTakingLonger(elapsed: 60) == true)
-    #expect(timing.hasTimedOut(elapsed: 119.9) == false)
-    #expect(timing.hasTimedOut(elapsed: 120) == true)
+    #expect(timing.hasTimedOut(elapsed: 1_799.9) == false)
+    #expect(timing.hasTimedOut(elapsed: 1_800) == true)
 }
 
 @Test func onboardingRelayerUnlockCacheCoversSyncTimeoutHandoff() {

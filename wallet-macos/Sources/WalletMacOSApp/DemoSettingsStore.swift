@@ -45,7 +45,13 @@ struct DemoNetworkSettings: Equatable {
         autoGasTier: .standard
     )
 
-    static let previousDefaultSepoliaConsensusRPCURL = "https://ethereum-sepolia-beacon-api.publicnode.com"
+    static let previousDefaultSepoliaRPCURLs = [
+        "https://ethereum-sepolia-rpc.publicnode.com",
+    ]
+    static let previousDefaultSepoliaConsensusRPCURLs = [
+        "https://ethereum-sepolia-beacon-api.publicnode.com",
+        "https://lodestar-sepolia.chainsafe.io",
+    ]
 
     var activeChain: ChainConfiguration {
         let base = isTestnetModeEnabled ? ChainConfiguration.ethereumSepolia : ChainConfiguration.ethereum
@@ -179,16 +185,36 @@ struct DemoNetworkSettings: Equatable {
         return url.absoluteString
     }
 
+    static func defaultingSepoliaRPCURL(_ value: String?) -> String {
+        defaultingURL(
+            value,
+            defaultValue: defaults.sepoliaRPCURL,
+            previousDefaultValues: previousDefaultSepoliaRPCURLs
+        )
+    }
+
     static func defaultingSepoliaConsensusRPCURL(_ value: String?) -> String {
+        defaultingURL(
+            value,
+            defaultValue: defaults.sepoliaConsensusRPCURL,
+            previousDefaultValues: previousDefaultSepoliaConsensusRPCURLs
+        )
+    }
+
+    private static func defaultingURL(
+        _ value: String?,
+        defaultValue: String,
+        previousDefaultValues: [String]
+    ) -> String {
         guard let value else {
-            return defaults.sepoliaConsensusRPCURL
+            return defaultValue
         }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.isEmpty == false else {
-            return defaults.sepoliaConsensusRPCURL
+            return defaultValue
         }
-        if trimmed == previousDefaultSepoliaConsensusRPCURL {
-            return defaults.sepoliaConsensusRPCURL
+        if previousDefaultValues.contains(trimmed) {
+            return defaultValue
         }
         return trimmed
     }
@@ -261,9 +287,10 @@ struct DemoSettingsStore {
                 ?? DemoNetworkSettings.defaults.mainnetMaxFeePerGasGwei,
             mainnetMaxPriorityFeePerGasGwei: defaults.string(forKey: Keys.mainnetMaxPriorityFeePerGasGwei)
                 ?? DemoNetworkSettings.defaults.mainnetMaxPriorityFeePerGasGwei,
-            sepoliaRPCURL: defaults.string(forKey: Keys.sepoliaRPCURL)
-                ?? defaults.string(forKey: Keys.legacyOnboardingRPCURL)
-                ?? DemoNetworkSettings.defaults.sepoliaRPCURL,
+            sepoliaRPCURL: DemoNetworkSettings.defaultingSepoliaRPCURL(
+                defaults.string(forKey: Keys.sepoliaRPCURL)
+                    ?? defaults.string(forKey: Keys.legacyOnboardingRPCURL)
+            ),
             sepoliaArchiveNodeURL: defaults.string(forKey: Keys.sepoliaArchiveNodeURL)
                 ?? defaults.string(forKey: Keys.legacyOnboardingArchiveNodeURL)
                 ?? DemoNetworkSettings.defaults.sepoliaArchiveNodeURL,

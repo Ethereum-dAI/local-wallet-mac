@@ -97,6 +97,19 @@ private func stubbedClient() -> WalletNodeClient {
     )
 }
 
+@Test func rpcErrorDescriptionIncludesDaemonDetail() {
+    let error = WalletNodeClient.ClientError.rpcError(
+        method: "localwallet_estimateUserOperationGas",
+        code: -32002,
+        message: "Not ready: helios_error",
+        reason: "helios_error",
+        detail: "out of sync: 42 blocks behind"
+    )
+
+    #expect(error.localizedDescription.contains("helios_error"))
+    #expect(error.localizedDescription.contains("detail: out of sync: 42 blocks behind"))
+}
+
 @Test func decodesBundlerStatusReplacementBlock() throws {
     var json: [String: Any] = [
         "ready": true,

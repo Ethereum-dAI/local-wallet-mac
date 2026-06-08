@@ -871,7 +871,9 @@ final class AppModel: ObservableObject {
                     throw error
                 }
 
-                appendLog("relayer: \(operation) waiting for verified wallet-node reads; retrying")
+                appendLog(
+                    "relayer: \(operation) waiting for verified wallet-node reads; retrying after \(error.localizedDescription)"
+                )
                 try await Task.sleep(nanoseconds: Self.walletNodeWarmupRetryDelays[attempt])
             }
         }
@@ -2029,7 +2031,7 @@ enum TerminalUserOperationStatus {
 
 enum ReplacementActionFailurePolicy {
     static func shouldMarkLocalHistoryFailed(_ error: Error) -> Bool {
-        guard case let WalletNodeClient.ClientError.rpcError(_, code, _, reason) = error,
+        guard case let WalletNodeClient.ClientError.rpcError(_, code, _, reason, _) = error,
               code == -32011
         else {
             return false
@@ -2038,7 +2040,7 @@ enum ReplacementActionFailurePolicy {
     }
 
     static func displayMessage(action: String, error: Error) -> String {
-        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason) = error,
+        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason, _) = error,
               code == -32011
         else {
             return "\(action) failed: \(error.localizedDescription)"
@@ -2100,7 +2102,7 @@ enum ReconcilerLoopStep {
 
 enum WalletNodeWarmupRetryPolicy {
     static func isWarmupError(_ error: Error) -> Bool {
-        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason) = error else {
+        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason, _) = error else {
             return false
         }
         if code == -32010 {

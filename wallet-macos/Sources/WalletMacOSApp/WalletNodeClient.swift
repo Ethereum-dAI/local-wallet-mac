@@ -196,7 +196,7 @@ struct WalletNodeClient {
     enum ClientError: LocalizedError {
         case invalidResponse
         case transport(String)
-        case rpcError(method: String, code: Int, message: String, reason: String?)
+        case rpcError(method: String, code: Int, message: String, reason: String?, detail: String? = nil)
 
         var errorDescription: String? {
             switch self {
@@ -204,11 +204,18 @@ struct WalletNodeClient {
                 return "wallet-node returned an invalid response"
             case let .transport(message):
                 return message
-            case let .rpcError(method, code, message, reason):
+            case let .rpcError(method, code, message, reason, detail):
+                var context: [String] = []
                 if let reason {
-                    return "wallet-node RPC \(method) \(code): \(message) (\(reason))"
+                    context.append(reason)
                 }
-                return "wallet-node RPC \(method) \(code): \(message)"
+                if let detail {
+                    context.append("detail: \(detail)")
+                }
+                guard context.isEmpty == false else {
+                    return "wallet-node RPC \(method) \(code): \(message)"
+                }
+                return "wallet-node RPC \(method) \(code): \(message) (\(context.joined(separator: "; ")))"
             }
         }
     }
@@ -614,8 +621,16 @@ struct WalletNodeClient {
         if let error = object["error"] as? [String: Any] {
             let code = error["code"] as? Int ?? 0
             let message = error["message"] as? String ?? "RPC error"
-            let reason = (error["data"] as? [String: Any])?["reason"] as? String
-            throw ClientError.rpcError(method: method, code: code, message: message, reason: reason)
+            let errorData = error["data"] as? [String: Any]
+            let reason = Self.errorDataString(errorData?["reason"])
+            let detail = Self.errorDataString(errorData?["detail"])
+            throw ClientError.rpcError(
+                method: method,
+                code: code,
+                message: message,
+                reason: reason,
+                detail: detail
+            )
         }
         guard let result = object["result"] else {
             throw ClientError.invalidResponse
@@ -670,6 +685,25 @@ struct WalletNodeClient {
 
     private func hexString(_ data: Data) -> String {
         "0x" + data.hexEncodedString
+    }
+
+    private static func errorDataString(_ value: Any?) -> String? {
+        guard let value, !(value is NSNull) else {
+            return nil
+        }
+        if let string = value as? String {
+            return string
+        }
+        if let number = value as? NSNumber {
+            return number.stringValue
+        }
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let string = String(data: data, encoding: .utf8)
+        else {
+            return String(describing: value)
+        }
+        return string
     }
 
     private func parseQuantity(_ value: String, field: String) throws -> Data {

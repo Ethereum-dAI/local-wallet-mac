@@ -149,7 +149,9 @@ For packaged demo builds:
 LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..." ./scripts/package-macos-demo.sh
 ```
 
-The package script builds and embeds `wallet-node`, copies the llama.cpp/ggml dynamic libraries into the app bundle, verifies embedded Mach-O deployment targets, and signs the copied app. The v0.1 alpha zip targets macOS 14+ on Apple Silicon and does not embed the recommended GGUF model by default; onboarding downloads/installs it during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` only when you explicitly want a large self-contained demo build. If your installed Homebrew llama.cpp/ggml dylibs target a newer macOS, build a local macOS 14-compatible prefix and pass it with `LOCAL_LLAMA_PREFIX`.
+The package script builds and embeds `wallet-node`, copies the llama.cpp/ggml dynamic libraries into the app bundle, verifies embedded Mach-O deployment targets, signs the copied app, and checks that the final signature has the application identifier entitlement required by Secure Enclave. For testers outside your own Macs, use the Developer ID notarization path documented in `scripts/README.md` (`LOCAL_WALLET_NOTARIZE=1` plus a Developer ID Application identity and notarytool credentials); otherwise Gatekeeper may block the zip. Removing quarantine from a trusted copy is less destructive than ad-hoc re-signing; ad-hoc re-signing breaks the entitlement identity needed for wallet creation.
+
+The v0.1 alpha zip targets macOS 14+ on Apple Silicon and does not embed the recommended GGUF model by default; onboarding downloads/installs it during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` only when you explicitly want a large self-contained demo build. If your installed Homebrew llama.cpp/ggml dylibs target a newer macOS, build a local macOS 14-compatible prefix and pass it with `LOCAL_LLAMA_PREFIX`.
 
 ## Common Commands
 

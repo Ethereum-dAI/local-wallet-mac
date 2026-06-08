@@ -4,7 +4,6 @@ import WalletSignature
 struct OnboardingProvisioningResult {
     let kernelAccountAddress: String
     let bundlerAddress: String
-    let isPreviewFallback: Bool
 }
 
 struct OnboardingProvisioningService {
@@ -29,18 +28,13 @@ struct OnboardingProvisioningService {
     }
 
     func createOrLoadIdentity() throws -> OnboardingProvisioningResult {
-        do {
-            let wallet = try createOrLoadWalletRecord()
-            let bundlerAddress = try createOrLoadBundlerAddress()
+        let wallet = try createOrLoadWalletRecord()
+        let bundlerAddress = try createOrLoadBundlerAddress()
 
-            return OnboardingProvisioningResult(
-                kernelAccountAddress: wallet.kernelAccountAddress ?? "Unavailable",
-                bundlerAddress: bundlerAddress,
-                isPreviewFallback: false
-            )
-        } catch AppError.missingEntitlement {
-            return previewIdentity()
-        }
+        return OnboardingProvisioningResult(
+            kernelAccountAddress: wallet.kernelAccountAddress ?? "Unavailable",
+            bundlerAddress: bundlerAddress
+        )
     }
 
     private func createOrLoadWalletRecord() throws -> WalletRecord {
@@ -125,11 +119,4 @@ struct OnboardingProvisioningService {
         return address
     }
 
-    private func previewIdentity() -> OnboardingProvisioningResult {
-        OnboardingProvisioningResult(
-            kernelAccountAddress: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
-            bundlerAddress: "0xF39fd6e51aad88F6F4ce6aB8827279cffFb92266",
-            isPreviewFallback: true
-        )
-    }
 }

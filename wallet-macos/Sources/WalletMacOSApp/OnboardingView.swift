@@ -54,7 +54,7 @@ private final class OnboardingState: ObservableObject {
     enum KeyState: Equatable {
         case idle
         case creating
-        case ready(kernelAddress: String, bundlerAddress: String, isPreview: Bool)
+        case ready(kernelAddress: String, bundlerAddress: String)
         case failed(String)
     }
 
@@ -278,8 +278,7 @@ private final class OnboardingState: ObservableObject {
                 let result = try provisioningService.createOrLoadIdentity()
                 keyState = .ready(
                     kernelAddress: result.kernelAccountAddress,
-                    bundlerAddress: result.bundlerAddress,
-                    isPreview: result.isPreviewFallback
+                    bundlerAddress: result.bundlerAddress
                 )
             } catch {
                 keyState = .failed(error.localizedDescription)
@@ -298,22 +297,12 @@ private final class OnboardingState: ObservableObject {
             return
         }
 
-        guard case let .ready(kernelAddress, _, isPreview) = keyState else {
+        guard case let .ready(kernelAddress, _) = keyState else {
             chainReadinessState = .failed("Create keys before syncing verified reads.")
             return
         }
 
         persistNetwork()
-
-        if isPreview {
-            chainReadinessElapsed = 0
-            chainReadinessState = .ready(
-                WalletNodeClient.NetworkStatus.onboardingPreviewReady(
-                    chain: networkSettingsStore.networkSettings.activeChain
-                )
-            )
-            return
-        }
 
         let runID = UUID()
         let startedAt = Date()
@@ -900,8 +889,8 @@ private struct KeysStep: View {
                     setupPreview
                 case .creating:
                     creatingView
-                case .ready(let kernelAddress, let bundlerAddress, let isPreview):
-                    readyView(kernelAddress: kernelAddress, bundlerAddress: bundlerAddress, isPreview: isPreview)
+                case .ready(let kernelAddress, let bundlerAddress):
+                    readyView(kernelAddress: kernelAddress, bundlerAddress: bundlerAddress)
                 case .failed(let message):
                     VStack(alignment: .leading, spacing: 14) {
                         errorBanner(message)
@@ -955,53 +944,29 @@ private struct KeysStep: View {
         }
     }
 
-    private func readyView(kernelAddress: String, bundlerAddress: String, isPreview: Bool) -> some View {
+    private func readyView(kernelAddress: String, bundlerAddress: String) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            if isPreview {
-                previewBanner
-            }
             AddressPreviewCard(
                 icon: "lock.shield.fill",
-                title: isPreview ? "Kernel smart account preview" : "Kernel smart account",
+                title: "Kernel smart account",
                 value: kernelAddress,
-                badge: isPreview ? "PREVIEW" : "READY"
+                badge: "READY"
             )
             AddressPreviewCard(
                 icon: "key.fill",
-                title: isPreview ? "Bundler address preview" : "Bundler address",
+                title: "Bundler address",
                 value: bundlerAddress,
-                badge: isPreview ? "PREVIEW" : "READY"
+                badge: "READY"
             )
             HStack(spacing: 8) {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(OnboardingPalette.success)
-                Text(isPreview ? "Preview mode is ready. Run from a signed Xcode target to create real keys." : "Wallet setup is ready. Open the dashboard to inspect and test the account.")
+                Text("Wallet setup is ready. Open the dashboard to inspect and test the account.")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(OnboardingPalette.secondaryText)
             }
             .padding(.horizontal, 4)
         }
-    }
-
-    private var previewBanner: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "info.circle.fill")
-                .foregroundStyle(OnboardingPalette.ethereumGold)
-            Text("Unsigned preview mode: showing placeholder addresses so you can inspect the onboarding UI.")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(OnboardingPalette.secondaryText)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer()
-        }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(OnboardingPalette.ethereumGold.opacity(0.10))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(OnboardingPalette.ethereumGold.opacity(0.22), lineWidth: 1)
-                )
-        )
     }
 
     private func errorBanner(_ message: String) -> some View {

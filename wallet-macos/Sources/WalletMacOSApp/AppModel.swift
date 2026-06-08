@@ -829,7 +829,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func withWalletNodeClient<T>(
+    private func withWalletNodeClient<T: Sendable>(
         operation: String,
         _ body: (WalletNodeClient) async throws -> T
     ) async throws -> T {
@@ -855,7 +855,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func withWalletNodeWarmupRetry<T>(
+    private func withWalletNodeWarmupRetry<T: Sendable>(
         operation: String,
         _ body: () async throws -> T
     ) async throws -> T {

@@ -12,6 +12,11 @@ RELEASE_DIR="$REPO_ROOT/dist"
 APP_NAME="Local Wallet.app"
 ZIP_NAME="${LOCAL_WALLET_ZIP_NAME:-LocalWallet-v0.1.0-alpha-macOS-AppleSilicon-no-LLM.zip}"
 DEPLOYMENT_TARGET="${LOCAL_WALLET_DEPLOYMENT_TARGET:-14.0}"
+NOTARIZE="${LOCAL_WALLET_NOTARIZE:-0}"
+NOTARY_PROFILE="${LOCAL_WALLET_NOTARY_PROFILE:-}"
+NOTARY_APPLE_ID="${LOCAL_WALLET_NOTARY_APPLE_ID:-}"
+NOTARY_PASSWORD="${LOCAL_WALLET_NOTARY_PASSWORD:-}"
+NOTARY_TEAM_ID="${LOCAL_WALLET_NOTARY_TEAM_ID:-}"
 BUNDLER_URL="${LOCAL_WALLET_SEPOLIA_BUNDLER_URL:-}"
 DAEMON_REPO="${LOCAL_WALLET_DAEMON_REPO:-$REPO_ROOT/../local-wallet-daemon}"
 EMBED_MODEL="${LOCAL_WALLET_EMBED_MODEL:-0}"
@@ -20,6 +25,7 @@ MODEL_SHA256="90ce98129eb3e8cc57e62433d500c97c624b1e3af1fcc85dd3b55ad7e0313e9f"
 MODEL_URL="${LOCAL_WALLET_MODEL_URL:-https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/$MODEL_FILE_NAME?download=true}"
 APP_SUPPORT_MODEL="$HOME/Library/Application Support/LocalWallet/Models/$MODEL_FILE_NAME"
 MODEL_CACHE_DIR="${LOCAL_WALLET_MODEL_CACHE_DIR:-$REPO_ROOT/build/model-cache}"
+NOTARYTOOL_AUTH_ARGS=()
 LLAMA_PREFIX="${LOCAL_LLAMA_PREFIX:-}"
 LLAMA_SEARCH_DIRS=(
   "${LOCAL_LLAMA_LIB_DIR:-}"
@@ -33,6 +39,13 @@ if [[ ! -d "$PROJECT" ]]; then
   echo "Missing LocalWallet.xcodeproj. Generate it from project.yml before packaging."
   exit 1
 fi
+
+is_truthy() {
+  case "$1" in
+    1|true|TRUE|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 verify_model_checksum() {
   local file_path="$1"
@@ -301,21 +314,77 @@ verify_no_external_llama_dependencies() {
   return $failures
 }
 
+verify_secure_enclave_entitlements() {
+  local app_path="$1"
+  local entitlements_plist="$BUILD_DIR/final-entitlements.plist"
+  local application_identifier=""
+  local team_identifier=""
+
+  rm -f "$entitlements_plist"
+  if ! codesign -d --entitlements :- "$app_path" >"$entitlements_plist" 2>/dev/null || ! plutil -lint "$entitlements_plist" >/dev/null 2>&1; then
+    echo "Could not read valid entitlements from packaged app." >&2
+    echo "Secure Enclave key creation requires a signed app with an application identifier entitlement." >&2
+    exit 1
+  fi
+
+  application_identifier="$(/usr/libexec/PlistBuddy -c "Print :com.apple.application-identifier" "$entitlements_plist" 2>/dev/null || true)"
+  if [[ -z "$application_identifier" ]]; then
+    application_identifier="$(/usr/libexec/PlistBuddy -c "Print :application-identifier" "$entitlements_plist" 2>/dev/null || true)"
+  fi
+  team_identifier="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.team-identifier" "$entitlements_plist" 2>/dev/null || true)"
+
+  if [[ -z "$application_identifier" ]]; then
+    echo "Packaged app is missing the application identifier entitlement required by Secure Enclave/Keychain." >&2
+    echo "Do not distribute an ad-hoc re-signed build for wallet testing. Build with an Apple Development or Developer ID Application identity." >&2
+    exit 1
+  fi
+
+  echo "Secure Enclave entitlement check passed: $application_identifier"
+  if [[ -n "$team_identifier" ]]; then
+    echo "Team identifier: $team_identifier"
+  fi
+}
+
 sign_packaged_app() {
   local source_app="$1"
   local packaged_app="$2"
   local signing_identity="${CODESIGN_IDENTITY:-}"
   local entitlements_plist="$BUILD_DIR/packaged-entitlements.plist"
+  local codesign_args=(--force)
+  local nested_codesign_args=(--force)
 
   if [[ -z "$signing_identity" ]]; then
-    local codesign_details
-    codesign_details="$(codesign -d -vv "$source_app" 2>&1 || true)"
-    signing_identity="$(printf '%s\n' "$codesign_details" | awk -F= '/Authority=/ && !found { print $2; found = 1 }')"
+    if is_truthy "$NOTARIZE"; then
+      signing_identity="$(security find-identity -v -p codesigning 2>/dev/null | awk -F\" '/Developer ID Application/ { print $2; exit }' || true)"
+    else
+      local codesign_details
+      codesign_details="$(codesign -d -vv "$source_app" 2>&1 || true)"
+      signing_identity="$(printf '%s\n' "$codesign_details" | awk -F= '/Authority=/ && !found { print $2; found = 1 }')"
+    fi
   fi
   if [[ -z "$signing_identity" ]]; then
-    echo "Could not determine signing identity from built app. Falling back to ad-hoc signing."
-    signing_identity="-"
+    if is_truthy "$NOTARIZE"; then
+      echo "LOCAL_WALLET_NOTARIZE=1 requires a Developer ID Application certificate." >&2
+      echo "Install the certificate or set CODESIGN_IDENTITY explicitly." >&2
+      exit 1
+    else
+      echo "Could not determine signing identity from built app. Falling back to ad-hoc signing."
+      signing_identity="-"
+    fi
   fi
+
+  if is_truthy "$NOTARIZE" && [[ "$signing_identity" != Developer\ ID\ Application:* ]]; then
+    echo "LOCAL_WALLET_NOTARIZE=1 requires CODESIGN_IDENTITY to be a Developer ID Application certificate." >&2
+    echo "Resolved identity: $signing_identity" >&2
+    exit 1
+  fi
+
+  if [[ "$signing_identity" == Developer\ ID\ Application:* ]]; then
+    codesign_args+=(--timestamp)
+    nested_codesign_args+=(--timestamp)
+  fi
+  codesign_args+=(--options runtime --sign "$signing_identity")
+  nested_codesign_args+=(--options runtime --sign "$signing_identity")
 
   rm -f "$entitlements_plist"
   if codesign -d --entitlements :- "$source_app" >"$entitlements_plist" 2>/dev/null && plutil -lint "$entitlements_plist" >/dev/null 2>&1; then
@@ -326,15 +395,70 @@ sign_packaged_app() {
 
   while IFS= read -r -d '' mach_o_file; do
     if is_mach_o_file "$mach_o_file"; then
-      codesign --force --sign "$signing_identity" "$mach_o_file"
+      codesign "${nested_codesign_args[@]}" "$mach_o_file"
     fi
   done < <(find "$packaged_app/Contents/Frameworks" "$packaged_app/Contents/Resources/bin" -type f -print0 2>/dev/null || true)
 
   if [[ -f "$entitlements_plist" ]]; then
-    codesign --force --deep --options runtime --sign "$signing_identity" --entitlements "$entitlements_plist" "$packaged_app"
+    codesign "${codesign_args[@]}" --entitlements "$entitlements_plist" "$packaged_app"
   else
-    codesign --force --deep --options runtime --sign "$signing_identity" "$packaged_app"
+    codesign "${codesign_args[@]}" "$packaged_app"
   fi
+
+  codesign --verify --deep --strict --verbose=2 "$packaged_app"
+  codesign -dvv "$packaged_app" 2>&1 | grep -E "Authority=|TeamIdentifier=|Runtime Version|flags=" || true
+  verify_secure_enclave_entitlements "$packaged_app"
+}
+
+create_release_zip() {
+  local app_path="$1"
+  local zip_path="$2"
+
+  rm -f "$zip_path"
+  COPYFILE_DISABLE=1 ditto -c -k --norsrc --noextattr --keepParent "$app_path" "$zip_path"
+}
+
+build_notarytool_auth_args() {
+  NOTARYTOOL_AUTH_ARGS=()
+
+  if [[ -n "$NOTARY_PROFILE" ]]; then
+    NOTARYTOOL_AUTH_ARGS=(--keychain-profile "$NOTARY_PROFILE")
+    return
+  fi
+
+  if [[ -z "$NOTARY_APPLE_ID" || -z "$NOTARY_PASSWORD" || -z "$NOTARY_TEAM_ID" ]]; then
+    echo "Notarization requires LOCAL_WALLET_NOTARY_PROFILE or all of:" >&2
+    echo "LOCAL_WALLET_NOTARY_APPLE_ID, LOCAL_WALLET_NOTARY_PASSWORD, LOCAL_WALLET_NOTARY_TEAM_ID" >&2
+    exit 1
+  fi
+
+  NOTARYTOOL_AUTH_ARGS=(
+    --apple-id "$NOTARY_APPLE_ID"
+    --password "$NOTARY_PASSWORD"
+    --team-id "$NOTARY_TEAM_ID"
+  )
+}
+
+notarize_packaged_app() {
+  local app_path="$1"
+  local notary_zip="$BUILD_DIR/notary-upload.zip"
+
+  if ! is_truthy "$NOTARIZE"; then
+    return
+  fi
+
+  echo "=== Creating notarization upload zip ==="
+  create_release_zip "$app_path" "$notary_zip"
+
+  build_notarytool_auth_args
+
+  echo "=== Submitting app for notarization ==="
+  xcrun notarytool submit "$notary_zip" "${NOTARYTOOL_AUTH_ARGS[@]}" --wait
+
+  echo "=== Stapling notarization ticket ==="
+  xcrun stapler staple "$app_path"
+  xcrun stapler validate "$app_path"
+  spctl --assess --type execute --verbose=2 "$app_path"
 }
 
 echo "=== Resolving embedded assets ==="
@@ -415,12 +539,17 @@ sign_packaged_app "$APP_PATH" "$PACKAGED_APP"
 echo "=== Verifying Mach-O deployment targets (<= macOS $DEPLOYMENT_TARGET) ==="
 verify_mach_o_deployment_targets "$PACKAGED_APP" "$DEPLOYMENT_TARGET"
 
+notarize_packaged_app "$PACKAGED_APP"
+
 echo "=== Creating zip ==="
-rm -f "$RELEASE_DIR/$ZIP_NAME"
-COPYFILE_DISABLE=1 ditto -c -k --norsrc --noextattr --keepParent "$PACKAGED_APP" "$RELEASE_DIR/$ZIP_NAME"
+create_release_zip "$PACKAGED_APP" "$RELEASE_DIR/$ZIP_NAME"
 
 echo "=== Package complete ==="
 echo "App: $PACKAGED_APP"
 echo "Zip: $RELEASE_DIR/$ZIP_NAME"
 echo
-echo "This demo build is not notarized. Testers may need to right-click Open or use System Settings > Privacy & Security > Open Anyway."
+if is_truthy "$NOTARIZE"; then
+  echo "This build is signed with Developer ID, notarized, and stapled."
+else
+  echo "This demo build is not notarized. Set LOCAL_WALLET_NOTARIZE=1 and sign with Developer ID before sharing outside your own Mac."
+fi

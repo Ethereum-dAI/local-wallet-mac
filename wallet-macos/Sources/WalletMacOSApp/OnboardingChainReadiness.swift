@@ -20,24 +20,6 @@ struct OnboardingChainReadinessTiming: Equatable {
     }
 }
 
-extension WalletNodeClient.NetworkStatus {
-    static func onboardingPreviewReady(chain: ChainConfiguration) -> WalletNodeClient.NetworkStatus {
-        WalletNodeClient.NetworkStatus(
-            status: "preview_ready",
-            reason: nil,
-            chainId: chain.id,
-            networkProfile: chain.shortName,
-            helios: WalletNodeClient.NetworkStatus.Helios(
-                ready: true,
-                checkpointLoaded: true,
-                checkpointAgeDays: nil,
-                head: nil
-            ),
-            bundler: nil
-        )
-    }
-}
-
 enum OnboardingChainReadinessError: LocalizedError {
     case timedOut(lastStatus: WalletNodeClient.NetworkStatus?)
 

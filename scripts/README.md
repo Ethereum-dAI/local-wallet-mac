@@ -44,7 +44,7 @@ Pinned historical blocks require an archive-capable RPC. If `WALLET_FORK_BLOCK_N
 
 ### `package-macos-demo.sh`
 
-Builds the Swift/Rust bridge, builds the `LocalWalletApp` Xcode scheme for Apple Silicon, embeds the `wallet-node` daemon, optionally embeds the recommended GGUF model, copies llama.cpp/ggml dynamic libraries into the app bundle, optionally injects the hosted Sepolia bundler URL, signs the copied app, and produces a zip under `dist/`.
+Builds the Swift/Rust bridge, builds the `LocalWalletApp` Xcode scheme for Apple Silicon, embeds the `wallet-node` daemon, optionally embeds the recommended GGUF model, copies llama.cpp/ggml dynamic libraries into the app bundle, optionally injects the hosted Sepolia bundler URL, signs the copied app, verifies the application identifier entitlement needed by Secure Enclave, optionally notarizes and staples it, and produces a zip under `dist/`.
 
 ```bash
 LOCAL_WALLET_SEPOLIA_BUNDLER_URL=https://your-bundler.example \
@@ -61,9 +61,26 @@ LOCAL_WALLET_DEPLOYMENT_TARGET=14.0 \
 ./scripts/package-macos-demo.sh
 ```
 
-The package step verifies every embedded Mach-O in `Contents/MacOS`, `Contents/Frameworks`, and `Contents/Resources/bin` has `minos <= LOCAL_WALLET_DEPLOYMENT_TARGET`.
+The package step verifies every embedded Mach-O in `Contents/MacOS`, `Contents/Frameworks`, and `Contents/Resources/bin` has `minos <= LOCAL_WALLET_DEPLOYMENT_TARGET`. It also verifies that the final app signature includes an application identifier entitlement; without that entitlement the Secure Enclave key creation path returns `errSecMissingEntitlement` and onboarding cannot create a wallet.
 
-The resulting demo build is not notarized.
+For external alpha distribution, sign with a Developer ID Application certificate and notarize the build:
+
+```bash
+xcrun notarytool store-credentials local-wallet-notary \
+  --apple-id "developer@example.com" \
+  --team-id YOURTEAMID \
+  --password "app-specific-password"
+
+CODESIGN_IDENTITY="Developer ID Application: Your Name (YOURTEAMID)" \
+LOCAL_WALLET_NOTARIZE=1 \
+LOCAL_WALLET_NOTARY_PROFILE=local-wallet-notary \
+LOCAL_WALLET_SEPOLIA_BUNDLER_URL=https://your-bundler.example \
+./scripts/package-macos-demo.sh
+```
+
+When `LOCAL_WALLET_NOTARIZE=1` is set, the script requires a Developer ID Application identity, submits a temporary zip with `xcrun notarytool`, staples the ticket to the `.app`, runs `spctl --assess`, then creates the final zip. This is the build path to use for testers outside your own Macs; it avoids per-user ad-hoc re-signing and preserves the app's signing identity for Keychain continuity.
+
+If `LOCAL_WALLET_NOTARIZE` is omitted, the zip is for local/private testing only and may be blocked by Gatekeeper on other Macs. Testers can remove quarantine from a trusted copy, but they should not ad-hoc re-sign this app; ad-hoc signing changes the code identity and breaks the Secure Enclave/Keychain entitlement chain needed for wallet creation.
 
 ### `run-keychain-spike.sh`
 

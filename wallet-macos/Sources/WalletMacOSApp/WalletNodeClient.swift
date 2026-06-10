@@ -449,6 +449,18 @@ struct WalletNodeClient {
         return try await ethCall(to: entryPoint, data: callData)
     }
 
+    func entryPointNonce(
+        entryPoint: String,
+        accountAddress: String,
+        nonceKey192: Data
+    ) async throws -> String {
+        let callData = try ChainReadCallData.entryPointGetNonce(
+            accountAddress: accountAddress,
+            nonceKey192: nonceKey192
+        )
+        return try await ethCall(to: entryPoint, data: callData)
+    }
+
     func resolveName(_ name: String, sendChainId: Int) async throws -> ResolvedName {
         let result = try await call(
             method: "localwallet_resolveName",

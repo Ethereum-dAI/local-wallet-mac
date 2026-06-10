@@ -75,6 +75,7 @@ final class AppModel: ObservableObject {
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
     private var walletNodeLaunchFailure: WalletNodeLaunchFailure?
     private var optimisticNextNonce: [String: UInt64] = [:]
+    private var pendingSessionInstallByUserOpHash: [String: SessionRecord] = [:]
     private var reconcilerTask: Task<Void, Never>?
     private let userOperationBuilder: UserOperationBuilder
     private let walletHistoryStore: WalletTransactionHistoryStore
@@ -1056,7 +1057,8 @@ final class AppModel: ObservableObject {
 
     func buildUserOperationDraft(
         intent: TransactionIntent,
-        isDeployedOverride: Bool? = nil
+        isDeployedOverride: Bool? = nil,
+        nonceKey192: Data? = nil
     ) async throws -> UserOperationDraft {
         guard let walletRecord else {
             throw AppError.corruptedMetadataStore
@@ -1071,7 +1073,11 @@ final class AppModel: ObservableObject {
         }
 
         appendLog("build: reading EntryPoint nonce through local wallet-node")
-        let nonceHex = try await resolvedNonceHex(entryPoint: activeChain.entryPoint, sender: sender)
+        let nonceHex = try await resolvedNonceHex(
+            entryPoint: activeChain.entryPoint,
+            sender: sender,
+            nonceKey192: nonceKey192
+        )
 
         return try userOperationBuilder.buildDraft(
             walletRecord: walletRecord,
@@ -1085,7 +1091,8 @@ final class AppModel: ObservableObject {
 
     func buildUserOperationDraft(
         executions: [KernelExecutionRequest],
-        isDeployedOverride: Bool? = nil
+        isDeployedOverride: Bool? = nil,
+        nonceKey192: Data? = nil
     ) async throws -> UserOperationDraft {
         guard let walletRecord else {
             throw AppError.corruptedMetadataStore
@@ -1100,7 +1107,11 @@ final class AppModel: ObservableObject {
         }
 
         appendLog("build: reading EntryPoint nonce through local wallet-node")
-        let nonceHex = try await resolvedNonceHex(entryPoint: activeChain.entryPoint, sender: sender)
+        let nonceHex = try await resolvedNonceHex(
+            entryPoint: activeChain.entryPoint,
+            sender: sender,
+            nonceKey192: nonceKey192
+        )
 
         return try userOperationBuilder.buildDraft(
             walletRecord: walletRecord,
@@ -1112,23 +1123,37 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func resolvedNonceHex(entryPoint: String, sender: String) async throws -> String {
+    private func resolvedNonceHex(
+        entryPoint: String,
+        sender: String,
+        nonceKey192: Data? = nil
+    ) async throws -> String {
         let onChainHex = try await withWalletNodeWarmupRetry(operation: "EntryPoint nonce read") {
             try await withWalletNodeClient(operation: "EntryPoint nonce read") { client in
-                try await client.entryPointNonce(entryPoint: entryPoint, accountAddress: sender, nonceKey: 0)
+                if let nonceKey192 {
+                    return try await client.entryPointNonce(
+                        entryPoint: entryPoint,
+                        accountAddress: sender,
+                        nonceKey192: nonceKey192
+                    )
+                }
+                return try await client.entryPointNonce(entryPoint: entryPoint, accountAddress: sender, nonceKey: 0)
             }
         }
-        let onChain = try nonceSequence(from: onChainHex)
-        let key = nonceCacheKey(chainID: activeChain.id, sender: sender)
+        let onChainData = try Data(hexString: onChainHex).leftPadded(to: 32)
+        let onChain = try nonceSequence(from: onChainData)
+        let nonceKey = try normalizedNonceKey192(nonceKey192)
+        let key = nonceCacheKey(chainID: activeChain.id, sender: sender, nonceKey: nonceKey)
         let effective = NonceClamp.effective(onChain: onChain, optimistic: optimisticNextNonce[key])
-        return nonceHex(fromSequence: effective)
+        return nonceHex(nonceKey192: nonceKey, sequence: effective)
     }
 
     private func recordOptimisticNonce(after draft: UserOperationDraft) {
         guard let used = try? nonceSequence(from: draft.nonce) else {
             return
         }
-        let key = nonceCacheKey(chainID: activeChain.id, sender: draft.sender)
+        let nonceKey = nonceKey192(fromFullNonce: draft.nonce)
+        let key = nonceCacheKey(chainID: activeChain.id, sender: draft.sender, nonceKey: nonceKey)
         optimisticNextNonce[key] = NonceClamp.next(after: used)
     }
 
@@ -1136,11 +1161,19 @@ final class AppModel: ObservableObject {
         guard let sender = walletRecord?.kernelAccountAddress else {
             return
         }
-        optimisticNextNonce.removeValue(forKey: nonceCacheKey(chainID: activeChain.id, sender: sender))
+        let prefix = nonceCacheKeyPrefix(chainID: activeChain.id, sender: sender)
+        let matchingKeys = optimisticNextNonce.keys.filter { $0.hasPrefix(prefix) }
+        for key in matchingKeys {
+            optimisticNextNonce.removeValue(forKey: key)
+        }
     }
 
-    private func nonceCacheKey(chainID: UInt64, sender: String) -> String {
-        "\(chainID):\(sender.lowercased())"
+    private func nonceCacheKeyPrefix(chainID: UInt64, sender: String) -> String {
+        "\(chainID):\(sender.lowercased()):"
+    }
+
+    private func nonceCacheKey(chainID: UInt64, sender: String, nonceKey: Data) -> String {
+        nonceCacheKeyPrefix(chainID: chainID, sender: sender) + nonceKey.hexEncodedString
     }
 
     private func nonceSequence(from hex: String) throws -> UInt64 {
@@ -1155,8 +1188,29 @@ final class AppModel: ObservableObject {
         return full.suffix(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
     }
 
+    private func normalizedNonceKey192(_ nonceKey: Data?) throws -> Data {
+        guard let nonceKey else {
+            return Data(repeating: 0, count: 24)
+        }
+        if nonceKey.count == 24 {
+            return nonceKey
+        }
+        guard nonceKey.count == 32, nonceKey.prefix(8).allSatisfy({ $0 == 0 }) else {
+            throw AppError.invalidHexString
+        }
+        return Data(nonceKey.suffix(24))
+    }
+
+    private func nonceKey192(fromFullNonce nonce: Data) -> Data {
+        Data(nonce.leftPadded(to: 32).prefix(24))
+    }
+
     private func nonceHex(fromSequence sequence: UInt64) -> String {
-        "0x" + Data.fromBigEndian(sequence).leftPadded(to: 32).hexEncodedString
+        nonceHex(nonceKey192: Data(repeating: 0, count: 24), sequence: sequence)
+    }
+
+    private func nonceHex(nonceKey192: Data, sequence: UInt64) -> String {
+        "0x" + (nonceKey192 + Data.fromBigEndian(sequence)).hexEncodedString
     }
 
     func buildUserOperationDraftPreview() {
@@ -1440,15 +1494,17 @@ final class AppModel: ObservableObject {
         try await executeUserOperation(
             logContext: logContext,
             signingReason: signingReason ?? "Authorize \(executions.count) transaction batch on \(activeChain.name)",
+            intent: nil,
             historyDraft: WalletTransactionDraft(
                 operation: .batch,
                 amount: String(executions.count),
                 token: executions.count == 1 ? "call" : "calls"
             )
-        ) { [self] isDeployed in
+        ) { [self] buildContext in
             try await buildUserOperationDraft(
                 executions: executions,
-                isDeployedOverride: isDeployed
+                isDeployedOverride: buildContext.isDeployed,
+                nonceKey192: buildContext.sessionPlan?.nonceKey192
             )
         }
     }
@@ -1461,11 +1517,13 @@ final class AppModel: ObservableObject {
         try await executeUserOperation(
             logContext: logContext,
             signingReason: signingReason,
+            intent: intent,
             historyDraft: historyDraft(for: intent)
-        ) { [self] isDeployed in
+        ) { [self] buildContext in
             try await buildUserOperationDraft(
                 intent: intent,
-                isDeployedOverride: isDeployed
+                isDeployedOverride: buildContext.isDeployed,
+                nonceKey192: buildContext.sessionPlan?.nonceKey192
             )
         }
     }
@@ -1473,8 +1531,9 @@ final class AppModel: ObservableObject {
     private func executeUserOperation(
         logContext: String,
         signingReason: String,
+        intent: TransactionIntent?,
         historyDraft: WalletTransactionDraft?,
-        buildDraft: @escaping (_ isDeployed: Bool) async throws -> UserOperationDraft
+        buildDraft: @escaping (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
             throw AppError.walletOperationInProgress
@@ -1497,6 +1556,7 @@ final class AppModel: ObservableObject {
             let result = try await sendUserOperation(
                 logContext: logContext,
                 signingReason: signingReason,
+                intent: intent,
                 historyDraft: historyDraft,
                 buildDraft: buildDraft
             )
@@ -1512,47 +1572,82 @@ final class AppModel: ObservableObject {
     private func sendUserOperation(
         logContext: String,
         signingReason: String,
+        intent: TransactionIntent?,
         historyDraft: WalletTransactionDraft?,
-        buildDraft: (_ isDeployed: Bool) async throws -> UserOperationDraft
+        buildDraft: (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         appendLog("\(logContext): preparing transaction on \(activeChain.name)")
 
         let liveInspection = try await refreshAccountInspectionWithRetry(logContext: "\(logContext)-preflight")
         appendLog("\(logContext): using \(liveInspection.isDeployed ? "deployed" : "precomputed") account path")
 
-        let draft = try await buildDraft(liveInspection.isDeployed)
+        let sessionPlan = intent.flatMap {
+            liveInspection.isDeployed ? activeSessionPlan(for: $0, now: Date()) : nil
+        }
+        if let sessionPlan {
+            let modeLabel = sessionPlan.signatureMode == .installed ? "installed" : "enable"
+            appendLog("\(logContext): using silent session-key path (\(modeLabel) mode)")
+        } else if intent != nil, settingsStore.sessionKeysEnabled {
+            appendLog("\(logContext): session-key path unavailable or out of policy; using passkey")
+        }
+
+        let buildContext = UserOperationBuildContext(
+            isDeployed: liveInspection.isDeployed,
+            sessionPlan: sessionPlan
+        )
+        let draft = try await buildDraft(buildContext)
         appendDraftLogSummary(draft, context: logContext)
 
         let enrichedDraft = try await enrichDraftWithLocalBundlerEstimation(
             draft,
-            logContext: logContext
+            logContext: logContext,
+            sessionPlan: sessionPlan
         )
         builtUserOperationDraft = enrichedDraft
 
-        let finalHash = try enrichedDraft.userOpHash()
-        appendLog("\(logContext): final userOpHash \(finalHash.shortHex)")
-
-        let preimage = try WalletSignature.computeSigningPreimage(userOpHash: finalHash)
-        appendLog("\(logContext): computed signing preimage (\(preimage.count) bytes)")
-
-        appendLog("\(logContext): requesting Secure Enclave signature")
-        let signature = try keyStore.sign(preimage: preimage, reason: signingReason)
-        appendLog("\(logContext): signature components r=\(signature.r.shortHex) s=\(signature.s.shortHex)")
-
-        var lowS = signature.s
-        let originalS = lowS
-        try WalletSignature.normaliseLowS(s: &lowS)
-        appendLog(
-            "\(logContext): low-s normalization \(originalS == lowS ? "not needed" : "applied")"
+        let signatureResult = try UserOperationSigning.signForSend(
+            draft: enrichedDraft,
+            session: sessionPlan?.signingContext,
+            passkeySigner: { [self] preimage in
+                appendLog("\(logContext): computed signing preimage (\(preimage.count) bytes)")
+                appendLog("\(logContext): requesting Secure Enclave signature")
+                let signature = try keyStore.sign(preimage: preimage, reason: signingReason)
+                appendLog("\(logContext): signature components r=\(signature.r.shortHex) s=\(signature.s.shortHex)")
+                return signature
+            },
+            passkeyWrapper: { [self] userOpHash, signature in
+                var lowS = signature.s
+                let originalS = lowS
+                try WalletSignature.normaliseLowS(s: &lowS)
+                appendLog(
+                    "\(logContext): low-s normalization \(originalS == lowS ? "not needed" : "applied")"
+                )
+                let encoded = try WalletSignature.abiEncodeSignature(
+                    userOpHash: userOpHash,
+                    r: signature.r,
+                    s: lowS,
+                    usePrecompiled: false
+                )
+                appendLog("\(logContext): encoded Kernel/WebAuthn signature (\(encoded.count) bytes)")
+                return encoded
+            },
+            sessionSecretReader: { keyRef in
+                try SessionKeyStore.shared.read(keyRef: keyRef).secret
+            },
+            sessionWrapper: { [self] secret, userOpHash, mode, enableData, selectorData, enableSig in
+                let signature = try WalletSignature.sessionSignAndWrap(
+                    secret: secret,
+                    userOpHash: userOpHash,
+                    mode: mode,
+                    enableData: enableData,
+                    selectorData: selectorData,
+                    enableSig: enableSig
+                )
+                appendLog("\(logContext): encoded session signature (\(signature.count) bytes)")
+                return signature
+            }
         )
-
-        let encodedSignature = try WalletSignature.abiEncodeSignature(
-            userOpHash: finalHash,
-            r: signature.r,
-            s: lowS,
-            usePrecompiled: false
-        )
-        appendLog("\(logContext): encoded Kernel/WebAuthn signature (\(encodedSignature.count) bytes)")
+        appendLog("\(logContext): final userOpHash \(signatureResult.userOpHash.shortHex)")
 
         bridgeStatus = "Submitting UserOperation to local wallet-node on \(activeChain.name)..."
         activeBundlerStatus = "Submitting UserOperation"
@@ -1560,10 +1655,13 @@ final class AppModel: ObservableObject {
         let sentUserOpHash = try await withWalletNodeClient(operation: "\(logContext) submit") { client in
             try await client.sendUserOperation(
                 draft: enrichedDraft,
-                signature: encodedSignature
+                signature: signatureResult.signature
             )
         }
         lastSubmittedUserOperationHash = sentUserOpHash
+        if let sessionPlan, !sessionPlan.record.installedOnChain {
+            pendingSessionInstallByUserOpHash[sentUserOpHash.lowercased()] = sessionPlan.record
+        }
         recordOptimisticNonce(after: enrichedDraft)
         appendLog("\(logContext): local wallet-node accepted userOpHash \(sentUserOpHash)")
         if let historyDraft {
@@ -1584,6 +1682,30 @@ final class AppModel: ObservableObject {
             transactionHash: nil,
             success: nil
         )
+    }
+
+    private func activeSessionPlan(for intent: TransactionIntent, now: Date) -> SessionUserOperationPlan? {
+        guard settingsStore.sessionKeysEnabled,
+              let walletRecord,
+              let sessionRecord = walletRecord.sessionRecords.first(where: { $0.chainId == activeChain.id }),
+              let plan = SessionUserOperationPlan(record: sessionRecord)
+        else {
+            return nil
+        }
+
+        let context = SessionPolicyContext(
+            sessionRecord: sessionRecord,
+            now: now,
+            recentSessionTransactionDates: []
+        )
+        guard SessionPolicyMirror.isWithinPolicy(
+            intent: intent,
+            config: sessionRecord.policyConfigSnapshot,
+            context: context
+        ) else {
+            return nil
+        }
+        return plan
     }
 
     private func signSessionEnableDigest(_ digest: Data, reason: String) throws -> Data {
@@ -1654,7 +1776,8 @@ final class AppModel: ObservableObject {
 
     private func enrichDraftWithLocalBundlerEstimation(
         _ draft: UserOperationDraft,
-        logContext: String
+        logContext: String,
+        sessionPlan: SessionUserOperationPlan? = nil
     ) async throws -> UserOperationDraft {
         appendLog("\(logContext): checking local wallet-node entry point support")
         try await withWalletNodeClient(operation: "\(logContext) entry point check") { client in
@@ -1662,8 +1785,19 @@ final class AppModel: ObservableObject {
         }
         appendLog("\(logContext): local wallet-node supports entry point \(activeChain.entryPoint)")
 
-        let dummySignature = try WalletSignature.abiEncodeDummySignature(usePrecompiled: false)
-        appendLog("\(logContext): generated dummy signature for estimation (\(dummySignature.count) bytes)")
+        let dummySignature: Data
+        if let sessionPlan {
+            dummySignature = try WalletSignature.sessionDummySignature(
+                mode: sessionPlan.signatureMode,
+                enableData: sessionPlan.record.installedOnChain ? Data() : sessionPlan.record.enableData,
+                selectorData: sessionPlan.record.installedOnChain ? Data() : sessionPlan.record.selectorData,
+                usePrecompiled: false
+            )
+            appendLog("\(logContext): generated session dummy signature for estimation (\(dummySignature.count) bytes)")
+        } else {
+            dummySignature = try WalletSignature.abiEncodeDummySignature(usePrecompiled: false)
+            appendLog("\(logContext): generated dummy signature for estimation (\(dummySignature.count) bytes)")
+        }
 
         let estimate = try await withWalletNodeWarmupRetry(operation: "\(logContext) gas estimate") {
             try await withWalletNodeClient(operation: "\(logContext) gas estimate") { client in
@@ -1880,8 +2014,50 @@ final class AppModel: ObservableObject {
                 invalidated: receipt.invalidated
             ))
             appendLog("\(logContext): wallet history reconciled receipt \(receipt.success ? "included" : "reverted")")
+            updatePendingSessionInstall(
+                userOpHash: receipt.userOpHash,
+                chainID: chainID,
+                success: receipt.success,
+                logContext: logContext
+            )
         } catch {
             appendLog("\(logContext): wallet history receipt update failed — \(error.localizedDescription)")
+        }
+    }
+
+    private func updatePendingSessionInstall(
+        userOpHash: String,
+        chainID: UInt64,
+        success: Bool,
+        logContext: String
+    ) {
+        let key = userOpHash.lowercased()
+        guard let pendingRecord = pendingSessionInstallByUserOpHash.removeValue(forKey: key) else {
+            return
+        }
+        guard success else {
+            appendLog("\(logContext): session permission install was not included")
+            return
+        }
+        guard let walletRecord else {
+            return
+        }
+
+        var installedRecord = walletRecord.sessionRecords.first {
+            $0.chainId == chainID && $0.permissionId == pendingRecord.permissionId
+        } ?? pendingRecord
+        installedRecord.installedOnChain = true
+        do {
+            let refreshed = walletRecord.replacingSessionRecord(
+                installedRecord,
+                isDeployed: walletRecord.isDeployed,
+                updatedAt: Date()
+            )
+            try metadataStore.save(refreshed)
+            self.walletRecord = refreshed
+            appendLog("\(logContext): marked session permission installed")
+        } catch {
+            appendLog("\(logContext): session permission install update failed — \(error.localizedDescription)")
         }
     }
 

@@ -1,0 +1,144 @@
+import Foundation
+import Testing
+@testable import WalletMacOSApp
+
+@Test func sessionPolicyMirrorAllowsNativeTransferAtCapAndRejectsOverCap() {
+    let context = sessionPolicyContext()
+    let recipient = "0x1111111111111111111111111111111111111111"
+
+    #expect(SessionPolicyMirror.isWithinPolicy(
+        intent: .nativeTransfer(recipient: recipient, amountETH: "0.1"),
+        config: .default,
+        context: context
+    ))
+    #expect(!SessionPolicyMirror.isWithinPolicy(
+        intent: .nativeTransfer(recipient: recipient, amountETH: "0.100000000000000001"),
+        config: .default,
+        context: context
+    ))
+}
+
+@Test func sessionPolicyMirrorAllowsKnownERC20TransferAndRejectsUnknownOrOverCap() throws {
+    let context = sessionPolicyContext()
+    let recipient = "0x2222222222222222222222222222222222222222"
+    let usdc = try #require(WalletTokenRegistry.token(matching: "USDC", on: 11_155_111))
+    let unknown = WalletToken(
+        chainID: 11_155_111,
+        symbol: "FAKE",
+        name: "Fake",
+        decimals: 18,
+        kind: .erc20(address: "0x9999999999999999999999999999999999999999")
+    )
+
+    #expect(SessionPolicyMirror.isWithinPolicy(
+        intent: .erc20Transfer(token: usdc, recipient: recipient, amount: "100"),
+        config: .default,
+        context: context
+    ))
+    #expect(!SessionPolicyMirror.isWithinPolicy(
+        intent: .erc20Transfer(token: unknown, recipient: recipient, amount: "1"),
+        config: .default,
+        context: context
+    ))
+    #expect(!SessionPolicyMirror.isWithinPolicy(
+        intent: .erc20Transfer(token: usdc, recipient: recipient, amount: "1000000000000"),
+        config: .default,
+        context: context
+    ))
+}
+
+@Test func sessionPolicyMirrorAllowsKnownRouterSwapAndRejectsUnknownRouter() throws {
+    let context = sessionPolicyContext()
+    let quote = try makeSessionPolicyMirrorSwapQuote(
+        router: "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E"
+    )
+    let request = SwapExecutionRequest(
+        quote: quote,
+        recipient: "0x3333333333333333333333333333333333333333",
+        tokenInIsNative: false,
+        tokenOutIsNative: false
+    )
+    let unknownRouterQuote = try makeSessionPolicyMirrorSwapQuote(
+        router: "0x5555555555555555555555555555555555555555"
+    )
+    let unknownRouterRequest = SwapExecutionRequest(
+        quote: unknownRouterQuote,
+        recipient: request.recipient,
+        tokenInIsNative: false,
+        tokenOutIsNative: false
+    )
+
+    #expect(SessionPolicyMirror.isWithinPolicy(
+        intent: .exactInputSwap(request),
+        config: .default,
+        context: context
+    ))
+    #expect(!SessionPolicyMirror.isWithinPolicy(
+        intent: .exactInputSwap(unknownRouterRequest),
+        config: .default,
+        context: context
+    ))
+}
+
+@Test func sessionPolicyMirrorRejectsExpiredSessionAndExhaustedRateLimit() {
+    let recipient = "0x4444444444444444444444444444444444444444"
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let intent = TransactionIntent.nativeTransfer(recipient: recipient, amountETH: "0.01")
+    let exhaustedDates = (0..<SessionPolicyConfig.default.rateLimitCount).map {
+        now.addingTimeInterval(-Double($0 + 1))
+    }
+
+    #expect(!SessionPolicyMirror.isWithinPolicy(
+        intent: intent,
+        config: .default,
+        context: SessionPolicyContext(
+            chainID: 11_155_111,
+            now: now,
+            expiresAt: now.addingTimeInterval(-1)
+        )
+    ))
+    #expect(!SessionPolicyMirror.isWithinPolicy(
+        intent: intent,
+        config: .default,
+        context: SessionPolicyContext(
+            chainID: 11_155_111,
+            now: now,
+            expiresAt: now.addingTimeInterval(604_800),
+            recentSessionTransactionDates: exhaustedDates
+        )
+    ))
+}
+
+private func sessionPolicyContext() -> SessionPolicyContext {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    return SessionPolicyContext(
+        chainID: 11_155_111,
+        now: now,
+        expiresAt: now.addingTimeInterval(604_800)
+    )
+}
+
+private func makeSessionPolicyMirrorSwapQuote(router: String) throws -> SwapQuote {
+    let usdc = try #require(WalletTokenRegistry.token(matching: "USDC", on: 11_155_111))
+    let weth = try #require(WalletTokenRegistry.token(matching: "WETH", on: 11_155_111))
+    let tokenIn = try #require(usdc.contractAddress)
+    let tokenOut = try #require(weth.contractAddress)
+
+    return SwapQuote(
+        chainID: 11_155_111,
+        factory: "0x0000000000000000000000000000000000000001",
+        router: router,
+        quoter: "0x0000000000000000000000000000000000000002",
+        tokenIn: tokenIn,
+        tokenOut: tokenOut,
+        amountIn: try Data(hexString: "64").leftPadded(to: 32),
+        quoteAmountOut: try Data(hexString: "5f").leftPadded(to: 32),
+        amountOutMinimum: try Data(hexString: "5e").leftPadded(to: 32),
+        slippageBps: 100,
+        path: try Data(hexString: "\(String(tokenIn.dropFirst(2)))000bb8\(String(tokenOut.dropFirst(2)))"),
+        hops: [],
+        gasEstimate: "0x0",
+        allowance: nil,
+        requiresApproval: false
+    )
+}

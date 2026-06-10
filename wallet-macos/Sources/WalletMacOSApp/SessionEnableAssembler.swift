@@ -76,9 +76,13 @@ enum SessionEnableAssembler {
 
     private static let erc20TransferSelector = "0xa9059cbb"
     private static let erc20ApproveSelector = "0x095ea7b3"
+    private static let swapRouterExactInputSelector = "0xb858183f"
+    private static let swapRouterUnwrapWETH9Selector = "0x49404b7c"
     private static let nativeTransferSelector = "0x00000000"
     private static let anyTarget = "0x0000000000000000000000000000000000000000"
-    private static let amountArgumentOffset: UInt64 = 32
+    private static let erc20AmountArgumentOffset: UInt64 = 32
+    private static let swapRecipientArgumentOffset: UInt64 = 32
+    private static let swapAmountInArgumentOffset: UInt64 = 64
 
     static func assemble(
         policy: SessionPolicyConfig,
@@ -149,7 +153,11 @@ enum SessionEnableAssembler {
             rateLimitStartAt: 0,
             validAfter: 0,
             validUntil: validUntil,
-            allowedCalls: try allowedCalls(policy: policy, chainID: chain.id)
+            allowedCalls: try allowedCalls(
+                policy: policy,
+                chainID: chain.id,
+                accountAddress: accountAddress
+            )
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -162,13 +170,14 @@ enum SessionEnableAssembler {
 
     private static func allowedCalls(
         policy: SessionPolicyConfig,
-        chainID: UInt64
+        chainID: UInt64,
+        accountAddress: String
     ) throws -> [SessionPermissionAllowedCall] {
         var calls: [SessionPermissionAllowedCall] = []
         let amountLimit = try b256Hex(decimal: policy.perTxValueLimitWei)
-        let amountRule = SessionPermissionAllowRule(
+        let erc20AmountRule = SessionPermissionAllowRule(
             condition: "lessEqual",
-            offset: amountArgumentOffset,
+            offset: erc20AmountArgumentOffset,
             params: [amountLimit]
         )
 
@@ -192,13 +201,53 @@ enum SessionEnableAssembler {
                     target: target,
                     selector: erc20TransferSelector,
                     valueLimitWei: "0",
-                    rules: [amountRule]
+                    rules: [erc20AmountRule]
                 ))
                 calls.append(SessionPermissionAllowedCall(
                     target: target,
                     selector: erc20ApproveSelector,
                     valueLimitWei: "0",
-                    rules: [amountRule]
+                    rules: [erc20AmountRule]
+                ))
+            }
+        }
+
+        if policy.allowlist.swapRouter {
+            let accountRule = SessionPermissionAllowRule(
+                condition: "equal",
+                offset: swapRecipientArgumentOffset,
+                params: [try b256Address(accountAddress)]
+            )
+            let swapAmountRule = SessionPermissionAllowRule(
+                condition: "lessEqual",
+                offset: swapAmountInArgumentOffset,
+                params: [amountLimit]
+            )
+
+            for router in SessionSwapRouterRegistry.routers(on: chainID) {
+                let target = try normalizedAddress(router)
+                let routerRule = SessionPermissionAllowRule(
+                    condition: "equal",
+                    offset: swapRecipientArgumentOffset,
+                    params: [try b256Address(router)]
+                )
+                calls.append(SessionPermissionAllowedCall(
+                    target: target,
+                    selector: swapRouterExactInputSelector,
+                    valueLimitWei: policy.perTxValueLimitWei,
+                    rules: [accountRule, swapAmountRule]
+                ))
+                calls.append(SessionPermissionAllowedCall(
+                    target: target,
+                    selector: swapRouterExactInputSelector,
+                    valueLimitWei: policy.perTxValueLimitWei,
+                    rules: [routerRule, swapAmountRule]
+                ))
+                calls.append(SessionPermissionAllowedCall(
+                    target: target,
+                    selector: swapRouterUnwrapWETH9Selector,
+                    valueLimitWei: "0",
+                    rules: [accountRule]
                 ))
             }
         }
@@ -220,6 +269,14 @@ enum SessionEnableAssembler {
             throw AppError.invalidHexString
         }
         return "0x" + data.hexEncodedString
+    }
+
+    private static func b256Address(_ value: String) throws -> String {
+        let data = try Data(hexString: value)
+        guard data.count == 20 else {
+            throw AppError.invalidExecutionAddress
+        }
+        return "0x" + data.leftPadded(to: 32).hexEncodedString
     }
 
     private static func nonNegativeUInt64(_ value: Int) throws -> UInt64 {

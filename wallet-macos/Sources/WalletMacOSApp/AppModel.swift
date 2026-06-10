@@ -1085,7 +1085,8 @@ final class AppModel: ObservableObject {
             chain: activeChain,
             isDeployed: isDeployedOverride ?? accountInspection?.isDeployed ?? walletRecord.isDeployed,
             nonceHex: nonceHex,
-            intent: intent
+            intent: intent,
+            sessionMode: nonceKey192 != nil
         )
     }
 

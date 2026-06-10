@@ -74,6 +74,44 @@ import Testing
         $0.target == usdc && $0.selector == "0x095ea7b3"
     })
 
+    let router = "0x3bfa4769fb09eefc5a80d6e87c3b9c650f7ae48e"
+    let accountRule = SessionPermissionAllowRule(
+        condition: "equal",
+        offset: 32,
+        params: [try b256Address("0x000000000000000000000000000000000000dEaD")]
+    )
+    let routerRule = SessionPermissionAllowRule(
+        condition: "equal",
+        offset: 32,
+        params: [try b256Address(router)]
+    )
+    let swapAmountRule = SessionPermissionAllowRule(
+        condition: "lessEqual",
+        offset: 64,
+        params: [expectedLimit]
+    )
+    let exactInputToAccount = try #require(decoded.allowedCalls.first {
+        $0.target == router
+            && $0.selector == "0xb858183f"
+            && $0.rules.contains(accountRule)
+    })
+    #expect(exactInputToAccount.valueLimitWei == policy.perTxValueLimitWei)
+    #expect(exactInputToAccount.rules.contains(swapAmountRule))
+
+    let exactInputToRouter = try #require(decoded.allowedCalls.first {
+        $0.target == router
+            && $0.selector == "0xb858183f"
+            && $0.rules.contains(routerRule)
+    })
+    #expect(exactInputToRouter.valueLimitWei == policy.perTxValueLimitWei)
+    #expect(exactInputToRouter.rules.contains(swapAmountRule))
+
+    let unwrap = try #require(decoded.allowedCalls.first {
+        $0.target == router && $0.selector == "0x49404b7c"
+    })
+    #expect(unwrap.valueLimitWei == "0")
+    #expect(unwrap.rules == [accountRule])
+
     #expect(assembly.permission == artifacts)
     #expect(assembly.record.chainId == 11_155_111)
     #expect(assembly.record.sessionKeyRef == "session-key:11155111:0xdead")
@@ -88,4 +126,9 @@ import Testing
     #expect(assembly.record.selectorData == artifacts.selectorData)
     #expect(assembly.record.nonceKeyDefault == artifacts.nonceKeyDefault)
     #expect(assembly.record.nonceKeyEnable == artifacts.nonceKeyEnable)
+}
+
+private func b256Address(_ value: String) throws -> String {
+    let data = try Data(hexString: value)
+    return "0x" + data.leftPadded(to: 32).hexEncodedString
 }

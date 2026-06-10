@@ -96,6 +96,74 @@ import Testing
     #expect(executions[0].target == quote.router.lowercasedAddress)
 }
 
+@Test func nativeOutSwapUsesRouterMulticallOutsideSessionMode() throws {
+    let builder = UserOperationBuilder()
+    let quote = try makeSwapQuote(
+        allowance: try Data(hexString: "64").leftPadded(to: 32),
+        requiresApproval: false
+    )
+    let request = SwapExecutionRequest(
+        quote: quote,
+        recipient: "0x3333333333333333333333333333333333333333",
+        tokenInIsNative: false,
+        tokenOutIsNative: true
+    )
+    let swapCallData = try SwapRouterCallEncoder().encodeExactInput(
+        path: quote.path,
+        recipient: quote.router,
+        amountIn: quote.amountIn,
+        amountOutMinimum: quote.amountOutMinimum
+    )
+    let unwrapCallData = try SwapRouterCallEncoder().encodeUnwrapWETH9(
+        amountMinimum: quote.amountOutMinimum,
+        recipient: request.recipient
+    )
+
+    let executions = try builder.buildExecutionRequests(for: .exactInputSwap(request))
+
+    #expect(executions.count == 1)
+    #expect(executions[0].target == quote.router.lowercasedAddress)
+    #expect(executions[0].callData == SwapRouterCallEncoder().encodeMulticall([swapCallData, unwrapCallData]))
+}
+
+@Test func nativeOutSwapInSessionModeUsesTopLevelRouterCalls() throws {
+    let builder = UserOperationBuilder()
+    let quote = try makeSwapQuote(
+        allowance: Data(repeating: 0, count: 32),
+        requiresApproval: true
+    )
+    let request = SwapExecutionRequest(
+        quote: quote,
+        recipient: "0x3333333333333333333333333333333333333333",
+        tokenInIsNative: false,
+        tokenOutIsNative: true
+    )
+    let expectedApproval = try ERC20ApprovalCallEncoder().encodeApprove(
+        spender: quote.router,
+        amount: quote.amountIn
+    )
+    let expectedSwap = try SwapRouterCallEncoder().encodeExactInput(
+        path: quote.path,
+        recipient: quote.router,
+        amountIn: quote.amountIn,
+        amountOutMinimum: quote.amountOutMinimum
+    )
+    let expectedUnwrap = try SwapRouterCallEncoder().encodeUnwrapWETH9(
+        amountMinimum: quote.amountOutMinimum,
+        recipient: request.recipient
+    )
+
+    let executions = try builder.buildExecutionRequests(for: .exactInputSwap(request), sessionMode: true)
+
+    #expect(executions.count == 3)
+    #expect(executions[0].target == quote.tokenIn.lowercasedAddress)
+    #expect(executions[0].callData == expectedApproval)
+    #expect(executions[1].target == quote.router.lowercasedAddress)
+    #expect(executions[1].callData == expectedSwap)
+    #expect(executions[2].target == quote.router.lowercasedAddress)
+    #expect(executions[2].callData == expectedUnwrap)
+}
+
 private func makeSwapQuote(allowance: Data?, requiresApproval: Bool) throws -> SwapQuote {
     let tokenIn = "0x1111111111111111111111111111111111111111"
     let tokenOut = "0x2222222222222222222222222222222222222222"

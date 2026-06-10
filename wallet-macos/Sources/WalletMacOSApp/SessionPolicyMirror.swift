@@ -87,15 +87,6 @@ enum SessionPolicyMirror {
         )
     }
 
-    private static let knownSwapRouters: [UInt64: Set<String>] = [
-        1: [
-            "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45",
-        ],
-        11_155_111: [
-            "0x3bfa4769fb09eefc5a80d6e87c3b9c650f7ae48e",
-        ],
-    ]
-
     private static func isActive(_ context: SessionPolicyContext) -> Bool {
         context.now < context.expiresAt
     }
@@ -152,12 +143,10 @@ enum SessionPolicyMirror {
     }
 
     private static func isKnownSwapRouter(_ address: String, chainID: UInt64) -> Bool {
-        guard let normalized = normalizedAddress(address),
-              let routers = knownSwapRouters[chainID]
-        else {
+        guard let normalized = normalizedAddress(address) else {
             return false
         }
-        return routers.contains(normalized)
+        return SessionSwapRouterRegistry.routerSet(on: chainID).contains(normalized)
     }
 
     private static func normalizedAddress(_ value: String) -> String? {

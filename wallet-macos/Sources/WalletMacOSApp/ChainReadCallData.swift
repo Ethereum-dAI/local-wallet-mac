@@ -1,6 +1,10 @@
 import Foundation
 
 enum ChainReadCallData {
+    static func kernelCurrentNonce() -> String {
+        "0xadb610a3"
+    }
+
     static func entryPointGetNonce(
         accountAddress: String,
         nonceKey: UInt64

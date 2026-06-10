@@ -99,4 +99,26 @@ extension WalletRecord {
     func matches(_ coordinates: PublicKeyCoordinates) -> Bool {
         pubkeyX == coordinates.x && pubkeyY == coordinates.y
     }
+
+    func replacingSessionRecord(
+        _ sessionRecord: SessionRecord,
+        isDeployed: Bool,
+        updatedAt: Date
+    ) -> WalletRecord {
+        let retainedRecords = sessionRecords.filter { $0.chainId != sessionRecord.chainId }
+        return WalletRecord(
+            walletId: walletId,
+            keyTag: keyTag,
+            pubkeyX: pubkeyX,
+            pubkeyY: pubkeyY,
+            chainId: chainId,
+            kernelAccountAddress: kernelAccountAddress,
+            authenticatorIdHash: authenticatorIdHash,
+            kernelSalt: kernelSalt,
+            sessionRecords: retainedRecords + [sessionRecord],
+            isDeployed: isDeployed,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
 }

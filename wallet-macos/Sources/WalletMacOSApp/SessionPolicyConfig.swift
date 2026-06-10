@@ -42,6 +42,11 @@ struct SessionRecord: Codable, Equatable {
     var enabledAt: Date
     var expiresAt: Date
     var installedOnChain: Bool
+    var validationNonce: UInt32
+    var enableData: Data
+    var selectorData: Data
+    var nonceKeyDefault: Data
+    var nonceKeyEnable: Data
     var policyConfigSnapshot: SessionPolicyConfig
 
     init(
@@ -52,6 +57,11 @@ struct SessionRecord: Codable, Equatable {
         enabledAt: Date,
         expiresAt: Date,
         installedOnChain: Bool,
+        validationNonce: UInt32 = 0,
+        enableData: Data = Data(),
+        selectorData: Data = Data(),
+        nonceKeyDefault: Data = Data(),
+        nonceKeyEnable: Data = Data(),
         policyConfigSnapshot: SessionPolicyConfig = .default
     ) {
         self.chainId = chainId
@@ -61,6 +71,11 @@ struct SessionRecord: Codable, Equatable {
         self.enabledAt = enabledAt
         self.expiresAt = expiresAt
         self.installedOnChain = installedOnChain
+        self.validationNonce = validationNonce
+        self.enableData = enableData
+        self.selectorData = selectorData
+        self.nonceKeyDefault = nonceKeyDefault
+        self.nonceKeyEnable = nonceKeyEnable
         self.policyConfigSnapshot = policyConfigSnapshot
     }
 
@@ -72,6 +87,11 @@ struct SessionRecord: Codable, Equatable {
         case enabledAt
         case expiresAt
         case installedOnChain
+        case validationNonce
+        case enableData
+        case selectorData
+        case nonceKeyDefault
+        case nonceKeyEnable
         case policyConfigSnapshot
     }
 
@@ -84,6 +104,11 @@ struct SessionRecord: Codable, Equatable {
         enabledAt = try container.decode(Date.self, forKey: .enabledAt)
         expiresAt = try container.decode(Date.self, forKey: .expiresAt)
         installedOnChain = try container.decode(Bool.self, forKey: .installedOnChain)
+        validationNonce = try container.decodeIfPresent(UInt32.self, forKey: .validationNonce) ?? 0
+        enableData = try container.decodeIfPresent(Data.self, forKey: .enableData) ?? Data()
+        selectorData = try container.decodeIfPresent(Data.self, forKey: .selectorData) ?? Data()
+        nonceKeyDefault = try container.decodeIfPresent(Data.self, forKey: .nonceKeyDefault) ?? Data()
+        nonceKeyEnable = try container.decodeIfPresent(Data.self, forKey: .nonceKeyEnable) ?? Data()
         policyConfigSnapshot = try container.decodeIfPresent(
             SessionPolicyConfig.self,
             forKey: .policyConfigSnapshot

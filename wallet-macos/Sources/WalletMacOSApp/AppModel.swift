@@ -1223,6 +1223,73 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @discardableResult
+    func enableSessionKeys(now: Date = Date()) async throws -> SessionRecord {
+        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+            throw AppError.walletOperationInProgress
+        }
+        if walletRecord == nil {
+            bootstrap()
+        }
+        guard let record = walletRecord, let accountAddress = record.kernelAccountAddress else {
+            throw AppError.corruptedMetadataStore
+        }
+
+        appendSection("Enable Session Keys")
+        appendLog("session: checking deployed account state")
+        let inspection = try await refreshAccountInspectionWithRetry(logContext: "session-enable")
+        guard inspection.isDeployed else {
+            throw AppError.sessionKeysRequireDeployedAccount
+        }
+
+        let keyRef = try SessionEnableAssembler.sessionKeyRef(
+            chainID: activeChain.id,
+            accountAddress: accountAddress
+        )
+        appendLog("session: loading session key \(keyRef)")
+        let sessionKey = try SessionKeyStore.shared.createIfNeeded(keyRef: keyRef)
+
+        appendLog("session: reading Kernel currentNonce")
+        let validationNonce = try await withWalletNodeWarmupRetry(operation: "Kernel currentNonce read") {
+            try await withWalletNodeClient(operation: "Kernel currentNonce read") { client in
+                try await client.kernelCurrentNonce(accountAddress: accountAddress)
+            }
+        }
+
+        let policy = settingsStore.sessionPolicy
+        let assembly = try SessionEnableAssembler.assemble(
+            policy: policy,
+            chain: activeChain,
+            accountAddress: accountAddress,
+            sessionKeyRef: keyRef,
+            sessionAddress: sessionKey.address,
+            validationNonce: validationNonce,
+            now: now,
+            composer: { configJSON in
+                try SessionPermissionArtifacts(
+                    permission: WalletSignature.sessionBuildPermission(configJSON: configJSON)
+                )
+            },
+            enableDigestSigner: { [self] digest in
+                try signSessionEnableDigest(
+                    digest,
+                    reason: "Enable session keys for \(activeChain.name)"
+                )
+            }
+        )
+
+        let refreshed = record.replacingSessionRecord(
+            assembly.record,
+            isDeployed: inspection.isDeployed,
+            updatedAt: now
+        )
+        try metadataStore.save(refreshed)
+        walletRecord = refreshed
+        settingsStore.setSessionKeysEnabled(true)
+        appendLog("session: stored permission 0x\(assembly.record.permissionId.hexEncodedString)")
+        return assembly.record
+    }
+
     func executeNativeTransfer(
         recipient: String,
         amountETH: String,
@@ -1516,6 +1583,19 @@ final class AppModel: ObservableObject {
             userOpHash: sentUserOpHash,
             transactionHash: nil,
             success: nil
+        )
+    }
+
+    private func signSessionEnableDigest(_ digest: Data, reason: String) throws -> Data {
+        let preimage = try WalletSignature.computeSigningPreimage(userOpHash: digest)
+        let signature = try keyStore.sign(preimage: preimage, reason: reason)
+        var lowS = signature.s
+        try WalletSignature.normaliseLowS(s: &lowS)
+        return try WalletSignature.abiEncodeSignature(
+            userOpHash: digest,
+            r: signature.r,
+            s: lowS,
+            usePrecompiled: false
         )
     }
 

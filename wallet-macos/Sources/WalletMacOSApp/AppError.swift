@@ -21,6 +21,7 @@ enum AppError: LocalizedError {
     case walletOperationInProgress
     case swapApprovalRequired(String)
     case invalidExecutionBatch
+    case sessionKeysRequireDeployedAccount
 
     var errorDescription: String? {
         switch self {
@@ -64,6 +65,8 @@ enum AppError: LocalizedError {
             return "\(token) approval is required before this swap can be submitted."
         case .invalidExecutionBatch:
             return "Batch execution needs at least one transaction."
+        case .sessionKeysRequireDeployedAccount:
+            return "Session keys can be enabled after the smart account is deployed. Send one passkey-authorized transaction first, then enable session keys."
         }
     }
 }

@@ -424,6 +424,19 @@ struct WalletNodeClient {
         return try await ethCall(to: tokenAddress, data: callData)
     }
 
+    func kernelCurrentNonce(accountAddress: String) async throws -> UInt32 {
+        let account = try Data(hexString: accountAddress)
+        guard account.count == 20 else {
+            throw AppError.invalidExecutionAddress
+        }
+        let result = try await ethCall(to: accountAddress, data: ChainReadCallData.kernelCurrentNonce())
+        let data = try Data(hexString: result)
+        guard data.count <= 32 else {
+            throw AppError.invalidHexString
+        }
+        return data.leftPadded(to: 32).suffix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+    }
+
     func entryPointNonce(
         entryPoint: String,
         accountAddress: String,

@@ -80,6 +80,82 @@ final class WalletSignatureTests: XCTestCase {
         XCTAssertEqual(address.hexString, "0xbe3f88b31963bedfdf8661eedf605639beaa0c4f")
     }
 
+    func testSessionBuildPermissionReturnsPlan1FixtureShape() throws {
+        let configJSON = Data("""
+        {
+          "account": "0x000000000000000000000000000000000000dEaD",
+          "chainId": 11155111,
+          "sessionKey": "0x90F8bf6A479f320ead074411a4B0e7944Ea8c9C1",
+          "executeSelector": "0xe9ae5c53",
+          "validationNonce": 1,
+          "gasBudgetWei": "5000000000000000",
+          "rateLimitIntervalSec": 86400,
+          "rateLimitCount": 20,
+          "rateLimitStartAt": 0,
+          "validAfter": 0,
+          "validUntil": 1900000000,
+          "allowedCalls": [
+            {
+              "target": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+              "selector": "0xa9059cbb",
+              "valueLimitWei": "0",
+              "rules": []
+            },
+            {
+              "target": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+              "selector": "0x095ea7b3",
+              "valueLimitWei": "0",
+              "rules": []
+            }
+          ]
+        }
+        """.utf8)
+
+        let permission = try WalletSignature.sessionBuildPermission(configJSON: configJSON)
+
+        XCTAssertEqual(permission.permissionId.hexString, "0x44366fcb")
+        XCTAssertEqual(
+            permission.enableDigest.hexString,
+            "0x010bc9b9b04ad89b23fc5806dba26f3d3bdcf191cb6ff607d78287cf2d39cedd"
+        )
+        XCTAssertFalse(permission.enableData.isEmpty)
+        XCTAssertEqual(permission.selectorData.prefix(4).hexString, "0xe9ae5c53")
+        XCTAssertEqual(permission.nonceKeyDefault.count, 32)
+        XCTAssertEqual(permission.nonceKeyEnable.count, 32)
+        XCTAssertEqual(permission.nonceKeyDefault[8], 0x00)
+        XCTAssertEqual(permission.nonceKeyDefault[9], 0x02)
+        XCTAssertEqual(permission.nonceKeyEnable[8], 0x01)
+        XCTAssertEqual(permission.nonceKeyEnable[9], 0x02)
+    }
+
+    func testSessionSignAndWrapInstalledMatchesPlan1Fixture() throws {
+        let secret = Data(hexString: "4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9c46f30d7d21715b23b1d")!
+        let hash = Data(hexString: "2d7b4ebae2de5315eaa3fb8edc341f76e683263012aca13c24eb63841d105852")!
+
+        let signature = try WalletSignature.sessionSignAndWrap(
+            secret: secret,
+            userOpHash: hash,
+            mode: .installed
+        )
+
+        XCTAssertEqual(
+            signature.hexString,
+            "0xffc7003f8ba4ba30856697a2b167be01b30eecd2ba3daa10c676b8839d31f204bd4641441d01eabd763428c80071e4722ff8012b13cc48a3c67f9d2ac02afc680f1c"
+        )
+    }
+
+    func testSessionDummySignatureAndInvalidateNonceCalldata() throws {
+        let dummy = try WalletSignature.sessionDummySignature(mode: .installed)
+        XCTAssertEqual(dummy.count, 66)
+        XCTAssertEqual(dummy[0], 0xff)
+
+        let calldata = try WalletSignature.sessionInvalidateNonceCalldata(nonce: 7)
+        XCTAssertEqual(
+            calldata.hexString,
+            "0x1f1b92e30000000000000000000000000000000000000000000000000000000000000007"
+        )
+    }
+
     func testFullPipeline() throws {
         // 1. Compute hash
         let hash = try WalletSignature.computeUserOpHash(

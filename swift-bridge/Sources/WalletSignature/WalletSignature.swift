@@ -14,10 +14,33 @@ private func checkResult(_ code: Int32) throws {
     }
 }
 
+private func takeFFIBuffer(_ ptr: UnsafePointer<UInt8>?, _ len: UInt32) throws -> Data {
+    guard let ptr, len > 0 else {
+        throw WalletError.internalError
+    }
+    let data = Data(bytes: ptr, count: Int(len))
+    wallet_free_buffer(UnsafeMutablePointer(mutating: ptr), len)
+    return data
+}
+
 public struct WalletSignature {
+    public enum SessionSignatureMode: UInt8 {
+        case installed = 0
+        case enable = 1
+    }
+
     public struct BundlerSecret {
         public let secret: Data
         public let address: Data
+    }
+
+    public struct SessionPermission {
+        public let permissionId: Data
+        public let enableData: Data
+        public let enableDigest: Data
+        public let selectorData: Data
+        public let nonceKeyDefault: Data
+        public let nonceKeyEnable: Data
     }
 
     public static func generateBundlerSecret() throws -> BundlerSecret {
@@ -183,6 +206,179 @@ public struct WalletSignature {
         let data = Data(bytes: ptr, count: Int(outLen))
         wallet_free_buffer(UnsafeMutablePointer(mutating: ptr), outLen)
         return data
+    }
+
+    public static func sessionBuildPermission(configJSON: Data) throws -> SessionPermission {
+        guard !configJSON.isEmpty else {
+            throw WalletError.invalidInput
+        }
+
+        var permissionId = Data(count: 4)
+        var enableDigest = Data(count: 32)
+        var nonceKeyDefault = Data(count: 32)
+        var nonceKeyEnable = Data(count: 32)
+        var enableDataPtr: UnsafePointer<UInt8>?
+        var enableDataLen: UInt32 = 0
+        var selectorDataPtr: UnsafePointer<UInt8>?
+        var selectorDataLen: UInt32 = 0
+
+        let result: Int32 = configJSON.withUnsafeBytes { configPtr in
+            permissionId.withUnsafeMutableBytes { permissionPtr in
+                enableDigest.withUnsafeMutableBytes { digestPtr in
+                    nonceKeyDefault.withUnsafeMutableBytes { defaultPtr in
+                        nonceKeyEnable.withUnsafeMutableBytes { enablePtr in
+                            wallet_session_build_permission(
+                                configPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                                UInt32(configJSON.count),
+                                permissionPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                                &enableDataPtr,
+                                &enableDataLen,
+                                &selectorDataPtr,
+                                &selectorDataLen,
+                                digestPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                                defaultPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                                enablePtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        try checkResult(result)
+
+        let enableData = try takeFFIBuffer(enableDataPtr, enableDataLen)
+        let selectorData = try takeFFIBuffer(selectorDataPtr, selectorDataLen)
+        return SessionPermission(
+            permissionId: permissionId,
+            enableData: enableData,
+            enableDigest: enableDigest,
+            selectorData: selectorData,
+            nonceKeyDefault: nonceKeyDefault,
+            nonceKeyEnable: nonceKeyEnable
+        )
+    }
+
+    public static func sessionSignAndWrap(
+        secret: Data,
+        userOpHash: Data,
+        mode: SessionSignatureMode,
+        enableData: Data = Data(),
+        selectorData: Data = Data(),
+        enableSig: Data = Data()
+    ) throws -> Data {
+        guard secret.count == 32, userOpHash.count == 32 else {
+            throw WalletError.invalidInput
+        }
+
+        var outPtr: UnsafePointer<UInt8>?
+        var outLen: UInt32 = 0
+
+        let result: Int32
+        switch mode {
+        case .installed:
+            result = secret.withUnsafeBytes { secretPtr in
+                userOpHash.withUnsafeBytes { hashPtr in
+                    wallet_session_sign_and_wrap(
+                        secretPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        hashPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        mode.rawValue,
+                        nil,
+                        0,
+                        nil,
+                        0,
+                        nil,
+                        0,
+                        &outPtr,
+                        &outLen
+                    )
+                }
+            }
+        case .enable:
+            guard !enableData.isEmpty, !selectorData.isEmpty, !enableSig.isEmpty else {
+                throw WalletError.invalidInput
+            }
+            result = secret.withUnsafeBytes { secretPtr in
+                userOpHash.withUnsafeBytes { hashPtr in
+                    enableData.withUnsafeBytes { enableDataPtr in
+                        selectorData.withUnsafeBytes { selectorDataPtr in
+                            enableSig.withUnsafeBytes { enableSigPtr in
+                                wallet_session_sign_and_wrap(
+                                    secretPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                                    hashPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                                    mode.rawValue,
+                                    enableDataPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                                    UInt32(enableData.count),
+                                    selectorDataPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                                    UInt32(selectorData.count),
+                                    enableSigPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                                    UInt32(enableSig.count),
+                                    &outPtr,
+                                    &outLen
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        try checkResult(result)
+        return try takeFFIBuffer(outPtr, outLen)
+    }
+
+    public static func sessionDummySignature(
+        mode: SessionSignatureMode,
+        enableData: Data = Data(),
+        selectorData: Data = Data(),
+        usePrecompiled: Bool = false
+    ) throws -> Data {
+        var outPtr: UnsafePointer<UInt8>?
+        var outLen: UInt32 = 0
+
+        let result: Int32
+        switch mode {
+        case .installed:
+            result = wallet_session_dummy_signature(
+                mode.rawValue,
+                nil,
+                0,
+                nil,
+                0,
+                usePrecompiled,
+                &outPtr,
+                &outLen
+            )
+        case .enable:
+            guard !enableData.isEmpty, !selectorData.isEmpty else {
+                throw WalletError.invalidInput
+            }
+            result = enableData.withUnsafeBytes { enableDataPtr in
+                selectorData.withUnsafeBytes { selectorDataPtr in
+                    wallet_session_dummy_signature(
+                        mode.rawValue,
+                        enableDataPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        UInt32(enableData.count),
+                        selectorDataPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        UInt32(selectorData.count),
+                        usePrecompiled,
+                        &outPtr,
+                        &outLen
+                    )
+                }
+            }
+        }
+
+        try checkResult(result)
+        return try takeFFIBuffer(outPtr, outLen)
+    }
+
+    public static func sessionInvalidateNonceCalldata(nonce: UInt32) throws -> Data {
+        var outPtr: UnsafePointer<UInt8>?
+        var outLen: UInt32 = 0
+
+        let result = wallet_session_invalidate_nonce_calldata(nonce, &outPtr, &outLen)
+        try checkResult(result)
+        return try takeFFIBuffer(outPtr, outLen)
     }
 
     public static func predictKernelAccountAddress(

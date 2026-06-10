@@ -14,6 +14,8 @@ wallet-signature  = { workspace = true }
 wallet-kernel     = { workspace = true }
 wallet-node-api   = { workspace = true }
 alloy-primitives  = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
 sha2              = { workspace = true }
 secp256k1         = { version = "0.30", features = ["rand"] }
 zeroize           = { workspace = true }

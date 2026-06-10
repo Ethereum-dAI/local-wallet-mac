@@ -1852,6 +1852,8 @@ dependencies = [
  "hex-literal",
  "p256",
  "secp256k1",
+ "serde",
+ "serde_json",
  "sha2",
  "wallet-kernel",
  "wallet-node-api",

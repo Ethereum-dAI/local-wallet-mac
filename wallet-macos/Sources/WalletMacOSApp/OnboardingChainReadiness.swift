@@ -68,6 +68,9 @@ struct OnboardingChainReadinessService {
             gasPolicy: gasPolicy
         )
         onEvent("launch: wallet-node started; polling network status")
+        if let logURL = WalletNodeDaemon.managedLogFileURL() {
+            onEvent("launch: wallet-node logs \(logURL.path)")
+        }
         var lastStatus: WalletNodeClient.NetworkStatus?
 
         while true {

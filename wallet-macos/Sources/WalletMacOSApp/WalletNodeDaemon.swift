@@ -189,12 +189,14 @@ final class WalletNodeDaemon: @unchecked Sendable {
             try setCloseOnExec(secretPipe[0])
             try setCloseOnExec(secretPipe[1])
 
-            let pid = try spawnHelper(
-                execPath: execPath,
-                readyWrite: readyPipe[1],
-                aliveRead: alivePipe[0],
-                secretRead: secretPipe[0]
-            )
+            let pid = try withWalletNodeLoggingEnvironment(environment) {
+                try spawnHelper(
+                    execPath: execPath,
+                    readyWrite: readyPipe[1],
+                    aliveRead: alivePipe[0],
+                    secretRead: secretPipe[0]
+                )
+            }
             closeIfOpen(&readyPipe[1])
             closeIfOpen(&alivePipe[0])
             closeIfOpen(&secretPipe[0])
@@ -265,6 +267,41 @@ final class WalletNodeDaemon: @unchecked Sendable {
         try daemonConfigTOML(chain: chain, gasPolicy: gasPolicy).write(to: configURL, atomically: true, encoding: .utf8)
     }
 
+    static func managedLogFileURL(fileManager: FileManager = .default) -> URL? {
+        guard let directory = try? daemonSupportDirectory(fileManager: fileManager) else {
+            return nil
+        }
+        return directory
+            .appendingPathComponent("logs", isDirectory: true)
+            .appendingPathComponent("wallet-node.log", isDirectory: false)
+    }
+
+    static func managedLogTail(maxBytes: Int = 96 * 1024, fileManager: FileManager = .default) -> String {
+        guard let logURL = managedLogFileURL(fileManager: fileManager) else {
+            return "wallet-node log path unavailable"
+        }
+        guard fileManager.fileExists(atPath: logURL.path) else {
+            return "wallet-node log file not found at \(logURL.path)"
+        }
+        do {
+            let handle = try FileHandle(forReadingFrom: logURL)
+            defer {
+                try? handle.close()
+            }
+            let size = try handle.seekToEnd()
+            let offset = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+            try handle.seek(toOffset: offset)
+            let data = try handle.readToEnd() ?? Data()
+            let text = String(data: data, encoding: .utf8) ?? "<wallet-node log is not valid UTF-8>"
+            if offset == 0 {
+                return text.isEmpty ? "<wallet-node log is empty>" : text
+            }
+            return "<tail truncated to last \(maxBytes) bytes>\n\(text)"
+        } catch {
+            return "wallet-node log read failed: \(error.localizedDescription)"
+        }
+    }
+
     static func gasPolicy(for chain: ChainConfiguration) -> GasPolicy {
         chain.isTestnet ? .sepolia : .mainnet
     }
@@ -303,8 +340,8 @@ final class WalletNodeDaemon: @unchecked Sendable {
         """
     }
 
-    private static func daemonSupportDirectory() throws -> URL {
-        let base = try FileManager.default.url(
+    private static func daemonSupportDirectory(fileManager: FileManager = .default) throws -> URL {
+        let base = try fileManager.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
@@ -320,6 +357,46 @@ final class WalletNodeDaemon: @unchecked Sendable {
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
+
+    private static func withWalletNodeLoggingEnvironment<T>(
+        _ environment: [String: String],
+        _ body: () throws -> T
+    ) throws -> T {
+        let rustLog = environment["LOCAL_WALLET_NODE_RUST_LOG"]
+            ?? environment["WALLET_NODE_RUST_LOG"]
+            ?? environment["RUST_LOG"]
+            ?? defaultManagedRustLog
+        let rustBacktrace = environment["RUST_BACKTRACE"] ?? "1"
+        let oldRustLog = getenv("RUST_LOG").map { String(cString: $0) }
+        let oldRustBacktrace = getenv("RUST_BACKTRACE").map { String(cString: $0) }
+
+        setenv("RUST_LOG", rustLog, 1)
+        setenv("RUST_BACKTRACE", rustBacktrace, 1)
+        defer {
+            restoreEnvironmentVariable("RUST_LOG", oldRustLog)
+            restoreEnvironmentVariable("RUST_BACKTRACE", oldRustBacktrace)
+        }
+
+        return try body()
+    }
+
+    private static func restoreEnvironmentVariable(_ name: String, _ value: String?) {
+        if let value {
+            setenv(name, value, 1)
+        } else {
+            unsetenv(name)
+        }
+    }
+
+    private static let defaultManagedRustLog = [
+        "wallet_node=trace",
+        "wallet_node_api=trace",
+        "wallet_node_store=trace",
+        "wallet_chain=trace",
+        "wallet_bundler=trace",
+        "helios=trace",
+        "warn",
+    ].joined(separator: ",")
 
     private static func parseReadyEvent(_ data: Data) throws -> ReadyEvent {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],

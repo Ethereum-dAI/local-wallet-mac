@@ -499,6 +499,152 @@ final class AppModel: ObservableObject {
         appendLog("log: cleared debug activity panel")
     }
 
+    func debugSessionReport(snapshot: LocalWalletSettingsSnapshot) async -> String {
+        appendLog("debug: collecting session report")
+
+        var lines: [String] = [
+            "Local Wallet Debug Report",
+            "generatedAt=\(Self.debugReportDateFormatter.string(from: Date()))",
+            "capturedAt=\(Self.debugReportDateFormatter.string(from: snapshot.capturedAt))",
+            "",
+            "[app]",
+            "version=\(snapshot.appVersion) build=\(snapshot.appBuild)",
+            "walletNodeMode=\(snapshot.walletNodeMode)",
+            "walletNodeConfig=\(snapshot.walletNodeConfigPath)",
+            "walletNodeLog=\(snapshot.walletNodeLogPath)",
+            "bridgeStatus=\(bridgeStatus)",
+            "activeBundlerStatus=\(activeBundlerStatus)",
+            "lastError=\(lastError ?? "None")",
+            "",
+            "[chain]",
+            "name=\(activeChain.name)",
+            "chainId=\(activeChain.id)",
+            "executionRPC=\(activeChain.rpcURL.absoluteString)",
+            "archiveRPC=\(activeChain.archiveRPCURL?.absoluteString ?? "Not set")",
+            "consensusRPC=\(activeChain.consensusRPCURL.absoluteString)",
+            "entryPoint=\(activeChain.entryPoint)",
+            "",
+            "[wallet]",
+            "kernelAccount=\(walletRecord?.kernelAccountAddress ?? snapshot.kernelAccountAddress)",
+            "accountState=\(accountInspection?.stateTitle ?? snapshot.kernelAccountState)",
+            "accountBalance=\(accountInspection?.balanceDisplay ?? snapshot.kernelAccountBalance)",
+            "lastUserOp=\(lastSubmittedUserOperationHash ?? "None")",
+            "lastBundleTx=\(lastBundledTransactionHash ?? "None")",
+            "isSendingUserOperation=\(isSendingUserOperation)",
+            "isBuildingUserOperation=\(isBuildingUserOperation)",
+            "",
+            "[networkStatus]",
+        ]
+        lines.append(contentsOf: await debugNetworkStatusLines())
+        lines.append("")
+        lines.append("[bundlerStatus]")
+        lines.append(contentsOf: await debugBundlerStatusLines())
+        lines.append("")
+        lines.append("[history]")
+        lines.append(contentsOf: debugHistoryLines())
+        lines.append("")
+        lines.append("[debugLog]")
+        lines.append(debugLogText.isEmpty ? "No debug log entries." : debugLogText)
+        lines.append("")
+        lines.append("[walletNodeLogTail]")
+        lines.append(WalletNodeClient.Configuration.fromEnvironment() == nil
+            ? WalletNodeDaemon.managedLogTail()
+            : "External wallet-node is configured. Inspect the daemon's own configured logs directory.")
+        return lines.joined(separator: "\n")
+    }
+
+    private func debugNetworkStatusLines() async -> [String] {
+        do {
+            let status = try await withWalletNodeClient(operation: "debug network status") { client in
+                try await client.networkStatus()
+            }
+            var lines = [
+                "status=\(status.status)",
+                "reason=\(status.reason ?? "None")",
+                "chainId=\(status.chainId)",
+                "profile=\(status.networkProfile)",
+                "helios.ready=\(status.helios.ready)",
+                "helios.checkpointLoaded=\(status.helios.checkpointLoaded)",
+                "helios.checkpointAgeDays=\(status.helios.checkpointAgeDays.map { String(format: "%.3f", $0) } ?? "None")",
+            ]
+            if let head = status.helios.head {
+                lines.append("helios.head=#\(head.number) \(head.hash)")
+            } else {
+                lines.append("helios.head=None")
+            }
+            if let bundler = status.bundler {
+                lines.append("bundler.ready=\(bundler.ready)")
+                lines.append("bundler.needsTopup=\(bundler.needsTopup.map(String.init) ?? "None")")
+                lines.append("bundler.reason=\(bundler.reason ?? "None")")
+                lines.append("bundler.eoa=\(bundler.eoa ?? "None")")
+            } else {
+                lines.append("bundler=None")
+            }
+            return lines
+        } catch {
+            return ["error=\(error.localizedDescription)"]
+        }
+    }
+
+    private func debugBundlerStatusLines() async -> [String] {
+        do {
+            let status = try await fetchLocalRelayerStatusWithBalanceRetry()
+            localRelayerStatus = status
+            localRelayerMessage = status.ready
+                ? "Local relayer ready on \(status.networkProfile)."
+                : "Local relayer needs attention."
+            return [
+                "ready=\(status.ready)",
+                "ownerScope=\(status.ownerScope)",
+                "chainId=\(status.chainId)",
+                "profile=\(status.networkProfile)",
+                "eoa=\(status.eoa)",
+                "keyRef=\(status.keyRef ?? "None")",
+                "lifecycle=\(status.lifecycle)",
+                "balance=\(status.balance)",
+                "thresholdLow=\(status.thresholdLow)",
+                "needsTopup=\(status.needsTopup)",
+                "pendingFundingAddress=\(status.pendingFundingAddress ?? "None")",
+                "pendingFundingCount=\(status.pendingFundingCount)",
+                "retiringCount=\(status.retiringCount)",
+                "latestAuditEvent=\(status.latestAuditEvent ?? "None")",
+                "replacement.eligible=\(status.replacement.map { String($0.eligible) } ?? "None")",
+                "replacement.blocked=\(status.replacement.map { String($0.blocked) } ?? "None")",
+                "replacement.reason=\(status.replacement?.blockedReason ?? "None")",
+                "replacement.txHash=\(status.replacement?.txHash ?? "None")",
+                "replacement.userOpHash=\(status.replacement?.userOpHash ?? "None")",
+            ]
+        } catch {
+            return ["error=\(error.localizedDescription)"]
+        }
+    }
+
+    private func debugHistoryLines(limit: Int = 5) -> [String] {
+        do {
+            let records = try walletHistoryStore.loadRecords(
+                accountAddress: walletRecord?.kernelAccountAddress,
+                chainID: activeChain.id,
+                limit: limit
+            )
+            guard !records.isEmpty else {
+                return ["No local transaction history rows for this account/chain."]
+            }
+            return records.enumerated().map { index, record in
+                [
+                    "history[\(index)]",
+                    "status=\(record.status.rawValue)",
+                    "operation=\(record.operation.rawValue)",
+                    "userOp=\(record.userOpHash)",
+                    "tx=\(record.transactionHash ?? "None")",
+                    "success=\(record.debugSuccessText)",
+                    "revertReason=\(record.revertReason ?? "None")",
+                ].joined(separator: " ")
+            }
+        } catch {
+            return ["error=\(error.localizedDescription)"]
+        }
+    }
+
     func refreshLocalRelayerStatus() {
         guard !isRefreshingLocalRelayer else {
             return
@@ -797,6 +943,9 @@ final class AppModel: ObservableObject {
             walletNodeClient = daemon.client
             localRelayerMessage = "Local wallet-node daemon connected."
             appendLog("relayer: wallet-node daemon started")
+            if let logURL = WalletNodeDaemon.managedLogFileURL() {
+                appendLog("relayer: wallet-node logs \(logURL.path)")
+            }
             return daemon.client
         } catch {
             walletNodeLaunchTask = nil
@@ -1916,6 +2065,12 @@ final class AppModel: ObservableObject {
         formatter.dateFormat = "HH:mm:ss"
         return formatter
     }()
+
+    private static let debugReportDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 }
 
 private struct WalletNodeLaunchFailure {
@@ -2168,5 +2323,18 @@ private extension String {
             return 0
         }
         return normalized.count / 2
+    }
+}
+
+private extension WalletTransactionRecord {
+    var debugSuccessText: String {
+        switch status {
+        case .included:
+            return "true"
+        case .reverted, .failed, .dropped:
+            return "false"
+        case .created, .submitted, .pending, .looksIncluded, .cancelled, .unknown:
+            return "None"
+        }
     }
 }

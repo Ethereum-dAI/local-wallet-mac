@@ -99,6 +99,7 @@ struct LocalWalletSettingsSnapshot: Equatable {
     let rankingCount: Int
     let walletNodeMode: String
     let walletNodeConfigPath: String
+    let walletNodeLogPath: String
     let unlockRelayerOnLaunch: Bool
     let walletKeyPolicy: String
     let relayerKeyPolicy: String
@@ -131,6 +132,10 @@ struct LocalWalletSettingsSnapshot: Equatable {
             .appendingPathComponent("config.toml", isDirectory: false)
             .path
     }
+
+    static func walletNodeLogPath() -> String {
+        WalletNodeDaemon.managedLogFileURL()?.path ?? "Not available"
+    }
 }
 
 struct LocalWalletSettingsView: View {
@@ -150,6 +155,7 @@ struct LocalWalletSettingsView: View {
     let onExportRelayerKey: () async throws -> String
     let onDeleteRelayerKey: (Bool) async throws -> String
     let onResetWallet: () throws -> String
+    let onCopyDebugReport: () async -> String
     let onClearDebugLog: () -> Void
     let onSetUnlockRelayerOnLaunch: (Bool) -> Void
     let onClose: () -> Void
@@ -190,6 +196,7 @@ struct LocalWalletSettingsView: View {
         onExportRelayerKey: @escaping () async throws -> String,
         onDeleteRelayerKey: @escaping (Bool) async throws -> String,
         onResetWallet: @escaping () throws -> String,
+        onCopyDebugReport: @escaping () async -> String,
         onClearDebugLog: @escaping () -> Void,
         onSetUnlockRelayerOnLaunch: @escaping (Bool) -> Void,
         onClose: @escaping () -> Void
@@ -210,6 +217,7 @@ struct LocalWalletSettingsView: View {
         self.onExportRelayerKey = onExportRelayerKey
         self.onDeleteRelayerKey = onDeleteRelayerKey
         self.onResetWallet = onResetWallet
+        self.onCopyDebugReport = onCopyDebugReport
         self.onClearDebugLog = onClearDebugLog
         self.onSetUnlockRelayerOnLaunch = onSetUnlockRelayerOnLaunch
         self.onClose = onClose
@@ -1140,6 +1148,7 @@ struct LocalWalletSettingsView: View {
                 SettingsKeyValueRows(rows: [
                     SettingsKeyValue(title: "Mode", value: snapshot.walletNodeMode),
                     SettingsKeyValue(title: "Config", value: snapshot.walletNodeConfigPath),
+                    SettingsKeyValue(title: "Log file", value: snapshot.walletNodeLogPath),
                     SettingsKeyValue(title: "Version", value: snapshot.walletNodeVersion),
                     SettingsKeyValue(title: "Relayer message", value: snapshot.relayerMessage),
                     SettingsKeyValue(title: "Active bundler", value: snapshot.activeBundlerStatus),
@@ -1155,6 +1164,21 @@ struct LocalWalletSettingsView: View {
                 ])
                 Divider().overlay(SettingsPalette.border).padding(.vertical, 4)
                 HStack(spacing: 12) {
+                    Button {
+                        advancedMessage = SettingsMessage(kind: .info, text: "Collecting debug report...")
+                        Task {
+                            let report = await onCopyDebugReport()
+                            await MainActor.run {
+                                copyToPasteboard(report)
+                                advancedMessage = SettingsMessage(kind: .success, text: "Debug report copied.")
+                            }
+                        }
+                    } label: {
+                        Label("Copy debug report", systemImage: "doc.on.clipboard")
+                            .font(.system(size: 13, weight: .bold))
+                    }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+
                     Button {
                         onClearDebugLog()
                         advancedMessage = SettingsMessage(kind: .success, text: "Debug log cleared.")

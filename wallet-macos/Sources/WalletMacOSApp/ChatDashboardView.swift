@@ -723,6 +723,9 @@ private final class ChatDashboardModel: ObservableObject {
             rankingCount: rankingCount,
             walletNodeMode: walletNodeMode,
             walletNodeConfigPath: LocalWalletSettingsSnapshot.walletNodeConfigPath(),
+            walletNodeLogPath: WalletNodeClient.Configuration.fromEnvironment() == nil
+                ? LocalWalletSettingsSnapshot.walletNodeLogPath()
+                : "External wallet-node; inspect that daemon's configured logs directory.",
             unlockRelayerOnLaunch: walletModel.unlockRelayerOnLaunch,
             walletKeyPolicy: "Secure Enclave P-256 key; local user presence required for signing.",
             relayerKeyPolicy: "Keychain generic password protected by current biometric set.",
@@ -1829,6 +1832,10 @@ private final class ChatDashboardModel: ObservableObject {
         return "Wallet reset requested. The app will create fresh local key material."
     }
 
+    func debugSessionReportFromSettings() async -> String {
+        await walletModel.debugSessionReport(snapshot: settingsSnapshot)
+    }
+
     func clearDebugLogFromSettings() {
         walletModel.clearDebugLog()
     }
@@ -2872,6 +2879,9 @@ struct LocalWalletChatDashboardView: View {
             },
             onResetWallet: {
                 try model.resetWalletFromSettings()
+            },
+            onCopyDebugReport: {
+                await model.debugSessionReportFromSettings()
             },
             onClearDebugLog: {
                 model.clearDebugLogFromSettings()

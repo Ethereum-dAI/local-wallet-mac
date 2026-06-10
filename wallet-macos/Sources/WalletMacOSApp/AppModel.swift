@@ -203,6 +203,7 @@ final class AppModel: ObservableObject {
                         kernelAccountAddress: predictedAddress,
                         authenticatorIdHash: existing.authenticatorIdHash,
                         kernelSalt: existing.kernelSalt,
+                        sessionRecords: existing.sessionRecords,
                         isDeployed: existing.isDeployed,
                         createdAt: existing.createdAt,
                         updatedAt: now
@@ -1539,6 +1540,7 @@ final class AppModel: ObservableObject {
             kernelAccountAddress: record.kernelAccountAddress,
             authenticatorIdHash: record.authenticatorIdHash,
             kernelSalt: record.kernelSalt,
+            sessionRecords: record.sessionRecords,
             isDeployed: inspection.isDeployed,
             createdAt: record.createdAt,
             updatedAt: Date()

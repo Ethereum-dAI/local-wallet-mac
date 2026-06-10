@@ -12,6 +12,7 @@ struct WalletRecord: Codable, Equatable {
     let kernelAccountAddress: String?
     let authenticatorIdHash: Data
     let kernelSalt: Data
+    let sessionRecords: [SessionRecord]
     let isDeployed: Bool
     let createdAt: Date
     let updatedAt: Date
@@ -25,6 +26,7 @@ struct WalletRecord: Codable, Equatable {
         kernelAccountAddress: String?,
         authenticatorIdHash: Data = Data(repeating: 0, count: 32),
         kernelSalt: Data = Data(repeating: 0, count: 32),
+        sessionRecords: [SessionRecord] = [],
         isDeployed: Bool,
         createdAt: Date,
         updatedAt: Date
@@ -37,6 +39,7 @@ struct WalletRecord: Codable, Equatable {
         self.kernelAccountAddress = kernelAccountAddress
         self.authenticatorIdHash = authenticatorIdHash
         self.kernelSalt = kernelSalt
+        self.sessionRecords = sessionRecords
         self.isDeployed = isDeployed
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -51,6 +54,7 @@ struct WalletRecord: Codable, Equatable {
         case kernelAccountAddress
         case authenticatorIdHash
         case kernelSalt
+        case sessionRecords
         case isDeployed
         case createdAt
         case updatedAt
@@ -68,6 +72,7 @@ struct WalletRecord: Codable, Equatable {
             ?? Data(repeating: 0, count: 32)
         kernelSalt = try container.decodeIfPresent(Data.self, forKey: .kernelSalt)
             ?? Data(repeating: 0, count: 32)
+        sessionRecords = try container.decodeIfPresent([SessionRecord].self, forKey: .sessionRecords) ?? []
         isDeployed = try container.decode(Bool.self, forKey: .isDeployed)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)

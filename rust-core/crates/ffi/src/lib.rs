@@ -12,8 +12,9 @@ use wallet_kernel::{
 use wallet_signature::{
     abi_encode_dummy_signature as signature_abi_encode_dummy_signature,
     abi_encode_webauthn_signature, build_signature, compute_userop_hash, normalise_low_s,
+    sign_session_userop_hash,
     webauthn::{build_authenticator_data, build_client_data_json},
-    PackedUserOperation,
+    wrap_enable_signature, wrap_installed_signature, PackedUserOperation,
 };
 use zeroize::Zeroizing;
 
@@ -693,6 +694,78 @@ pub unsafe extern "C" fn wallet_session_build_permission(
 }
 
 /// # Safety
+/// `session_secret` and `userop_hash` must point to 32 bytes.
+/// Enable-mode pointer parameters must be valid when their lengths are non-zero.
+/// Caller must free returned heap buffer with `wallet_free_buffer`.
+#[no_mangle]
+pub unsafe extern "C" fn wallet_session_sign_and_wrap(
+    session_secret: *const u8, // 32 bytes
+    userop_hash: *const u8,    // 32 bytes
+    mode: u8,                  // 0 = installed, 1 = enable
+    enable_data: *const u8,
+    enable_data_len: u32,
+    selector_data: *const u8,
+    selector_data_len: u32,
+    enable_sig: *const u8,
+    enable_sig_len: u32,
+    out_ptr: *mut *const u8,
+    out_len: *mut u32,
+) -> i32 {
+    let result = catch_unwind(|| {
+        if session_secret.is_null()
+            || userop_hash.is_null()
+            || out_ptr.is_null()
+            || out_len.is_null()
+        {
+            return WalletResult::InvalidInput as i32;
+        }
+
+        let secret = match fixed_32(std::slice::from_raw_parts(session_secret, 32)) {
+            Ok(secret) => secret,
+            Err(result) => return result as i32,
+        };
+        let hash = match fixed_32(std::slice::from_raw_parts(userop_hash, 32)) {
+            Ok(hash) => hash,
+            Err(result) => return result as i32,
+        };
+        let inner = match sign_session_userop_hash(&hash, &secret) {
+            Ok(signature) => signature,
+            Err(_) => return WalletResult::InvalidInput as i32,
+        };
+
+        let signature = match mode {
+            0 => wrap_installed_signature(&inner),
+            1 => {
+                if enable_data.is_null() || selector_data.is_null() || enable_sig.is_null() {
+                    return WalletResult::InvalidInput as i32;
+                }
+                let enable_data = std::slice::from_raw_parts(enable_data, enable_data_len as usize);
+                let selector_data =
+                    std::slice::from_raw_parts(selector_data, selector_data_len as usize);
+                let enable_sig = std::slice::from_raw_parts(enable_sig, enable_sig_len as usize);
+                let userop_sig = wrap_installed_signature(&inner);
+                wrap_enable_signature(
+                    Address::ZERO,
+                    enable_data,
+                    &[],
+                    selector_data,
+                    enable_sig,
+                    &userop_sig,
+                )
+            }
+            _ => return WalletResult::InvalidInput as i32,
+        };
+
+        match write_heap_buffer(signature, out_ptr, out_len) {
+            Ok(()) => WalletResult::Ok as i32,
+            Err(result) => result as i32,
+        }
+    });
+
+    result.unwrap_or(WalletResult::InternalError as i32)
+}
+
+/// # Safety
 /// `ptr` must have been returned by `wallet_abi_encode_signature`. Call exactly once.
 #[no_mangle]
 pub unsafe extern "C" fn wallet_free_buffer(ptr: *mut u8, len: u32) {
@@ -719,6 +792,17 @@ mod tests {
     fn permission_fixture() -> serde_json::Value {
         serde_json::from_str(include_str!("../testdata/permission/permission.json"))
             .expect("permission fixture parses")
+    }
+
+    fn decode_abi_bytes_tail_element(tail: &[u8], index: usize) -> Vec<u8> {
+        let head_start = index * 32;
+        let mut offset_bytes = [0u8; 8];
+        offset_bytes.copy_from_slice(&tail[head_start + 24..head_start + 32]);
+        let offset = u64::from_be_bytes(offset_bytes) as usize;
+        let mut len_bytes = [0u8; 8];
+        len_bytes.copy_from_slice(&tail[offset + 24..offset + 32]);
+        let len = u64::from_be_bytes(len_bytes) as usize;
+        tail[offset + 32..offset + 32 + len].to_vec()
     }
 
     #[test]
@@ -1064,5 +1148,78 @@ mod tests {
             wallet_free_buffer(enable_data_ptr as *mut u8, enable_data_len);
             wallet_free_buffer(selector_data_ptr as *mut u8, selector_data_len);
         }
+    }
+
+    #[test]
+    fn ffi_session_sign_and_wrap_matches_installed_fixture() {
+        let fixture = permission_fixture();
+        let secret = decode_hex_bytes(fixture["meta"]["SESSION_PK"].as_str().unwrap());
+        let userop_hash = decode_hex_bytes(fixture["dummyUserOpHash"].as_str().unwrap());
+        let mut out_ptr: *const u8 = std::ptr::null();
+        let mut out_len: u32 = 0;
+
+        let result = unsafe {
+            wallet_session_sign_and_wrap(
+                secret.as_ptr(),
+                userop_hash.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(result, WalletResult::Ok as i32);
+        let signature = unsafe { std::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(
+            signature,
+            decode_hex_bytes(fixture["installedUserOpSig"].as_str().unwrap())
+        );
+
+        unsafe { wallet_free_buffer(out_ptr as *mut u8, out_len) };
+    }
+
+    #[test]
+    fn ffi_session_sign_and_wrap_matches_enable_fixture() {
+        let fixture = permission_fixture();
+        let secret = decode_hex_bytes(fixture["meta"]["SESSION_PK"].as_str().unwrap());
+        let userop_hash = decode_hex_bytes(fixture["dummyUserOpHash"].as_str().unwrap());
+        let enable_signature = decode_hex_bytes(fixture["enableUserOpSig"].as_str().unwrap());
+        let root_enable_sig = decode_abi_bytes_tail_element(&enable_signature[20..], 3);
+        let enable_data = decode_hex_bytes(fixture["enableData"].as_str().unwrap());
+        let selector_data = decode_hex_bytes(
+            fixture["enableTypedData"]["message"]["selectorData"]
+                .as_str()
+                .unwrap(),
+        );
+        let mut out_ptr: *const u8 = std::ptr::null();
+        let mut out_len: u32 = 0;
+
+        let result = unsafe {
+            wallet_session_sign_and_wrap(
+                secret.as_ptr(),
+                userop_hash.as_ptr(),
+                1,
+                enable_data.as_ptr(),
+                enable_data.len() as u32,
+                selector_data.as_ptr(),
+                selector_data.len() as u32,
+                root_enable_sig.as_ptr(),
+                root_enable_sig.len() as u32,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(result, WalletResult::Ok as i32);
+        let signature = unsafe { std::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(signature, enable_signature);
+
+        unsafe { wallet_free_buffer(out_ptr as *mut u8, out_len) };
     }
 }

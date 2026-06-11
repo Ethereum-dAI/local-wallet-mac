@@ -22,6 +22,7 @@ enum AppError: LocalizedError {
     case swapApprovalRequired(String)
     case invalidExecutionBatch
     case sessionKeysRequireDeployedAccount
+    case sessionKeysNotEnabled
 
     var errorDescription: String? {
         switch self {
@@ -67,6 +68,8 @@ enum AppError: LocalizedError {
             return "Batch execution needs at least one transaction."
         case .sessionKeysRequireDeployedAccount:
             return "Session keys can be enabled after the smart account is deployed. Send one passkey-authorized transaction first, then enable session keys."
+        case .sessionKeysNotEnabled:
+            return "Session keys are not enabled for the active account."
         }
     }
 }

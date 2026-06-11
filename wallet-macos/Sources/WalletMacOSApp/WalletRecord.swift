@@ -121,4 +121,25 @@ extension WalletRecord {
             updatedAt: updatedAt
         )
     }
+
+    func removingSessionRecord(
+        chainID: UInt64,
+        isDeployed: Bool,
+        updatedAt: Date
+    ) -> WalletRecord {
+        WalletRecord(
+            walletId: walletId,
+            keyTag: keyTag,
+            pubkeyX: pubkeyX,
+            pubkeyY: pubkeyY,
+            chainId: chainId,
+            kernelAccountAddress: kernelAccountAddress,
+            authenticatorIdHash: authenticatorIdHash,
+            kernelSalt: kernelSalt,
+            sessionRecords: sessionRecords.filter { $0.chainId != chainID },
+            isDeployed: isDeployed,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
 }

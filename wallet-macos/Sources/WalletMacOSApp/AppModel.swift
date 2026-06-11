@@ -76,6 +76,7 @@ final class AppModel: ObservableObject {
     private var walletNodeLaunchFailure: WalletNodeLaunchFailure?
     private var optimisticNextNonce: [String: UInt64] = [:]
     private var pendingSessionInstallByUserOpHash: [String: SessionRecord] = [:]
+    private var pendingSessionRevokeByUserOpHash: [String: SessionRecord] = [:]
     private var reconcilerTask: Task<Void, Never>?
     private let userOperationBuilder: UserOperationBuilder
     private let walletHistoryStore: WalletTransactionHistoryStore
@@ -1345,6 +1346,56 @@ final class AppModel: ObservableObject {
         return assembly.record
     }
 
+    @discardableResult
+    func revokeSessionKeys() async throws -> UserOperationSendResult {
+        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+            throw AppError.walletOperationInProgress
+        }
+        if walletRecord == nil {
+            bootstrap()
+        }
+        guard let record = walletRecord,
+              let accountAddress = record.kernelAccountAddress
+        else {
+            throw AppError.corruptedMetadataStore
+        }
+        guard let sessionRecord = record.sessionRecords.first(where: { $0.chainId == activeChain.id }) else {
+            throw AppError.sessionKeysNotEnabled
+        }
+        if !settingsStore.sessionKeysEnabled {
+            appendLog("session-revoke: local toggle is off, but a session record exists; revoking anyway")
+        }
+
+        let execution = try SessionRevokeAssembler.executionRequest(
+            accountAddress: accountAddress,
+            validationNonce: sessionRecord.validationNonce,
+            calldataBuilder: WalletSignature.sessionInvalidateNonceCalldata(nonce:)
+        )
+
+        return try await executeUserOperation(
+            logContext: "session-revoke",
+            signingReason: "Revoke session keys for \(activeChain.name)",
+            intent: nil,
+            historyDraft: SessionRevokeAssembler.historyDraft(
+                accountAddress: accountAddress,
+                validationNonce: sessionRecord.validationNonce
+            ),
+            afterSubmit: { [self] userOpHash in
+                pendingSessionRevokeByUserOpHash[userOpHash.lowercased()] = sessionRecord
+                appendLog("session-revoke: waiting for receipt before clearing local session state")
+            }
+        ) { [self] buildContext in
+            guard buildContext.isDeployed else {
+                throw AppError.sessionKeysRequireDeployedAccount
+            }
+            return try await buildUserOperationDraft(
+                executions: [execution],
+                isDeployedOverride: true,
+                nonceKey192: nil
+            )
+        }
+    }
+
     func executeNativeTransfer(
         recipient: String,
         amountETH: String,
@@ -1534,6 +1585,7 @@ final class AppModel: ObservableObject {
         signingReason: String,
         intent: TransactionIntent?,
         historyDraft: WalletTransactionDraft?,
+        afterSubmit: ((String) -> Void)? = nil,
         buildDraft: @escaping (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
@@ -1559,6 +1611,7 @@ final class AppModel: ObservableObject {
                 signingReason: signingReason,
                 intent: intent,
                 historyDraft: historyDraft,
+                afterSubmit: afterSubmit,
                 buildDraft: buildDraft
             )
             isSendingUserOperation = false
@@ -1575,6 +1628,7 @@ final class AppModel: ObservableObject {
         signingReason: String,
         intent: TransactionIntent?,
         historyDraft: WalletTransactionDraft?,
+        afterSubmit: ((String) -> Void)? = nil,
         buildDraft: (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         appendLog("\(logContext): preparing transaction on \(activeChain.name)")
@@ -1663,6 +1717,7 @@ final class AppModel: ObservableObject {
         if let sessionPlan, !sessionPlan.record.installedOnChain {
             pendingSessionInstallByUserOpHash[sentUserOpHash.lowercased()] = sessionPlan.record
         }
+        afterSubmit?(sentUserOpHash)
         recordOptimisticNonce(after: enrichedDraft)
         appendLog("\(logContext): local wallet-node accepted userOpHash \(sentUserOpHash)")
         if let historyDraft {
@@ -2021,6 +2076,12 @@ final class AppModel: ObservableObject {
                 success: receipt.success,
                 logContext: logContext
             )
+            updatePendingSessionRevoke(
+                userOpHash: receipt.userOpHash,
+                chainID: chainID,
+                success: receipt.success,
+                logContext: logContext
+            )
         } catch {
             appendLog("\(logContext): wallet history receipt update failed — \(error.localizedDescription)")
         }
@@ -2059,6 +2120,46 @@ final class AppModel: ObservableObject {
             appendLog("\(logContext): marked session permission installed")
         } catch {
             appendLog("\(logContext): session permission install update failed — \(error.localizedDescription)")
+        }
+    }
+
+    private func updatePendingSessionRevoke(
+        userOpHash: String,
+        chainID: UInt64,
+        success: Bool,
+        logContext: String
+    ) {
+        let key = userOpHash.lowercased()
+        guard let pendingRecord = pendingSessionRevokeByUserOpHash.removeValue(forKey: key) else {
+            return
+        }
+        guard success else {
+            appendLog("\(logContext): session permission revoke was not included")
+            return
+        }
+        guard let walletRecord else {
+            return
+        }
+
+        do {
+            let refreshed = walletRecord.removingSessionRecord(
+                chainID: chainID,
+                isDeployed: walletRecord.isDeployed,
+                updatedAt: Date()
+            )
+            try metadataStore.save(refreshed)
+            self.walletRecord = refreshed
+            if chainID == activeChain.id {
+                settingsStore.setSessionKeysEnabled(false)
+            }
+            do {
+                try SessionKeyStore.shared.delete(keyRef: pendingRecord.sessionKeyRef)
+            } catch {
+                appendLog("\(logContext): session key cleanup failed — \(error.localizedDescription)")
+            }
+            appendLog("\(logContext): cleared local session-key state")
+        } catch {
+            appendLog("\(logContext): session permission revoke cleanup failed — \(error.localizedDescription)")
         }
     }
 

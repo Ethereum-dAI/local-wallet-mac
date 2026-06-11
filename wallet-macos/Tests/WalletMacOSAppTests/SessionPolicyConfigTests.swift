@@ -41,3 +41,19 @@ private func freshSessionSettingsStore() -> DemoSettingsStore {
     #expect(reloaded.sessionKeysEnabled == true)
     #expect(reloaded.sessionPolicy == policy)
 }
+
+@Test func sessionPolicyValidationRejectsNonPositiveLimitsAndBadWei() throws {
+    _ = try SessionPolicyConfig.default.validated()
+
+    var invalidCount = SessionPolicyConfig.default
+    invalidCount.rateLimitCount = 0
+    #expect(throws: AppError.self) {
+        _ = try invalidCount.validated()
+    }
+
+    var invalidWei = SessionPolicyConfig.default
+    invalidWei.perTxValueLimitWei = "not-a-number"
+    #expect(throws: AppError.self) {
+        _ = try invalidWei.validated()
+    }
+}

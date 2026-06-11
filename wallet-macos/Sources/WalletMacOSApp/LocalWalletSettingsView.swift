@@ -48,6 +48,67 @@ struct SettingsDiagnosticsReport: Equatable {
     let checks: [SettingsHealthCheck]
 }
 
+struct LocalWalletSessionSettingsSnapshot: Equatable {
+    let isEnabled: Bool
+    let configuredPolicy: SessionPolicyConfig
+    let record: SessionRecord?
+    let capturedAt: Date
+
+    var hasRecord: Bool {
+        record != nil
+    }
+
+    var isExpired: Bool {
+        guard let record else {
+            return false
+        }
+        return record.expiresAt <= capturedAt
+    }
+
+    var statusTitle: String {
+        guard let record else {
+            return "Off"
+        }
+        if isExpired {
+            return "Expired"
+        }
+        if isEnabled && record.installedOnChain {
+            return "Active"
+        }
+        if isEnabled {
+            return "Pending install"
+        }
+        return "Stored"
+    }
+
+    var statusDetail: String {
+        guard let record else {
+            return "No session permission is stored for this chain."
+        }
+        if isExpired {
+            return "Expired \(Self.dateFormatter.string(from: record.expiresAt))"
+        }
+        if isEnabled && record.installedOnChain {
+            return "Installed onchain; expires \(Self.dateFormatter.string(from: record.expiresAt))"
+        }
+        if isEnabled {
+            return "First in-policy session transaction will install it onchain."
+        }
+        return "A local record exists while the session toggle is off."
+    }
+
+    var activePolicy: SessionPolicyConfig {
+        record?.policyConfigSnapshot ?? configuredPolicy
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+}
+
 struct LocalWalletSettingsSnapshot: Equatable {
     let capturedAt: Date
     let appVersion: String
@@ -103,6 +164,7 @@ struct LocalWalletSettingsSnapshot: Equatable {
     let unlockRelayerOnLaunch: Bool
     let walletKeyPolicy: String
     let relayerKeyPolicy: String
+    let session: LocalWalletSessionSettingsSnapshot
     let bridgeStatus: String
     let activeBundlerStatus: String
     let lastSubmittedUserOperationHash: String
@@ -155,6 +217,9 @@ struct LocalWalletSettingsView: View {
     let onExportRelayerKey: () async throws -> String
     let onDeleteRelayerKey: (Bool) async throws -> String
     let onResetWallet: () throws -> String
+    let onEnableSessionKeys: () async throws -> String
+    let onRevokeSessionKeys: () async throws -> String
+    let onUpdateSessionPolicy: (SessionPolicyConfig) throws -> String
     let onCopyDebugReport: () async -> String
     let onClearDebugLog: () -> Void
     let onSetUnlockRelayerOnLaunch: (Bool) -> Void
@@ -170,13 +235,17 @@ struct LocalWalletSettingsView: View {
     @State private var modelMessage: SettingsMessage?
     @State private var walletMessage: SettingsMessage?
     @State private var securityMessage: SettingsMessage?
+    @State private var sessionMessage: SettingsMessage?
     @State private var advancedMessage: SettingsMessage?
     @State private var unlockRelayerOnLaunch: Bool
+    @State private var sessionPolicyDraft: SessionPolicyDraft
     @State private var isTestingNetwork = false
     @State private var isRunningDiagnostics = false
     @State private var isRotatingRelayer = false
     @State private var isExportingRelayer = false
     @State private var isDeletingRelayer = false
+    @State private var isEnablingSessionKeys = false
+    @State private var isRevokingSessionKeys = false
     @State private var pendingConfirmation: SettingsConfirmation?
 
     init(
@@ -196,6 +265,9 @@ struct LocalWalletSettingsView: View {
         onExportRelayerKey: @escaping () async throws -> String,
         onDeleteRelayerKey: @escaping (Bool) async throws -> String,
         onResetWallet: @escaping () throws -> String,
+        onEnableSessionKeys: @escaping () async throws -> String,
+        onRevokeSessionKeys: @escaping () async throws -> String,
+        onUpdateSessionPolicy: @escaping (SessionPolicyConfig) throws -> String,
         onCopyDebugReport: @escaping () async -> String,
         onClearDebugLog: @escaping () -> Void,
         onSetUnlockRelayerOnLaunch: @escaping (Bool) -> Void,
@@ -217,12 +289,16 @@ struct LocalWalletSettingsView: View {
         self.onExportRelayerKey = onExportRelayerKey
         self.onDeleteRelayerKey = onDeleteRelayerKey
         self.onResetWallet = onResetWallet
+        self.onEnableSessionKeys = onEnableSessionKeys
+        self.onRevokeSessionKeys = onRevokeSessionKeys
+        self.onUpdateSessionPolicy = onUpdateSessionPolicy
         self.onCopyDebugReport = onCopyDebugReport
         self.onClearDebugLog = onClearDebugLog
         self.onSetUnlockRelayerOnLaunch = onSetUnlockRelayerOnLaunch
         self.onClose = onClose
         self._networkDraft = State(initialValue: snapshot.networkSettings)
         self._unlockRelayerOnLaunch = State(initialValue: snapshot.unlockRelayerOnLaunch)
+        self._sessionPolicyDraft = State(initialValue: SessionPolicyDraft(policy: snapshot.session.configuredPolicy))
     }
 
     var body: some View {
@@ -243,6 +319,9 @@ struct LocalWalletSettingsView: View {
         }
         .onChange(of: snapshot.unlockRelayerOnLaunch) { _, newValue in
             unlockRelayerOnLaunch = newValue
+        }
+        .onChange(of: snapshot.session.configuredPolicy) { _, newValue in
+            sessionPolicyDraft = SessionPolicyDraft(policy: newValue)
         }
         .alert(item: $pendingConfirmation) { confirmation in
             Alert(
@@ -1074,6 +1153,132 @@ struct LocalWalletSettingsView: View {
                 }
             }
 
+            SettingsSection(title: "Session Keys") {
+                VStack(alignment: .leading, spacing: 14) {
+                    SettingsInfoGrid {
+                        SettingsInfoItem(
+                            title: "Status",
+                            value: snapshot.session.statusTitle,
+                            detail: snapshot.session.statusDetail,
+                            systemImage: snapshot.session.isEnabled ? "shield.fill" : "shield.slash",
+                            tint: snapshot.session.isExpired ? SettingsPalette.orange : (snapshot.session.isEnabled ? SettingsPalette.green : SettingsPalette.secondaryText)
+                        )
+                        SettingsInfoItem(
+                            title: "Per transaction",
+                            value: "\(snapshot.session.activePolicy.perTxValueLimitWei) wei",
+                            detail: "\(snapshot.session.activePolicy.rateLimitCount) tx per \(snapshot.session.activePolicy.rateLimitIntervalSec)s",
+                            systemImage: "speedometer",
+                            tint: SettingsPalette.cyan
+                        )
+                        SettingsInfoItem(
+                            title: "Lifetime",
+                            value: "\(snapshot.session.activePolicy.ttlSeconds)s",
+                            detail: "Gas budget \(snapshot.session.activePolicy.gasBudgetWei) wei",
+                            systemImage: "timer",
+                            tint: SettingsPalette.blue
+                        )
+                    }
+
+                    Toggle(isOn: Binding(
+                        get: { snapshot.session.isEnabled },
+                        set: { value in
+                            if value {
+                                enableSessionKeys()
+                            } else {
+                                pendingConfirmation = .revokeSessionKeys
+                            }
+                        }
+                    )) {
+                        Text("Enable session keys")
+                            .font(.system(size: 13, weight: .bold))
+                    }
+                    .toggleStyle(.switch)
+                    .foregroundStyle(SettingsPalette.primaryText)
+                    .disabled(isEnablingSessionKeys || isRevokingSessionKeys)
+
+                    SettingsKeyValueRows(rows: sessionKeyRows)
+
+                    Divider().overlay(SettingsPalette.border).padding(.vertical, 2)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(alignment: .top, spacing: 12) {
+                            SettingsEditableField(
+                                title: "Per tx cap wei",
+                                placeholder: SessionPolicyConfig.default.perTxValueLimitWei,
+                                text: $sessionPolicyDraft.perTxValueLimitWei
+                            )
+                            SettingsEditableField(
+                                title: "Gas budget wei",
+                                placeholder: SessionPolicyConfig.default.gasBudgetWei,
+                                text: $sessionPolicyDraft.gasBudgetWei
+                            )
+                        }
+                        HStack(alignment: .top, spacing: 12) {
+                            SettingsEditableField(
+                                title: "Tx count",
+                                placeholder: "\(SessionPolicyConfig.default.rateLimitCount)",
+                                text: $sessionPolicyDraft.rateLimitCount
+                            )
+                            SettingsEditableField(
+                                title: "Window seconds",
+                                placeholder: "\(SessionPolicyConfig.default.rateLimitIntervalSec)",
+                                text: $sessionPolicyDraft.rateLimitIntervalSec
+                            )
+                            SettingsEditableField(
+                                title: "TTL seconds",
+                                placeholder: "\(SessionPolicyConfig.default.ttlSeconds)",
+                                text: $sessionPolicyDraft.ttlSeconds
+                            )
+                        }
+                        HStack(spacing: 18) {
+                            Toggle("Native transfers", isOn: $sessionPolicyDraft.nativeTransfers)
+                                .toggleStyle(.checkbox)
+                            Toggle("Swap router", isOn: $sessionPolicyDraft.swapRouter)
+                                .toggleStyle(.checkbox)
+                            Text("ERC20 scope: known list")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(SettingsPalette.secondaryText)
+                            Spacer()
+                        }
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(SettingsPalette.primaryText)
+
+                        HStack(spacing: 12) {
+                            Button {
+                                saveSessionPolicyDraft()
+                            } label: {
+                                Label("Save limits", systemImage: "square.and.arrow.down")
+                                    .font(.system(size: 13, weight: .bold))
+                            }
+                            .buttonStyle(SettingsPrimaryButtonStyle())
+
+                            Button {
+                                sessionPolicyDraft = SessionPolicyDraft(policy: .default)
+                                saveSessionPolicyDraft()
+                            } label: {
+                                Label("Reset defaults", systemImage: "arrow.counterclockwise")
+                                    .font(.system(size: 13, weight: .bold))
+                            }
+                            .buttonStyle(SettingsSecondaryButtonStyle())
+
+                            Button {
+                                pendingConfirmation = .revokeSessionKeys
+                            } label: {
+                                Label(isRevokingSessionKeys ? "Disabling..." : "Disable now", systemImage: "xmark.circle.fill")
+                                    .font(.system(size: 13, weight: .bold))
+                            }
+                            .buttonStyle(SettingsDestructiveButtonStyle())
+                            .disabled(!snapshot.session.hasRecord || isRevokingSessionKeys)
+                            Spacer()
+                        }
+                    }
+
+                    if let sessionMessage {
+                        SettingsMessageBanner(message: sessionMessage)
+                    }
+                }
+            }
+
             SettingsSection(title: "Key Material") {
                 SettingsKeyValueRows(rows: [
                     SettingsKeyValue(title: "Smart account", value: snapshot.kernelAccountAddress),
@@ -1246,6 +1451,80 @@ struct LocalWalletSettingsView: View {
         }
     }
 
+    private var sessionKeyRows: [SettingsKeyValue] {
+        var rows = [
+            SettingsKeyValue(title: "Toggle", value: snapshot.session.isEnabled ? "Enabled" : "Disabled"),
+            SettingsKeyValue(title: "Policy source", value: snapshot.session.hasRecord ? "Active session snapshot" : "Configured defaults"),
+        ]
+        guard let record = snapshot.session.record else {
+            return rows
+        }
+        rows.append(contentsOf: [
+            SettingsKeyValue(title: "Permission", value: "0x\(record.permissionId.hexEncodedString)"),
+            SettingsKeyValue(title: "Installed", value: record.installedOnChain ? "Yes" : "No"),
+            SettingsKeyValue(title: "Enabled at", value: Self.dateFormatter.string(from: record.enabledAt)),
+            SettingsKeyValue(title: "Expires", value: Self.dateFormatter.string(from: record.expiresAt)),
+            SettingsKeyValue(title: "Validation nonce", value: "\(record.validationNonce)"),
+            SettingsKeyValue(title: "Session key ref", value: record.sessionKeyRef),
+        ])
+        return rows
+    }
+
+    private func enableSessionKeys() {
+        guard !isEnablingSessionKeys else {
+            return
+        }
+        isEnablingSessionKeys = true
+        sessionMessage = SettingsMessage(kind: .info, text: "Requesting passkey authorization to enable session keys...")
+        Task {
+            do {
+                let message = try await onEnableSessionKeys()
+                await MainActor.run {
+                    sessionMessage = SettingsMessage(kind: .success, text: message)
+                    isEnablingSessionKeys = false
+                }
+            } catch {
+                await MainActor.run {
+                    sessionMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
+                    isEnablingSessionKeys = false
+                }
+            }
+        }
+    }
+
+    private func revokeSessionKeys() {
+        guard !isRevokingSessionKeys else {
+            return
+        }
+        isRevokingSessionKeys = true
+        sessionMessage = SettingsMessage(kind: .info, text: "Requesting passkey authorization to disable session keys...")
+        Task {
+            do {
+                let message = try await onRevokeSessionKeys()
+                await MainActor.run {
+                    sessionMessage = SettingsMessage(kind: .success, text: message)
+                    isRevokingSessionKeys = false
+                }
+            } catch {
+                await MainActor.run {
+                    sessionMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
+                    isRevokingSessionKeys = false
+                }
+            }
+        }
+    }
+
+    private func saveSessionPolicyDraft() {
+        do {
+            let policy = try sessionPolicyDraft.policy()
+            let message = try onUpdateSessionPolicy(policy)
+            sessionPolicyDraft = SessionPolicyDraft(policy: policy)
+            sessionMessage = SettingsMessage(kind: .success, text: message)
+        } catch {
+            sessionMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
+        }
+    }
+
     private func rotateRelayer() {
         guard !isRotatingRelayer else {
             return
@@ -1322,6 +1601,8 @@ struct LocalWalletSettingsView: View {
                 dataMessage = SettingsMessage(kind: .success, text: try onClearChatHistory())
             case .deleteRelayerKey(let unsafe):
                 deleteRelayerKey(unsafe: unsafe)
+            case .revokeSessionKeys:
+                revokeSessionKeys()
             case .resetWallet:
                 securityMessage = SettingsMessage(kind: .success, text: try onResetWallet())
             }
@@ -1330,6 +1611,8 @@ struct LocalWalletSettingsView: View {
             switch confirmation {
             case .clearRankings, .clearChatHistory:
                 dataMessage = message
+            case .revokeSessionKeys:
+                sessionMessage = message
             case .deleteRelayerKey, .resetWallet:
                 securityMessage = message
             }
@@ -1362,6 +1645,7 @@ private enum SettingsConfirmation: Identifiable, Equatable {
     case clearRankings
     case clearChatHistory
     case deleteRelayerKey(unsafe: Bool)
+    case revokeSessionKeys
     case resetWallet
 
     var id: String {
@@ -1372,6 +1656,8 @@ private enum SettingsConfirmation: Identifiable, Equatable {
             return "clear-chat-history"
         case .deleteRelayerKey(let unsafe):
             return unsafe ? "unsafe-reset-relayer" : "delete-relayer"
+        case .revokeSessionKeys:
+            return "revoke-session-keys"
         case .resetWallet:
             return "reset-wallet"
         }
@@ -1385,6 +1671,8 @@ private enum SettingsConfirmation: Identifiable, Equatable {
             return "Clear chat history?"
         case .deleteRelayerKey(let unsafe):
             return unsafe ? "Unsafe reset relayer key?" : "Safe delete relayer key?"
+        case .revokeSessionKeys:
+            return "Disable session keys?"
         case .resetWallet:
             return "Reset wallet?"
         }
@@ -1400,6 +1688,8 @@ private enum SettingsConfirmation: Identifiable, Equatable {
             return unsafe
                 ? "This deletes relayer key material even if wallet-node has pending relay state."
                 : "This asks wallet-node to delete the relayer key only when it is safe."
+        case .revokeSessionKeys:
+            return "This submits a passkey-authorized revoke transaction. Local session key state is cleared after the revoke receipt succeeds."
         case .resetWallet:
             return "This deletes the Secure Enclave wallet key reference, local relayer keys, and wallet metadata. A new account will be created."
         }
@@ -1413,9 +1703,52 @@ private enum SettingsConfirmation: Identifiable, Equatable {
             return "Clear History"
         case .deleteRelayerKey(let unsafe):
             return unsafe ? "Unsafe Reset" : "Safe Delete"
+        case .revokeSessionKeys:
+            return "Disable"
         case .resetWallet:
             return "Reset Wallet"
         }
+    }
+}
+
+private struct SessionPolicyDraft: Equatable {
+    var perTxValueLimitWei: String
+    var rateLimitCount: String
+    var rateLimitIntervalSec: String
+    var ttlSeconds: String
+    var gasBudgetWei: String
+    var nativeTransfers: Bool
+    var swapRouter: Bool
+
+    init(policy: SessionPolicyConfig) {
+        perTxValueLimitWei = policy.perTxValueLimitWei
+        rateLimitCount = "\(policy.rateLimitCount)"
+        rateLimitIntervalSec = "\(policy.rateLimitIntervalSec)"
+        ttlSeconds = "\(policy.ttlSeconds)"
+        gasBudgetWei = policy.gasBudgetWei
+        nativeTransfers = policy.allowlist.nativeTransfers
+        swapRouter = policy.allowlist.swapRouter
+    }
+
+    func policy() throws -> SessionPolicyConfig {
+        guard let count = Int(rateLimitCount.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let interval = Int(rateLimitIntervalSec.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let ttl = Int(ttlSeconds.trimmingCharacters(in: .whitespacesAndNewlines))
+        else {
+            throw AppError.invalidAmount
+        }
+        return try SessionPolicyConfig(
+            perTxValueLimitWei: perTxValueLimitWei.trimmingCharacters(in: .whitespacesAndNewlines),
+            rateLimitCount: count,
+            rateLimitIntervalSec: interval,
+            ttlSeconds: ttl,
+            gasBudgetWei: gasBudgetWei.trimmingCharacters(in: .whitespacesAndNewlines),
+            allowlist: SessionPolicyAllowlist(
+                nativeTransfers: nativeTransfers,
+                erc20TokenScope: .knownList,
+                swapRouter: swapRouter
+            )
+        ).validated()
     }
 }
 

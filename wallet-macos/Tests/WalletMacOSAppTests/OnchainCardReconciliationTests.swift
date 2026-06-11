@@ -82,6 +82,41 @@ private func freshChatStore() -> (ChatSQLiteStore, URL) {
     #expect(OnchainTransactionSummary.decode(from: ChatMessage.userText("hi")) == nil)
 }
 
+@Test func onchainTransactionSigningModeIsOptionalAndPreserved() throws {
+    var summary = submittedSummary(userOpHash: "0xAAA")
+    #expect(summary.signingMode == nil)
+
+    summary = OnchainTransactionSummary(
+        chainName: summary.chainName,
+        chainID: summary.chainID,
+        amount: summary.amount,
+        token: summary.token,
+        recipient: summary.recipient,
+        recipientName: summary.recipientName,
+        resolvedRecipient: summary.resolvedRecipient,
+        resolutionChainName: summary.resolutionChainName,
+        resolutionChainID: summary.resolutionChainID,
+        ccipReadUsed: summary.ccipReadUsed,
+        operation: summary.operation,
+        signingMode: "session",
+        amountOut: summary.amountOut,
+        minimumReceived: summary.minimumReceived,
+        route: summary.route,
+        userOpHash: summary.userOpHash,
+        transactionHash: summary.transactionHash,
+        status: summary.status,
+        createdAt: summary.createdAt
+    )
+
+    let decoded = try #require(OnchainTransactionSummary.decode(from: .onchainTransaction(summary)))
+    #expect(decoded.signingMode == "session")
+    #expect(decoded.reconciled(with: historyRecord(
+        userOpHash: "0xaaa",
+        status: .included,
+        txHash: "0xTX"
+    )).signingMode == "session")
+}
+
 @Test func reconciledSummaryAdoptsIncludedStatusAndTxHashByUserOpHash() {
     let summary = submittedSummary(userOpHash: "0xAAA")
     let updated = summary.reconciled(with: historyRecord(

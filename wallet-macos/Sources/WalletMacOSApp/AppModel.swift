@@ -12,6 +12,19 @@ final class AppModel: ObservableObject {
         let userOpHash: String
         let transactionHash: String?
         let success: Bool?
+        let signedBySession: Bool
+
+        init(
+            userOpHash: String,
+            transactionHash: String?,
+            success: Bool?,
+            signedBySession: Bool = false
+        ) {
+            self.userOpHash = userOpHash
+            self.transactionHash = transactionHash
+            self.success = success
+            self.signedBySession = signedBySession
+        }
     }
 
     @Published private(set) var walletRecord: WalletRecord?
@@ -49,6 +62,14 @@ final class AppModel: ObservableObject {
 
     var networkSettings: DemoNetworkSettings {
         configuration.networkSettings
+    }
+
+    var sessionKeysEnabled: Bool {
+        settingsStore.sessionKeysEnabled
+    }
+
+    var sessionPolicy: SessionPolicyConfig {
+        settingsStore.sessionPolicy
     }
 
     var hasLocalRelayerClient: Bool {
@@ -434,6 +455,11 @@ final class AppModel: ObservableObject {
         lastSubmittedUserOperationHash = nil
         lastBundledTransactionHash = nil
         bootstrap()
+    }
+
+    func updateSessionPolicy(_ policy: SessionPolicyConfig) throws {
+        settingsStore.setSessionPolicy(try policy.validated())
+        appendLog("session: updated local session policy")
     }
 
     func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
@@ -1703,6 +1729,9 @@ final class AppModel: ObservableObject {
             }
         )
         appendLog("\(logContext): final userOpHash \(signatureResult.userOpHash.shortHex)")
+        let submittedHistoryDraft = historyDraft.map {
+            signedHistoryDraft($0, signedBySession: signatureResult.usedSession)
+        }
 
         bridgeStatus = "Submitting UserOperation to local wallet-node on \(activeChain.name)..."
         activeBundlerStatus = "Submitting UserOperation"
@@ -1720,9 +1749,9 @@ final class AppModel: ObservableObject {
         afterSubmit?(sentUserOpHash)
         recordOptimisticNonce(after: enrichedDraft)
         appendLog("\(logContext): local wallet-node accepted userOpHash \(sentUserOpHash)")
-        if let historyDraft {
+        if let submittedHistoryDraft {
             recordSubmittedHistory(
-                historyDraft,
+                submittedHistoryDraft,
                 userOpHash: sentUserOpHash,
                 accountAddress: enrichedDraft.sender,
                 logContext: logContext
@@ -1736,7 +1765,8 @@ final class AppModel: ObservableObject {
         return UserOperationSendResult(
             userOpHash: sentUserOpHash,
             transactionHash: nil,
-            success: nil
+            success: nil,
+            signedBySession: signatureResult.usedSession
         )
     }
 
@@ -2296,6 +2326,25 @@ final class AppModel: ObservableObject {
             return value
         }
         return "\(value.prefix(10))...\(value.suffix(8))"
+    }
+
+    private func signedHistoryDraft(
+        _ draft: WalletTransactionDraft,
+        signedBySession: Bool
+    ) -> WalletTransactionDraft {
+        var fields: [String: String] = [:]
+        if let detailsJSON = draft.detailsJSON,
+           let data = detailsJSON.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for (key, value) in object {
+                fields[key] = "\(value)"
+            }
+        }
+        fields["signingMode"] = signedBySession ? "session" : "passkey"
+
+        var updated = draft
+        updated.detailsJSON = historyDetailsJSON(fields)
+        return updated
     }
 
     private func historyDetailsJSON(_ fields: [String: String]) -> String? {

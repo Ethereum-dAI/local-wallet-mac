@@ -162,6 +162,7 @@ struct OnchainTransactionSummary: Codable, Equatable {
     let resolutionChainID: UInt64?
     let ccipReadUsed: Bool?
     let operation: Operation?
+    let signingMode: String?
     let amountOut: String?
     let minimumReceived: String?
     let route: String?
@@ -169,6 +170,48 @@ struct OnchainTransactionSummary: Codable, Equatable {
     let transactionHash: String?
     let status: Status
     let createdAt: Date
+
+    init(
+        chainName: String,
+        chainID: UInt64,
+        amount: String,
+        token: String,
+        recipient: String,
+        recipientName: String?,
+        resolvedRecipient: String?,
+        resolutionChainName: String?,
+        resolutionChainID: UInt64?,
+        ccipReadUsed: Bool?,
+        operation: Operation?,
+        signingMode: String? = nil,
+        amountOut: String?,
+        minimumReceived: String?,
+        route: String?,
+        userOpHash: String,
+        transactionHash: String?,
+        status: Status,
+        createdAt: Date
+    ) {
+        self.chainName = chainName
+        self.chainID = chainID
+        self.amount = amount
+        self.token = token
+        self.recipient = recipient
+        self.recipientName = recipientName
+        self.resolvedRecipient = resolvedRecipient
+        self.resolutionChainName = resolutionChainName
+        self.resolutionChainID = resolutionChainID
+        self.ccipReadUsed = ccipReadUsed
+        self.operation = operation
+        self.signingMode = signingMode
+        self.amountOut = amountOut
+        self.minimumReceived = minimumReceived
+        self.route = route
+        self.userOpHash = userOpHash
+        self.transactionHash = transactionHash
+        self.status = status
+        self.createdAt = createdAt
+    }
 }
 
 enum OnchainTransactionActions {
@@ -278,6 +321,7 @@ extension OnchainTransactionSummary {
             resolutionChainID: resolutionChainID,
             ccipReadUsed: ccipReadUsed,
             operation: operation,
+            signingMode: signingMode,
             amountOut: amountOut,
             minimumReceived: minimumReceived,
             route: route,
@@ -666,6 +710,8 @@ private final class ChatDashboardModel: ObservableObject {
         let networkSettings = walletModel.networkSettings
         let gasPolicy = networkSettings.activeGasPolicy
         let relayerStatus = walletModel.localRelayerStatus
+        let now = Date()
+        let sessionRecord = walletModel.walletRecord?.sessionRecords.first { $0.chainId == chain.id }
         let walletNodeMode = WalletNodeClient.Configuration.fromEnvironment() == nil
             ? "Managed local daemon"
             : "External wallet-node"
@@ -673,7 +719,7 @@ private final class ChatDashboardModel: ObservableObject {
         let rankingCount = (try? chatStore.loadToolIntentFeedbackExportRecords().count) ?? 0
 
         return LocalWalletSettingsSnapshot(
-            capturedAt: Date(),
+            capturedAt: now,
             appVersion: appBuild.version,
             appBuild: appBuild.build,
             updateVersion: "0.2.0-preview",
@@ -729,6 +775,12 @@ private final class ChatDashboardModel: ObservableObject {
             unlockRelayerOnLaunch: walletModel.unlockRelayerOnLaunch,
             walletKeyPolicy: "Secure Enclave P-256 key; local user presence required for signing.",
             relayerKeyPolicy: "Keychain generic password protected by current biometric set.",
+            session: LocalWalletSessionSettingsSnapshot(
+                isEnabled: walletModel.sessionKeysEnabled,
+                configuredPolicy: walletModel.sessionPolicy,
+                record: sessionRecord,
+                capturedAt: now
+            ),
             bridgeStatus: walletModel.bridgeStatus,
             activeBundlerStatus: walletModel.activeBundlerStatus,
             lastSubmittedUserOperationHash: walletModel.lastSubmittedUserOperationHash ?? "None",
@@ -1043,6 +1095,7 @@ private final class ChatDashboardModel: ObservableObject {
                     minimumReceived: summary.minimumReceived,
                     conversationID: conversation.id,
                     messageID: message.id,
+                    detailsJSON: summary.signingMode.map { #"{"signingMode":"\#($0)"}"# },
                     createdAt: summary.createdAt,
                     updatedAt: summary.createdAt
                 )
@@ -1687,6 +1740,26 @@ private final class ChatDashboardModel: ObservableObject {
         return "Saved \(validated.activeNetworkName) network settings. wallet-node will use max \(validated.activeMaxFeePerGasGwei) gwei and priority \(validated.activeMaxPriorityFeePerGasGwei) gwei caps."
     }
 
+    func enableSessionKeysFromSettings() async throws -> String {
+        let record = try await walletModel.enableSessionKeys()
+        refreshAccountIdentity()
+        return "Session keys enabled for permission 0x\(record.permissionId.hexEncodedString)."
+    }
+
+    func revokeSessionKeysFromSettings() async throws -> String {
+        let result = try await walletModel.revokeSessionKeys()
+        refreshAccountIdentity()
+        return "Session key revoke submitted as \(result.userOpHash). Local session state clears after the revoke receipt succeeds."
+    }
+
+    func updateSessionPolicyFromSettings(_ policy: SessionPolicyConfig) throws -> String {
+        try walletModel.updateSessionPolicy(policy)
+        if walletModel.sessionKeysEnabled {
+            return "Saved limits for the next session enable. Disable and enable again to apply them onchain."
+        }
+        return "Saved session limits."
+    }
+
     func testNetworkSettings(_ settings: DemoNetworkSettings) async throws -> String {
         try await walletModel.testNetworkSettings(settings)
     }
@@ -2237,6 +2310,7 @@ private final class ChatDashboardModel: ObservableObject {
             "status": "submitted",
             "intent_id": intent.id.uuidString,
             "user_op_hash": result.userOpHash,
+            "signed_by": result.signedBySession ? "session_key" : "passkey",
         ]
         if let transactionHash = result.transactionHash {
             responsePayload["transaction_hash"] = transactionHash
@@ -2281,6 +2355,7 @@ private final class ChatDashboardModel: ObservableObject {
             resolutionChainID: request.resolvedName.map { UInt64($0.resolutionChainId) },
             ccipReadUsed: request.resolvedName?.ccipReadUsed,
             operation: .transfer,
+            signingMode: result.signedBySession ? "session" : "passkey",
             amountOut: nil,
             minimumReceived: nil,
             route: nil,
@@ -2312,6 +2387,7 @@ private final class ChatDashboardModel: ObservableObject {
             "quote_amount_out": "0x" + request.quote.quoteAmountOut.hexEncodedString,
             "amount_out_minimum": "0x" + request.quote.amountOutMinimum.hexEncodedString,
             "approval_batched": request.quote.requiresApproval && !request.fromToken.isNative,
+            "signed_by": result.signedBySession ? "session_key" : "passkey",
         ]
         if let transactionHash = result.transactionHash {
             responsePayload["transaction_hash"] = transactionHash
@@ -2352,6 +2428,7 @@ private final class ChatDashboardModel: ObservableObject {
             resolutionChainID: nil,
             ccipReadUsed: nil,
             operation: .swap,
+            signingMode: result.signedBySession ? "session" : "passkey",
             amountOut: TokenAmountFormatter.displayString(
                 rawUnits: request.quote.quoteAmountOut,
                 decimals: request.toToken.decimals,
@@ -2879,6 +2956,15 @@ struct LocalWalletChatDashboardView: View {
             },
             onResetWallet: {
                 try model.resetWalletFromSettings()
+            },
+            onEnableSessionKeys: {
+                try await model.enableSessionKeysFromSettings()
+            },
+            onRevokeSessionKeys: {
+                try await model.revokeSessionKeysFromSettings()
+            },
+            onUpdateSessionPolicy: { policy in
+                try model.updateSessionPolicyFromSettings(policy)
             },
             onCopyDebugReport: {
                 await model.debugSessionReportFromSettings()
@@ -4342,6 +4428,9 @@ private struct WalletHistoryDetailView: View {
                         }
                     }
                     WalletHistoryFieldRow(title: "UserOperation", value: record.userOpHash, copiedValue: $copiedValue)
+                    if let signingModeTitle = record.signingModeTitle {
+                        WalletHistoryFieldRow(title: "Signed by", value: signingModeTitle, copiedValue: $copiedValue, monospaced: false)
+                    }
                     if let transactionHash = record.transactionHash {
                         WalletHistoryFieldRow(
                             title: "Transaction",
@@ -4573,6 +4662,17 @@ private extension WalletTransactionRecord {
         }
     }
 
+    var signingModeTitle: String? {
+        switch detailsField("signingMode") {
+        case "session":
+            return "Session key"
+        case "passkey":
+            return "Passkey"
+        default:
+            return nil
+        }
+    }
+
     var statusExplanation: String {
         switch status {
         case .included:
@@ -4596,6 +4696,17 @@ private extension WalletTransactionRecord {
         case .unknown:
             return "The app cannot currently reconcile this record."
         }
+    }
+
+    private func detailsField(_ key: String) -> String? {
+        guard let detailsJSON,
+              let data = detailsJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let value = object[key]
+        else {
+            return nil
+        }
+        return "\(value)"
     }
 
     var statusTint: Color {
@@ -4725,6 +4836,19 @@ private struct OnchainTransactionCard: View {
                     value: summary.userOpHash,
                     copiedValue: $copiedValue
                 )
+                if let signingModeTitle {
+                    HStack {
+                        Text("Signed by")
+                            .font(.system(size: 11, weight: .black))
+                            .foregroundStyle(ChatPalette.mutedText)
+                            .frame(width: 108, alignment: .leading)
+                        Label(signingModeTitle, systemImage: signingModeIcon)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(signingModeTint)
+                        Spacer()
+                    }
+                    .frame(height: 30)
+                }
                 if let transactionHash = summary.transactionHash {
                     TransactionHashRow(
                         title: "Transaction",
@@ -4858,6 +4982,25 @@ private struct OnchainTransactionCard: View {
 
     private var isSwap: Bool {
         summary.operation == .swap
+    }
+
+    private var signingModeTitle: String? {
+        switch summary.signingMode {
+        case "session":
+            return "Session key"
+        case "passkey":
+            return "Passkey"
+        default:
+            return nil
+        }
+    }
+
+    private var signingModeIcon: String {
+        summary.signingMode == "session" ? "bolt.fill" : "touchid"
+    }
+
+    private var signingModeTint: Color {
+        summary.signingMode == "session" ? ChatPalette.success : ChatPalette.secondaryText
     }
 
     private var statusTitle: String {

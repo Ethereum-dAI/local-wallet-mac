@@ -18,6 +18,20 @@ struct SessionPolicyConfig: Codable, Equatable {
     )
 }
 
+extension SessionPolicyConfig {
+    func validated() throws -> SessionPolicyConfig {
+        guard rateLimitCount > 0,
+              rateLimitIntervalSec > 0,
+              ttlSeconds > 0
+        else {
+            throw AppError.invalidAmount
+        }
+        _ = try Data.quantityString(perTxValueLimitWei)
+        _ = try Data.quantityString(gasBudgetWei)
+        return self
+    }
+}
+
 struct SessionPolicyAllowlist: Codable, Equatable {
     var nativeTransfers: Bool
     var erc20TokenScope: SessionERC20TokenScope

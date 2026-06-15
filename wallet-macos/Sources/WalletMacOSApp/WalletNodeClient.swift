@@ -626,10 +626,11 @@ struct WalletNodeClient {
             request.httpBody = body
 
             let (responseData, response) = try await session.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200..<300).contains(httpResponse.statusCode)
-            else {
+            guard let httpResponse = response as? HTTPURLResponse else {
                 throw ClientError.invalidResponse
+            }
+            if !(200..<300).contains(httpResponse.statusCode), responseData.isEmpty {
+                throw ClientError.transport("wallet-node returned HTTP \(httpResponse.statusCode) without a response body")
             }
             data = responseData
         case let .unixSocket(socketPath):
@@ -862,6 +863,9 @@ private enum UnixSocketJSONRPCTransport {
     }
 
     private static func parseHTTPBody(_ response: Data) throws -> Data {
+        guard !response.isEmpty else {
+            throw WalletNodeClient.ClientError.transport("wallet-node closed the connection without a response")
+        }
         guard let separator = "\r\n\r\n".data(using: .utf8),
               let range = response.range(of: separator)
         else {
@@ -875,12 +879,15 @@ private enum UnixSocketJSONRPCTransport {
         }
         let parts = statusLine.split(separator: " ")
         guard parts.count >= 2,
-              let status = Int(parts[1]),
-              (200..<300).contains(status)
+              let status = Int(parts[1])
         else {
             throw WalletNodeClient.ClientError.invalidResponse
         }
-        return response[range.upperBound...]
+        let body = response[range.upperBound...]
+        if !(200..<300).contains(status), body.isEmpty {
+            throw WalletNodeClient.ClientError.transport("wallet-node returned HTTP \(status) without a response body")
+        }
+        return body
     }
 }
 

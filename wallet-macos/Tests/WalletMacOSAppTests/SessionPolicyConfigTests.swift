@@ -14,7 +14,7 @@ private func freshSessionSettingsStore() -> DemoSettingsStore {
     #expect(policy.rateLimitCount == 20)
     #expect(policy.rateLimitIntervalSec == 86_400)
     #expect(policy.ttlSeconds == 604_800)
-    #expect(policy.gasBudgetWei == "5000000000000000")
+    #expect(policy.gasBudgetWei == "50000000000000000")
     #expect(policy.allowlist.nativeTransfers == true)
     #expect(policy.allowlist.erc20TokenScope == .knownList)
     #expect(policy.allowlist.swapRouter == true)

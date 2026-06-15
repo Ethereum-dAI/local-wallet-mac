@@ -13,7 +13,7 @@ struct SessionPolicyConfig: Codable, Equatable {
         rateLimitCount: 20,
         rateLimitIntervalSec: 86_400,
         ttlSeconds: 604_800,
-        gasBudgetWei: "5000000000000000",
+        gasBudgetWei: "50000000000000000",
         allowlist: .default
     )
 }

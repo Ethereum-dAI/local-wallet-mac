@@ -381,6 +381,26 @@ public struct WalletSignature {
         return try takeFFIBuffer(outPtr, outLen)
     }
 
+    public static func sessionEmptyPermissionDeinitData(enableData: Data) throws -> Data {
+        guard !enableData.isEmpty else {
+            throw WalletError.invalidInput
+        }
+
+        var outPtr: UnsafePointer<UInt8>?
+        var outLen: UInt32 = 0
+
+        let result = enableData.withUnsafeBytes { enableDataPtr in
+            wallet_session_empty_permission_deinit_data(
+                enableDataPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                UInt32(enableData.count),
+                &outPtr,
+                &outLen
+            )
+        }
+        try checkResult(result)
+        return try takeFFIBuffer(outPtr, outLen)
+    }
+
     public static func sessionUninstallPermissionCalldata(
         permissionId: Data,
         deinitData: Data = Data()

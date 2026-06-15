@@ -1392,11 +1392,16 @@ final class AppModel: ObservableObject {
             appendLog("session-revoke: local toggle is off, but a session record exists; revoking anyway")
         }
 
+        let deinitData = try WalletSignature.sessionEmptyPermissionDeinitData(enableData: sessionRecord.enableData)
         let execution = try SessionRevokeAssembler.executionRequest(
             accountAddress: accountAddress,
             permissionId: sessionRecord.permissionId,
-            calldataBuilder: { permissionId in
-                try WalletSignature.sessionUninstallPermissionCalldata(permissionId: permissionId)
+            deinitData: deinitData,
+            calldataBuilder: { permissionId, deinitData in
+                try WalletSignature.sessionUninstallPermissionCalldata(
+                    permissionId: permissionId,
+                    deinitData: deinitData
+                )
             }
         )
 

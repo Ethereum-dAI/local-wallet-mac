@@ -5,7 +5,8 @@ enum SessionRevokeAssembler {
     static func executionRequest(
         accountAddress: String,
         permissionId: Data,
-        calldataBuilder: (Data) throws -> Data
+        deinitData: Data,
+        calldataBuilder: (Data, Data) throws -> Data
     ) throws -> KernelExecutionRequest {
         let account = try Data(hexString: accountAddress)
         guard account.count == 20 else {
@@ -13,7 +14,7 @@ enum SessionRevokeAssembler {
         }
         return KernelExecutionRequest.zeroValueCall(
             target: "0x" + account.hexEncodedString,
-            callData: try calldataBuilder(permissionId)
+            callData: try calldataBuilder(permissionId, deinitData)
         )
     }
 

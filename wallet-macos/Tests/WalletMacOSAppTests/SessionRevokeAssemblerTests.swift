@@ -5,19 +5,24 @@ import WalletToolLayer
 
 @Test func sessionRevokeExecutionTargetsAccountAndUsesPermissionId() throws {
     var capturedPermissionId: Data?
+    var capturedDeinitData: Data?
     let calldata = try Data(hexString: "deadbeef")
     let permissionId = Data([0xaa, 0xbb, 0xcc, 0xdd])
+    let deinitData = Data([0x01, 0x02])
 
     let execution = try SessionRevokeAssembler.executionRequest(
         accountAddress: "0x000000000000000000000000000000000000dEaD",
         permissionId: permissionId,
-        calldataBuilder: { permissionId in
+        deinitData: deinitData,
+        calldataBuilder: { permissionId, deinitData in
             capturedPermissionId = permissionId
+            capturedDeinitData = deinitData
             return calldata
         }
     )
 
     #expect(capturedPermissionId == permissionId)
+    #expect(capturedDeinitData == deinitData)
     #expect(execution.target == "0x000000000000000000000000000000000000dead")
     #expect(execution.value == Data(repeating: 0, count: 32))
     #expect(execution.callData == calldata)

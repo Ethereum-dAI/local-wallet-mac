@@ -3,20 +3,21 @@ import Testing
 import WalletToolLayer
 @testable import WalletMacOSApp
 
-@Test func sessionRevokeExecutionTargetsAccountAndUsesValidationNonce() throws {
-    var capturedNonce: UInt32?
+@Test func sessionRevokeExecutionTargetsAccountAndUsesPermissionId() throws {
+    var capturedPermissionId: Data?
     let calldata = try Data(hexString: "deadbeef")
+    let permissionId = Data([0xaa, 0xbb, 0xcc, 0xdd])
 
     let execution = try SessionRevokeAssembler.executionRequest(
         accountAddress: "0x000000000000000000000000000000000000dEaD",
-        validationNonce: 7,
-        calldataBuilder: { nonce in
-            capturedNonce = nonce
+        permissionId: permissionId,
+        calldataBuilder: { permissionId in
+            capturedPermissionId = permissionId
             return calldata
         }
     )
 
-    #expect(capturedNonce == 7)
+    #expect(capturedPermissionId == permissionId)
     #expect(execution.target == "0x000000000000000000000000000000000000dead")
     #expect(execution.value == Data(repeating: 0, count: 32))
     #expect(execution.callData == calldata)

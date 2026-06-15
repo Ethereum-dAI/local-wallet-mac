@@ -4,8 +4,8 @@ import WalletToolLayer
 enum SessionRevokeAssembler {
     static func executionRequest(
         accountAddress: String,
-        validationNonce: UInt32,
-        calldataBuilder: (UInt32) throws -> Data
+        permissionId: Data,
+        calldataBuilder: (Data) throws -> Data
     ) throws -> KernelExecutionRequest {
         let account = try Data(hexString: accountAddress)
         guard account.count == 20 else {
@@ -13,7 +13,7 @@ enum SessionRevokeAssembler {
         }
         return KernelExecutionRequest.zeroValueCall(
             target: "0x" + account.hexEncodedString,
-            callData: try calldataBuilder(validationNonce)
+            callData: try calldataBuilder(permissionId)
         )
     }
 

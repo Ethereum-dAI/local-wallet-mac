@@ -156,6 +156,24 @@ final class WalletSignatureTests: XCTestCase {
         )
     }
 
+    func testSessionUninstallPermissionCalldataMatchesPinnedVector() throws {
+        let calldata = try WalletSignature.sessionUninstallPermissionCalldata(
+            permissionId: Data(hexString: "aabbccdd")!,
+            deinitData: Data(hexString: "1234")!
+        )
+
+        XCTAssertEqual(
+            calldata.hexString,
+            "0xe6f3d50a"
+                + "02aabbccdd000000000000000000000000000000000000000000000000000000"
+                + "0000000000000000000000000000000000000000000000000000000000000060"
+                + "00000000000000000000000000000000000000000000000000000000000000a0"
+                + "0000000000000000000000000000000000000000000000000000000000000002"
+                + "1234000000000000000000000000000000000000000000000000000000000000"
+                + "0000000000000000000000000000000000000000000000000000000000000000"
+        )
+    }
+
     func testFullPipeline() throws {
         // 1. Compute hash
         let hash = try WalletSignature.computeUserOpHash(

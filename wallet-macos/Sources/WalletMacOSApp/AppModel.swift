@@ -1394,8 +1394,10 @@ final class AppModel: ObservableObject {
 
         let execution = try SessionRevokeAssembler.executionRequest(
             accountAddress: accountAddress,
-            validationNonce: sessionRecord.validationNonce,
-            calldataBuilder: WalletSignature.sessionInvalidateNonceCalldata(nonce:)
+            permissionId: sessionRecord.permissionId,
+            calldataBuilder: { permissionId in
+                try WalletSignature.sessionUninstallPermissionCalldata(permissionId: permissionId)
+            }
         )
 
         return try await executeUserOperation(

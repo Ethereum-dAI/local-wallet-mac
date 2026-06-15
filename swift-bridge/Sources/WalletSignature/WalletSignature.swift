@@ -381,6 +381,32 @@ public struct WalletSignature {
         return try takeFFIBuffer(outPtr, outLen)
     }
 
+    public static func sessionUninstallPermissionCalldata(
+        permissionId: Data,
+        deinitData: Data = Data()
+    ) throws -> Data {
+        guard permissionId.count == 4 else {
+            throw WalletError.invalidInput
+        }
+
+        var outPtr: UnsafePointer<UInt8>?
+        var outLen: UInt32 = 0
+
+        let result = permissionId.withUnsafeBytes { permissionPtr in
+            deinitData.withUnsafeBytes { deinitPtr in
+                wallet_session_uninstall_permission_calldata(
+                    permissionPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    deinitPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    UInt32(deinitData.count),
+                    &outPtr,
+                    &outLen
+                )
+            }
+        }
+        try checkResult(result)
+        return try takeFFIBuffer(outPtr, outLen)
+    }
+
     public static func predictKernelAccountAddress(
         factoryAddress: Data,
         implementation: Data,

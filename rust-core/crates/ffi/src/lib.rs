@@ -7,8 +7,8 @@ use wallet_kernel::{
     call_policy, ecdsa_signer_entry, enable_digest, encode_enable_data, encode_initialize_call,
     encode_permission_nonce_key, encode_selector_data_default_action, gas_policy,
     invalidate_nonce_calldata, permission_id, permission_validation_id,
-    predict_kernel_account_address, rate_limit_policy, timestamp_policy, AllowRule, AllowedCall,
-    Condition,
+    predict_kernel_account_address, rate_limit_policy, timestamp_policy,
+    uninstall_permission_calldata, AllowRule, AllowedCall, Condition,
 };
 use wallet_signature::{
     abi_encode_dummy_signature as signature_abi_encode_dummy_signature,
@@ -838,6 +838,50 @@ pub unsafe extern "C" fn wallet_session_invalidate_nonce_calldata(
 }
 
 /// # Safety
+/// `permission_id` must point to 4 bytes. `deinit_data` may be null only when
+/// `deinit_data_len` is zero. Caller must free returned heap buffer with
+/// `wallet_free_buffer`.
+#[no_mangle]
+pub unsafe extern "C" fn wallet_session_uninstall_permission_calldata(
+    permission_id: *const u8,
+    deinit_data: *const u8,
+    deinit_data_len: u32,
+    out_ptr: *mut *const u8,
+    out_len: *mut u32,
+) -> i32 {
+    let result = catch_unwind(|| {
+        if permission_id.is_null() || out_ptr.is_null() || out_len.is_null() {
+            return WalletResult::InvalidInput as i32;
+        }
+        if deinit_data_len > 0 && deinit_data.is_null() {
+            return WalletResult::InvalidInput as i32;
+        }
+
+        let permission_id = match <[u8; 4]>::try_from(std::slice::from_raw_parts(permission_id, 4))
+        {
+            Ok(value) => value,
+            Err(_) => return WalletResult::InvalidInput as i32,
+        };
+        let deinit_data = if deinit_data_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(deinit_data, deinit_data_len as usize)
+        };
+
+        match write_heap_buffer(
+            uninstall_permission_calldata(permission_id, deinit_data),
+            out_ptr,
+            out_len,
+        ) {
+            Ok(()) => WalletResult::Ok as i32,
+            Err(result) => result as i32,
+        }
+    });
+
+    result.unwrap_or(WalletResult::InternalError as i32)
+}
+
+/// # Safety
 /// `ptr` must have been returned by `wallet_abi_encode_signature`. Call exactly once.
 #[no_mangle]
 pub unsafe extern "C" fn wallet_free_buffer(ptr: *mut u8, len: u32) {
@@ -1378,6 +1422,41 @@ mod tests {
         assert_eq!(
             calldata,
             hex!("1f1b92e30000000000000000000000000000000000000000000000000000000000000007")
+        );
+
+        unsafe { wallet_free_buffer(out_ptr as *mut u8, out_len) };
+    }
+
+    #[test]
+    fn ffi_session_uninstall_permission_calldata_matches_kernel_selector() {
+        let permission_id = [0xaa, 0xbb, 0xcc, 0xdd];
+        let deinit_data = [0x12, 0x34];
+        let mut out_ptr: *const u8 = std::ptr::null();
+        let mut out_len: u32 = 0;
+
+        let result = unsafe {
+            wallet_session_uninstall_permission_calldata(
+                permission_id.as_ptr(),
+                deinit_data.as_ptr(),
+                deinit_data.len() as u32,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(result, WalletResult::Ok as i32);
+        let calldata = unsafe { std::slice::from_raw_parts(out_ptr, out_len as usize) };
+        assert_eq!(
+            calldata,
+            hex!(
+                "e6f3d50a"
+                "02aabbccdd000000000000000000000000000000000000000000000000000000"
+                "0000000000000000000000000000000000000000000000000000000000000060"
+                "00000000000000000000000000000000000000000000000000000000000000a0"
+                "0000000000000000000000000000000000000000000000000000000000000002"
+                "1234000000000000000000000000000000000000000000000000000000000000"
+                "0000000000000000000000000000000000000000000000000000000000000000"
+            )
         );
 
         unsafe { wallet_free_buffer(out_ptr as *mut u8, out_len) };

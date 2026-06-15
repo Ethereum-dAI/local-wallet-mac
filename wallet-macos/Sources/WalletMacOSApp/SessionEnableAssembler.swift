@@ -213,11 +213,7 @@ enum SessionEnableAssembler {
         }
 
         if policy.allowlist.swapRouter {
-            let accountRule = SessionPermissionAllowRule(
-                condition: "equal",
-                offset: swapRecipientArgumentOffset,
-                params: [try b256Address(accountAddress)]
-            )
+            let accountRecipient = try b256Address(accountAddress)
             let swapAmountRule = SessionPermissionAllowRule(
                 condition: "lessEqual",
                 offset: swapAmountInArgumentOffset,
@@ -226,28 +222,29 @@ enum SessionEnableAssembler {
 
             for router in SessionSwapRouterRegistry.routers(on: chainID) {
                 let target = try normalizedAddress(router)
-                let routerRule = SessionPermissionAllowRule(
-                    condition: "equal",
+                let routerRecipient = try b256Address(router)
+                let recipientRule = SessionPermissionAllowRule(
+                    condition: "oneOf",
                     offset: swapRecipientArgumentOffset,
-                    params: [try b256Address(router)]
+                    params: [accountRecipient, routerRecipient]
                 )
                 calls.append(SessionPermissionAllowedCall(
                     target: target,
                     selector: swapRouterExactInputSelector,
                     valueLimitWei: policy.perTxValueLimitWei,
-                    rules: [accountRule, swapAmountRule]
-                ))
-                calls.append(SessionPermissionAllowedCall(
-                    target: target,
-                    selector: swapRouterExactInputSelector,
-                    valueLimitWei: policy.perTxValueLimitWei,
-                    rules: [routerRule, swapAmountRule]
+                    rules: [recipientRule, swapAmountRule]
                 ))
                 calls.append(SessionPermissionAllowedCall(
                     target: target,
                     selector: swapRouterUnwrapWETH9Selector,
                     valueLimitWei: "0",
-                    rules: [accountRule]
+                    rules: [
+                        SessionPermissionAllowRule(
+                            condition: "equal",
+                            offset: swapRecipientArgumentOffset,
+                            params: [accountRecipient]
+                        ),
+                    ]
                 ))
             }
         }

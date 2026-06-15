@@ -80,31 +80,27 @@ import Testing
         offset: 32,
         params: [try b256Address("0x000000000000000000000000000000000000dEaD")]
     )
-    let routerRule = SessionPermissionAllowRule(
-        condition: "equal",
+    let recipientRule = SessionPermissionAllowRule(
+        condition: "oneOf",
         offset: 32,
-        params: [try b256Address(router)]
+        params: [
+            try b256Address("0x000000000000000000000000000000000000dEaD"),
+            try b256Address(router),
+        ]
     )
     let swapAmountRule = SessionPermissionAllowRule(
         condition: "lessEqual",
         offset: 64,
         params: [expectedLimit]
     )
-    let exactInputToAccount = try #require(decoded.allowedCalls.first {
+    let exactInputCalls = decoded.allowedCalls.filter {
         $0.target == router
             && $0.selector == "0xb858183f"
-            && $0.rules.contains(accountRule)
-    })
-    #expect(exactInputToAccount.valueLimitWei == policy.perTxValueLimitWei)
-    #expect(exactInputToAccount.rules.contains(swapAmountRule))
-
-    let exactInputToRouter = try #require(decoded.allowedCalls.first {
-        $0.target == router
-            && $0.selector == "0xb858183f"
-            && $0.rules.contains(routerRule)
-    })
-    #expect(exactInputToRouter.valueLimitWei == policy.perTxValueLimitWei)
-    #expect(exactInputToRouter.rules.contains(swapAmountRule))
+    }
+    #expect(exactInputCalls.count == 1)
+    let exactInput = try #require(exactInputCalls.first)
+    #expect(exactInput.valueLimitWei == policy.perTxValueLimitWei)
+    #expect(exactInput.rules == [recipientRule, swapAmountRule])
 
     let unwrap = try #require(decoded.allowedCalls.first {
         $0.target == router && $0.selector == "0x49404b7c"

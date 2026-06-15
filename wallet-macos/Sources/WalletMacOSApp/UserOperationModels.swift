@@ -71,10 +71,7 @@ enum WalletTokenRegistry {
     }
 
     static func swapIntermediates(on chainID: UInt64) -> [WalletToken] {
-        guard chainID == 1 else {
-            return []
-        }
-        return ["WETH", "USDC", "USDT", "DAI"].compactMap { token(matching: $0, on: chainID) }
+        ["WETH", "USDC", "USDT", "DAI"].compactMap { token(matching: $0, on: chainID) }
     }
 
     private static let allTokens: [WalletToken] = [

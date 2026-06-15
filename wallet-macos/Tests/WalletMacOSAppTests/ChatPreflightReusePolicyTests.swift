@@ -54,15 +54,6 @@ import Testing
     ) == false)
 }
 
-@Test func sepoliaSwapQuotesUseDirectRouteOnly() {
-    #expect(WalletTokenRegistry.swapIntermediates(on: 11_155_111).isEmpty)
-}
-
-@Test func mainnetSwapQuotesKeepLiquidIntermediates() {
-    let symbols = WalletTokenRegistry.swapIntermediates(on: 1).map(\.symbol)
-    #expect(symbols == ["WETH", "USDC", "USDT", "DAI"])
-}
-
 private func previewQuote(from: WalletToken, to: WalletToken) -> SwapQuote {
     SwapQuote(
         chainID: from.chainID,

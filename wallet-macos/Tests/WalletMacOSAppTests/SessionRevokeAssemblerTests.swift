@@ -73,6 +73,37 @@ import WalletToolLayer
     #expect(refreshed.updatedAt == updatedAt)
 }
 
+@Test func pendingSessionRevokeBlocksSessionSigningPlan() {
+    let record = makeRevokeSessionRecord(chainID: 11_155_111, keyRef: "session:sepolia")
+    let intent = TransactionIntent.nativeTransfer(
+        recipient: "0x1111111111111111111111111111111111111111",
+        amountETH: "0.0001"
+    )
+    let now = record.enabledAt.addingTimeInterval(60)
+
+    #expect(SessionSigningAvailability.plan(
+        settingsEnabled: true,
+        sessionRecord: record,
+        pendingRevokeRecords: [],
+        intent: intent,
+        now: now
+    ) != nil)
+    #expect(SessionSigningAvailability.plan(
+        settingsEnabled: true,
+        sessionRecord: record,
+        pendingRevokeRecords: [record],
+        intent: intent,
+        now: now
+    ) == nil)
+    #expect(SessionSigningAvailability.plan(
+        settingsEnabled: false,
+        sessionRecord: record,
+        pendingRevokeRecords: [],
+        intent: intent,
+        now: now
+    ) == nil)
+}
+
 private func makeRevokeSessionRecord(chainID: UInt64, keyRef: String) -> SessionRecord {
     let now = Date(timeIntervalSince1970: 1_700_000_000)
     return SessionRecord(

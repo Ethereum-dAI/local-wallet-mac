@@ -302,13 +302,22 @@ extension OnchainTransactionSummary {
             return self
         }
         let newStatus = OnchainTransactionSummary.Status(historyStatus: record.status)
+        let recordSigningMode = signingModeFromDetailsJSON(record.detailsJSON)
         if isTerminalStatus(status), !isTerminalStatus(newStatus) {
-            return with(status: status, transactionHash: record.transactionHash ?? transactionHash)
+            return with(
+                status: status,
+                transactionHash: record.transactionHash ?? transactionHash,
+                signingMode: recordSigningMode
+            )
         }
-        return with(status: newStatus, transactionHash: record.transactionHash ?? transactionHash)
+        return with(
+            status: newStatus,
+            transactionHash: record.transactionHash ?? transactionHash,
+            signingMode: recordSigningMode
+        )
     }
 
-    func with(status: Status, transactionHash: String?) -> OnchainTransactionSummary {
+    func with(status: Status, transactionHash: String?, signingMode: String? = nil) -> OnchainTransactionSummary {
         OnchainTransactionSummary(
             chainName: chainName,
             chainID: chainID,
@@ -321,7 +330,7 @@ extension OnchainTransactionSummary {
             resolutionChainID: resolutionChainID,
             ccipReadUsed: ccipReadUsed,
             operation: operation,
-            signingMode: signingMode,
+            signingMode: signingMode ?? self.signingMode,
             amountOut: amountOut,
             minimumReceived: minimumReceived,
             route: route,
@@ -334,6 +343,22 @@ extension OnchainTransactionSummary {
 
     private func isTerminalStatus(_ status: Status) -> Bool {
         status == .included || status == .reverted || status == .cancelled
+    }
+}
+
+private func signingModeFromDetailsJSON(_ detailsJSON: String?) -> String? {
+    guard let detailsJSON,
+          let data = detailsJSON.data(using: .utf8),
+          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let value = object["signingMode"] as? String
+    else {
+        return nil
+    }
+    switch value {
+    case "session", "passkey":
+        return value
+    default:
+        return nil
     }
 }
 
@@ -4663,7 +4688,7 @@ private extension WalletTransactionRecord {
     }
 
     var signingModeTitle: String? {
-        switch detailsField("signingMode") {
+        switch signingModeFromDetailsJSON(detailsJSON) {
         case "session":
             return "Session key"
         case "passkey":

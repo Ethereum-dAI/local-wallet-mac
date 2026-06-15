@@ -41,6 +41,40 @@ struct UserOperationBuildContext: Equatable {
     let sessionPlan: SessionUserOperationPlan?
 }
 
+enum SessionSigningAvailability {
+    static func plan(
+        settingsEnabled: Bool,
+        sessionRecord: SessionRecord?,
+        pendingRevokeRecords: [SessionRecord],
+        intent: TransactionIntent,
+        now: Date
+    ) -> SessionUserOperationPlan? {
+        guard settingsEnabled,
+              let sessionRecord,
+              !pendingRevokeRecords.contains(where: {
+                  $0.chainId == sessionRecord.chainId && $0.permissionId == sessionRecord.permissionId
+              }),
+              let plan = SessionUserOperationPlan(record: sessionRecord)
+        else {
+            return nil
+        }
+
+        let context = SessionPolicyContext(
+            sessionRecord: sessionRecord,
+            now: now,
+            recentSessionTransactionDates: []
+        )
+        guard SessionPolicyMirror.isWithinPolicy(
+            intent: intent,
+            config: sessionRecord.policyConfigSnapshot,
+            context: context
+        ) else {
+            return nil
+        }
+        return plan
+    }
+}
+
 struct UserOperationSignatureResult: Equatable {
     let userOpHash: Data
     let signature: Data

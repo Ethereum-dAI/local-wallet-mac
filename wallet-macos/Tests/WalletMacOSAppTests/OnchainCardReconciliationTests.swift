@@ -6,7 +6,8 @@ import WalletToolLayer
 private func historyRecord(
     userOpHash: String,
     status: WalletTransactionStatus,
-    txHash: String?
+    txHash: String?,
+    signingMode: String? = nil
 ) -> WalletTransactionRecord {
     WalletTransactionRecord(
         chainID: 11_155_111,
@@ -15,7 +16,8 @@ private func historyRecord(
         operation: .transfer,
         status: status,
         userOpHash: userOpHash,
-        transactionHash: txHash
+        transactionHash: txHash,
+        detailsJSON: signingMode.map { #"{"signingMode":"\#($0)"}"# }
     )
 }
 
@@ -115,6 +117,41 @@ private func freshChatStore() -> (ChatSQLiteStore, URL) {
         status: .included,
         txHash: "0xTX"
     )).signingMode == "session")
+}
+
+@Test func reconciledSummaryAdoptsSigningModeFromHistory() throws {
+    var summary = submittedSummary(userOpHash: "0xAAA")
+    summary = OnchainTransactionSummary(
+        chainName: summary.chainName,
+        chainID: summary.chainID,
+        amount: summary.amount,
+        token: summary.token,
+        recipient: summary.recipient,
+        recipientName: summary.recipientName,
+        resolvedRecipient: summary.resolvedRecipient,
+        resolutionChainName: summary.resolutionChainName,
+        resolutionChainID: summary.resolutionChainID,
+        ccipReadUsed: summary.ccipReadUsed,
+        operation: summary.operation,
+        signingMode: "session",
+        amountOut: summary.amountOut,
+        minimumReceived: summary.minimumReceived,
+        route: summary.route,
+        userOpHash: summary.userOpHash,
+        transactionHash: summary.transactionHash,
+        status: summary.status,
+        createdAt: summary.createdAt
+    )
+
+    let corrected = summary.reconciled(with: historyRecord(
+        userOpHash: "0xaaa",
+        status: .included,
+        txHash: "0xTX",
+        signingMode: "passkey"
+    ))
+    #expect(corrected.signingMode == "passkey")
+    #expect(corrected.status == .included)
+    #expect(corrected.transactionHash == "0xTX")
 }
 
 @Test func reconciledSummaryAdoptsIncludedStatusAndTxHashByUserOpHash() {

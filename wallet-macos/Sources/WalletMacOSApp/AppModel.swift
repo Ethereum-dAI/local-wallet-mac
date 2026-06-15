@@ -1415,7 +1415,9 @@ final class AppModel: ObservableObject {
             ),
             afterSubmit: { [self] userOpHash in
                 pendingSessionRevokeByUserOpHash[userOpHash.lowercased()] = sessionRecord
-                appendLog("session-revoke: waiting for receipt before clearing local session state")
+                objectWillChange.send()
+                settingsStore.setSessionKeysEnabled(false)
+                appendLog("session-revoke: disabled local session signing while waiting for revoke receipt")
             }
         ) { [self] buildContext in
             guard buildContext.isDeployed else {
@@ -1778,27 +1780,13 @@ final class AppModel: ObservableObject {
     }
 
     private func activeSessionPlan(for intent: TransactionIntent, now: Date) -> SessionUserOperationPlan? {
-        guard settingsStore.sessionKeysEnabled,
-              let walletRecord,
-              let sessionRecord = walletRecord.sessionRecords.first(where: { $0.chainId == activeChain.id }),
-              let plan = SessionUserOperationPlan(record: sessionRecord)
-        else {
-            return nil
-        }
-
-        let context = SessionPolicyContext(
-            sessionRecord: sessionRecord,
-            now: now,
-            recentSessionTransactionDates: []
-        )
-        guard SessionPolicyMirror.isWithinPolicy(
+        SessionSigningAvailability.plan(
+            settingsEnabled: settingsStore.sessionKeysEnabled,
+            sessionRecord: walletRecord?.sessionRecords.first(where: { $0.chainId == activeChain.id }),
+            pendingRevokeRecords: Array(pendingSessionRevokeByUserOpHash.values),
             intent: intent,
-            config: sessionRecord.policyConfigSnapshot,
-            context: context
-        ) else {
-            return nil
-        }
-        return plan
+            now: now
+        )
     }
 
     private func signSessionEnableDigest(_ digest: Data, reason: String) throws -> Data {

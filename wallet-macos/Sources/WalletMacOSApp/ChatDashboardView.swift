@@ -549,6 +549,8 @@ private final class ChatDashboardModel: ObservableObject {
     private var walletModelCancellable: AnyCancellable?
     private var gasPollTask: Task<Void, Never>?
     private var reconcilerTask: Task<Void, Never>?
+    private var sessionActivityEventMonitor: Any?
+    private var appDidBecomeActiveObserver: NSObjectProtocol?
     private let inferenceService: EmbeddedLlamaInferenceService
     private let chatStore: ChatSQLiteStore
     private let walletHistoryStore: WalletTransactionHistoryStore
@@ -712,6 +714,51 @@ private final class ChatDashboardModel: ObservableObject {
 
     func refreshGasPricesNow() {
         Task { await walletModel.refreshLiveGasPrices() }
+    }
+
+    func startSessionActivityTracking() {
+        walletModel.handleAppBecameActive()
+        if sessionActivityEventMonitor == nil {
+            sessionActivityEventMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [
+                    .leftMouseDown,
+                    .rightMouseDown,
+                    .otherMouseDown,
+                    .keyDown,
+                    .scrollWheel,
+                    .magnify,
+                    .swipe,
+                    .rotate,
+                ]
+            ) { [weak self] event in
+                Task { @MainActor [weak self] in
+                    self?.walletModel.recordSessionUserActivity()
+                }
+                return event
+            }
+        }
+        if appDidBecomeActiveObserver == nil {
+            appDidBecomeActiveObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.walletModel.handleAppBecameActive()
+                }
+            }
+        }
+    }
+
+    func stopSessionActivityTracking() {
+        if let sessionActivityEventMonitor {
+            NSEvent.removeMonitor(sessionActivityEventMonitor)
+            self.sessionActivityEventMonitor = nil
+        }
+        if let appDidBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
+            self.appDidBecomeActiveObserver = nil
+        }
     }
 
     var settingsSnapshot: LocalWalletSettingsSnapshot {
@@ -1772,9 +1819,12 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     func revokeSessionKeysFromSettings() async throws -> String {
-        let result = try await walletModel.revokeSessionKeys()
+        let result = try await walletModel.revokeSessionKeysAndWaitForReceipt()
         refreshAccountIdentity()
-        return "Session key revoke submitted as \(result.userOpHash). Local session state clears after the revoke receipt succeeds."
+        if let transactionHash = result.transactionHash {
+            return "Session key disabled. Revoke confirmed in transaction \(transactionHash)."
+        }
+        return "Session key disabled. Revoke receipt confirmed for \(result.userOpHash)."
     }
 
     func updateSessionPolicyFromSettings(_ policy: SessionPolicyConfig) throws -> String {
@@ -2741,6 +2791,12 @@ struct LocalWalletChatDashboardView: View {
             }
         } message: {
             Text(model.feedbackExportMessage ?? "")
+        }
+        .onAppear {
+            model.startSessionActivityTracking()
+        }
+        .onDisappear {
+            model.stopSessionActivityTracking()
         }
     }
 

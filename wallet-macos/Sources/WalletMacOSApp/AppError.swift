@@ -23,6 +23,8 @@ enum AppError: LocalizedError {
     case invalidExecutionBatch
     case sessionKeysRequireDeployedAccount
     case sessionKeysNotEnabled
+    case userOperationTerminal(String)
+    case userOperationReceiptReverted(String)
 
     var errorDescription: String? {
         switch self {
@@ -70,6 +72,10 @@ enum AppError: LocalizedError {
             return "Session keys can be enabled after the smart account is deployed. Send one passkey-authorized transaction first, then enable session keys."
         case .sessionKeysNotEnabled:
             return "Session keys are not enabled for the active account."
+        case .userOperationTerminal(let message):
+            return message
+        case .userOperationReceiptReverted(let reason):
+            return reason
         }
     }
 }

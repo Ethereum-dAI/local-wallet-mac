@@ -164,6 +164,29 @@ import Testing
     #expect(executions[2].callData == expectedUnwrap)
 }
 
+@Test func swapExactInputCallPolicyOffsetsMatchEncodedCalldataWords() throws {
+    let quote = try makeSwapQuote(
+        allowance: try Data(hexString: "64").leftPadded(to: 32),
+        requiresApproval: false
+    )
+    let recipient = "0x3333333333333333333333333333333333333333"
+    let callData = try SwapRouterCallEncoder().encodeExactInput(
+        path: quote.path,
+        recipient: recipient,
+        amountIn: quote.amountIn,
+        amountOutMinimum: quote.amountOutMinimum
+    )
+    let tupleOffset = try Data(hexString: "20").leftPadded(to: 32)
+    let pathOffset = try Data(hexString: "80").leftPadded(to: 32)
+    let encodedRecipient = try Data(hexString: recipient).leftPadded(to: 32)
+
+    #expect(callPolicyWord(callData, offset: 0) == tupleOffset)
+    #expect(callPolicyWord(callData, offset: 32) == pathOffset)
+    #expect(callPolicyWord(callData, offset: 64) == encodedRecipient)
+    #expect(callPolicyWord(callData, offset: 96) == quote.amountIn)
+    #expect(callPolicyWord(callData, offset: 128) == quote.amountOutMinimum)
+}
+
 private func makeSwapQuote(allowance: Data?, requiresApproval: Bool) throws -> SwapQuote {
     let tokenIn = "0x1111111111111111111111111111111111111111"
     let tokenOut = "0x2222222222222222222222222222222222222222"
@@ -185,6 +208,11 @@ private func makeSwapQuote(allowance: Data?, requiresApproval: Bool) throws -> S
         allowance: allowance,
         requiresApproval: requiresApproval
     )
+}
+
+private func callPolicyWord(_ callData: Data, offset: Int) -> Data {
+    let start = 4 + offset
+    return callData.subdata(in: start..<(start + 32))
 }
 
 private extension String {

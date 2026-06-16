@@ -112,7 +112,7 @@ private func makeRevokeSessionRecord(chainID: UInt64, keyRef: String) -> Session
         permissionId: Data([0x44, 0x36, 0x6f, 0xcb]),
         enableSig: Data(repeating: 0xee, count: 65),
         enabledAt: now,
-        expiresAt: now.addingTimeInterval(604_800),
+        expiresAt: now.addingTimeInterval(TimeInterval(SessionPolicyConfig.defaultTTLSeconds)),
         installedOnChain: true,
         validationNonce: 7,
         enableData: Data([0x01, 0x02]),

@@ -13,7 +13,8 @@ private func freshSessionSettingsStore() -> DemoSettingsStore {
     #expect(policy.perTxValueLimitWei == "100000000000000000")
     #expect(policy.rateLimitCount == 20)
     #expect(policy.rateLimitIntervalSec == 86_400)
-    #expect(policy.ttlSeconds == 604_800)
+    #expect(policy.ttlSeconds == 28_800)
+    #expect(policy.inactivityTimeoutSeconds == 3_600)
     #expect(policy.gasBudgetWei == "50000000000000000")
     #expect(policy.allowlist.nativeTransfers == true)
     #expect(policy.allowlist.erc20TokenScope == .knownList)
@@ -42,6 +43,31 @@ private func freshSessionSettingsStore() -> DemoSettingsStore {
     #expect(reloaded.sessionPolicy == policy)
 }
 
+@Test func demoSettingsStoreFallsBackFromInvalidLegacySessionPolicy() {
+    let store = freshSessionSettingsStore()
+    let legacySevenDayPolicy = """
+    {
+      "perTxValueLimitWei": "100000000000000000",
+      "rateLimitCount": 20,
+      "rateLimitIntervalSec": 86400,
+      "ttlSeconds": 604800,
+      "gasBudgetWei": "50000000000000000",
+      "allowlist": {
+        "nativeTransfers": true,
+        "erc20TokenScope": "knownList",
+        "swapRouter": true
+      }
+    }
+    """
+    store.defaults.set(
+        Data(legacySevenDayPolicy.utf8),
+        forKey: "com.localwallet.demo.session-policy"
+    )
+
+    #expect(store.sessionPolicy == .default)
+}
+
+
 @Test func sessionPolicyValidationRejectsNonPositiveLimitsAndBadWei() throws {
     _ = try SessionPolicyConfig.default.validated()
 
@@ -56,4 +82,50 @@ private func freshSessionSettingsStore() -> DemoSettingsStore {
     #expect(throws: AppError.self) {
         _ = try invalidWei.validated()
     }
+
+    var unsupportedTTL = SessionPolicyConfig.default
+    unsupportedTTL.ttlSeconds = 7_200
+    #expect(throws: AppError.self) {
+        _ = try unsupportedTTL.validated()
+    }
+
+    var tooShortInactivity = SessionPolicyConfig.default
+    tooShortInactivity.inactivityTimeoutSeconds = 599
+    #expect(throws: AppError.self) {
+        _ = try tooShortInactivity.validated()
+    }
+
+    var tooLongInactivity = SessionPolicyConfig.default
+    tooLongInactivity.inactivityTimeoutSeconds = 14_401
+    #expect(throws: AppError.self) {
+        _ = try tooLongInactivity.validated()
+    }
+
+    var inactivityLongerThanDuration = SessionPolicyConfig.default
+    inactivityLongerThanDuration.ttlSeconds = 14_400
+    inactivityLongerThanDuration.inactivityTimeoutSeconds = 14_401
+    #expect(throws: AppError.self) {
+        _ = try inactivityLongerThanDuration.validated()
+    }
+}
+
+@Test func legacySessionPolicyDecodesWithDefaultInactivityTimeout() throws {
+    let json = """
+    {
+      "perTxValueLimitWei": "100000000000000000",
+      "rateLimitCount": 20,
+      "rateLimitIntervalSec": 86400,
+      "ttlSeconds": 28800,
+      "gasBudgetWei": "50000000000000000",
+      "allowlist": {
+        "nativeTransfers": true,
+        "erc20TokenScope": "knownList",
+        "swapRouter": true
+      }
+    }
+    """
+
+    let policy = try JSONDecoder().decode(SessionPolicyConfig.self, from: Data(json.utf8))
+
+    #expect(policy.inactivityTimeoutSeconds == 3_600)
 }

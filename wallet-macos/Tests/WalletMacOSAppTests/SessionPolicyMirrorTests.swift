@@ -103,8 +103,36 @@ import Testing
         context: SessionPolicyContext(
             chainID: 11_155_111,
             now: now,
-            expiresAt: now.addingTimeInterval(604_800),
+            expiresAt: now.addingTimeInterval(TimeInterval(SessionPolicyConfig.defaultTTLSeconds)),
             recentSessionTransactionDates: exhaustedDates
+        )
+    ))
+}
+
+@Test func sessionPolicyMirrorRejectsInactiveSessionBeforeOnchainDurationExpires() {
+    let recipient = "0x4444444444444444444444444444444444444444"
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let intent = TransactionIntent.nativeTransfer(recipient: recipient, amountETH: "0.01")
+
+    #expect(!SessionPolicyMirror.isWithinPolicy(
+        intent: intent,
+        config: .default,
+        context: SessionPolicyContext(
+            chainID: 11_155_111,
+            now: now,
+            expiresAt: now.addingTimeInterval(TimeInterval(SessionPolicyConfig.defaultTTLSeconds)),
+            lastActivityAt: now.addingTimeInterval(-TimeInterval(SessionPolicyConfig.defaultInactivityTimeoutSeconds))
+        )
+    ))
+
+    #expect(SessionPolicyMirror.isWithinPolicy(
+        intent: intent,
+        config: .default,
+        context: SessionPolicyContext(
+            chainID: 11_155_111,
+            now: now,
+            expiresAt: now.addingTimeInterval(TimeInterval(SessionPolicyConfig.defaultTTLSeconds)),
+            lastActivityAt: now.addingTimeInterval(-TimeInterval(SessionPolicyConfig.defaultInactivityTimeoutSeconds) + 1)
         )
     ))
 }
@@ -114,7 +142,7 @@ private func sessionPolicyContext() -> SessionPolicyContext {
     return SessionPolicyContext(
         chainID: 11_155_111,
         now: now,
-        expiresAt: now.addingTimeInterval(604_800)
+        expiresAt: now.addingTimeInterval(TimeInterval(SessionPolicyConfig.defaultTTLSeconds))
     )
 }
 

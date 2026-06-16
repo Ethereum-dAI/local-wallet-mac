@@ -50,7 +50,7 @@ import Testing
     #expect(decoded.rateLimitCount == 20)
     #expect(decoded.rateLimitStartAt == 0)
     #expect(decoded.validAfter == 0)
-    #expect(decoded.validUntil == 1_700_604_800)
+    #expect(decoded.validUntil == 1_700_028_800)
 
     let expectedLimit = "0x" + (try Data.quantityString(policy.perTxValueLimitWei))
         .leftPadded(to: 32)
@@ -82,7 +82,7 @@ import Testing
     )
     let recipientRule = SessionPermissionAllowRule(
         condition: "oneOf",
-        offset: 32,
+        offset: 64,
         params: [
             try b256Address("0x000000000000000000000000000000000000dEaD"),
             try b256Address(router),
@@ -90,7 +90,7 @@ import Testing
     )
     let swapAmountRule = SessionPermissionAllowRule(
         condition: "lessEqual",
-        offset: 64,
+        offset: 96,
         params: [expectedLimit]
     )
     let exactInputCalls = decoded.allowedCalls.filter {
@@ -114,7 +114,8 @@ import Testing
     #expect(assembly.record.permissionId == artifacts.permissionId)
     #expect(assembly.record.enableSig == enableSig)
     #expect(assembly.record.enabledAt == now)
-    #expect(assembly.record.expiresAt == now.addingTimeInterval(604_800))
+    #expect(assembly.record.expiresAt == now.addingTimeInterval(28_800))
+    #expect(assembly.record.lastActivityAt == now)
     #expect(assembly.record.installedOnChain == false)
     #expect(assembly.record.policyConfigSnapshot == policy)
     #expect(assembly.record.validationNonce == 1)

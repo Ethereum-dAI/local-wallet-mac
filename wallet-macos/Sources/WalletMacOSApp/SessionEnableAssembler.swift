@@ -81,8 +81,9 @@ enum SessionEnableAssembler {
     private static let nativeTransferSelector = "0x00000000"
     private static let anyTarget = "0x0000000000000000000000000000000000000000"
     private static let erc20AmountArgumentOffset: UInt64 = 32
-    private static let swapRecipientArgumentOffset: UInt64 = 32
-    private static let swapAmountInArgumentOffset: UInt64 = 64
+    private static let exactInputRecipientArgumentOffset: UInt64 = 64
+    private static let exactInputAmountInArgumentOffset: UInt64 = 96
+    private static let unwrapRecipientArgumentOffset: UInt64 = 32
 
     static func assemble(
         policy: SessionPolicyConfig,
@@ -95,8 +96,9 @@ enum SessionEnableAssembler {
         composer: (Data) throws -> SessionPermissionArtifacts,
         enableDigestSigner: (Data) throws -> Data
     ) throws -> SessionEnableAssembly {
+        let validatedPolicy = try policy.validated()
         let configJSON = try permissionConfigJSON(
-            policy: policy,
+            policy: validatedPolicy,
             chain: chain,
             accountAddress: accountAddress,
             sessionAddress: sessionAddress,
@@ -105,7 +107,7 @@ enum SessionEnableAssembler {
         )
         let permission = try composer(configJSON)
         let enableSig = try enableDigestSigner(permission.enableDigest)
-        let expiresAt = now.addingTimeInterval(TimeInterval(policy.ttlSeconds))
+        let expiresAt = now.addingTimeInterval(TimeInterval(validatedPolicy.ttlSeconds))
         let record = SessionRecord(
             chainId: chain.id,
             sessionKeyRef: sessionKeyRef,
@@ -113,13 +115,14 @@ enum SessionEnableAssembler {
             enableSig: enableSig,
             enabledAt: now,
             expiresAt: expiresAt,
+            lastActivityAt: now,
             installedOnChain: false,
             validationNonce: validationNonce,
             enableData: permission.enableData,
             selectorData: permission.selectorData,
             nonceKeyDefault: permission.nonceKeyDefault,
             nonceKeyEnable: permission.nonceKeyEnable,
-            policyConfigSnapshot: policy
+            policyConfigSnapshot: validatedPolicy
         )
         return SessionEnableAssembly(
             configJSON: configJSON,
@@ -216,7 +219,7 @@ enum SessionEnableAssembler {
             let accountRecipient = try b256Address(accountAddress)
             let swapAmountRule = SessionPermissionAllowRule(
                 condition: "lessEqual",
-                offset: swapAmountInArgumentOffset,
+                offset: exactInputAmountInArgumentOffset,
                 params: [amountLimit]
             )
 
@@ -225,7 +228,7 @@ enum SessionEnableAssembler {
                 let routerRecipient = try b256Address(router)
                 let recipientRule = SessionPermissionAllowRule(
                     condition: "oneOf",
-                    offset: swapRecipientArgumentOffset,
+                    offset: exactInputRecipientArgumentOffset,
                     params: [accountRecipient, routerRecipient]
                 )
                 calls.append(SessionPermissionAllowedCall(
@@ -241,7 +244,7 @@ enum SessionEnableAssembler {
                     rules: [
                         SessionPermissionAllowRule(
                             condition: "equal",
-                            offset: swapRecipientArgumentOffset,
+                            offset: unwrapRecipientArgumentOffset,
                             params: [accountRecipient]
                         ),
                     ]

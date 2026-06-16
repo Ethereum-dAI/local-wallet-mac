@@ -112,6 +112,7 @@ final class AppModel: ObservableObject {
         2_000_000_000,
     ]
     private static let walletNodeLaunchFailureCooldownSeconds: TimeInterval = 4
+    private static let sessionUserActivityPersistenceMinInterval: TimeInterval = 15
     private static let relayerBalanceRetryDelays: [UInt64] = [
         400_000_000,
         900_000_000,
@@ -264,6 +265,7 @@ final class AppModel: ObservableObject {
             appendLog("bootstrap: failed — \(error.localizedDescription)")
         }
 
+        expireExpiredSessionIfNeeded(now: Date(), logContext: "bootstrap")
         isBootstrapping = false
 
         if shouldInspectAfterBootstrap {
@@ -460,6 +462,14 @@ final class AppModel: ObservableObject {
     func updateSessionPolicy(_ policy: SessionPolicyConfig) throws {
         settingsStore.setSessionPolicy(try policy.validated())
         appendLog("session: updated local session policy")
+    }
+
+    func handleAppBecameActive(now: Date = Date()) {
+        expireExpiredSessionIfNeeded(now: now, logContext: "session-resume")
+    }
+
+    func recordSessionUserActivity(now: Date = Date()) {
+        recordSessionActivity(now: now, source: "UI interaction", isUserInput: true)
     }
 
     func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
@@ -1431,6 +1441,42 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @discardableResult
+    func revokeSessionKeysAndWaitForReceipt() async throws -> UserOperationSendResult {
+        let chainID = activeChain.id
+        let submitted = try await revokeSessionKeys()
+        bridgeStatus = "Session key revoke submitted. Waiting for the receipt."
+        activeBundlerStatus = "Waiting for revoke receipt"
+
+        let receipt = try await waitForLocalReceipt(
+            userOpHash: submitted.userOpHash,
+            chainID: chainID,
+            logContext: "session-revoke"
+        )
+
+        recordReceiptHistory(receipt, chainID: chainID, logContext: "session-revoke")
+        guard receipt.success else {
+            activeBundlerStatus = "Revoke reverted"
+            bridgeStatus = "Session key revoke reverted."
+            let reason: String
+            if let revertReason = receipt.revertReason, !revertReason.isEmpty {
+                reason = "Session key revoke reverted: \(revertReason)"
+            } else {
+                reason = "Session key revoke reverted onchain."
+            }
+            throw AppError.userOperationReceiptReverted(reason)
+        }
+
+        activeBundlerStatus = "Session key disabled"
+        bridgeStatus = "Session key revoke confirmed onchain."
+        return UserOperationSendResult(
+            userOpHash: receipt.userOpHash,
+            transactionHash: receipt.txHash,
+            success: receipt.success,
+            signedBySession: submitted.signedBySession
+        )
+    }
+
     func executeNativeTransfer(
         recipient: String,
         amountETH: String,
@@ -1738,6 +1784,9 @@ final class AppModel: ObservableObject {
             }
         )
         appendLog("\(logContext): final userOpHash \(signatureResult.userOpHash.shortHex)")
+        if signatureResult.usedSession {
+            recordSessionActivity(now: Date(), source: "session signing", isUserInput: false)
+        }
         let submittedHistoryDraft = historyDraft.map {
             signedHistoryDraft($0, signedBySession: signatureResult.usedSession)
         }
@@ -1780,13 +1829,108 @@ final class AppModel: ObservableObject {
     }
 
     private func activeSessionPlan(for intent: TransactionIntent, now: Date) -> SessionUserOperationPlan? {
-        SessionSigningAvailability.plan(
+        if expireExpiredSessionIfNeeded(now: now, logContext: "session-preflight") {
+            return nil
+        }
+        return SessionSigningAvailability.plan(
             settingsEnabled: settingsStore.sessionKeysEnabled,
             sessionRecord: walletRecord?.sessionRecords.first(where: { $0.chainId == activeChain.id }),
             pendingRevokeRecords: Array(pendingSessionRevokeByUserOpHash.values),
             intent: intent,
             now: now
         )
+    }
+
+    @discardableResult
+    private func expireExpiredSessionIfNeeded(now: Date, logContext: String) -> Bool {
+        guard let walletRecord,
+              let sessionRecord = walletRecord.sessionRecords.first(where: { $0.chainId == activeChain.id }),
+              let reason = SessionLifecycle.expiryReason(record: sessionRecord, now: now)
+        else {
+            return false
+        }
+        expireLocalSession(
+            record: sessionRecord,
+            reason: reason,
+            now: now,
+            logContext: logContext
+        )
+        return true
+    }
+
+    private func expireLocalSession(
+        record sessionRecord: SessionRecord,
+        reason: SessionExpiryReason,
+        now: Date,
+        logContext: String
+    ) {
+        guard let walletRecord else {
+            return
+        }
+
+        let refreshed = walletRecord.removingSessionRecord(
+            chainID: sessionRecord.chainId,
+            isDeployed: walletRecord.isDeployed,
+            updatedAt: now
+        )
+        do {
+            try metadataStore.save(refreshed)
+            self.walletRecord = refreshed
+            if sessionRecord.chainId == activeChain.id {
+                settingsStore.setSessionKeysEnabled(false)
+            }
+            appendLog("\(logContext): \(reason.logLabel); disabled local session signing")
+        } catch {
+            appendLog("\(logContext): failed to persist expired session cleanup — \(error.localizedDescription)")
+        }
+
+        do {
+            try SessionKeyStore.shared.delete(keyRef: sessionRecord.sessionKeyRef)
+            appendLog("\(logContext): deleted expired session key from Keychain")
+        } catch {
+            appendLog("\(logContext): expired session key cleanup failed — \(error.localizedDescription)")
+        }
+    }
+
+    private func recordSessionActivity(now: Date, source: String, isUserInput: Bool) {
+        guard settingsStore.sessionKeysEnabled,
+              let walletRecord,
+              let sessionRecord = walletRecord.sessionRecords.first(where: { $0.chainId == activeChain.id })
+        else {
+            return
+        }
+        if let reason = SessionLifecycle.expiryReason(record: sessionRecord, now: now) {
+            expireLocalSession(
+                record: sessionRecord,
+                reason: reason,
+                now: now,
+                logContext: "session-activity"
+            )
+            return
+        }
+        if isUserInput,
+           now.timeIntervalSince(sessionRecord.lastActivityAt) < Self.sessionUserActivityPersistenceMinInterval {
+            return
+        }
+
+        let refreshed = walletRecord.updatingSessionActivity(
+            chainID: sessionRecord.chainId,
+            activityAt: now,
+            isDeployed: walletRecord.isDeployed,
+            updatedAt: now
+        )
+        guard refreshed != walletRecord else {
+            return
+        }
+        do {
+            try metadataStore.save(refreshed)
+            self.walletRecord = refreshed
+            if !isUserInput {
+                appendLog("session: refreshed activity after \(source)")
+            }
+        } catch {
+            appendLog("session: failed to persist activity after \(source) — \(error.localizedDescription)")
+        }
     }
 
     private func signSessionEnableDigest(_ digest: Data, reason: String) throws -> Data {
@@ -1935,6 +2079,53 @@ final class AppModel: ObservableObject {
         }
 
         return nil
+    }
+
+    private func waitForLocalReceipt(
+        userOpHash: String,
+        chainID: UInt64,
+        logContext: String
+    ) async throws -> WalletNodeClient.UserOperationReceipt {
+        appendLog("\(logContext): waiting for local wallet-node receipt for \(userOpHash)")
+        var attempt = 1
+
+        while true {
+            try Task.checkCancellation()
+
+            let receipt = try await withWalletNodeClient(operation: "\(logContext) receipt poll") { client in
+                try await client.getUserOperationReceipt(userOpHash: userOpHash)
+            }
+            if let receipt {
+                appendLog("\(logContext): receipt received on attempt \(attempt)")
+                return receipt
+            }
+
+            let operationStatus = try await withWalletNodeClient(operation: "\(logContext) status poll") { client in
+                try await client.getUserOperationStatus(userOpHash: userOpHash)
+            }
+            if let terminal = TerminalUserOperationStatus.historyStatus(from: operationStatus) {
+                markTerminalHistory(
+                    userOpHash: userOpHash,
+                    chainID: chainID,
+                    status: terminal.status,
+                    reason: terminal.reason,
+                    logContext: logContext
+                )
+                activeBundlerStatus = "Revoke \(terminal.status.rawValue)"
+                bridgeStatus = "Session key revoke \(terminal.status.rawValue)."
+                var message = "Session key revoke did not receive a receipt. wallet-node reported \(terminal.status.rawValue)"
+                if let reason = terminal.reason, !reason.isEmpty {
+                    message += ": \(reason)"
+                } else {
+                    message += "."
+                }
+                throw AppError.userOperationTerminal(message)
+            }
+
+            appendLog("\(logContext): receipt pending (attempt \(attempt))")
+            attempt += 1
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+        }
     }
 
     func loadWalletHistoryRecords(limit: Int = 200) -> [WalletTransactionRecord] {

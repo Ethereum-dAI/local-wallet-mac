@@ -291,7 +291,12 @@ struct DemoSettingsStore {
         guard let data = defaults.data(forKey: Keys.sessionPolicy) else {
             return .default
         }
-        return (try? JSONDecoder().decode(SessionPolicyConfig.self, from: data)) ?? .default
+        guard let decoded = try? JSONDecoder().decode(SessionPolicyConfig.self, from: data),
+              let validated = try? decoded.validated()
+        else {
+            return .default
+        }
+        return validated
     }
 
     func setSessionPolicy(_ policy: SessionPolicyConfig) {

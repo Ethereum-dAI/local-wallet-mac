@@ -4,17 +4,20 @@ struct SessionPolicyContext: Equatable {
     var chainID: UInt64
     var now: Date
     var expiresAt: Date
+    var lastActivityAt: Date
     var recentSessionTransactionDates: [Date]
 
     init(
         chainID: UInt64,
         now: Date,
         expiresAt: Date,
+        lastActivityAt: Date? = nil,
         recentSessionTransactionDates: [Date] = []
     ) {
         self.chainID = chainID
         self.now = now
         self.expiresAt = expiresAt
+        self.lastActivityAt = lastActivityAt ?? now
         self.recentSessionTransactionDates = recentSessionTransactionDates
     }
 
@@ -27,6 +30,7 @@ struct SessionPolicyContext: Equatable {
             chainID: sessionRecord.chainId,
             now: now,
             expiresAt: sessionRecord.expiresAt,
+            lastActivityAt: sessionRecord.lastActivityAt,
             recentSessionTransactionDates: recentSessionTransactionDates
         )
     }
@@ -38,7 +42,7 @@ enum SessionPolicyMirror {
         config: SessionPolicyConfig,
         context: SessionPolicyContext
     ) -> Bool {
-        guard isActive(context),
+        guard isActive(context, config: config),
               isUnderRateLimit(config: config, context: context),
               let cap = capData(config)
         else {
@@ -87,8 +91,14 @@ enum SessionPolicyMirror {
         )
     }
 
-    private static func isActive(_ context: SessionPolicyContext) -> Bool {
-        context.now < context.expiresAt
+    private static func isActive(_ context: SessionPolicyContext, config: SessionPolicyConfig) -> Bool {
+        guard context.now < context.expiresAt else {
+            return false
+        }
+        let inactivityExpiresAt = context.lastActivityAt.addingTimeInterval(
+            TimeInterval(config.inactivityTimeoutSeconds)
+        )
+        return context.now < inactivityExpiresAt
     }
 
     private static func isUnderRateLimit(

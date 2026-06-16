@@ -142,4 +142,31 @@ extension WalletRecord {
             updatedAt: updatedAt
         )
     }
+
+    func updatingSessionActivity(
+        chainID: UInt64,
+        activityAt: Date,
+        isDeployed: Bool,
+        updatedAt: Date
+    ) -> WalletRecord {
+        var refreshedRecords = sessionRecords
+        guard let index = refreshedRecords.firstIndex(where: { $0.chainId == chainID }) else {
+            return self
+        }
+        refreshedRecords[index].lastActivityAt = activityAt
+        return WalletRecord(
+            walletId: walletId,
+            keyTag: keyTag,
+            pubkeyX: pubkeyX,
+            pubkeyY: pubkeyY,
+            chainId: chainId,
+            kernelAccountAddress: kernelAccountAddress,
+            authenticatorIdHash: authenticatorIdHash,
+            kernelSalt: kernelSalt,
+            sessionRecords: refreshedRecords,
+            isDeployed: isDeployed,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
 }

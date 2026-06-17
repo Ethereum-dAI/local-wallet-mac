@@ -430,6 +430,33 @@ enum ChatPreflightReusePolicy {
     }
 }
 
+enum ChatIntentPreviewPolicy {
+    static func shouldAutomaticallyPreparePreview(
+        for message: ChatMessage,
+        in messages: [ChatMessage]
+    ) -> Bool {
+        guard messages.reversed().first(where: { $0.kind == .toolIntent && $0.toolIntent != nil })?.id == message.id else {
+            return false
+        }
+        return isPendingUnexecutedToolIntent(message, in: messages)
+    }
+
+    private static func isPendingUnexecutedToolIntent(
+        _ message: ChatMessage,
+        in messages: [ChatMessage]
+    ) -> Bool {
+        guard message.kind == .toolIntent,
+              let intent = message.toolIntent,
+              intent.disposition == .pending
+        else {
+            return false
+        }
+        return !messages.contains {
+            $0.kind == .toolResponse && $0.toolCallId == intent.id.uuidString
+        }
+    }
+}
+
 private enum ChatIntentExecutionError: LocalizedError {
     case unsupportedTransferToken
     case unsupportedTransferAmount
@@ -1618,8 +1645,12 @@ private final class ChatDashboardModel: ObservableObject {
         swapPreflightStatuses[intent.id]
     }
 
-    func prepareIntentPreview(_ message: ChatMessage) {
+    func prepareIntentPreview(_ message: ChatMessage, automatically: Bool = true) {
         guard let intent = message.toolIntent else {
+            return
+        }
+        if automatically,
+           !ChatIntentPreviewPolicy.shouldAutomaticallyPreparePreview(for: message, in: messages) {
             return
         }
         // Only preview intents still awaiting a decision. Once an intent is

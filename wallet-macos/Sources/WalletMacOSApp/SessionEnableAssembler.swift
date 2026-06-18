@@ -177,12 +177,7 @@ enum SessionEnableAssembler {
         accountAddress: String
     ) throws -> [SessionPermissionAllowedCall] {
         var calls: [SessionPermissionAllowedCall] = []
-        let amountLimit = try b256Hex(decimal: policy.perTxValueLimitWei)
-        let erc20AmountRule = SessionPermissionAllowRule(
-            condition: "lessEqual",
-            offset: erc20AmountArgumentOffset,
-            params: [amountLimit]
-        )
+        let nativeAmountLimit = try b256Hex(decimal: policy.perTxValueLimitWei)
 
         if policy.allowlist.nativeTransfers {
             calls.append(SessionPermissionAllowedCall(
@@ -196,22 +191,37 @@ enum SessionEnableAssembler {
         switch policy.allowlist.erc20TokenScope {
         case .knownList:
             for token in WalletTokenRegistry.tokens(on: chainID) {
-                guard let address = token.contractAddress else {
+                guard let address = token.contractAddress,
+                      let tokenLimit = policy.erc20TokenLimit(for: token),
+                      tokenLimit.isEnabled
+                else {
                     continue
                 }
                 let target = try normalizedAddress(address)
-                calls.append(SessionPermissionAllowedCall(
-                    target: target,
-                    selector: erc20TransferSelector,
-                    valueLimitWei: "0",
-                    rules: [erc20AmountRule]
-                ))
-                calls.append(SessionPermissionAllowedCall(
-                    target: target,
-                    selector: erc20ApproveSelector,
-                    valueLimitWei: "0",
-                    rules: [erc20AmountRule]
-                ))
+                let tokenAmountRule = SessionPermissionAllowRule(
+                    condition: "lessEqual",
+                    offset: erc20AmountArgumentOffset,
+                    params: [try b256Hex(decimal: tokenLimit.maxAmount)]
+                )
+                if policy.allowlist.erc20Transfers {
+                    calls.append(SessionPermissionAllowedCall(
+                        target: target,
+                        selector: erc20TransferSelector,
+                        valueLimitWei: "0",
+                        rules: [tokenAmountRule]
+                    ))
+                }
+                if let approvalSpenderRules = try approvalSpenderRules(
+                    mode: policy.allowlist.erc20Approvals,
+                    chainID: chainID
+                ) {
+                    calls.append(SessionPermissionAllowedCall(
+                        target: target,
+                        selector: erc20ApproveSelector,
+                        valueLimitWei: "0",
+                        rules: approvalSpenderRules + [tokenAmountRule]
+                    ))
+                }
             }
         }
 
@@ -220,7 +230,7 @@ enum SessionEnableAssembler {
             let swapAmountRule = SessionPermissionAllowRule(
                 condition: "lessEqual",
                 offset: exactInputAmountInArgumentOffset,
-                params: [amountLimit]
+                params: [nativeAmountLimit]
             )
 
             for router in SessionSwapRouterRegistry.routers(on: chainID) {
@@ -253,6 +263,28 @@ enum SessionEnableAssembler {
         }
 
         return calls
+    }
+
+    private static func approvalSpenderRules(
+        mode: SessionERC20ApprovalMode,
+        chainID: UInt64
+    ) throws -> [SessionPermissionAllowRule]? {
+        switch mode {
+        case .disabled:
+            return nil
+        case .anySpender:
+            return []
+        case .knownSwapRouters:
+            let routers = try SessionSwapRouterRegistry.routers(on: chainID).map(b256Address)
+            guard !routers.isEmpty else {
+                return nil
+            }
+            return [SessionPermissionAllowRule(
+                condition: "oneOf",
+                offset: 0,
+                params: routers
+            )]
+        }
     }
 
     private static func normalizedAddress(_ value: String) throws -> String {

@@ -52,7 +52,7 @@ import Testing
     #expect(decoded.validAfter == 0)
     #expect(decoded.validUntil == 1_700_028_800)
 
-    let expectedLimit = "0x" + (try Data.quantityString(policy.perTxValueLimitWei))
+    let expectedNativeLimit = "0x" + (try Data.quantityString(policy.perTxValueLimitWei))
         .leftPadded(to: 32)
         .hexEncodedString
     let nativeTransfer = try #require(decoded.allowedCalls.first {
@@ -63,16 +63,30 @@ import Testing
     #expect(nativeTransfer.rules == [])
 
     let usdc = "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238"
+    let usdcToken = try #require(WalletTokenRegistry.token(matching: "USDC", on: 11_155_111))
+    let expectedUSDCLimit = "0x" + (try Data.quantityString(
+        try #require(policy.erc20TokenLimit(for: usdcToken)).maxAmount
+    ))
+        .leftPadded(to: 32)
+        .hexEncodedString
     let transfer = try #require(decoded.allowedCalls.first {
         $0.target == usdc && $0.selector == "0xa9059cbb"
     })
     #expect(transfer.valueLimitWei == "0")
     #expect(transfer.rules == [
-        SessionPermissionAllowRule(condition: "lessEqual", offset: 32, params: [expectedLimit]),
+        SessionPermissionAllowRule(condition: "lessEqual", offset: 32, params: [expectedUSDCLimit]),
     ])
-    #expect(decoded.allowedCalls.contains {
+    let approval = try #require(decoded.allowedCalls.first {
         $0.target == usdc && $0.selector == "0x095ea7b3"
     })
+    #expect(approval.rules == [
+        SessionPermissionAllowRule(
+            condition: "oneOf",
+            offset: 0,
+            params: [try b256Address("0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E")]
+        ),
+        SessionPermissionAllowRule(condition: "lessEqual", offset: 32, params: [expectedUSDCLimit]),
+    ])
 
     let router = "0x3bfa4769fb09eefc5a80d6e87c3b9c650f7ae48e"
     let accountRule = SessionPermissionAllowRule(
@@ -91,7 +105,7 @@ import Testing
     let swapAmountRule = SessionPermissionAllowRule(
         condition: "lessEqual",
         offset: 96,
-        params: [expectedLimit]
+        params: [expectedNativeLimit]
     )
     let exactInputCalls = decoded.allowedCalls.filter {
         $0.target == router
@@ -123,6 +137,82 @@ import Testing
     #expect(assembly.record.selectorData == artifacts.selectorData)
     #expect(assembly.record.nonceKeyDefault == artifacts.nonceKeyDefault)
     #expect(assembly.record.nonceKeyEnable == artifacts.nonceKeyEnable)
+}
+
+@Test func sessionEnableAssemblerEncodesCustomGuardrailsAndDisabledActionTypes() throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let accountAddress = "0x000000000000000000000000000000000000dEaD"
+    let sessionAddress = try Data(hexString: "90F8bf6A479f320ead074411a4B0e7944Ea8c9C1")
+    let policy = SessionPolicyConfig(
+        perTxValueLimitWei: "42",
+        rateLimitCount: 3,
+        rateLimitIntervalSec: 600,
+        ttlSeconds: 14_400,
+        inactivityTimeoutSeconds: 600,
+        gasBudgetWei: "123",
+        allowlist: SessionPolicyAllowlist(
+            nativeTransfers: false,
+            erc20TokenScope: .knownList,
+            swapRouter: false
+        ),
+        erc20TokenLimits: [
+            SessionERC20TokenLimit(
+                chainID: 11_155_111,
+                tokenAddress: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+                isEnabled: true,
+                maxAmount: "42"
+            ),
+        ]
+    )
+
+    let configJSON = try SessionEnableAssembler.permissionConfigJSON(
+        policy: policy,
+        chain: .ethereumSepolia,
+        accountAddress: accountAddress,
+        sessionAddress: sessionAddress,
+        validationNonce: 7,
+        now: now
+    )
+
+    let decoded = try JSONDecoder().decode(SessionPermissionConfigPayload.self, from: configJSON)
+    #expect(decoded.gasBudgetWei == "123")
+    #expect(decoded.rateLimitCount == 3)
+    #expect(decoded.rateLimitIntervalSec == 600)
+    #expect(decoded.validUntil == 1_700_014_400)
+    #expect(decoded.validationNonce == 7)
+    #expect(!decoded.allowedCalls.contains { $0.selector == "0x00000000" })
+    #expect(!decoded.allowedCalls.contains { $0.selector == "0xb858183f" })
+    #expect(!decoded.allowedCalls.contains { $0.selector == "0x49404b7c" })
+    #expect(decoded.allowedCalls.allSatisfy {
+        $0.selector == "0xa9059cbb" || $0.selector == "0x095ea7b3"
+    })
+
+    let expectedLimit = "0x" + (try Data.quantityString(policy.perTxValueLimitWei))
+        .leftPadded(to: 32)
+        .hexEncodedString
+    let expectedAmountRule = SessionPermissionAllowRule(
+        condition: "lessEqual",
+        offset: 32,
+        params: [expectedLimit]
+    )
+    let usdc = "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238"
+    let transfer = try #require(decoded.allowedCalls.first {
+        $0.target == usdc && $0.selector == "0xa9059cbb"
+    })
+    let approve = try #require(decoded.allowedCalls.first {
+        $0.target == usdc && $0.selector == "0x095ea7b3"
+    })
+    #expect(transfer.valueLimitWei == "0")
+    #expect(transfer.rules == [expectedAmountRule])
+    #expect(approve.valueLimitWei == "0")
+    #expect(approve.rules == [
+        SessionPermissionAllowRule(
+            condition: "oneOf",
+            offset: 0,
+            params: [try b256Address("0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E")]
+        ),
+        expectedAmountRule,
+    ])
 }
 
 private func b256Address(_ value: String) throws -> String {

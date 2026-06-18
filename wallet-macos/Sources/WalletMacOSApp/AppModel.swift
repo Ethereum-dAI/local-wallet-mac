@@ -3,6 +3,26 @@ import LocalAuthentication
 import WalletToolLayer
 import WalletSignature
 
+enum SessionSigningPreviewMode: Equatable {
+    case install
+    case active
+}
+
+enum SessionSigningPasskeyReason: Equatable {
+    case sessionOff
+    case accountNotDeployed
+    case noSessionRecord
+    case pendingRevoke
+    case expired(SessionExpiryReason)
+    case missingSigningArtifacts
+    case policy(SessionPolicyMirror.RejectionReason)
+}
+
+enum SessionSigningPreview: Equatable {
+    case session(SessionSigningPreviewMode)
+    case passkey(SessionSigningPasskeyReason)
+}
+
 // AppModel drives the signed macOS demo shell. It is intentionally opinionated
 // around the current demo scope (Sepolia, ETH transfer first, local wallet-node)
 // and should not be treated as the final wallet product architecture.
@@ -462,6 +482,41 @@ final class AppModel: ObservableObject {
     func updateSessionPolicy(_ policy: SessionPolicyConfig) throws {
         settingsStore.setSessionPolicy(try policy.validated())
         appendLog("session: updated local session policy")
+    }
+
+    func sessionSigningPreview(for intent: TransactionIntent, now: Date = Date()) -> SessionSigningPreview {
+        guard settingsStore.sessionKeysEnabled else {
+            return .passkey(.sessionOff)
+        }
+        guard let walletRecord else {
+            return .passkey(.noSessionRecord)
+        }
+        guard walletRecord.isDeployed || accountInspection?.isDeployed == true else {
+            return .passkey(.accountNotDeployed)
+        }
+        guard let sessionRecord = walletRecord.sessionRecords.first(where: { $0.chainId == activeChain.id }) else {
+            return .passkey(.noSessionRecord)
+        }
+        if pendingSessionRevokeByUserOpHash.values.contains(where: {
+            $0.chainId == sessionRecord.chainId && $0.permissionId == sessionRecord.permissionId
+        }) {
+            return .passkey(.pendingRevoke)
+        }
+        if let reason = SessionLifecycle.expiryReason(record: sessionRecord, now: now) {
+            return .passkey(.expired(reason))
+        }
+        guard let plan = SessionUserOperationPlan(record: sessionRecord) else {
+            return .passkey(.missingSigningArtifacts)
+        }
+        let context = SessionPolicyContext(sessionRecord: sessionRecord, now: now)
+        if let reason = SessionPolicyMirror.rejectionReason(
+            intent: intent,
+            config: sessionRecord.policyConfigSnapshot,
+            context: context
+        ) {
+            return .passkey(.policy(reason))
+        }
+        return .session(plan.record.installedOnChain ? .active : .install)
     }
 
     func handleAppBecameActive(now: Date = Date()) {

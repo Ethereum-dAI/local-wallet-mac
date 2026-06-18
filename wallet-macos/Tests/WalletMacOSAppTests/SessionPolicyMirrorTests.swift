@@ -16,6 +16,11 @@ import Testing
         config: .default,
         context: context
     ))
+    #expect(SessionPolicyMirror.rejectionReason(
+        intent: .nativeTransfer(recipient: recipient, amountETH: "0.100000000000000001"),
+        config: .default,
+        context: context
+    ) == .overValueLimit)
 }
 
 @Test func sessionPolicyMirrorAllowsKnownERC20TransferAndRejectsUnknownOrOverCap() throws {
@@ -40,11 +45,46 @@ import Testing
         config: .default,
         context: context
     ))
+    #expect(SessionPolicyMirror.rejectionReason(
+        intent: .erc20Transfer(token: unknown, recipient: recipient, amount: "1"),
+        config: .default,
+        context: context
+    ) == .unsupportedToken)
     #expect(!SessionPolicyMirror.isWithinPolicy(
         intent: .erc20Transfer(token: usdc, recipient: recipient, amount: "1000000000000"),
         config: .default,
         context: context
     ))
+}
+
+@Test func sessionPolicyMirrorRejectsDisabledERC20TransfersAndTokens() throws {
+    let context = sessionPolicyContext()
+    let recipient = "0x2222222222222222222222222222222222222222"
+    let usdc = try #require(WalletTokenRegistry.token(matching: "USDC", on: 11_155_111))
+    var transfersDisabled = SessionPolicyConfig.default
+    transfersDisabled.allowlist.erc20Transfers = false
+
+    #expect(SessionPolicyMirror.rejectionReason(
+        intent: .erc20Transfer(token: usdc, recipient: recipient, amount: "1"),
+        config: transfersDisabled,
+        context: context
+    ) == .erc20TransfersDisabled)
+
+    var tokenDisabled = SessionPolicyConfig.default
+    tokenDisabled.erc20TokenLimits = [
+        SessionERC20TokenLimit(
+            chainID: 11_155_111,
+            tokenAddress: try #require(usdc.contractAddress),
+            isEnabled: false,
+            maxAmount: "100000000"
+        ),
+    ]
+
+    #expect(SessionPolicyMirror.rejectionReason(
+        intent: .erc20Transfer(token: usdc, recipient: recipient, amount: "1"),
+        config: tokenDisabled,
+        context: context
+    ) == .erc20TokenDisabled)
 }
 
 @Test func sessionPolicyMirrorAllowsKnownRouterSwapAndRejectsUnknownRouter() throws {
@@ -78,6 +118,74 @@ import Testing
         config: .default,
         context: context
     ))
+    #expect(SessionPolicyMirror.rejectionReason(
+        intent: .exactInputSwap(unknownRouterRequest),
+        config: .default,
+        context: context
+    ) == .unsupportedSwapRouter)
+}
+
+@Test func sessionPolicyMirrorRejectsSwapThatNeedsDisabledERC20Approval() throws {
+    let context = sessionPolicyContext()
+    let quote = try makeSessionPolicyMirrorSwapQuote(
+        router: "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E",
+        requiresApproval: true
+    )
+    let request = SwapExecutionRequest(
+        quote: quote,
+        recipient: "0x3333333333333333333333333333333333333333",
+        tokenInIsNative: false,
+        tokenOutIsNative: false
+    )
+    var approvalsDisabled = SessionPolicyConfig.default
+    approvalsDisabled.allowlist.erc20Approvals = .disabled
+
+    #expect(SessionPolicyMirror.rejectionReason(
+        intent: .exactInputSwap(request),
+        config: approvalsDisabled,
+        context: context
+    ) == .erc20ApprovalsDisabled)
+}
+
+@Test func sessionPolicyMirrorRejectsDisabledNativeTransfersAndSwaps() throws {
+    let context = sessionPolicyContext()
+    let recipient = "0x3333333333333333333333333333333333333333"
+    var nativeDisabled = SessionPolicyConfig.default
+    nativeDisabled.allowlist.nativeTransfers = false
+
+    #expect(!SessionPolicyMirror.isWithinPolicy(
+        intent: .nativeTransfer(recipient: recipient, amountETH: "0.01"),
+        config: nativeDisabled,
+        context: context
+    ))
+    #expect(SessionPolicyMirror.rejectionReason(
+        intent: .nativeTransfer(recipient: recipient, amountETH: "0.01"),
+        config: nativeDisabled,
+        context: context
+    ) == .nativeTransfersDisabled)
+
+    let quote = try makeSessionPolicyMirrorSwapQuote(
+        router: "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E"
+    )
+    let request = SwapExecutionRequest(
+        quote: quote,
+        recipient: recipient,
+        tokenInIsNative: false,
+        tokenOutIsNative: false
+    )
+    var swapsDisabled = SessionPolicyConfig.default
+    swapsDisabled.allowlist.swapRouter = false
+
+    #expect(!SessionPolicyMirror.isWithinPolicy(
+        intent: .exactInputSwap(request),
+        config: swapsDisabled,
+        context: context
+    ))
+    #expect(SessionPolicyMirror.rejectionReason(
+        intent: .exactInputSwap(request),
+        config: swapsDisabled,
+        context: context
+    ) == .swapsDisabled)
 }
 
 @Test func sessionPolicyMirrorRejectsExpiredSessionAndExhaustedRateLimit() {
@@ -107,6 +215,16 @@ import Testing
             recentSessionTransactionDates: exhaustedDates
         )
     ))
+    #expect(SessionPolicyMirror.rejectionReason(
+        intent: intent,
+        config: .default,
+        context: SessionPolicyContext(
+            chainID: 11_155_111,
+            now: now,
+            expiresAt: now.addingTimeInterval(TimeInterval(SessionPolicyConfig.defaultTTLSeconds)),
+            recentSessionTransactionDates: exhaustedDates
+        )
+    ) == .rateLimited)
 }
 
 @Test func sessionPolicyMirrorRejectsInactiveSessionBeforeOnchainDurationExpires() {
@@ -146,7 +264,10 @@ private func sessionPolicyContext() -> SessionPolicyContext {
     )
 }
 
-private func makeSessionPolicyMirrorSwapQuote(router: String) throws -> SwapQuote {
+private func makeSessionPolicyMirrorSwapQuote(
+    router: String,
+    requiresApproval: Bool = false
+) throws -> SwapQuote {
     let usdc = try #require(WalletTokenRegistry.token(matching: "USDC", on: 11_155_111))
     let weth = try #require(WalletTokenRegistry.token(matching: "WETH", on: 11_155_111))
     let tokenIn = try #require(usdc.contractAddress)
@@ -166,7 +287,7 @@ private func makeSessionPolicyMirrorSwapQuote(router: String) throws -> SwapQuot
         path: try Data(hexString: "\(String(tokenIn.dropFirst(2)))000bb8\(String(tokenOut.dropFirst(2)))"),
         hops: [],
         gasEstimate: "0x0",
-        allowance: nil,
-        requiresApproval: false
+        allowance: requiresApproval ? Data(repeating: 0, count: 32) : nil,
+        requiresApproval: requiresApproval
     )
 }

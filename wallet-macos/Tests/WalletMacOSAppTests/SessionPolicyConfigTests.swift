@@ -18,7 +18,12 @@ private func freshSessionSettingsStore() -> DemoSettingsStore {
     #expect(policy.gasBudgetWei == "50000000000000000")
     #expect(policy.allowlist.nativeTransfers == true)
     #expect(policy.allowlist.erc20TokenScope == .knownList)
+    #expect(policy.allowlist.erc20Transfers == true)
+    #expect(policy.allowlist.erc20Approvals == .knownSwapRouters)
     #expect(policy.allowlist.swapRouter == true)
+    #expect(policy.erc20TokenLimits == [])
+    let usdc = try #require(WalletTokenRegistry.token(matching: "USDC", on: 11_155_111))
+    #expect(policy.erc20TokenLimit(for: usdc)?.maxAmount == "100000000")
 
     let encoded = try JSONEncoder().encode(policy)
     let decoded = try JSONDecoder().decode(SessionPolicyConfig.self, from: encoded)
@@ -128,4 +133,7 @@ private func freshSessionSettingsStore() -> DemoSettingsStore {
     let policy = try JSONDecoder().decode(SessionPolicyConfig.self, from: Data(json.utf8))
 
     #expect(policy.inactivityTimeoutSeconds == 3_600)
+    #expect(policy.allowlist.erc20Transfers == true)
+    #expect(policy.allowlist.erc20Approvals == .knownSwapRouters)
+    #expect(policy.erc20TokenLimits == [])
 }

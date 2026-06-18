@@ -821,8 +821,6 @@ private final class ChatDashboardModel: ObservableObject {
             capturedAt: now,
             appVersion: appBuild.version,
             appBuild: appBuild.build,
-            updateVersion: "0.2.0-preview",
-            updateStatus: "Preview build",
             textModelName: selectedModel.name,
             textModelIdentifier: selectedModel.id,
             textModelSize: selectedModel.size,
@@ -1645,6 +1643,48 @@ private final class ChatDashboardModel: ObservableObject {
         swapPreflightStatuses[intent.id]
     }
 
+    func signingPreview(
+        for intent: ToolIntent,
+        transferPreflightStatus: ChatTransferPreflightStatus?,
+        swapPreflightStatus: ChatSwapPreflightStatus?
+    ) -> ChatSigningPreview? {
+        guard intent.disposition == .pending else {
+            return nil
+        }
+        switch intent.tool {
+        case .transfer:
+            guard let transactionIntent = transferTransactionIntent(
+                from: intent,
+                preflightStatus: transferPreflightStatus
+            ) else {
+                if case .resolving = transferPreflightStatus {
+                    return ChatSigningPreview(
+                        mode: .pending,
+                        title: "Checking signing path",
+                        detail: "Recipient resolution has to finish before the app can choose session key or passkey."
+                    )
+                }
+                return nil
+            }
+            return chatSigningPreview(for: walletModel.sessionSigningPreview(for: transactionIntent))
+        case .swap:
+            guard let transactionIntent = swapTransactionIntent(
+                from: intent,
+                preflightStatus: swapPreflightStatus
+            ) else {
+                if case .quoting = swapPreflightStatus {
+                    return ChatSigningPreview(
+                        mode: .pending,
+                        title: "Checking signing path",
+                        detail: "The route quote has to finish before the app can choose session key or passkey."
+                    )
+                }
+                return nil
+            }
+            return chatSigningPreview(for: walletModel.sessionSigningPreview(for: transactionIntent))
+        }
+    }
+
     func prepareIntentPreview(_ message: ChatMessage, automatically: Bool = true) {
         guard let intent = message.toolIntent else {
             return
@@ -1699,6 +1739,142 @@ private final class ChatDashboardModel: ObservableObject {
             } catch {
                 self.transferPreflightStatuses[intent.id] = .failed(error.localizedDescription)
             }
+        }
+    }
+
+    private func transferTransactionIntent(
+        from intent: ToolIntent,
+        preflightStatus: ChatTransferPreflightStatus?
+    ) -> TransactionIntent? {
+        guard let token = WalletTokenRegistry.token(
+            matching: intent.args["token"],
+            on: walletModel.activeChain.id
+        ),
+              let amount = intent.args["amount"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !amount.isEmpty,
+              amount.lowercased() != "all",
+              let recipient = transferRecipient(from: intent, preflightStatus: preflightStatus)
+        else {
+            return nil
+        }
+        if token.isNative {
+            return .nativeTransfer(recipient: recipient, amountETH: amount)
+        }
+        return .erc20Transfer(token: token, recipient: recipient, amount: amount)
+    }
+
+    private func transferRecipient(
+        from intent: ToolIntent,
+        preflightStatus: ChatTransferPreflightStatus?
+    ) -> String? {
+        guard let rawRecipient = intent.args["to"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawRecipient.isEmpty
+        else {
+            return nil
+        }
+        if let recipientBytes = try? Data(hexString: rawRecipient), recipientBytes.count == 20 {
+            return "0x" + recipientBytes.hexEncodedString
+        }
+        if case .resolved(let resolvedName) = preflightStatus {
+            return resolvedName.address
+        }
+        return nil
+    }
+
+    private func swapTransactionIntent(
+        from intent: ToolIntent,
+        preflightStatus: ChatSwapPreflightStatus?
+    ) -> TransactionIntent? {
+        guard case .quoted(let preview) = preflightStatus,
+              let walletAddress = walletModel.walletRecord?.kernelAccountAddress
+        else {
+            return nil
+        }
+        let request = SwapExecutionRequest(
+            quote: preview.quote,
+            recipient: walletAddress,
+            tokenInIsNative: preview.fromToken.isNative,
+            tokenOutIsNative: preview.toToken.isNative
+        )
+        return .exactInputSwap(request)
+    }
+
+    private func chatSigningPreview(for preview: SessionSigningPreview) -> ChatSigningPreview {
+        switch preview {
+        case .session(let mode):
+            return ChatSigningPreview(
+                mode: .session,
+                title: mode == .install ? "Will use session key" : "Will use active session key",
+                detail: mode == .install
+                    ? "This in-policy action will install the approved session permission and submit without another Touch ID prompt."
+                    : "This action is inside the active guardrails and should submit without another Touch ID prompt."
+            )
+        case .passkey(let reason):
+            return ChatSigningPreview(
+                mode: .passkey,
+                title: "Passkey required",
+                detail: passkeyReasonDetail(reason)
+            )
+        }
+    }
+
+    private func passkeyReasonDetail(_ reason: SessionSigningPasskeyReason) -> String {
+        switch reason {
+        case .sessionOff:
+            return "Assistant session is off. Confirming this action will request Touch ID."
+        case .accountNotDeployed:
+            return "Session keys can only be used after the smart account has been deployed once."
+        case .noSessionRecord:
+            return "No session permission is stored for this chain."
+        case .pendingRevoke:
+            return "A session revoke is already in progress, so this action will use the passkey path."
+        case .expired(.duration):
+            return "The session duration has ended. Enable a fresh session to use silent signing again."
+        case .expired(.inactivity):
+            return "The session locked after inactivity. Enable a fresh session to use silent signing again."
+        case .missingSigningArtifacts:
+            return "The stored session record is incomplete, so the app will fall back to passkey approval."
+        case .policy(let reason):
+            return policyRejectionDetail(reason)
+        }
+    }
+
+    private func policyRejectionDetail(_ reason: SessionPolicyMirror.RejectionReason) -> String {
+        switch reason {
+        case .expired:
+            return "The session duration has ended. Enable a fresh session to use silent signing again."
+        case .inactive:
+            return "The session locked after inactivity. Enable a fresh session to use silent signing again."
+        case .rateLimited:
+            return "The active session has reached its action limit for the current window."
+        case .invalidLimit:
+            return "The active session limit is invalid, so the app will use passkey approval."
+        case .nativeTransfersDisabled:
+            return "Native transfers are outside the current assistant guardrails."
+        case .erc20TransfersDisabled:
+            return "ERC-20 transfers are outside the current session key guardrails."
+        case .erc20ApprovalsDisabled:
+            return "This swap needs an ERC-20 approval, but session key approvals are disabled."
+        case .erc20TokenDisabled:
+            return "This token is disabled in the current session key guardrails."
+        case .swapsDisabled:
+            return "Swaps are outside the current assistant guardrails."
+        case .invalidRecipient:
+            return "The recipient is not a valid onchain address after preflight."
+        case .invalidAmount:
+            return "The amount could not be parsed into onchain units."
+        case .overValueLimit:
+            return "This action is above the active per-action session limit."
+        case .unsupportedToken:
+            return "This token is not in the session key's known-token allowlist."
+        case .wrongChain:
+            return "The action does not match the active chain for this session."
+        case .unsupportedSwapRouter:
+            return "The quoted swap router is not allowlisted for session signing."
+        case .unsupportedApprovalSpender:
+            return "The required ERC-20 approval spender is not allowed for session signing."
+        case .unsupportedSwapToken:
+            return "The quoted swap uses a token outside the session key's allowlist."
         }
     }
 
@@ -2741,9 +2917,13 @@ struct LocalWalletChatDashboardView: View {
     @State private var conversationPendingDeletion: ChatConversation?
     @State private var isToolsPopoverPresented = false
     @State private var isGasPopoverPresented = false
+    @State private var isSessionPopoverPresented = false
+    @State private var isSessionActionInProgress = false
+    @State private var sessionPopoverMessage: String?
     @State private var isAtBottomOfChat = true
     @State private var isAccountHeaderExpanded = true
     @State private var selectedSection: DashboardSection = .chat
+    @State private var settingsInitialTab: LocalWalletSettingsTab = .info
     @State private var historyFilter: WalletHistoryFilter = .all
 
     private var filteredHistoryRecords: [WalletTransactionRecord] {
@@ -2996,23 +3176,15 @@ struct LocalWalletChatDashboardView: View {
                         title: "Settings",
                         systemImage: "gearshape.fill",
                         isSelected: selectedSection == .settings,
-                        action: { selectedSection = .settings }
+                        action: {
+                            settingsInitialTab = .info
+                            selectedSection = .settings
+                        }
                     )
                 }
                 .padding(3)
                 .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1)))
 
-                HStack(spacing: 8) {
-                    Image(systemName: "person.crop.circle.fill")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(ChatPalette.secondaryText)
-                    Text("Default")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(ChatPalette.primaryText)
-                }
-                .padding(.horizontal, 13)
-                .frame(height: 36)
-                .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1)))
             }
 
             Spacer()
@@ -3027,6 +3199,7 @@ struct LocalWalletChatDashboardView: View {
         LocalWalletSettingsView(
             snapshot: model.settingsSnapshot,
             thinkingEnabled: $model.thinkingEnabled,
+            initialTab: settingsInitialTab,
             onExportRankings: {
                 model.exportFeedbackRankings()
             },
@@ -3212,13 +3385,20 @@ struct LocalWalletChatDashboardView: View {
                                     .id(message.id)
                                 case .toolIntent:
                                     if let intent = message.toolIntent {
+                                        let transferPreflightStatus = model.transferPreflightStatus(for: intent)
+                                        let swapPreflightStatus = model.swapPreflightStatus(for: intent)
                                         HStack {
                                             ToolIntentCardView(
                                                 intent: intent,
                                                 feedback: message.toolFeedback,
                                                 executionStatus: model.executionStatus(for: intent),
-                                                transferPreflightStatus: model.transferPreflightStatus(for: intent),
-                                                swapPreflightStatus: model.swapPreflightStatus(for: intent),
+                                                transferPreflightStatus: transferPreflightStatus,
+                                                swapPreflightStatus: swapPreflightStatus,
+                                                signingPreview: model.signingPreview(
+                                                    for: intent,
+                                                    transferPreflightStatus: transferPreflightStatus,
+                                                    swapPreflightStatus: swapPreflightStatus
+                                                ),
                                                 onConfirm: { model.confirmIntent(message) },
                                                 onReject: { model.rejectIntent(message) },
                                                 onEdit: { editedIntent in
@@ -3579,6 +3759,67 @@ struct LocalWalletChatDashboardView: View {
         ]
     }
 
+    private var sessionPillText: String {
+        switch model.settingsSnapshot.session.statusTitle {
+        case "Active":
+            return "Session key active"
+        case "Pending install":
+            return "Session key pending"
+        case "Inactive":
+            return "Session key locked"
+        case "Duration expired", "Expired":
+            return "Session key expired"
+        case "Stored":
+            return "Session key stored"
+        default:
+            return "Session key off"
+        }
+    }
+
+    private var sessionPillIcon: String {
+        switch model.settingsSnapshot.session.statusTitle {
+        case "Active":
+            return "bolt.fill"
+        case "Pending install":
+            return "hourglass"
+        case "Inactive", "Duration expired", "Expired":
+            return "lock.fill"
+        case "Stored":
+            return "key.fill"
+        default:
+            return "touchid"
+        }
+    }
+
+    private var sessionPillTint: Color {
+        switch model.settingsSnapshot.session.statusTitle {
+        case "Active":
+            return ChatPalette.success
+        case "Pending install", "Stored":
+            return ChatPalette.warning
+        case "Inactive", "Duration expired", "Expired":
+            return ChatPalette.warning
+        default:
+            return ChatPalette.secondaryText
+        }
+    }
+
+    private func runSessionPopoverAction(_ action: @escaping () async throws -> String) {
+        guard !isSessionActionInProgress else {
+            return
+        }
+        isSessionActionInProgress = true
+        sessionPopoverMessage = nil
+        Task { @MainActor in
+            do {
+                sessionPopoverMessage = try await action()
+            } catch {
+                sessionPopoverMessage = error.localizedDescription
+            }
+            isSessionActionInProgress = false
+        }
+    }
+
     private var footerControls: some View {
         HStack(spacing: 8) {
             StatusPill(icon: "circle.fill", text: "Gemma 4 E4B", tint: ChatPalette.success)
@@ -3593,6 +3834,40 @@ struct LocalWalletChatDashboardView: View {
                 text: model.executionStatusText,
                 tint: model.hasExecutingIntent ? ChatPalette.accent : ChatPalette.secondaryText
             )
+            Button {
+                isSessionPopoverPresented.toggle()
+                sessionPopoverMessage = nil
+            } label: {
+                StatusPill(
+                    icon: sessionPillIcon,
+                    text: sessionPillText,
+                    tint: sessionPillTint
+                )
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $isSessionPopoverPresented, arrowEdge: .top) {
+                SessionStatusPopover(
+                    snapshot: model.settingsSnapshot.session,
+                    isWorking: isSessionActionInProgress,
+                    message: sessionPopoverMessage,
+                    onEnable: {
+                        runSessionPopoverAction {
+                            try await model.enableSessionKeysFromSettings()
+                        }
+                    },
+                    onRevoke: {
+                        runSessionPopoverAction {
+                            try await model.revokeSessionKeysFromSettings()
+                        }
+                    },
+                    onOpenSettings: {
+                        settingsInitialTab = .sessionKeys
+                        selectedSection = .settings
+                        isSessionPopoverPresented = false
+                    }
+                )
+            }
+            .help("Assistant session key status")
             Button {
                 isGasPopoverPresented.toggle()
                 model.refreshGasPricesNow()
@@ -6149,6 +6424,211 @@ private struct StatusPill: View {
         .padding(.horizontal, 11)
         .frame(height: 32)
         .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 0.8)))
+    }
+}
+
+private struct SessionStatusPopover: View {
+    let snapshot: LocalWalletSessionSettingsSnapshot
+    let isWorking: Bool
+    let message: String?
+    let onEnable: () -> Void
+    let onRevoke: () -> Void
+    let onOpenSettings: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: statusIcon)
+                    .font(.system(size: 15, weight: .black))
+                    .foregroundStyle(statusTint)
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(statusTint.opacity(0.14)))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 14, weight: .heavy))
+                        .foregroundStyle(ChatPalette.primaryText)
+                    Text(sessionKeyDescription)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                SessionPopoverRow(title: "Max per action", value: Self.ethLabel(wei: snapshot.activePolicy.perTxValueLimitWei))
+                SessionPopoverRow(
+                    title: "Action pace",
+                    value: "\(snapshot.activePolicy.rateLimitCount) / \(Self.friendlyDurationLabel(seconds: snapshot.activePolicy.rateLimitIntervalSec))"
+                )
+                SessionPopoverRow(title: "Duration", value: Self.friendlyDurationLabel(seconds: snapshot.activePolicy.ttlSeconds))
+                SessionPopoverRow(
+                    title: "Actions",
+                    value: actionScope
+                )
+                SessionPopoverRow(title: "Token scope", value: "Known ERC-20s")
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(ChatPalette.input)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(ChatPalette.border.opacity(0.8), lineWidth: 1)
+                    )
+            )
+
+            if let message, !message.isEmpty {
+                Text(message)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(ChatPalette.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(ChatPalette.selectedPanel.opacity(0.7))
+                    )
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    snapshot.isEnabled ? onRevoke() : onEnable()
+                } label: {
+                    if isWorking {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Label(actionTitle, systemImage: snapshot.isEnabled ? "xmark.circle.fill" : "bolt.fill")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isWorking)
+
+                Button("Settings", action: onOpenSettings)
+                    .buttonStyle(.bordered)
+                    .disabled(isWorking)
+            }
+        }
+        .padding(16)
+        .frame(width: 360)
+        .background(ChatPalette.panel)
+    }
+
+    private var title: String {
+        "Session key \(statusLabel)"
+    }
+
+    private var actionTitle: String {
+        snapshot.isEnabled ? "End session key" : "Enable session key"
+    }
+
+    private var statusLabel: String {
+        switch snapshot.statusTitle {
+        case "Active":
+            return "active"
+        case "Pending install":
+            return "pending"
+        case "Inactive":
+            return "locked"
+        case "Duration expired", "Expired":
+            return "expired"
+        case "Stored":
+            return "stored"
+        default:
+            return "off"
+        }
+    }
+
+    private var sessionKeyDescription: String {
+        if snapshot.isExpired {
+            return "This session key is no longer active. Enable a new one to sign approved \"Transfer\" and \"Swap\" actions without Touch ID."
+        }
+        if snapshot.isEnabled, snapshot.record?.installedOnChain == true {
+            return "This session key can sign approved \"Transfer\" and \"Swap\" actions without Touch ID while staying inside your wallet limits."
+        }
+        if snapshot.isEnabled {
+            return "The first approved \"Transfer\" or \"Swap\" action will install this session key onchain."
+        }
+        return "A session key lets the assistant sign approved \"Transfer\" and \"Swap\" actions without Touch ID while staying inside your wallet limits."
+    }
+
+    private var statusIcon: String {
+        if snapshot.isExpired {
+            return "lock.fill"
+        }
+        if snapshot.isEnabled {
+            return snapshot.record?.installedOnChain == true ? "bolt.fill" : "hourglass"
+        }
+        return snapshot.hasRecord ? "key.fill" : "touchid"
+    }
+
+    private var statusTint: Color {
+        if snapshot.isEnabled, !snapshot.isExpired, snapshot.record?.installedOnChain == true {
+            return ChatPalette.success
+        }
+        if snapshot.hasRecord || snapshot.isExpired {
+            return ChatPalette.warning
+        }
+        return ChatPalette.secondaryText
+    }
+
+    private var actionScope: String {
+        var actions: [String] = []
+        if snapshot.activePolicy.allowlist.nativeTransfers {
+            actions.append("\"Transfer\"")
+        }
+        if snapshot.activePolicy.allowlist.swapRouter {
+            actions.append("\"Swap\"")
+        }
+        return actions.isEmpty ? "None" : actions.joined(separator: ", ")
+    }
+
+    private static func friendlyDurationLabel(seconds: Int) -> String {
+        if seconds % 86_400 == 0 {
+            let days = seconds / 86_400
+            return "\(days) \(days == 1 ? "day" : "days")"
+        }
+        if seconds % 3_600 == 0 {
+            let hours = seconds / 3_600
+            return "\(hours) \(hours == 1 ? "hour" : "hours")"
+        }
+        if seconds % 60 == 0 {
+            let minutes = seconds / 60
+            return "\(minutes) \(minutes == 1 ? "minute" : "minutes")"
+        }
+        return "\(seconds) seconds"
+    }
+
+    private static func ethLabel(wei: String) -> String {
+        let trimmed = wei.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let weiValue = Decimal(string: trimmed) else {
+            return trimmed.isEmpty ? "Not set" : "\(trimmed) wei"
+        }
+        let ethValue = weiValue / Decimal(1_000_000_000) / Decimal(1_000_000_000)
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = 6
+        return "\(formatter.string(from: ethValue as NSDecimalNumber) ?? "\(ethValue)") ETH"
+    }
+}
+
+private struct SessionPopoverRow: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+                .font(.system(size: 11, weight: .heavy))
+                .foregroundStyle(ChatPalette.mutedText)
+            Spacer(minLength: 16)
+            Text(value)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(ChatPalette.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
     }
 }
 

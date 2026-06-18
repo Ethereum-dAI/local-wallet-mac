@@ -1,12 +1,47 @@
 import SwiftUI
 import WalletToolLayer
 
+struct ChatSigningPreview: Equatable {
+    enum Mode: Equatable {
+        case session
+        case passkey
+        case pending
+    }
+
+    let mode: Mode
+    let title: String
+    let detail: String
+
+    var systemImage: String {
+        switch mode {
+        case .session:
+            return "bolt.fill"
+        case .passkey:
+            return "touchid"
+        case .pending:
+            return "hourglass"
+        }
+    }
+
+    var tint: Color {
+        switch mode {
+        case .session:
+            return .green
+        case .passkey:
+            return .secondary
+        case .pending:
+            return .secondary
+        }
+    }
+}
+
 struct ToolIntentCardView: View {
     let intent: ToolIntent
     let feedback: ToolIntentFeedback?
     let executionStatus: ChatIntentExecutionStatus
     let transferPreflightStatus: ChatTransferPreflightStatus?
     let swapPreflightStatus: ChatSwapPreflightStatus?
+    let signingPreview: ChatSigningPreview?
     let onConfirm: () -> Void
     let onReject: () -> Void
     let onEdit: ([String: String]) -> Void
@@ -51,6 +86,8 @@ struct ToolIntentCardView: View {
             transferPreflightRow
 
             swapPreflightRow
+
+            signingPreviewRow
 
             executionStatusRow
 
@@ -120,6 +157,13 @@ struct ToolIntentCardView: View {
 
     private var isExecutionRunning: Bool {
         if case .running = executionStatus {
+            return true
+        }
+        return false
+    }
+
+    private var shouldShowSigningPreview: Bool {
+        if case .idle = executionStatus {
             return true
         }
         return false
@@ -290,6 +334,28 @@ struct ToolIntentCardView: View {
                 }
                 .padding(.vertical, 4)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var signingPreviewRow: some View {
+        if shouldShowSigningPreview, let signingPreview {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: signingPreview.systemImage)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(signingPreview.tint)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(signingPreview.title)
+                        .font(.caption.bold())
+                        .foregroundStyle(signingPreview.tint)
+                    Text(signingPreview.detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.vertical, 4)
         }
     }
 

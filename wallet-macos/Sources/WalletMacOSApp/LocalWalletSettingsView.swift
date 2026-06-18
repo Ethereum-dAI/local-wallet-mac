@@ -139,8 +139,6 @@ struct LocalWalletSettingsSnapshot: Equatable {
     let capturedAt: Date
     let appVersion: String
     let appBuild: String
-    let updateVersion: String
-    let updateStatus: String
     let textModelName: String
     let textModelIdentifier: String
     let textModelSize: String
@@ -229,6 +227,7 @@ struct LocalWalletSettingsSnapshot: Equatable {
 struct LocalWalletSettingsView: View {
     let snapshot: LocalWalletSettingsSnapshot
     @Binding var thinkingEnabled: Bool
+    let initialTab: LocalWalletSettingsTab
     let onExportRankings: () -> Void
     let onExportDatabase: () throws -> String
     let onRevealDatabase: () -> Void
@@ -251,7 +250,7 @@ struct LocalWalletSettingsView: View {
     let onSetUnlockRelayerOnLaunch: (Bool) -> Void
     let onClose: () -> Void
 
-    @State private var selectedTab: SettingsTab = .info
+    @State private var selectedTab: LocalWalletSettingsTab
     @State private var hardwareProfile: LocalHardwareProfile?
     @State private var networkDraft: DemoNetworkSettings
     @State private var networkMessage: SettingsMessage?
@@ -272,11 +271,13 @@ struct LocalWalletSettingsView: View {
     @State private var isDeletingRelayer = false
     @State private var isEnablingSessionKeys = false
     @State private var isRevokingSessionKeys = false
+    @State private var showingSessionTokenLimits = false
     @State private var pendingConfirmation: SettingsConfirmation?
 
     init(
         snapshot: LocalWalletSettingsSnapshot,
         thinkingEnabled: Binding<Bool>,
+        initialTab: LocalWalletSettingsTab = .info,
         onExportRankings: @escaping () -> Void,
         onExportDatabase: @escaping () throws -> String,
         onRevealDatabase: @escaping () -> Void,
@@ -301,6 +302,7 @@ struct LocalWalletSettingsView: View {
     ) {
         self.snapshot = snapshot
         self._thinkingEnabled = thinkingEnabled
+        self.initialTab = initialTab
         self.onExportRankings = onExportRankings
         self.onExportDatabase = onExportDatabase
         self.onRevealDatabase = onRevealDatabase
@@ -324,7 +326,11 @@ struct LocalWalletSettingsView: View {
         self.onClose = onClose
         self._networkDraft = State(initialValue: snapshot.networkSettings)
         self._unlockRelayerOnLaunch = State(initialValue: snapshot.unlockRelayerOnLaunch)
-        self._sessionPolicyDraft = State(initialValue: SessionPolicyDraft(policy: snapshot.session.configuredPolicy))
+        self._sessionPolicyDraft = State(initialValue: SessionPolicyDraft(
+            policy: snapshot.session.configuredPolicy,
+            chainID: Self.chainID(from: snapshot.chainID)
+        ))
+        self._selectedTab = State(initialValue: initialTab)
     }
 
     var body: some View {
@@ -347,7 +353,10 @@ struct LocalWalletSettingsView: View {
             unlockRelayerOnLaunch = newValue
         }
         .onChange(of: snapshot.session.configuredPolicy) { _, newValue in
-            sessionPolicyDraft = SessionPolicyDraft(policy: newValue)
+            sessionPolicyDraft = SessionPolicyDraft(
+                policy: newValue,
+                chainID: Self.chainID(from: snapshot.chainID)
+            )
         }
         .alert(item: $pendingConfirmation) { confirmation in
             Alert(
@@ -358,6 +367,9 @@ struct LocalWalletSettingsView: View {
                 },
                 secondaryButton: .cancel()
             )
+        }
+        .sheet(isPresented: $showingSessionTokenLimits) {
+            SessionTokenLimitsSheet(limits: $sessionPolicyDraft.erc20TokenLimits)
         }
     }
 
@@ -384,6 +396,10 @@ struct LocalWalletSettingsView: View {
             return "\(seconds / 60)m"
         }
         return "\(seconds)s"
+    }
+
+    private static func chainID(from value: String) -> UInt64 {
+        UInt64(value.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 11_155_111
     }
 
     private static func friendlyDurationLabel(seconds: Int) -> String {
@@ -443,7 +459,7 @@ struct LocalWalletSettingsView: View {
             .padding(.horizontal, 18)
 
             VStack(spacing: 7) {
-                ForEach(SettingsTab.allCases) { tab in
+                ForEach(LocalWalletSettingsTab.allCases) { tab in
                     settingsTabButton(tab)
                 }
             }
@@ -467,7 +483,7 @@ struct LocalWalletSettingsView: View {
         .background(SettingsPalette.sidebar)
     }
 
-    private func settingsTabButton(_ tab: SettingsTab) -> some View {
+    private func settingsTabButton(_ tab: LocalWalletSettingsTab) -> some View {
         Button {
             withAnimation(.easeInOut(duration: 0.16)) {
                 selectedTab = tab
@@ -506,12 +522,6 @@ struct LocalWalletSettingsView: View {
                         .foregroundStyle(SettingsPalette.secondaryText)
                 }
                 Spacer()
-                SettingsStatusPill(
-                    title: snapshot.updateVersion,
-                    detail: snapshot.updateStatus,
-                    systemImage: "arrow.down.circle.fill",
-                    tint: SettingsPalette.green
-                )
             }
             .padding(.horizontal, 30)
             .padding(.top, 26)
@@ -532,6 +542,8 @@ struct LocalWalletSettingsView: View {
                         dataTab
                     case .wallet:
                         walletTab
+                    case .sessionKeys:
+                        sessionKeysTab
                     case .security:
                         securityTab
                     case .about:
@@ -542,6 +554,9 @@ struct LocalWalletSettingsView: View {
                 }
                 .padding(.horizontal, 30)
                 .padding(.bottom, 30)
+            }
+            if selectedTab == .sessionKeys {
+                sessionKeysFooter
             }
         }
     }
@@ -1122,13 +1137,6 @@ struct LocalWalletSettingsView: View {
                         tint: SettingsPalette.blue
                     )
                     SettingsInfoItem(
-                        title: "Assistant guardrails",
-                        value: snapshot.session.statusTitle,
-                        detail: sessionStatusShortDetail,
-                        systemImage: sessionStatusImage,
-                        tint: sessionStatusTint
-                    )
-                    SettingsInfoItem(
                         title: "Gas relayer",
                         value: snapshot.relayerState,
                         detail: "\(snapshot.relayerBalance) available",
@@ -1164,9 +1172,6 @@ struct LocalWalletSettingsView: View {
                     SettingsKeyValue(title: "EntryPoint", value: snapshot.entryPointAddress),
                 ])
             }
-
-            sessionKeysSection
-
             SettingsSection(title: "Local Relayer") {
                 VStack(alignment: .leading, spacing: 12) {
                     SettingsInfoGrid {
@@ -1234,118 +1239,195 @@ struct LocalWalletSettingsView: View {
         }
     }
 
-    private var sessionKeysSection: some View {
-        SettingsSection(title: "Assistant Guardrails") {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 16, weight: .black))
-                        .foregroundStyle(SettingsPalette.cyan)
-                        .frame(width: 30, height: 30)
-                        .background(Circle().fill(SettingsPalette.cyan.opacity(0.14)))
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("Session keys let the local assistant help with small wallet actions without asking for Touch ID every time.")
-                            .font(.system(size: 14, weight: .heavy))
-                            .foregroundStyle(SettingsPalette.primaryText)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text("Your passkey still owns the wallet. The assistant can only act inside the time, spend, and action limits below; anything larger falls back to passkey approval.")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(SettingsPalette.secondaryText)
-                            .fixedSize(horizontal: false, vertical: true)
+    private var sessionKeysTab: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SettingsSection(title: "Session Key") {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: "key.fill")
+                            .font(.system(size: 16, weight: .black))
+                            .foregroundStyle(SettingsPalette.cyan)
+                            .frame(width: 30, height: 30)
+                            .background(Circle().fill(SettingsPalette.cyan.opacity(0.14)))
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("Session keys let the assistant sign only the wallet actions you allow.")
+                                .font(.system(size: 14, weight: .heavy))
+                                .foregroundStyle(SettingsPalette.primaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text("Your passkey still owns the wallet. Actions outside these caps, tokens, or time windows fall back to passkey approval.")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(SettingsPalette.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
                     }
-                    Spacer(minLength: 0)
-                }
 
-                SettingsInfoGrid {
-                    SettingsInfoItem(
-                        title: "Status",
-                        value: snapshot.session.statusTitle,
-                        detail: snapshot.session.statusDetail,
-                        systemImage: sessionStatusImage,
-                        tint: sessionStatusTint
-                    )
-                    SettingsInfoItem(
-                        title: "Max per action",
-                        value: Self.ethLabel(wei: snapshot.session.activePolicy.perTxValueLimitWei),
-                        detail: "Gas allowance \(Self.ethLabel(wei: snapshot.session.activePolicy.gasBudgetWei))",
-                        systemImage: "speedometer",
-                        tint: SettingsPalette.cyan
-                    )
-                    SettingsInfoItem(
-                        title: "Action pace",
-                        value: "\(snapshot.session.activePolicy.rateLimitCount) actions",
-                        detail: "Every \(Self.friendlyDurationLabel(seconds: snapshot.session.activePolicy.rateLimitIntervalSec))",
-                        systemImage: "timer",
-                        tint: SettingsPalette.blue
-                    )
-                    SettingsInfoItem(
-                        title: "Time box",
-                        value: Self.friendlyDurationLabel(seconds: snapshot.session.activePolicy.ttlSeconds),
-                        detail: "Locks after \(Self.friendlyDurationLabel(seconds: snapshot.session.activePolicy.inactivityTimeoutSeconds)) inactive",
-                        systemImage: "lock.fill",
-                        tint: SettingsPalette.green
-                    )
-                }
+                    SettingsInfoGrid {
+                        SettingsInfoItem(
+                            title: "Status",
+                            value: snapshot.session.statusTitle,
+                            detail: snapshot.session.statusDetail,
+                            systemImage: sessionStatusImage,
+                            tint: sessionStatusTint
+                        )
+                        SettingsInfoItem(
+                            title: "ETH cap",
+                            value: Self.ethLabel(wei: snapshot.session.activePolicy.perTxValueLimitWei),
+                            detail: snapshot.session.activePolicy.allowlist.nativeTransfers ? "Native transfers enabled" : "Native transfers off",
+                            systemImage: "circle.hexagongrid.fill",
+                            tint: SettingsPalette.cyan
+                        )
+                        SettingsInfoItem(
+                            title: "ERC-20",
+                            value: sessionERC20Summary,
+                            detail: "Approvals only for Uniswap SwapRouter02",
+                            systemImage: "seal.fill",
+                            tint: SettingsPalette.blue
+                        )
+                        SettingsInfoItem(
+                            title: "Time box",
+                            value: Self.friendlyDurationLabel(seconds: snapshot.session.activePolicy.ttlSeconds),
+                            detail: "Locks after \(Self.friendlyDurationLabel(seconds: snapshot.session.activePolicy.inactivityTimeoutSeconds)) idle",
+                            systemImage: "timer",
+                            tint: SettingsPalette.green
+                        )
+                    }
 
-                Toggle(isOn: Binding(
-                    get: { snapshot.session.isEnabled },
-                    set: { value in
-                        if value {
-                            enableSessionKeys()
-                        } else {
-                            pendingConfirmation = .revokeSessionKeys
+                    Toggle(isOn: Binding(
+                        get: { snapshot.session.isEnabled },
+                        set: { value in
+                            if value {
+                                enableSessionKeys()
+                            } else {
+                                pendingConfirmation = .revokeSessionKeys
+                            }
+                        }
+                    )) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(snapshot.session.isEnabled ? "Session key enabled" : "Enable session key")
+                                .font(.system(size: 13, weight: .heavy))
+                            Text("Enabling creates an onchain permission. You approve once with your passkey, then the assistant can act inside the saved policy.")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(SettingsPalette.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                )) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(snapshot.session.isEnabled ? "Session key enabled" : "Enable assistant session key")
-                            .font(.system(size: 13, weight: .heavy))
-                        Text("This creates an onchain permission for the assistant. You will approve it with your passkey, then wait here while the transaction finishes.")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(SettingsPalette.secondaryText)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .toggleStyle(.switch)
-                .foregroundStyle(SettingsPalette.primaryText)
-                .disabled(isEnablingSessionKeys || isRevokingSessionKeys)
+                    .toggleStyle(.switch)
+                    .foregroundStyle(SettingsPalette.primaryText)
+                    .disabled(isEnablingSessionKeys || isRevokingSessionKeys)
 
-                if isSessionTransactionInProgress {
-                    SettingsTransactionProgressBanner(
-                        title: sessionTransactionTitle,
-                        detail: sessionTransactionDetail
+                    if isSessionTransactionInProgress {
+                        SettingsTransactionProgressBanner(
+                            title: sessionTransactionTitle,
+                            detail: sessionTransactionDetail
+                        )
+                    }
+
+                    SettingsKeyValueRows(rows: sessionKeyRows)
+                        .opacity(isSessionTransactionInProgress ? 0.55 : 1)
+                }
+            }
+
+            SettingsSection(title: "ETH") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("ETH transfers", isOn: $sessionPolicyDraft.nativeTransfers)
+                        .toggleStyle(.switch)
+                        .font(.system(size: 13, weight: .bold))
+                    SettingsEditableField(
+                        title: "Max ETH per action",
+                        placeholder: "0.1",
+                        detail: "Applies to native ETH transfers and ETH input sent directly to Uniswap SwapRouter02.",
+                        text: $sessionPolicyDraft.nativeValueLimitETH
                     )
                 }
+                .disabled(isSessionTransactionInProgress)
+                .opacity(isSessionTransactionInProgress ? 0.55 : 1)
+            }
 
-                SettingsKeyValueRows(rows: sessionKeyRows)
-                    .opacity(isSessionTransactionInProgress ? 0.55 : 1)
+            SettingsSection(title: "ERC-20") {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(alignment: .top, spacing: 16) {
+                        Toggle("ERC-20 transfers", isOn: $sessionPolicyDraft.erc20Transfers)
+                            .toggleStyle(.switch)
+                            .font(.system(size: 13, weight: .bold))
 
-                Divider().overlay(SettingsPalette.border).padding(.vertical, 2)
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Adjust what the assistant can do")
-                        .font(.system(size: 13, weight: .heavy))
-                        .foregroundStyle(SettingsPalette.primaryText)
-                    Text("These values are stored as on-chain policy units, so the fields stay precise. The summary above translates the important parts into wallet terms.")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(SettingsPalette.secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    HStack(alignment: .top, spacing: 12) {
-                        SettingsEditableField(
-                            title: "Max per action wei",
-                            placeholder: SessionPolicyConfig.default.perTxValueLimitWei,
-                            detail: "Current draft: \(Self.ethLabel(wei: sessionPolicyDraft.perTxValueLimitWei))",
-                            text: $sessionPolicyDraft.perTxValueLimitWei
-                        )
-                        SettingsEditableField(
-                            title: "Gas allowance wei",
-                            placeholder: SessionPolicyConfig.default.gasBudgetWei,
-                            detail: "Current draft: \(Self.ethLabel(wei: sessionPolicyDraft.gasBudgetWei))",
-                            text: $sessionPolicyDraft.gasBudgetWei
-                        )
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Approvals and swaps")
+                                .font(.system(size: 11, weight: .heavy))
+                                .foregroundStyle(SettingsPalette.mutedText)
+                                .textCase(.uppercase)
+                                .tracking(0.5)
+                            Text("Fixed to Uniswap SwapRouter02. If a swap needs a token approval, the session key can only approve that router and only up to the token cap below.")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(SettingsPalette.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
                     }
 
+                    HStack(spacing: 10) {
+                        Text("Token caps apply by symbol across supported chains.")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(SettingsPalette.secondaryText)
+                        Spacer()
+                        Button {
+                            setAllTokenLimitsEnabled(true)
+                        } label: {
+                            Label("All on", systemImage: "checkmark.circle")
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .buttonStyle(SettingsSecondaryButtonStyle())
+                        Button {
+                            setAllTokenLimitsEnabled(false)
+                        } label: {
+                            Label("All off", systemImage: "minus.circle")
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .buttonStyle(SettingsSecondaryButtonStyle())
+                        Button {
+                            resetTokenCapsToDefaults()
+                        } label: {
+                            Label("Reset caps", systemImage: "arrow.counterclockwise")
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .buttonStyle(SettingsSecondaryButtonStyle())
+                    }
+
+                    SessionTokenLimitTable(limits: $sessionPolicyDraft.erc20TokenLimits, rowLimit: 5)
+
+                    if sessionPolicyDraft.erc20TokenLimits.count > 5 {
+                        Button {
+                            showingSessionTokenLimits = true
+                        } label: {
+                            HStack(spacing: 10) {
+                                Label(
+                                    "Show more tokens",
+                                    systemImage: "list.bullet.rectangle"
+                                )
+                                .font(.system(size: 12, weight: .bold))
+                                Spacer(minLength: 0)
+                                Text("\(sessionPolicyDraft.erc20TokenLimits.count - 5) more")
+                                    .font(.system(size: 11, weight: .heavy))
+                                    .foregroundStyle(SettingsPalette.secondaryText)
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(SettingsSecondaryButtonStyle())
+                    }
+
+                    SettingsMessageBanner(
+                        message: SettingsMessage(
+                            kind: .info,
+                            text: "Token caps are enforced on ERC-20 transfers, swap inputs, and SwapRouter02 approvals. Existing onchain allowances are not revoked or reduced."
+                        )
+                    )
+                }
+                .disabled(isSessionTransactionInProgress)
+                .opacity(isSessionTransactionInProgress ? 0.55 : 1)
+            }
+
+            SettingsSection(title: "Timing And Budget") {
+                VStack(alignment: .leading, spacing: 12) {
                     VStack(alignment: .leading, spacing: 7) {
                         Text("Session duration")
                             .font(.system(size: 11, weight: .heavy))
@@ -1370,7 +1452,7 @@ struct LocalWalletSettingsView: View {
                             text: $sessionPolicyDraft.rateLimitCount
                         )
                         SettingsEditableField(
-                            title: "Resets after seconds",
+                            title: "Window seconds",
                             placeholder: "\(SessionPolicyConfig.default.rateLimitIntervalSec)",
                             detail: "Current draft: \(draftDurationLabel(sessionPolicyDraft.rateLimitIntervalSec))",
                             text: $sessionPolicyDraft.rateLimitIntervalSec
@@ -1383,55 +1465,73 @@ struct LocalWalletSettingsView: View {
                         )
                     }
 
-                    HStack(spacing: 18) {
-                        Toggle("Native transfers", isOn: $sessionPolicyDraft.nativeTransfers)
-                            .toggleStyle(.checkbox)
-                        Toggle("Swaps", isOn: $sessionPolicyDraft.swapRouter)
-                            .toggleStyle(.checkbox)
-                        Label("Known ERC-20 list only", systemImage: "checkmark.seal.fill")
-                            .foregroundStyle(SettingsPalette.secondaryText)
-                        Spacer()
-                    }
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(SettingsPalette.primaryText)
-
-                    HStack(spacing: 12) {
-                        Button {
-                            saveSessionPolicyDraft()
-                        } label: {
-                            Label("Save guardrails", systemImage: "square.and.arrow.down")
-                                .font(.system(size: 13, weight: .bold))
-                        }
-                        .buttonStyle(SettingsPrimaryButtonStyle())
-
-                        Button {
-                            sessionPolicyDraft = SessionPolicyDraft(policy: .default)
-                            saveSessionPolicyDraft()
-                        } label: {
-                            Label("Use standard guardrails", systemImage: "arrow.counterclockwise")
-                                .font(.system(size: 13, weight: .bold))
-                        }
-                        .buttonStyle(SettingsSecondaryButtonStyle())
-
-                        Button {
-                            pendingConfirmation = .revokeSessionKeys
-                        } label: {
-                            Label(isRevokingSessionKeys ? "Ending..." : "End session now", systemImage: "xmark.circle.fill")
-                                .font(.system(size: 13, weight: .bold))
-                        }
-                        .buttonStyle(SettingsDestructiveButtonStyle())
-                        .disabled(!snapshot.session.hasRecord || isRevokingSessionKeys)
-                        Spacer()
-                    }
+                    SettingsEditableField(
+                        title: "Gas allowance ETH",
+                        placeholder: "0.05",
+                        detail: "Maximum gas budget the permission can spend while the session key is active.",
+                        text: $sessionPolicyDraft.gasBudgetETH
+                    )
+                    .frame(maxWidth: 300)
                 }
                 .disabled(isSessionTransactionInProgress)
                 .opacity(isSessionTransactionInProgress ? 0.55 : 1)
+            }
 
-                if let sessionMessage {
-                    SettingsMessageBanner(message: sessionMessage)
+        }
+    }
+
+    private var sessionKeysFooter: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let sessionMessage {
+                SettingsMessageBanner(message: sessionMessage)
+            }
+            HStack(spacing: 12) {
+                Button {
+                    saveSessionPolicyDraft()
+                } label: {
+                    Label("Save", systemImage: "square.and.arrow.down")
+                        .font(.system(size: 13, weight: .bold))
                 }
+                .buttonStyle(SettingsPrimaryButtonStyle())
+                .disabled(isSessionTransactionInProgress)
+
+                Button {
+                    sessionPolicyDraft = SessionPolicyDraft(
+                        policy: .default,
+                        chainID: Self.chainID(from: snapshot.chainID)
+                    )
+                    saveSessionPolicyDraft()
+                } label: {
+                    Label("Use defaults", systemImage: "arrow.counterclockwise")
+                        .font(.system(size: 13, weight: .bold))
+                }
+                .buttonStyle(SettingsSecondaryButtonStyle())
+                .disabled(isSessionTransactionInProgress)
+
+                if snapshot.session.hasRecord {
+                    Button {
+                        pendingConfirmation = .revokeSessionKeys
+                    } label: {
+                        Label(isRevokingSessionKeys ? "Ending..." : "End session key", systemImage: "xmark.circle.fill")
+                            .font(.system(size: 13, weight: .bold))
+                    }
+                    .buttonStyle(SettingsDestructiveButtonStyle())
+                    .disabled(isRevokingSessionKeys)
+                }
+
+                Spacer()
             }
         }
+        .padding(.horizontal, 30)
+        .padding(.vertical, 12)
+        .background(
+            SettingsPalette.background
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(SettingsPalette.border.opacity(0.75))
+                        .frame(height: 1)
+                }
+        )
     }
 
     private var securityTab: some View {
@@ -1599,13 +1699,6 @@ struct LocalWalletSettingsView: View {
                         tint: SettingsPalette.blue
                     )
                     SettingsInfoItem(
-                        title: "Update",
-                        value: snapshot.updateVersion,
-                        detail: snapshot.updateStatus,
-                        systemImage: "arrow.down.circle.fill",
-                        tint: SettingsPalette.green
-                    )
-                    SettingsInfoItem(
                         title: "Release channel",
                         value: snapshot.releaseChannel,
                         detail: "Local development settings",
@@ -1631,7 +1724,6 @@ struct LocalWalletSettingsView: View {
                     SettingsKeyValue(title: "Captured", value: Self.dateFormatter.string(from: snapshot.capturedAt)),
                     SettingsKeyValue(title: "App version", value: snapshot.appVersion),
                     SettingsKeyValue(title: "App build", value: snapshot.appBuild),
-                    SettingsKeyValue(title: "Available update", value: "\(snapshot.updateVersion) · \(snapshot.updateStatus)"),
                 ])
             }
         }
@@ -1661,12 +1753,27 @@ struct LocalWalletSettingsView: View {
     private var sessionAllowedActionsText: String {
         var actions: [String] = []
         if snapshot.session.activePolicy.allowlist.nativeTransfers {
-            actions.append("native transfers")
+            actions.append("ETH transfers")
+        }
+        if snapshot.session.activePolicy.allowlist.erc20Transfers {
+            actions.append("ERC-20 transfers")
         }
         if snapshot.session.activePolicy.allowlist.swapRouter {
             actions.append("swaps")
         }
         return actions.isEmpty ? "None enabled" : actions.joined(separator: ", ")
+    }
+
+    private var sessionERC20Summary: String {
+        let policy = snapshot.session.activePolicy
+        let count = policy.effectiveERC20TokenLimits(on: Self.chainID(from: snapshot.chainID))
+            .filter(\.isEnabled)
+            .count
+        guard count > 0 else {
+            return "No tokens enabled"
+        }
+        let transferText = policy.allowlist.erc20Transfers ? "transfer" : "no transfer"
+        return "\(count) tokens · \(transferText)"
     }
 
     private var isSessionTransactionInProgress: Bool {
@@ -1679,9 +1786,9 @@ struct LocalWalletSettingsView: View {
 
     private var sessionTransactionDetail: String {
         if isRevokingSessionKeys {
-            return "A passkey-authorized revoke transaction is being executed. Keep this settings screen open until the session key is fully disabled."
+            return "A passkey-authorized revoke transaction is being executed. Keep this Session Keys screen open until the session key is fully disabled."
         }
-        return "A passkey-authorized enable transaction is being executed. Keep this settings screen open until the assistant permission is installed."
+        return "A passkey-authorized enable transaction is being executed. Keep this Session Keys screen open until the assistant permission is installed."
     }
 
     private var sessionKeyRows: [SettingsKeyValue] {
@@ -1689,7 +1796,8 @@ struct LocalWalletSettingsView: View {
             SettingsKeyValue(title: "Assistant access", value: snapshot.session.isEnabled ? "On" : "Off"),
             SettingsKeyValue(title: "Policy source", value: snapshot.session.hasRecord ? "Active session snapshot" : "Saved wallet defaults"),
             SettingsKeyValue(title: "Allowed actions", value: sessionAllowedActionsText),
-            SettingsKeyValue(title: "ERC-20 scope", value: "Known token list only"),
+            SettingsKeyValue(title: "ERC-20 tokens", value: sessionERC20Summary),
+            SettingsKeyValue(title: "Approvals", value: "Uniswap SwapRouter02 only"),
         ]
         guard let record = snapshot.session.record else {
             return rows
@@ -1715,6 +1823,19 @@ struct LocalWalletSettingsView: View {
             return "not set"
         }
         return Self.friendlyDurationLabel(seconds: seconds)
+    }
+
+    private func setAllTokenLimitsEnabled(_ isEnabled: Bool) {
+        for index in sessionPolicyDraft.erc20TokenLimits.indices {
+            sessionPolicyDraft.erc20TokenLimits[index].isEnabled = isEnabled
+        }
+    }
+
+    private func resetTokenCapsToDefaults() {
+        for index in sessionPolicyDraft.erc20TokenLimits.indices {
+            let token = sessionPolicyDraft.erc20TokenLimits[index].token
+            sessionPolicyDraft.erc20TokenLimits[index].maxAmount = SessionPolicyConfig.defaultERC20LimitDecimal(for: token)
+        }
     }
 
     private func enableSessionKeys() {
@@ -1771,7 +1892,10 @@ struct LocalWalletSettingsView: View {
         do {
             let policy = try sessionPolicyDraft.policy()
             let message = try onUpdateSessionPolicy(policy)
-            sessionPolicyDraft = SessionPolicyDraft(policy: policy)
+            sessionPolicyDraft = SessionPolicyDraft(
+                policy: policy,
+                chainID: Self.chainID(from: snapshot.chainID)
+            )
             sessionMessage = SettingsMessage(kind: .success, text: message)
         } catch {
             sessionMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
@@ -1942,7 +2066,7 @@ private enum SettingsConfirmation: Identifiable, Equatable {
                 ? "This deletes relayer key material even if wallet-node has pending relay state."
                 : "This asks wallet-node to delete the relayer key only when it is safe."
         case .revokeSessionKeys:
-            return "This starts a passkey-authorized onchain revoke transaction. Stay on the Wallet settings screen until the transaction finishes and the local session key state is cleared."
+            return "This starts a passkey-authorized onchain revoke transaction. Stay on the Session Keys settings screen until the transaction finishes and the local session key state is cleared."
         case .resetWallet:
             return "This deletes the Secure Enclave wallet key reference, local relayer keys, and wallet metadata. A new account will be created."
         }
@@ -1965,24 +2089,47 @@ private enum SettingsConfirmation: Identifiable, Equatable {
 }
 
 private struct SessionPolicyDraft: Equatable {
-    var perTxValueLimitWei: String
+    var nativeValueLimitETH: String
     var rateLimitCount: String
     var rateLimitIntervalSec: String
     var ttlSeconds: String
     var inactivityTimeoutSeconds: String
-    var gasBudgetWei: String
+    var gasBudgetETH: String
     var nativeTransfers: Bool
-    var swapRouter: Bool
+    var erc20Transfers: Bool
+    var erc20TokenLimits: [SessionPolicyTokenLimitDraft]
 
-    init(policy: SessionPolicyConfig) {
-        perTxValueLimitWei = policy.perTxValueLimitWei
+    init(policy: SessionPolicyConfig, chainID: UInt64) {
+        _ = chainID
+        nativeValueLimitETH = SessionPolicyConfig.tokenDecimalString(
+            fromBaseUnits: policy.perTxValueLimitWei,
+            decimals: 18
+        )
         rateLimitCount = "\(policy.rateLimitCount)"
         rateLimitIntervalSec = "\(policy.rateLimitIntervalSec)"
         ttlSeconds = "\(policy.ttlSeconds)"
         inactivityTimeoutSeconds = "\(policy.inactivityTimeoutSeconds)"
-        gasBudgetWei = policy.gasBudgetWei
+        gasBudgetETH = SessionPolicyConfig.tokenDecimalString(
+            fromBaseUnits: policy.gasBudgetWei,
+            decimals: 18
+        )
         nativeTransfers = policy.allowlist.nativeTransfers
-        swapRouter = policy.allowlist.swapRouter
+        erc20Transfers = policy.allowlist.erc20Transfers
+        erc20TokenLimits = WalletTokenRegistry.erc20PolicyCatalog().compactMap { token in
+            guard token.contractAddress != nil,
+                  let limit = policy.erc20TokenLimit(for: token)
+            else {
+                return nil
+            }
+            return SessionPolicyTokenLimitDraft(
+                token: token,
+                isEnabled: limit.isEnabled,
+                maxAmount: SessionPolicyConfig.tokenDecimalString(
+                    fromBaseUnits: limit.maxAmount,
+                    decimals: token.decimals
+                )
+            )
+        }
     }
 
     func policy() throws -> SessionPolicyConfig {
@@ -1993,29 +2140,59 @@ private struct SessionPolicyDraft: Equatable {
         else {
             throw AppError.invalidAmount
         }
+        let tokenLimits = try erc20TokenLimits.map { draft in
+            return SessionERC20TokenLimit(
+                symbol: draft.token.symbol,
+                isEnabled: draft.isEnabled,
+                maxAmount: try SessionPolicyConfig.tokenBaseUnits(
+                    fromDecimalString: draft.maxAmount,
+                    decimals: draft.token.decimals
+                )
+            )
+        }
         return try SessionPolicyConfig(
-            perTxValueLimitWei: perTxValueLimitWei.trimmingCharacters(in: .whitespacesAndNewlines),
+            perTxValueLimitWei: try SessionPolicyConfig.tokenBaseUnits(
+                fromDecimalString: nativeValueLimitETH,
+                decimals: 18
+            ),
             rateLimitCount: count,
             rateLimitIntervalSec: interval,
             ttlSeconds: ttl,
             inactivityTimeoutSeconds: inactivityTimeout,
-            gasBudgetWei: gasBudgetWei.trimmingCharacters(in: .whitespacesAndNewlines),
+            gasBudgetWei: try SessionPolicyConfig.tokenBaseUnits(
+                fromDecimalString: gasBudgetETH,
+                decimals: 18
+            ),
             allowlist: SessionPolicyAllowlist(
                 nativeTransfers: nativeTransfers,
                 erc20TokenScope: .knownList,
-                swapRouter: swapRouter
-            )
+                erc20Transfers: erc20Transfers,
+                erc20Approvals: .knownSwapRouters,
+                swapRouter: true
+            ),
+            erc20TokenLimits: tokenLimits
         ).validated()
     }
 }
 
-private enum SettingsTab: String, CaseIterable, Identifiable {
+private struct SessionPolicyTokenLimitDraft: Identifiable, Equatable {
+    let token: WalletToken
+    var isEnabled: Bool
+    var maxAmount: String
+
+    var id: String {
+        token.id
+    }
+}
+
+enum LocalWalletSettingsTab: String, CaseIterable, Identifiable {
     case info
     case models
     case network
     case diagnostics
     case data
     case wallet
+    case sessionKeys
     case security
     case about
     case advanced
@@ -2036,6 +2213,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "Data"
         case .wallet:
             return "Wallet"
+        case .sessionKeys:
+            return "Session Keys"
         case .security:
             return "Security"
         case .about:
@@ -2059,6 +2238,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "Local database and feedback exports"
         case .wallet:
             return "Smart account and relayer status"
+        case .sessionKeys:
+            return "Assistant signing limits and token caps"
         case .security:
             return "Local keys, biometric unlock, and reset controls"
         case .about:
@@ -2082,6 +2263,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "tray.and.arrow.down.fill"
         case .wallet:
             return "lock.shield.fill"
+        case .sessionKeys:
+            return "key.fill"
         case .security:
             return "touchid"
         case .about:
@@ -2260,6 +2443,166 @@ private struct SettingsEditableField: View {
     }
 }
 
+private struct SessionTokenLimitTable: View {
+    @Binding var limits: [SessionPolicyTokenLimitDraft]
+    var rowLimit: Int?
+
+    var body: some View {
+        let indices = displayedIndices
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Text("On")
+                    .frame(width: 42, alignment: .center)
+                Text("Token")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("Cap")
+                    .frame(width: 170, alignment: .leading)
+            }
+            .font(.system(size: 11, weight: .heavy))
+            .foregroundStyle(SettingsPalette.mutedText)
+            .textCase(.uppercase)
+            .tracking(0.5)
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(SettingsPalette.control.opacity(0.72))
+
+            ForEach(indices, id: \.self) { index in
+                SessionTokenLimitTableRow(limit: $limits[index])
+                if index != indices.last {
+                    Divider().overlay(SettingsPalette.border.opacity(0.45))
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(SettingsPalette.border.opacity(0.72), lineWidth: 1)
+        )
+    }
+
+    private var displayedIndices: [Int] {
+        let indices = Array(limits.indices)
+        guard let rowLimit else {
+            return indices
+        }
+        return Array(indices.prefix(rowLimit))
+    }
+}
+
+private struct SessionTokenLimitsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var limits: [SessionPolicyTokenLimitDraft]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("ERC-20 Token Caps")
+                        .font(.system(size: 24, weight: .heavy))
+                        .foregroundStyle(SettingsPalette.primaryText)
+                    Text("Caps apply by token symbol across all supported chains.")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(SettingsPalette.secondaryText)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .heavy))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(SettingsIconButtonStyle())
+            }
+
+            ScrollView {
+                SessionTokenLimitTable(limits: $limits)
+            }
+            .frame(minHeight: 360, maxHeight: 560)
+
+            HStack {
+                Text("\(limits.count) known token symbols")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(SettingsPalette.secondaryText)
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Done")
+                        .font(.system(size: 13, weight: .bold))
+                }
+                .buttonStyle(SettingsPrimaryButtonStyle())
+            }
+        }
+        .padding(22)
+        .frame(width: 760)
+        .background(SettingsPalette.background)
+    }
+}
+
+private struct SessionTokenLimitTableRow: View {
+    @Binding var limit: SessionPolicyTokenLimitDraft
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Toggle("", isOn: $limit.isEnabled)
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                .frame(width: 42)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(limit.token.symbol)
+                        .font(.system(size: 13, weight: .heavy))
+                        .foregroundStyle(SettingsPalette.primaryText)
+                    Text(limit.token.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(SettingsPalette.secondaryText)
+                        .lineLimit(1)
+                }
+                Text(chainCoverageText)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(SettingsPalette.mutedText)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            TextField(SessionPolicyConfig.defaultERC20LimitDecimal(for: limit.token), text: $limit.maxAmount)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .foregroundStyle(SettingsPalette.primaryText)
+                .padding(.horizontal, 10)
+                .frame(width: 170, height: 34)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(SettingsPalette.panel)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(SettingsPalette.border.opacity(0.72), lineWidth: 1)
+                        )
+                )
+                .disabled(!limit.isEnabled)
+                .opacity(limit.isEnabled ? 1 : 0.5)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 58)
+        .background(SettingsPalette.row)
+    }
+
+    private var chainCoverageText: String {
+        let count = [1, 11_155_111].filter { chainID in
+            WalletTokenRegistry.token(matching: limit.token.symbol, on: UInt64(chainID))?.contractAddress != nil
+        }.count
+        switch count {
+        case 0:
+            return "\(limit.token.decimals) decimals"
+        case 1:
+            return "\(limit.token.decimals) decimals · 1 supported chain"
+        default:
+            return "\(limit.token.decimals) decimals · \(count) supported chains"
+        }
+    }
+}
+
 private struct SettingsMessage: Equatable {
     enum Kind {
         case info
@@ -2394,36 +2737,6 @@ private struct SettingsHealthRow: View {
     }
 }
 
-private struct SettingsStatusPill: View {
-    let title: String
-    let detail: String
-    let systemImage: String
-    let tint: Color
-
-    var body: some View {
-        HStack(spacing: 9) {
-            Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .black))
-                .foregroundStyle(tint)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(.system(size: 12, weight: .heavy))
-                    .foregroundStyle(SettingsPalette.primaryText)
-                Text(detail)
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(SettingsPalette.secondaryText)
-            }
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 42)
-        .background(
-            Capsule()
-                .fill(SettingsPalette.control)
-                .overlay(Capsule().stroke(SettingsPalette.border, lineWidth: 1))
-        )
-    }
-}
-
 private struct SettingsPrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -2450,6 +2763,18 @@ private struct SettingsSecondaryButtonStyle: ButtonStyle {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .stroke(SettingsPalette.border.opacity(0.78), lineWidth: 1)
                     )
+            )
+    }
+}
+
+private struct SettingsIconButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(SettingsPalette.primaryText)
+            .background(
+                Circle()
+                    .fill(configuration.isPressed ? SettingsPalette.control.opacity(0.74) : SettingsPalette.control)
+                    .overlay(Circle().stroke(SettingsPalette.border.opacity(0.78), lineWidth: 1))
             )
     }
 }

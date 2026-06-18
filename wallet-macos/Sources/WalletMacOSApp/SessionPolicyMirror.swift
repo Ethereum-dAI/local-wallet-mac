@@ -37,40 +37,121 @@ struct SessionPolicyContext: Equatable {
 }
 
 enum SessionPolicyMirror {
+    enum RejectionReason: Equatable {
+        case expired
+        case inactive
+        case rateLimited
+        case invalidLimit
+        case nativeTransfersDisabled
+        case erc20TransfersDisabled
+        case erc20ApprovalsDisabled
+        case erc20TokenDisabled
+        case swapsDisabled
+        case invalidRecipient
+        case invalidAmount
+        case overValueLimit
+        case unsupportedToken
+        case wrongChain
+        case unsupportedSwapRouter
+        case unsupportedApprovalSpender
+        case unsupportedSwapToken
+    }
+
     static func isWithinPolicy(
         intent: TransactionIntent,
         config: SessionPolicyConfig,
         context: SessionPolicyContext
     ) -> Bool {
-        guard isActive(context, config: config),
-              isUnderRateLimit(config: config, context: context),
-              let cap = capData(config)
-        else {
-            return false
-        }
+        rejectionReason(intent: intent, config: config, context: context) == nil
+    }
 
+    static func rejectionReason(
+        intent: TransactionIntent,
+        config: SessionPolicyConfig,
+        context: SessionPolicyContext
+    ) -> RejectionReason? {
+        if context.now >= context.expiresAt {
+            return .expired
+        }
+        let inactivityExpiresAt = context.lastActivityAt.addingTimeInterval(
+            TimeInterval(config.inactivityTimeoutSeconds)
+        )
+        if context.now >= inactivityExpiresAt {
+            return .inactive
+        }
+        guard isUnderRateLimit(config: config, context: context) else {
+            return .rateLimited
+        }
+        guard let nativeCap = capData(config.perTxValueLimitWei) else {
+            return .invalidLimit
+        }
         switch intent {
         case let .nativeTransfer(recipient, amountETH):
-            return config.allowlist.nativeTransfers
-                && normalizedAddress(recipient) != nil
-                && parsedETH(amountETH).map { isLessThanOrEqual($0, cap) } == true
+            guard config.allowlist.nativeTransfers else {
+                return .nativeTransfersDisabled
+            }
+            guard normalizedAddress(recipient) != nil else {
+                return .invalidRecipient
+            }
+            guard let amount = parsedETH(amountETH) else {
+                return .invalidAmount
+            }
+            return isLessThanOrEqual(amount, nativeCap) ? nil : .overValueLimit
 
         case let .erc20Transfer(token, recipient, amount):
             switch config.allowlist.erc20TokenScope {
             case .knownList:
-                return isKnownERC20Token(token, chainID: context.chainID)
-                    && normalizedAddress(recipient) != nil
-                    && parsedTokenAmount(amount, decimals: token.decimals).map { isLessThanOrEqual($0, cap) } == true
+                guard isKnownERC20Token(token, chainID: context.chainID) else {
+                    return .unsupportedToken
+                }
+                guard config.allowlist.erc20Transfers else {
+                    return .erc20TransfersDisabled
+                }
+                guard let tokenCap = erc20CapData(config: config, token: token) else {
+                    return .erc20TokenDisabled
+                }
+                guard normalizedAddress(recipient) != nil else {
+                    return .invalidRecipient
+                }
+                guard let amount = parsedTokenAmount(amount, decimals: token.decimals) else {
+                    return .invalidAmount
+                }
+                return isLessThanOrEqual(amount, tokenCap) ? nil : .overValueLimit
             }
 
         case let .exactInputSwap(request):
-            return config.allowlist.swapRouter
-                && request.quote.chainID == context.chainID
-                && normalizedAddress(request.recipient) != nil
-                && isKnownSwapRouter(request.quote.router, chainID: context.chainID)
-                && isKnownERC20Address(request.quote.tokenIn, chainID: context.chainID)
-                && isKnownERC20Address(request.quote.tokenOut, chainID: context.chainID)
-                && isLessThanOrEqual(request.quote.amountIn, cap)
+            guard config.allowlist.swapRouter else {
+                return .swapsDisabled
+            }
+            guard request.quote.chainID == context.chainID else {
+                return .wrongChain
+            }
+            guard normalizedAddress(request.recipient) != nil else {
+                return .invalidRecipient
+            }
+            guard isKnownSwapRouter(request.quote.router, chainID: context.chainID) else {
+                return .unsupportedSwapRouter
+            }
+            guard let tokenIn = knownERC20Token(address: request.quote.tokenIn, chainID: context.chainID),
+                  knownERC20Token(address: request.quote.tokenOut, chainID: context.chainID) != nil
+            else {
+                return .unsupportedSwapToken
+            }
+            if request.tokenInIsNative {
+                return isLessThanOrEqual(request.quote.amountIn, nativeCap) ? nil : .overValueLimit
+            }
+            guard let tokenCap = erc20CapData(config: config, token: tokenIn) else {
+                return .erc20TokenDisabled
+            }
+            guard !request.quote.requiresApproval || config.allowlist.erc20Approvals != .disabled else {
+                return .erc20ApprovalsDisabled
+            }
+            if request.quote.requiresApproval,
+               config.allowlist.erc20Approvals == .knownSwapRouters,
+               !isKnownSwapRouter(request.quote.router, chainID: context.chainID) {
+                return .unsupportedApprovalSpender
+            }
+            return isLessThanOrEqual(request.quote.amountIn, tokenCap) ? nil : .overValueLimit
         }
     }
 
@@ -115,8 +196,8 @@ enum SessionPolicyMirror {
         return recentCount < config.rateLimitCount
     }
 
-    private static func capData(_ config: SessionPolicyConfig) -> Data? {
-        guard let data = try? Data.quantityString(config.perTxValueLimitWei) else {
+    private static func capData(_ value: String) -> Data? {
+        guard let data = try? Data.quantityString(value) else {
             return nil
         }
         let padded = data.leftPadded(to: 32)
@@ -124,6 +205,15 @@ enum SessionPolicyMirror {
             return nil
         }
         return padded
+    }
+
+    private static func erc20CapData(config: SessionPolicyConfig, token: WalletToken) -> Data? {
+        guard let limit = config.erc20TokenLimit(for: token),
+              limit.isEnabled
+        else {
+            return nil
+        }
+        return capData(limit.maxAmount)
     }
 
     private static func parsedETH(_ amount: String) -> Data? {
@@ -144,12 +234,16 @@ enum SessionPolicyMirror {
     }
 
     private static func isKnownERC20Address(_ address: String, chainID: UInt64) -> Bool {
+        knownERC20Token(address: address, chainID: chainID) != nil
+    }
+
+    private static func knownERC20Token(address: String, chainID: UInt64) -> WalletToken? {
         guard let normalized = normalizedAddress(address),
               let token = WalletTokenRegistry.token(matching: normalized, on: chainID)
         else {
-            return false
+            return nil
         }
-        return token.contractAddress != nil
+        return token.contractAddress != nil ? token : nil
     }
 
     private static func isKnownSwapRouter(_ address: String, chainID: UInt64) -> Bool {

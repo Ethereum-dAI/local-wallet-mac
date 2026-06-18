@@ -388,14 +388,68 @@ struct LocalWalletSettingsView: View {
         )
     }
 
-    private static func durationLabel(seconds: Int) -> String {
-        if seconds % 3_600 == 0 {
-            return "\(seconds / 3_600)h"
+    private var sessionIdleSelection: Binding<Int> {
+        Binding(
+            get: {
+                Int(sessionPolicyDraft.inactivityTimeoutSeconds)
+                    ?? SessionPolicyConfig.defaultInactivityTimeoutSeconds
+            },
+            set: { sessionPolicyDraft.inactivityTimeoutSeconds = "\($0)" }
+        )
+    }
+
+    private var rateLimitCountSelection: Binding<Int> {
+        Binding(
+            get: {
+                Int(sessionPolicyDraft.rateLimitCount) ?? SessionPolicyConfig.default.rateLimitCount
+            },
+            set: { sessionPolicyDraft.rateLimitCount = "\($0)" }
+        )
+    }
+
+    private var rateLimitWindowSelection: Binding<Int> {
+        Binding(
+            get: {
+                Int(sessionPolicyDraft.rateLimitIntervalSec)
+                    ?? SessionPolicyConfig.default.rateLimitIntervalSec
+            },
+            set: { sessionPolicyDraft.rateLimitIntervalSec = "\($0)" }
+        )
+    }
+
+    // Friendly preset choices for the session-key timing/budget pickers. The
+    // policy itself stays second-based; these only drive the menus. Any saved
+    // value that isn't a standard preset is preserved as its own option, so
+    // opening an existing policy never silently rewrites it.
+    private var sessionDurationOptions: [Int] {
+        Self.menuOptions(SessionPolicyConfig.allowedTTLSeconds, current: Int(sessionPolicyDraft.ttlSeconds))
+    }
+
+    private var idleLockOptions: [Int] {
+        Self.menuOptions(
+            [600, 1_800, 3_600, 7_200, 14_400],
+            current: Int(sessionPolicyDraft.inactivityTimeoutSeconds),
+            cappedAt: Int(sessionPolicyDraft.ttlSeconds)
+        )
+    }
+
+    private var rateLimitCountOptions: [Int] {
+        Self.menuOptions([5, 10, 20, 50, 100], current: Int(sessionPolicyDraft.rateLimitCount))
+    }
+
+    private var rateLimitWindowOptions: [Int] {
+        Self.menuOptions([3_600, 21_600, 43_200, 86_400], current: Int(sessionPolicyDraft.rateLimitIntervalSec))
+    }
+
+    private static func menuOptions(_ presets: [Int], current: Int?, cappedAt cap: Int? = nil) -> [Int] {
+        var options = presets
+        if let cap {
+            options = options.filter { $0 <= cap }
         }
-        if seconds % 60 == 0 {
-            return "\(seconds / 60)m"
+        if let current, !options.contains(current) {
+            options.append(current)
         }
-        return "\(seconds)s"
+        return options.sorted()
     }
 
     private static func chainID(from value: String) -> UInt64 {
@@ -1427,51 +1481,87 @@ struct LocalWalletSettingsView: View {
             }
 
             SettingsSection(title: "Timing And Budget") {
-                VStack(alignment: .leading, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text("Session duration")
-                            .font(.system(size: 11, weight: .heavy))
-                            .foregroundStyle(SettingsPalette.mutedText)
-                            .textCase(.uppercase)
-                            .tracking(0.5)
-                        Picker("Session duration", selection: sessionDurationSelection) {
-                            ForEach(SessionPolicyConfig.allowedTTLSeconds, id: \.self) { seconds in
-                                Text(Self.durationLabel(seconds: seconds)).tag(seconds)
-                            }
+                VStack(alignment: .leading, spacing: 16) {
+                    SessionRuleRow(
+                        title: "Session expires after",
+                        detail: "When it ends, the assistant stops signing until you start a new session with your passkey."
+                    ) {
+                        SettingsInlineMenu(
+                            selection: sessionDurationSelection,
+                            options: sessionDurationOptions,
+                            label: { Self.friendlyDurationLabel(seconds: $0) }
+                        )
+                    }
+
+                    Divider().overlay(SettingsPalette.border.opacity(0.45))
+
+                    SessionRuleRow(
+                        title: "Lock if idle for",
+                        detail: "Locks the session early after a quiet stretch. Approve with your passkey to resume."
+                    ) {
+                        SettingsInlineMenu(
+                            selection: sessionIdleSelection,
+                            options: idleLockOptions,
+                            label: { Self.friendlyDurationLabel(seconds: $0) }
+                        )
+                    }
+
+                    Divider().overlay(SettingsPalette.border.opacity(0.45))
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .center, spacing: 8) {
+                            Text("Allow up to")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(SettingsPalette.primaryText)
+                            SettingsInlineMenu(
+                                selection: rateLimitCountSelection,
+                                options: rateLimitCountOptions,
+                                label: { "\($0)" }
+                            )
+                            Text("actions every")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(SettingsPalette.primaryText)
+                            SettingsInlineMenu(
+                                selection: rateLimitWindowSelection,
+                                options: rateLimitWindowOptions,
+                                label: { Self.friendlyDurationLabel(seconds: $0) }
+                            )
+                            Spacer(minLength: 0)
                         }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(maxWidth: 560)
+                        Text("After this many actions, signing pauses until the window resets.")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(SettingsPalette.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    HStack(alignment: .top, spacing: 12) {
-                        SettingsEditableField(
-                            title: "Allowed actions",
-                            placeholder: "\(SessionPolicyConfig.default.rateLimitCount)",
-                            detail: "How many assistant-signed actions fit inside the window.",
-                            text: $sessionPolicyDraft.rateLimitCount
-                        )
-                        SettingsEditableField(
-                            title: "Window seconds",
-                            placeholder: "\(SessionPolicyConfig.default.rateLimitIntervalSec)",
-                            detail: "Current draft: \(draftDurationLabel(sessionPolicyDraft.rateLimitIntervalSec))",
-                            text: $sessionPolicyDraft.rateLimitIntervalSec
-                        )
-                        SettingsEditableField(
-                            title: "Idle lock seconds",
-                            placeholder: "\(SessionPolicyConfig.default.inactivityTimeoutSeconds)",
-                            detail: "Current draft: \(draftDurationLabel(sessionPolicyDraft.inactivityTimeoutSeconds)). Must be shorter than the session.",
-                            text: $sessionPolicyDraft.inactivityTimeoutSeconds
-                        )
-                    }
+                    Divider().overlay(SettingsPalette.border.opacity(0.45))
 
-                    SettingsEditableField(
-                        title: "Gas allowance ETH",
-                        placeholder: "0.05",
-                        detail: "Maximum gas budget the permission can spend while the session key is active.",
-                        text: $sessionPolicyDraft.gasBudgetETH
-                    )
-                    .frame(maxWidth: 300)
+                    SessionRuleRow(
+                        title: "Gas budget for the session",
+                        detail: "The most gas the assistant can spend before the session ends."
+                    ) {
+                        HStack(spacing: 8) {
+                            TextField("0.05", text: $sessionPolicyDraft.gasBudgetETH)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(SettingsPalette.primaryText)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 78)
+                                .padding(.horizontal, 12)
+                                .frame(height: 38)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(SettingsPalette.row)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                .stroke(SettingsPalette.border.opacity(0.72), lineWidth: 1)
+                                        )
+                                )
+                            Text("ETH")
+                                .font(.system(size: 12, weight: .heavy))
+                                .foregroundStyle(SettingsPalette.mutedText)
+                        }
+                    }
                 }
                 .disabled(isSessionTransactionInProgress)
                 .opacity(isSessionTransactionInProgress ? 0.55 : 1)
@@ -1816,13 +1906,6 @@ struct LocalWalletSettingsView: View {
             SettingsKeyValue(title: "Session key ref", value: record.sessionKeyRef),
         ])
         return rows
-    }
-
-    private func draftDurationLabel(_ value: String) -> String {
-        guard let seconds = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            return "not set"
-        }
-        return Self.friendlyDurationLabel(seconds: seconds)
     }
 
     private func setAllTokenLimitsEnabled(_ isEnabled: Bool) {
@@ -2439,6 +2522,84 @@ private struct SettingsEditableField: View {
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+}
+
+/// A compact, palette-styled dropdown for picking one of a fixed set of integer
+/// values (durations in seconds, or counts). Used by the session-key timing and
+/// budget rules so every value is a bounded choice instead of free-form text.
+private struct SettingsInlineMenu: View {
+    @Binding var selection: Int
+    let options: [Int]
+    let label: (Int) -> String
+
+    var body: some View {
+        Menu {
+            ForEach(options, id: \.self) { option in
+                Button {
+                    selection = option
+                } label: {
+                    if option == selection {
+                        Label(label(option), systemImage: "checkmark")
+                    } else {
+                        Text(label(option))
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 7) {
+                Text(label(selection))
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(SettingsPalette.primaryText)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .heavy))
+                    .foregroundStyle(SettingsPalette.mutedText)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 38)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(SettingsPalette.row)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(SettingsPalette.border.opacity(0.72), lineWidth: 1)
+                    )
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+}
+
+/// A single plain-language policy rule: a sentence-style title with a trailing
+/// control on the first line, and a one-line consequence beneath it.
+private struct SessionRuleRow<Control: View>: View {
+    let title: String
+    let detail: String
+    let control: Control
+
+    init(title: String, detail: String, @ViewBuilder control: () -> Control) {
+        self.title = title
+        self.detail = detail
+        self.control = control()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 12) {
+                Text(title)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(SettingsPalette.primaryText)
+                Spacer(minLength: 12)
+                control
+            }
+            Text(detail)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(SettingsPalette.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

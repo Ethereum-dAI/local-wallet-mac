@@ -970,6 +970,7 @@ dependencies = [
  "elliptic-curve",
  "once_cell",
  "sha2",
+ "signature",
 ]
 
 [[package]]
@@ -1839,7 +1840,7 @@ dependencies = [
 [[package]]
 name = "wallet-addresses"
 version = "0.1.0"
-source = "git+https://github.com/Ethereum-dAI/local-wallet-protocol.git?rev=221144d9b4ab95999c98c3fce40c8bc69b13a9e8#221144d9b4ab95999c98c3fce40c8bc69b13a9e8"
+source = "git+https://github.com/Ethereum-dAI/local-wallet-protocol.git?rev=44972b1fef024cec36d63faac63121455fabcb49#44972b1fef024cec36d63faac63121455fabcb49"
 dependencies = [
  "alloy-primitives",
 ]
@@ -1864,10 +1865,11 @@ dependencies = [
 [[package]]
 name = "wallet-kernel"
 version = "0.1.0"
-source = "git+https://github.com/Ethereum-dAI/local-wallet-protocol.git?rev=221144d9b4ab95999c98c3fce40c8bc69b13a9e8#221144d9b4ab95999c98c3fce40c8bc69b13a9e8"
+source = "git+https://github.com/Ethereum-dAI/local-wallet-protocol.git?rev=44972b1fef024cec36d63faac63121455fabcb49#44972b1fef024cec36d63faac63121455fabcb49"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
+ "wallet-addresses",
 ]
 
 [[package]]
@@ -1884,12 +1886,13 @@ dependencies = [
 [[package]]
 name = "wallet-signature"
 version = "0.1.0"
-source = "git+https://github.com/Ethereum-dAI/local-wallet-protocol.git?rev=221144d9b4ab95999c98c3fce40c8bc69b13a9e8#221144d9b4ab95999c98c3fce40c8bc69b13a9e8"
+source = "git+https://github.com/Ethereum-dAI/local-wallet-protocol.git?rev=44972b1fef024cec36d63faac63121455fabcb49#44972b1fef024cec36d63faac63121455fabcb49"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
  "base64",
  "hex",
+ "k256",
  "p256",
  "sha2",
  "wallet-addresses",

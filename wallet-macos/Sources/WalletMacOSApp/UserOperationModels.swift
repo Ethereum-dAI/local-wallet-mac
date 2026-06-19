@@ -50,6 +50,20 @@ enum WalletTokenRegistry {
         allTokens.filter { $0.chainID == chainID }
     }
 
+    static func erc20PolicyCatalog() -> [WalletToken] {
+        var seenSymbols = Set<String>()
+        return allTokens.compactMap { token in
+            guard token.contractAddress != nil else {
+                return nil
+            }
+            let symbol = token.symbol.uppercased()
+            guard seenSymbols.insert(symbol).inserted else {
+                return nil
+            }
+            return token
+        }
+    }
+
     static func token(matching rawValue: String?, on chainID: UInt64) -> WalletToken? {
         let normalized = (rawValue ?? "ETH")
             .trimmingCharacters(in: .whitespacesAndNewlines)

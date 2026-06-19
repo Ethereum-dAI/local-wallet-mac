@@ -12,6 +12,7 @@ struct WalletRecord: Codable, Equatable {
     let kernelAccountAddress: String?
     let authenticatorIdHash: Data
     let kernelSalt: Data
+    let sessionRecords: [SessionRecord]
     let isDeployed: Bool
     let createdAt: Date
     let updatedAt: Date
@@ -25,6 +26,7 @@ struct WalletRecord: Codable, Equatable {
         kernelAccountAddress: String?,
         authenticatorIdHash: Data = Data(repeating: 0, count: 32),
         kernelSalt: Data = Data(repeating: 0, count: 32),
+        sessionRecords: [SessionRecord] = [],
         isDeployed: Bool,
         createdAt: Date,
         updatedAt: Date
@@ -37,6 +39,7 @@ struct WalletRecord: Codable, Equatable {
         self.kernelAccountAddress = kernelAccountAddress
         self.authenticatorIdHash = authenticatorIdHash
         self.kernelSalt = kernelSalt
+        self.sessionRecords = sessionRecords
         self.isDeployed = isDeployed
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -51,6 +54,7 @@ struct WalletRecord: Codable, Equatable {
         case kernelAccountAddress
         case authenticatorIdHash
         case kernelSalt
+        case sessionRecords
         case isDeployed
         case createdAt
         case updatedAt
@@ -68,6 +72,7 @@ struct WalletRecord: Codable, Equatable {
             ?? Data(repeating: 0, count: 32)
         kernelSalt = try container.decodeIfPresent(Data.self, forKey: .kernelSalt)
             ?? Data(repeating: 0, count: 32)
+        sessionRecords = try container.decodeIfPresent([SessionRecord].self, forKey: .sessionRecords) ?? []
         isDeployed = try container.decode(Bool.self, forKey: .isDeployed)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
@@ -93,5 +98,75 @@ extension PublicKeyCoordinates {
 extension WalletRecord {
     func matches(_ coordinates: PublicKeyCoordinates) -> Bool {
         pubkeyX == coordinates.x && pubkeyY == coordinates.y
+    }
+
+    func replacingSessionRecord(
+        _ sessionRecord: SessionRecord,
+        isDeployed: Bool,
+        updatedAt: Date
+    ) -> WalletRecord {
+        let retainedRecords = sessionRecords.filter { $0.chainId != sessionRecord.chainId }
+        return WalletRecord(
+            walletId: walletId,
+            keyTag: keyTag,
+            pubkeyX: pubkeyX,
+            pubkeyY: pubkeyY,
+            chainId: chainId,
+            kernelAccountAddress: kernelAccountAddress,
+            authenticatorIdHash: authenticatorIdHash,
+            kernelSalt: kernelSalt,
+            sessionRecords: retainedRecords + [sessionRecord],
+            isDeployed: isDeployed,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    func removingSessionRecord(
+        chainID: UInt64,
+        isDeployed: Bool,
+        updatedAt: Date
+    ) -> WalletRecord {
+        WalletRecord(
+            walletId: walletId,
+            keyTag: keyTag,
+            pubkeyX: pubkeyX,
+            pubkeyY: pubkeyY,
+            chainId: chainId,
+            kernelAccountAddress: kernelAccountAddress,
+            authenticatorIdHash: authenticatorIdHash,
+            kernelSalt: kernelSalt,
+            sessionRecords: sessionRecords.filter { $0.chainId != chainID },
+            isDeployed: isDeployed,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    func updatingSessionActivity(
+        chainID: UInt64,
+        activityAt: Date,
+        isDeployed: Bool,
+        updatedAt: Date
+    ) -> WalletRecord {
+        var refreshedRecords = sessionRecords
+        guard let index = refreshedRecords.firstIndex(where: { $0.chainId == chainID }) else {
+            return self
+        }
+        refreshedRecords[index].lastActivityAt = activityAt
+        return WalletRecord(
+            walletId: walletId,
+            keyTag: keyTag,
+            pubkeyX: pubkeyX,
+            pubkeyY: pubkeyY,
+            chainId: chainId,
+            kernelAccountAddress: kernelAccountAddress,
+            authenticatorIdHash: authenticatorIdHash,
+            kernelSalt: kernelSalt,
+            sessionRecords: refreshedRecords,
+            isDeployed: isDeployed,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
     }
 }

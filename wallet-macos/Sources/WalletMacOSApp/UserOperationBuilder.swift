@@ -258,7 +258,8 @@ struct UserOperationBuilder {
         chain: ChainConfiguration,
         isDeployed: Bool,
         nonceHex: String,
-        intent: TransactionIntent
+        intent: TransactionIntent,
+        sessionMode: Bool = false
     ) throws -> UserOperationDraft {
         try buildDraft(
             walletRecord: walletRecord,
@@ -266,7 +267,7 @@ struct UserOperationBuilder {
             chain: chain,
             isDeployed: isDeployed,
             nonceHex: nonceHex,
-            executions: buildExecutionRequests(for: intent)
+            executions: buildExecutionRequests(for: intent, sessionMode: sessionMode)
         )
     }
 
@@ -326,7 +327,10 @@ struct UserOperationBuilder {
         )
     }
 
-    func buildExecutionRequests(for intent: TransactionIntent) throws -> [KernelExecutionRequest] {
+    func buildExecutionRequests(
+        for intent: TransactionIntent,
+        sessionMode: Bool = false
+    ) throws -> [KernelExecutionRequest] {
         switch intent {
         case .nativeTransfer(let recipient, let amountETH):
             let addressData = try Data(hexString: recipient)
@@ -364,6 +368,7 @@ struct UserOperationBuilder {
             guard routerData.count == 20 else {
                 throw AppError.invalidExecutionAddress
             }
+            let routerTarget = "0x" + routerData.hexEncodedString
 
             let routerCallData: Data
             if request.tokenOutIsNative {
@@ -377,6 +382,18 @@ struct UserOperationBuilder {
                     amountMinimum: request.quote.amountOutMinimum,
                     recipient: request.recipient
                 )
+                if sessionMode {
+                    let swapExecution = KernelExecutionRequest(
+                        target: routerTarget,
+                        value: request.tokenInIsNative ? request.quote.amountIn : Data(repeating: 0, count: 32),
+                        callData: swapCallData
+                    )
+                    let unwrapExecution = KernelExecutionRequest.zeroValueCall(
+                        target: routerTarget,
+                        callData: unwrapCallData
+                    )
+                    return try approvalExecutionRequests(for: request) + [swapExecution, unwrapExecution]
+                }
                 routerCallData = swapRouterCallEncoder.encodeMulticall([swapCallData, unwrapCallData])
             } else {
                 routerCallData = try swapRouterCallEncoder.encodeExactInput(
@@ -388,7 +405,7 @@ struct UserOperationBuilder {
             }
 
             let routerExecution = KernelExecutionRequest(
-                target: "0x" + routerData.hexEncodedString,
+                target: routerTarget,
                 value: request.tokenInIsNative ? request.quote.amountIn : Data(repeating: 0, count: 32),
                 callData: routerCallData
             )

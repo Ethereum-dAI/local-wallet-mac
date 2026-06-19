@@ -58,6 +58,7 @@ struct OnboardingProvisioningService {
                 kernelAccountAddress: predictedAddress,
                 authenticatorIdHash: existing.authenticatorIdHash,
                 kernelSalt: existing.kernelSalt,
+                sessionRecords: existing.sessionRecords,
                 isDeployed: existing.isDeployed,
                 createdAt: existing.createdAt,
                 updatedAt: now

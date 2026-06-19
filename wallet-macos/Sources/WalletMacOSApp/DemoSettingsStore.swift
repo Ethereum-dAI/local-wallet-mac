@@ -244,6 +244,8 @@ struct DemoSettingsStore {
         static let autoGasModeEnabled = "com.localwallet.demo.auto-gas-mode-enabled"
         static let autoGasTier = "com.localwallet.demo.auto-gas-tier"
         static let unlockRelayerOnLaunch = "com.localwallet.demo.unlock-relayer-on-launch"
+        static let sessionKeysEnabled = "com.localwallet.demo.session-keys-enabled"
+        static let sessionPolicy = "com.localwallet.demo.session-policy"
         static let legacyOnboardingRPCURL = "com.localwallet.demo.onboarding.rpc-url"
         static let legacyOnboardingArchiveNodeURL = "com.localwallet.demo.onboarding.archive-node-url"
         static let legacyOnboardingConsensusRPCURL = "com.localwallet.demo.onboarding.consensus-rpc-url"
@@ -275,6 +277,33 @@ struct DemoSettingsStore {
 
     func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
         defaults.set(isEnabled, forKey: Keys.unlockRelayerOnLaunch)
+    }
+
+    var sessionKeysEnabled: Bool {
+        defaults.bool(forKey: Keys.sessionKeysEnabled)
+    }
+
+    func setSessionKeysEnabled(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: Keys.sessionKeysEnabled)
+    }
+
+    var sessionPolicy: SessionPolicyConfig {
+        guard let data = defaults.data(forKey: Keys.sessionPolicy) else {
+            return .default
+        }
+        guard let decoded = try? JSONDecoder().decode(SessionPolicyConfig.self, from: data),
+              let validated = try? decoded.validated()
+        else {
+            return .default
+        }
+        return validated
+    }
+
+    func setSessionPolicy(_ policy: SessionPolicyConfig) {
+        guard let data = try? JSONEncoder().encode(policy) else {
+            return
+        }
+        defaults.set(data, forKey: Keys.sessionPolicy)
     }
 
     var networkSettings: DemoNetworkSettings {

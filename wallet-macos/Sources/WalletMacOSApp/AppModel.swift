@@ -3,6 +3,26 @@ import LocalAuthentication
 import WalletToolLayer
 import WalletSignature
 
+enum SessionSigningPreviewMode: Equatable {
+    case install
+    case active
+}
+
+enum SessionSigningPasskeyReason: Equatable {
+    case sessionOff
+    case accountNotDeployed
+    case noSessionRecord
+    case pendingRevoke
+    case expired(SessionExpiryReason)
+    case missingSigningArtifacts
+    case policy(SessionPolicyMirror.RejectionReason)
+}
+
+enum SessionSigningPreview: Equatable {
+    case session(SessionSigningPreviewMode)
+    case passkey(SessionSigningPasskeyReason)
+}
+
 // AppModel drives the signed macOS demo shell. It is intentionally opinionated
 // around the current demo scope (Sepolia, ETH transfer first, local wallet-node)
 // and should not be treated as the final wallet product architecture.
@@ -12,6 +32,19 @@ final class AppModel: ObservableObject {
         let userOpHash: String
         let transactionHash: String?
         let success: Bool?
+        let signedBySession: Bool
+
+        init(
+            userOpHash: String,
+            transactionHash: String?,
+            success: Bool?,
+            signedBySession: Bool = false
+        ) {
+            self.userOpHash = userOpHash
+            self.transactionHash = transactionHash
+            self.success = success
+            self.signedBySession = signedBySession
+        }
     }
 
     @Published private(set) var walletRecord: WalletRecord?
@@ -51,6 +84,14 @@ final class AppModel: ObservableObject {
         configuration.networkSettings
     }
 
+    var sessionKeysEnabled: Bool {
+        settingsStore.sessionKeysEnabled
+    }
+
+    var sessionPolicy: SessionPolicyConfig {
+        settingsStore.sessionPolicy
+    }
+
     var hasLocalRelayerClient: Bool {
         walletNodeClient != nil || WalletNodeClient.Configuration.fromEnvironment() == nil
     }
@@ -75,6 +116,8 @@ final class AppModel: ObservableObject {
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
     private var walletNodeLaunchFailure: WalletNodeLaunchFailure?
     private var optimisticNextNonce: [String: UInt64] = [:]
+    private var pendingSessionInstallByUserOpHash: [String: SessionRecord] = [:]
+    private var pendingSessionRevokeByUserOpHash: [String: SessionRecord] = [:]
     private var reconcilerTask: Task<Void, Never>?
     private let userOperationBuilder: UserOperationBuilder
     private let walletHistoryStore: WalletTransactionHistoryStore
@@ -89,6 +132,7 @@ final class AppModel: ObservableObject {
         2_000_000_000,
     ]
     private static let walletNodeLaunchFailureCooldownSeconds: TimeInterval = 4
+    private static let sessionUserActivityPersistenceMinInterval: TimeInterval = 15
     private static let relayerBalanceRetryDelays: [UInt64] = [
         400_000_000,
         900_000_000,
@@ -203,6 +247,7 @@ final class AppModel: ObservableObject {
                         kernelAccountAddress: predictedAddress,
                         authenticatorIdHash: existing.authenticatorIdHash,
                         kernelSalt: existing.kernelSalt,
+                        sessionRecords: existing.sessionRecords,
                         isDeployed: existing.isDeployed,
                         createdAt: existing.createdAt,
                         updatedAt: now
@@ -240,6 +285,7 @@ final class AppModel: ObservableObject {
             appendLog("bootstrap: failed — \(error.localizedDescription)")
         }
 
+        expireExpiredSessionIfNeeded(now: Date(), logContext: "bootstrap")
         isBootstrapping = false
 
         if shouldInspectAfterBootstrap {
@@ -431,6 +477,54 @@ final class AppModel: ObservableObject {
         lastSubmittedUserOperationHash = nil
         lastBundledTransactionHash = nil
         bootstrap()
+    }
+
+    func updateSessionPolicy(_ policy: SessionPolicyConfig) throws {
+        settingsStore.setSessionPolicy(try policy.validated())
+        appendLog("session: updated local session policy")
+    }
+
+    func sessionSigningPreview(for intent: TransactionIntent, now: Date = Date()) -> SessionSigningPreview {
+        guard settingsStore.sessionKeysEnabled else {
+            return .passkey(.sessionOff)
+        }
+        guard let walletRecord else {
+            return .passkey(.noSessionRecord)
+        }
+        guard walletRecord.isDeployed || accountInspection?.isDeployed == true else {
+            return .passkey(.accountNotDeployed)
+        }
+        guard let sessionRecord = walletRecord.sessionRecords.first(where: { $0.chainId == activeChain.id }) else {
+            return .passkey(.noSessionRecord)
+        }
+        if pendingSessionRevokeByUserOpHash.values.contains(where: {
+            $0.chainId == sessionRecord.chainId && $0.permissionId == sessionRecord.permissionId
+        }) {
+            return .passkey(.pendingRevoke)
+        }
+        if let reason = SessionLifecycle.expiryReason(record: sessionRecord, now: now) {
+            return .passkey(.expired(reason))
+        }
+        guard let plan = SessionUserOperationPlan(record: sessionRecord) else {
+            return .passkey(.missingSigningArtifacts)
+        }
+        let context = SessionPolicyContext(sessionRecord: sessionRecord, now: now)
+        if let reason = SessionPolicyMirror.rejectionReason(
+            intent: intent,
+            config: sessionRecord.policyConfigSnapshot,
+            context: context
+        ) {
+            return .passkey(.policy(reason))
+        }
+        return .session(plan.record.installedOnChain ? .active : .install)
+    }
+
+    func handleAppBecameActive(now: Date = Date()) {
+        expireExpiredSessionIfNeeded(now: now, logContext: "session-resume")
+    }
+
+    func recordSessionUserActivity(now: Date = Date()) {
+        recordSessionActivity(now: now, source: "UI interaction", isUserInput: true)
     }
 
     func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
@@ -1055,7 +1149,8 @@ final class AppModel: ObservableObject {
 
     func buildUserOperationDraft(
         intent: TransactionIntent,
-        isDeployedOverride: Bool? = nil
+        isDeployedOverride: Bool? = nil,
+        nonceKey192: Data? = nil
     ) async throws -> UserOperationDraft {
         guard let walletRecord else {
             throw AppError.corruptedMetadataStore
@@ -1070,7 +1165,11 @@ final class AppModel: ObservableObject {
         }
 
         appendLog("build: reading EntryPoint nonce through local wallet-node")
-        let nonceHex = try await resolvedNonceHex(entryPoint: activeChain.entryPoint, sender: sender)
+        let nonceHex = try await resolvedNonceHex(
+            entryPoint: activeChain.entryPoint,
+            sender: sender,
+            nonceKey192: nonceKey192
+        )
 
         return try userOperationBuilder.buildDraft(
             walletRecord: walletRecord,
@@ -1078,13 +1177,15 @@ final class AppModel: ObservableObject {
             chain: activeChain,
             isDeployed: isDeployedOverride ?? accountInspection?.isDeployed ?? walletRecord.isDeployed,
             nonceHex: nonceHex,
-            intent: intent
+            intent: intent,
+            sessionMode: nonceKey192 != nil
         )
     }
 
     func buildUserOperationDraft(
         executions: [KernelExecutionRequest],
-        isDeployedOverride: Bool? = nil
+        isDeployedOverride: Bool? = nil,
+        nonceKey192: Data? = nil
     ) async throws -> UserOperationDraft {
         guard let walletRecord else {
             throw AppError.corruptedMetadataStore
@@ -1099,7 +1200,11 @@ final class AppModel: ObservableObject {
         }
 
         appendLog("build: reading EntryPoint nonce through local wallet-node")
-        let nonceHex = try await resolvedNonceHex(entryPoint: activeChain.entryPoint, sender: sender)
+        let nonceHex = try await resolvedNonceHex(
+            entryPoint: activeChain.entryPoint,
+            sender: sender,
+            nonceKey192: nonceKey192
+        )
 
         return try userOperationBuilder.buildDraft(
             walletRecord: walletRecord,
@@ -1111,23 +1216,37 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func resolvedNonceHex(entryPoint: String, sender: String) async throws -> String {
+    private func resolvedNonceHex(
+        entryPoint: String,
+        sender: String,
+        nonceKey192: Data? = nil
+    ) async throws -> String {
         let onChainHex = try await withWalletNodeWarmupRetry(operation: "EntryPoint nonce read") {
             try await withWalletNodeClient(operation: "EntryPoint nonce read") { client in
-                try await client.entryPointNonce(entryPoint: entryPoint, accountAddress: sender, nonceKey: 0)
+                if let nonceKey192 {
+                    return try await client.entryPointNonce(
+                        entryPoint: entryPoint,
+                        accountAddress: sender,
+                        nonceKey192: nonceKey192
+                    )
+                }
+                return try await client.entryPointNonce(entryPoint: entryPoint, accountAddress: sender, nonceKey: 0)
             }
         }
-        let onChain = try nonceSequence(from: onChainHex)
-        let key = nonceCacheKey(chainID: activeChain.id, sender: sender)
+        let onChainData = try Data(hexString: onChainHex).leftPadded(to: 32)
+        let onChain = try nonceSequence(from: onChainData)
+        let nonceKey = try normalizedNonceKey192(nonceKey192)
+        let key = nonceCacheKey(chainID: activeChain.id, sender: sender, nonceKey: nonceKey)
         let effective = NonceClamp.effective(onChain: onChain, optimistic: optimisticNextNonce[key])
-        return nonceHex(fromSequence: effective)
+        return nonceHex(nonceKey192: nonceKey, sequence: effective)
     }
 
     private func recordOptimisticNonce(after draft: UserOperationDraft) {
         guard let used = try? nonceSequence(from: draft.nonce) else {
             return
         }
-        let key = nonceCacheKey(chainID: activeChain.id, sender: draft.sender)
+        let nonceKey = nonceKey192(fromFullNonce: draft.nonce)
+        let key = nonceCacheKey(chainID: activeChain.id, sender: draft.sender, nonceKey: nonceKey)
         optimisticNextNonce[key] = NonceClamp.next(after: used)
     }
 
@@ -1135,11 +1254,19 @@ final class AppModel: ObservableObject {
         guard let sender = walletRecord?.kernelAccountAddress else {
             return
         }
-        optimisticNextNonce.removeValue(forKey: nonceCacheKey(chainID: activeChain.id, sender: sender))
+        let prefix = nonceCacheKeyPrefix(chainID: activeChain.id, sender: sender)
+        let matchingKeys = optimisticNextNonce.keys.filter { $0.hasPrefix(prefix) }
+        for key in matchingKeys {
+            optimisticNextNonce.removeValue(forKey: key)
+        }
     }
 
-    private func nonceCacheKey(chainID: UInt64, sender: String) -> String {
-        "\(chainID):\(sender.lowercased())"
+    private func nonceCacheKeyPrefix(chainID: UInt64, sender: String) -> String {
+        "\(chainID):\(sender.lowercased()):"
+    }
+
+    private func nonceCacheKey(chainID: UInt64, sender: String, nonceKey: Data) -> String {
+        nonceCacheKeyPrefix(chainID: chainID, sender: sender) + nonceKey.hexEncodedString
     }
 
     private func nonceSequence(from hex: String) throws -> UInt64 {
@@ -1154,8 +1281,29 @@ final class AppModel: ObservableObject {
         return full.suffix(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
     }
 
+    private func normalizedNonceKey192(_ nonceKey: Data?) throws -> Data {
+        guard let nonceKey else {
+            return Data(repeating: 0, count: 24)
+        }
+        if nonceKey.count == 24 {
+            return nonceKey
+        }
+        guard nonceKey.count == 32, nonceKey.prefix(8).allSatisfy({ $0 == 0 }) else {
+            throw AppError.invalidHexString
+        }
+        return Data(nonceKey.suffix(24))
+    }
+
+    private func nonceKey192(fromFullNonce nonce: Data) -> Data {
+        Data(nonce.leftPadded(to: 32).prefix(24))
+    }
+
     private func nonceHex(fromSequence sequence: UInt64) -> String {
-        "0x" + Data.fromBigEndian(sequence).leftPadded(to: 32).hexEncodedString
+        nonceHex(nonceKey192: Data(repeating: 0, count: 24), sequence: sequence)
+    }
+
+    private func nonceHex(nonceKey192: Data, sequence: UInt64) -> String {
+        "0x" + (nonceKey192 + Data.fromBigEndian(sequence)).hexEncodedString
     }
 
     func buildUserOperationDraftPreview() {
@@ -1220,6 +1368,168 @@ final class AppModel: ObservableObject {
 
             isSendingUserOperation = false
         }
+    }
+
+    @discardableResult
+    func enableSessionKeys(now: Date = Date()) async throws -> SessionRecord {
+        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+            throw AppError.walletOperationInProgress
+        }
+        if walletRecord == nil {
+            bootstrap()
+        }
+        guard let record = walletRecord, let accountAddress = record.kernelAccountAddress else {
+            throw AppError.corruptedMetadataStore
+        }
+
+        appendSection("Enable Session Keys")
+        appendLog("session: checking deployed account state")
+        let inspection = try await refreshAccountInspectionWithRetry(logContext: "session-enable")
+        guard inspection.isDeployed else {
+            throw AppError.sessionKeysRequireDeployedAccount
+        }
+
+        let keyRef = try SessionEnableAssembler.sessionKeyRef(
+            chainID: activeChain.id,
+            accountAddress: accountAddress
+        )
+        appendLog("session: loading session key \(keyRef)")
+        let sessionKey = try SessionKeyStore.shared.createIfNeeded(keyRef: keyRef)
+
+        appendLog("session: reading Kernel currentNonce")
+        let validationNonce = try await withWalletNodeWarmupRetry(operation: "Kernel currentNonce read") {
+            try await withWalletNodeClient(operation: "Kernel currentNonce read") { client in
+                try await client.kernelCurrentNonce(accountAddress: accountAddress)
+            }
+        }
+
+        let policy = settingsStore.sessionPolicy
+        let assembly = try SessionEnableAssembler.assemble(
+            policy: policy,
+            chain: activeChain,
+            accountAddress: accountAddress,
+            sessionKeyRef: keyRef,
+            sessionAddress: sessionKey.address,
+            validationNonce: validationNonce,
+            now: now,
+            composer: { configJSON in
+                try SessionPermissionArtifacts(
+                    permission: WalletSignature.sessionBuildPermission(configJSON: configJSON)
+                )
+            },
+            enableDigestSigner: { [self] digest in
+                try signSessionEnableDigest(
+                    digest,
+                    reason: "Enable session keys for \(activeChain.name)"
+                )
+            }
+        )
+
+        let refreshed = record.replacingSessionRecord(
+            assembly.record,
+            isDeployed: inspection.isDeployed,
+            updatedAt: now
+        )
+        try metadataStore.save(refreshed)
+        walletRecord = refreshed
+        settingsStore.setSessionKeysEnabled(true)
+        appendLog("session: stored permission 0x\(assembly.record.permissionId.hexEncodedString)")
+        return assembly.record
+    }
+
+    @discardableResult
+    func revokeSessionKeys() async throws -> UserOperationSendResult {
+        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+            throw AppError.walletOperationInProgress
+        }
+        if walletRecord == nil {
+            bootstrap()
+        }
+        guard let record = walletRecord,
+              let accountAddress = record.kernelAccountAddress
+        else {
+            throw AppError.corruptedMetadataStore
+        }
+        guard let sessionRecord = record.sessionRecords.first(where: { $0.chainId == activeChain.id }) else {
+            throw AppError.sessionKeysNotEnabled
+        }
+        if !settingsStore.sessionKeysEnabled {
+            appendLog("session-revoke: local toggle is off, but a session record exists; revoking anyway")
+        }
+
+        let deinitData = try WalletSignature.sessionEmptyPermissionDeinitData(enableData: sessionRecord.enableData)
+        let execution = try SessionRevokeAssembler.executionRequest(
+            accountAddress: accountAddress,
+            permissionId: sessionRecord.permissionId,
+            deinitData: deinitData,
+            calldataBuilder: { permissionId, deinitData in
+                try WalletSignature.sessionUninstallPermissionCalldata(
+                    permissionId: permissionId,
+                    deinitData: deinitData
+                )
+            }
+        )
+
+        return try await executeUserOperation(
+            logContext: "session-revoke",
+            signingReason: "Revoke session keys for \(activeChain.name)",
+            intent: nil,
+            historyDraft: SessionRevokeAssembler.historyDraft(
+                accountAddress: accountAddress,
+                validationNonce: sessionRecord.validationNonce
+            ),
+            afterSubmit: { [self] userOpHash in
+                pendingSessionRevokeByUserOpHash[userOpHash.lowercased()] = sessionRecord
+                objectWillChange.send()
+                settingsStore.setSessionKeysEnabled(false)
+                appendLog("session-revoke: disabled local session signing while waiting for revoke receipt")
+            }
+        ) { [self] buildContext in
+            guard buildContext.isDeployed else {
+                throw AppError.sessionKeysRequireDeployedAccount
+            }
+            return try await buildUserOperationDraft(
+                executions: [execution],
+                isDeployedOverride: true,
+                nonceKey192: nil
+            )
+        }
+    }
+
+    @discardableResult
+    func revokeSessionKeysAndWaitForReceipt() async throws -> UserOperationSendResult {
+        let chainID = activeChain.id
+        let submitted = try await revokeSessionKeys()
+        bridgeStatus = "Session key revoke submitted. Waiting for the receipt."
+        activeBundlerStatus = "Waiting for revoke receipt"
+
+        let receipt = try await waitForLocalReceipt(
+            userOpHash: submitted.userOpHash,
+            chainID: chainID,
+            logContext: "session-revoke"
+        )
+
+        recordReceiptHistory(receipt, chainID: chainID, logContext: "session-revoke")
+        guard receipt.success else {
+            activeBundlerStatus = "Revoke reverted"
+            bridgeStatus = "Session key revoke reverted."
+            let reason: String
+            if let revertReason = receipt.revertReason, !revertReason.isEmpty {
+                reason = "Session key revoke reverted: \(revertReason)"
+            } else {
+                reason = "Session key revoke reverted onchain."
+            }
+            throw AppError.userOperationReceiptReverted(reason)
+        }
+
+        activeBundlerStatus = "Session key disabled"
+        bridgeStatus = "Session key revoke confirmed onchain."
+        return UserOperationSendResult(
+            userOpHash: receipt.userOpHash,
+            transactionHash: receipt.txHash,
+            success: receipt.success,
+            signedBySession: submitted.signedBySession
+        )
     }
 
     func executeNativeTransfer(
@@ -1372,15 +1682,17 @@ final class AppModel: ObservableObject {
         try await executeUserOperation(
             logContext: logContext,
             signingReason: signingReason ?? "Authorize \(executions.count) transaction batch on \(activeChain.name)",
+            intent: nil,
             historyDraft: WalletTransactionDraft(
                 operation: .batch,
                 amount: String(executions.count),
                 token: executions.count == 1 ? "call" : "calls"
             )
-        ) { [self] isDeployed in
+        ) { [self] buildContext in
             try await buildUserOperationDraft(
                 executions: executions,
-                isDeployedOverride: isDeployed
+                isDeployedOverride: buildContext.isDeployed,
+                nonceKey192: buildContext.sessionPlan?.nonceKey192
             )
         }
     }
@@ -1393,11 +1705,13 @@ final class AppModel: ObservableObject {
         try await executeUserOperation(
             logContext: logContext,
             signingReason: signingReason,
+            intent: intent,
             historyDraft: historyDraft(for: intent)
-        ) { [self] isDeployed in
+        ) { [self] buildContext in
             try await buildUserOperationDraft(
                 intent: intent,
-                isDeployedOverride: isDeployed
+                isDeployedOverride: buildContext.isDeployed,
+                nonceKey192: buildContext.sessionPlan?.nonceKey192
             )
         }
     }
@@ -1405,8 +1719,10 @@ final class AppModel: ObservableObject {
     private func executeUserOperation(
         logContext: String,
         signingReason: String,
+        intent: TransactionIntent?,
         historyDraft: WalletTransactionDraft?,
-        buildDraft: @escaping (_ isDeployed: Bool) async throws -> UserOperationDraft
+        afterSubmit: ((String) -> Void)? = nil,
+        buildDraft: @escaping (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
             throw AppError.walletOperationInProgress
@@ -1429,7 +1745,9 @@ final class AppModel: ObservableObject {
             let result = try await sendUserOperation(
                 logContext: logContext,
                 signingReason: signingReason,
+                intent: intent,
                 historyDraft: historyDraft,
+                afterSubmit: afterSubmit,
                 buildDraft: buildDraft
             )
             isSendingUserOperation = false
@@ -1444,47 +1762,89 @@ final class AppModel: ObservableObject {
     private func sendUserOperation(
         logContext: String,
         signingReason: String,
+        intent: TransactionIntent?,
         historyDraft: WalletTransactionDraft?,
-        buildDraft: (_ isDeployed: Bool) async throws -> UserOperationDraft
+        afterSubmit: ((String) -> Void)? = nil,
+        buildDraft: (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         appendLog("\(logContext): preparing transaction on \(activeChain.name)")
 
         let liveInspection = try await refreshAccountInspectionWithRetry(logContext: "\(logContext)-preflight")
         appendLog("\(logContext): using \(liveInspection.isDeployed ? "deployed" : "precomputed") account path")
 
-        let draft = try await buildDraft(liveInspection.isDeployed)
+        let sessionPlan = intent.flatMap {
+            liveInspection.isDeployed ? activeSessionPlan(for: $0, now: Date()) : nil
+        }
+        if let sessionPlan {
+            let modeLabel = sessionPlan.signatureMode == .installed ? "installed" : "enable"
+            appendLog("\(logContext): using silent session-key path (\(modeLabel) mode)")
+        } else if intent != nil, settingsStore.sessionKeysEnabled {
+            appendLog("\(logContext): session-key path unavailable or out of policy; using passkey")
+        }
+
+        let buildContext = UserOperationBuildContext(
+            isDeployed: liveInspection.isDeployed,
+            sessionPlan: sessionPlan
+        )
+        let draft = try await buildDraft(buildContext)
         appendDraftLogSummary(draft, context: logContext)
 
         let enrichedDraft = try await enrichDraftWithLocalBundlerEstimation(
             draft,
-            logContext: logContext
+            logContext: logContext,
+            sessionPlan: sessionPlan
         )
         builtUserOperationDraft = enrichedDraft
 
-        let finalHash = try enrichedDraft.userOpHash()
-        appendLog("\(logContext): final userOpHash \(finalHash.shortHex)")
-
-        let preimage = try WalletSignature.computeSigningPreimage(userOpHash: finalHash)
-        appendLog("\(logContext): computed signing preimage (\(preimage.count) bytes)")
-
-        appendLog("\(logContext): requesting Secure Enclave signature")
-        let signature = try keyStore.sign(preimage: preimage, reason: signingReason)
-        appendLog("\(logContext): signature components r=\(signature.r.shortHex) s=\(signature.s.shortHex)")
-
-        var lowS = signature.s
-        let originalS = lowS
-        try WalletSignature.normaliseLowS(s: &lowS)
-        appendLog(
-            "\(logContext): low-s normalization \(originalS == lowS ? "not needed" : "applied")"
+        let signatureResult = try UserOperationSigning.signForSend(
+            draft: enrichedDraft,
+            session: sessionPlan?.signingContext,
+            passkeySigner: { [self] preimage in
+                appendLog("\(logContext): computed signing preimage (\(preimage.count) bytes)")
+                appendLog("\(logContext): requesting Secure Enclave signature")
+                let signature = try keyStore.sign(preimage: preimage, reason: signingReason)
+                appendLog("\(logContext): signature components r=\(signature.r.shortHex) s=\(signature.s.shortHex)")
+                return signature
+            },
+            passkeyWrapper: { [self] userOpHash, signature in
+                var lowS = signature.s
+                let originalS = lowS
+                try WalletSignature.normaliseLowS(s: &lowS)
+                appendLog(
+                    "\(logContext): low-s normalization \(originalS == lowS ? "not needed" : "applied")"
+                )
+                let encoded = try WalletSignature.abiEncodeSignature(
+                    userOpHash: userOpHash,
+                    r: signature.r,
+                    s: lowS,
+                    usePrecompiled: false
+                )
+                appendLog("\(logContext): encoded Kernel/WebAuthn signature (\(encoded.count) bytes)")
+                return encoded
+            },
+            sessionSecretReader: { keyRef in
+                try SessionKeyStore.shared.read(keyRef: keyRef).secret
+            },
+            sessionWrapper: { [self] secret, userOpHash, mode, enableData, selectorData, enableSig in
+                let signature = try WalletSignature.sessionSignAndWrap(
+                    secret: secret,
+                    userOpHash: userOpHash,
+                    mode: mode,
+                    enableData: enableData,
+                    selectorData: selectorData,
+                    enableSig: enableSig
+                )
+                appendLog("\(logContext): encoded session signature (\(signature.count) bytes)")
+                return signature
+            }
         )
-
-        let encodedSignature = try WalletSignature.abiEncodeSignature(
-            userOpHash: finalHash,
-            r: signature.r,
-            s: lowS,
-            usePrecompiled: false
-        )
-        appendLog("\(logContext): encoded Kernel/WebAuthn signature (\(encodedSignature.count) bytes)")
+        appendLog("\(logContext): final userOpHash \(signatureResult.userOpHash.shortHex)")
+        if signatureResult.usedSession {
+            recordSessionActivity(now: Date(), source: "session signing", isUserInput: false)
+        }
+        let submittedHistoryDraft = historyDraft.map {
+            signedHistoryDraft($0, signedBySession: signatureResult.usedSession)
+        }
 
         bridgeStatus = "Submitting UserOperation to local wallet-node on \(activeChain.name)..."
         activeBundlerStatus = "Submitting UserOperation"
@@ -1492,15 +1852,19 @@ final class AppModel: ObservableObject {
         let sentUserOpHash = try await withWalletNodeClient(operation: "\(logContext) submit") { client in
             try await client.sendUserOperation(
                 draft: enrichedDraft,
-                signature: encodedSignature
+                signature: signatureResult.signature
             )
         }
         lastSubmittedUserOperationHash = sentUserOpHash
+        if let sessionPlan, !sessionPlan.record.installedOnChain {
+            pendingSessionInstallByUserOpHash[sentUserOpHash.lowercased()] = sessionPlan.record
+        }
+        afterSubmit?(sentUserOpHash)
         recordOptimisticNonce(after: enrichedDraft)
         appendLog("\(logContext): local wallet-node accepted userOpHash \(sentUserOpHash)")
-        if let historyDraft {
+        if let submittedHistoryDraft {
             recordSubmittedHistory(
-                historyDraft,
+                submittedHistoryDraft,
                 userOpHash: sentUserOpHash,
                 accountAddress: enrichedDraft.sender,
                 logContext: logContext
@@ -1514,7 +1878,126 @@ final class AppModel: ObservableObject {
         return UserOperationSendResult(
             userOpHash: sentUserOpHash,
             transactionHash: nil,
-            success: nil
+            success: nil,
+            signedBySession: signatureResult.usedSession
+        )
+    }
+
+    private func activeSessionPlan(for intent: TransactionIntent, now: Date) -> SessionUserOperationPlan? {
+        if expireExpiredSessionIfNeeded(now: now, logContext: "session-preflight") {
+            return nil
+        }
+        return SessionSigningAvailability.plan(
+            settingsEnabled: settingsStore.sessionKeysEnabled,
+            sessionRecord: walletRecord?.sessionRecords.first(where: { $0.chainId == activeChain.id }),
+            pendingRevokeRecords: Array(pendingSessionRevokeByUserOpHash.values),
+            intent: intent,
+            now: now
+        )
+    }
+
+    @discardableResult
+    private func expireExpiredSessionIfNeeded(now: Date, logContext: String) -> Bool {
+        guard let walletRecord,
+              let sessionRecord = walletRecord.sessionRecords.first(where: { $0.chainId == activeChain.id }),
+              let reason = SessionLifecycle.expiryReason(record: sessionRecord, now: now)
+        else {
+            return false
+        }
+        expireLocalSession(
+            record: sessionRecord,
+            reason: reason,
+            now: now,
+            logContext: logContext
+        )
+        return true
+    }
+
+    private func expireLocalSession(
+        record sessionRecord: SessionRecord,
+        reason: SessionExpiryReason,
+        now: Date,
+        logContext: String
+    ) {
+        guard let walletRecord else {
+            return
+        }
+
+        let refreshed = walletRecord.removingSessionRecord(
+            chainID: sessionRecord.chainId,
+            isDeployed: walletRecord.isDeployed,
+            updatedAt: now
+        )
+        do {
+            try metadataStore.save(refreshed)
+            self.walletRecord = refreshed
+            if sessionRecord.chainId == activeChain.id {
+                settingsStore.setSessionKeysEnabled(false)
+            }
+            appendLog("\(logContext): \(reason.logLabel); disabled local session signing")
+        } catch {
+            appendLog("\(logContext): failed to persist expired session cleanup — \(error.localizedDescription)")
+        }
+
+        do {
+            try SessionKeyStore.shared.delete(keyRef: sessionRecord.sessionKeyRef)
+            appendLog("\(logContext): deleted expired session key from Keychain")
+        } catch {
+            appendLog("\(logContext): expired session key cleanup failed — \(error.localizedDescription)")
+        }
+    }
+
+    private func recordSessionActivity(now: Date, source: String, isUserInput: Bool) {
+        guard settingsStore.sessionKeysEnabled,
+              let walletRecord,
+              let sessionRecord = walletRecord.sessionRecords.first(where: { $0.chainId == activeChain.id })
+        else {
+            return
+        }
+        if let reason = SessionLifecycle.expiryReason(record: sessionRecord, now: now) {
+            expireLocalSession(
+                record: sessionRecord,
+                reason: reason,
+                now: now,
+                logContext: "session-activity"
+            )
+            return
+        }
+        if isUserInput,
+           now.timeIntervalSince(sessionRecord.lastActivityAt) < Self.sessionUserActivityPersistenceMinInterval {
+            return
+        }
+
+        let refreshed = walletRecord.updatingSessionActivity(
+            chainID: sessionRecord.chainId,
+            activityAt: now,
+            isDeployed: walletRecord.isDeployed,
+            updatedAt: now
+        )
+        guard refreshed != walletRecord else {
+            return
+        }
+        do {
+            try metadataStore.save(refreshed)
+            self.walletRecord = refreshed
+            if !isUserInput {
+                appendLog("session: refreshed activity after \(source)")
+            }
+        } catch {
+            appendLog("session: failed to persist activity after \(source) — \(error.localizedDescription)")
+        }
+    }
+
+    private func signSessionEnableDigest(_ digest: Data, reason: String) throws -> Data {
+        let preimage = try WalletSignature.computeSigningPreimage(userOpHash: digest)
+        let signature = try keyStore.sign(preimage: preimage, reason: reason)
+        var lowS = signature.s
+        try WalletSignature.normaliseLowS(s: &lowS)
+        return try WalletSignature.abiEncodeSignature(
+            userOpHash: digest,
+            r: signature.r,
+            s: lowS,
+            usePrecompiled: false
         )
     }
 
@@ -1539,6 +2022,7 @@ final class AppModel: ObservableObject {
             kernelAccountAddress: record.kernelAccountAddress,
             authenticatorIdHash: record.authenticatorIdHash,
             kernelSalt: record.kernelSalt,
+            sessionRecords: record.sessionRecords,
             isDeployed: inspection.isDeployed,
             createdAt: record.createdAt,
             updatedAt: Date()
@@ -1572,7 +2056,8 @@ final class AppModel: ObservableObject {
 
     private func enrichDraftWithLocalBundlerEstimation(
         _ draft: UserOperationDraft,
-        logContext: String
+        logContext: String,
+        sessionPlan: SessionUserOperationPlan? = nil
     ) async throws -> UserOperationDraft {
         appendLog("\(logContext): checking local wallet-node entry point support")
         try await withWalletNodeClient(operation: "\(logContext) entry point check") { client in
@@ -1580,8 +2065,19 @@ final class AppModel: ObservableObject {
         }
         appendLog("\(logContext): local wallet-node supports entry point \(activeChain.entryPoint)")
 
-        let dummySignature = try WalletSignature.abiEncodeDummySignature(usePrecompiled: false)
-        appendLog("\(logContext): generated dummy signature for estimation (\(dummySignature.count) bytes)")
+        let dummySignature: Data
+        if let sessionPlan {
+            dummySignature = try WalletSignature.sessionDummySignature(
+                mode: sessionPlan.signatureMode,
+                enableData: sessionPlan.record.installedOnChain ? Data() : sessionPlan.record.enableData,
+                selectorData: sessionPlan.record.installedOnChain ? Data() : sessionPlan.record.selectorData,
+                usePrecompiled: false
+            )
+            appendLog("\(logContext): generated session dummy signature for estimation (\(dummySignature.count) bytes)")
+        } else {
+            dummySignature = try WalletSignature.abiEncodeDummySignature(usePrecompiled: false)
+            appendLog("\(logContext): generated dummy signature for estimation (\(dummySignature.count) bytes)")
+        }
 
         let estimate = try await withWalletNodeWarmupRetry(operation: "\(logContext) gas estimate") {
             try await withWalletNodeClient(operation: "\(logContext) gas estimate") { client in
@@ -1638,6 +2134,53 @@ final class AppModel: ObservableObject {
         }
 
         return nil
+    }
+
+    private func waitForLocalReceipt(
+        userOpHash: String,
+        chainID: UInt64,
+        logContext: String
+    ) async throws -> WalletNodeClient.UserOperationReceipt {
+        appendLog("\(logContext): waiting for local wallet-node receipt for \(userOpHash)")
+        var attempt = 1
+
+        while true {
+            try Task.checkCancellation()
+
+            let receipt = try await withWalletNodeClient(operation: "\(logContext) receipt poll") { client in
+                try await client.getUserOperationReceipt(userOpHash: userOpHash)
+            }
+            if let receipt {
+                appendLog("\(logContext): receipt received on attempt \(attempt)")
+                return receipt
+            }
+
+            let operationStatus = try await withWalletNodeClient(operation: "\(logContext) status poll") { client in
+                try await client.getUserOperationStatus(userOpHash: userOpHash)
+            }
+            if let terminal = TerminalUserOperationStatus.historyStatus(from: operationStatus) {
+                markTerminalHistory(
+                    userOpHash: userOpHash,
+                    chainID: chainID,
+                    status: terminal.status,
+                    reason: terminal.reason,
+                    logContext: logContext
+                )
+                activeBundlerStatus = "Revoke \(terminal.status.rawValue)"
+                bridgeStatus = "Session key revoke \(terminal.status.rawValue)."
+                var message = "Session key revoke did not receive a receipt. wallet-node reported \(terminal.status.rawValue)"
+                if let reason = terminal.reason, !reason.isEmpty {
+                    message += ": \(reason)"
+                } else {
+                    message += "."
+                }
+                throw AppError.userOperationTerminal(message)
+            }
+
+            appendLog("\(logContext): receipt pending (attempt \(attempt))")
+            attempt += 1
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+        }
     }
 
     func loadWalletHistoryRecords(limit: Int = 200) -> [WalletTransactionRecord] {
@@ -1798,8 +2341,96 @@ final class AppModel: ObservableObject {
                 invalidated: receipt.invalidated
             ))
             appendLog("\(logContext): wallet history reconciled receipt \(receipt.success ? "included" : "reverted")")
+            updatePendingSessionInstall(
+                userOpHash: receipt.userOpHash,
+                chainID: chainID,
+                success: receipt.success,
+                logContext: logContext
+            )
+            updatePendingSessionRevoke(
+                userOpHash: receipt.userOpHash,
+                chainID: chainID,
+                success: receipt.success,
+                logContext: logContext
+            )
         } catch {
             appendLog("\(logContext): wallet history receipt update failed — \(error.localizedDescription)")
+        }
+    }
+
+    private func updatePendingSessionInstall(
+        userOpHash: String,
+        chainID: UInt64,
+        success: Bool,
+        logContext: String
+    ) {
+        let key = userOpHash.lowercased()
+        guard let pendingRecord = pendingSessionInstallByUserOpHash.removeValue(forKey: key) else {
+            return
+        }
+        guard success else {
+            appendLog("\(logContext): session permission install was not included")
+            return
+        }
+        guard let walletRecord else {
+            return
+        }
+
+        var installedRecord = walletRecord.sessionRecords.first {
+            $0.chainId == chainID && $0.permissionId == pendingRecord.permissionId
+        } ?? pendingRecord
+        installedRecord.installedOnChain = true
+        do {
+            let refreshed = walletRecord.replacingSessionRecord(
+                installedRecord,
+                isDeployed: walletRecord.isDeployed,
+                updatedAt: Date()
+            )
+            try metadataStore.save(refreshed)
+            self.walletRecord = refreshed
+            appendLog("\(logContext): marked session permission installed")
+        } catch {
+            appendLog("\(logContext): session permission install update failed — \(error.localizedDescription)")
+        }
+    }
+
+    private func updatePendingSessionRevoke(
+        userOpHash: String,
+        chainID: UInt64,
+        success: Bool,
+        logContext: String
+    ) {
+        let key = userOpHash.lowercased()
+        guard let pendingRecord = pendingSessionRevokeByUserOpHash.removeValue(forKey: key) else {
+            return
+        }
+        guard success else {
+            appendLog("\(logContext): session permission revoke was not included")
+            return
+        }
+        guard let walletRecord else {
+            return
+        }
+
+        do {
+            let refreshed = walletRecord.removingSessionRecord(
+                chainID: chainID,
+                isDeployed: walletRecord.isDeployed,
+                updatedAt: Date()
+            )
+            try metadataStore.save(refreshed)
+            self.walletRecord = refreshed
+            if chainID == activeChain.id {
+                settingsStore.setSessionKeysEnabled(false)
+            }
+            do {
+                try SessionKeyStore.shared.delete(keyRef: pendingRecord.sessionKeyRef)
+            } catch {
+                appendLog("\(logContext): session key cleanup failed — \(error.localizedDescription)")
+            }
+            appendLog("\(logContext): cleared local session-key state")
+        } catch {
+            appendLog("\(logContext): session permission revoke cleanup failed — \(error.localizedDescription)")
         }
     }
 
@@ -1936,6 +2567,25 @@ final class AppModel: ObservableObject {
             return value
         }
         return "\(value.prefix(10))...\(value.suffix(8))"
+    }
+
+    private func signedHistoryDraft(
+        _ draft: WalletTransactionDraft,
+        signedBySession: Bool
+    ) -> WalletTransactionDraft {
+        var fields: [String: String] = [:]
+        if let detailsJSON = draft.detailsJSON,
+           let data = detailsJSON.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for (key, value) in object {
+                fields[key] = "\(value)"
+            }
+        }
+        fields["signingMode"] = signedBySession ? "session" : "passkey"
+
+        var updated = draft
+        updated.detailsJSON = historyDetailsJSON(fields)
+        return updated
     }
 
     private func historyDetailsJSON(_ fields: [String: String]) -> String? {

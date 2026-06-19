@@ -21,6 +21,9 @@ The C ABI currently exposes helpers for:
 - dummy WebAuthn signature ABI encoding for gas estimation
 - Kernel account address prediction
 - Kernel `initialize(...)` calldata encoding
+- Kernel session-permission construction
+- Kernel session signature wrapping and session dummy signatures
+- Kernel session nonce invalidation, empty permission deinit data, and permission uninstall calldata
 - freeing buffers allocated by Rust
 
 The ABI uses integer result codes:
@@ -61,6 +64,12 @@ The buffer-returning functions are:
 - `wallet_abi_encode_signature` — Kernel/WebAuthn signature ABI bytes
 - `wallet_abi_encode_dummy_signature` — gas-estimation dummy signature ABI bytes
 - `wallet_encode_kernel_initialize_call` — Kernel `initialize(...)` calldata
+- `wallet_session_build_permission` — Kernel session permission enable and selector data
+- `wallet_session_sign_and_wrap` — Kernel session signature bytes for installed or enable mode
+- `wallet_session_dummy_signature` — gas-estimation dummy session signature bytes
+- `wallet_session_invalidate_nonce_calldata` — Kernel `invalidateNonce(...)` calldata
+- `wallet_session_empty_permission_deinit_data` — deinit data for empty session permissions
+- `wallet_session_uninstall_permission_calldata` — Kernel permission uninstall calldata
 
 Fixed-size pointer arguments use these buffer sizes:
 
@@ -71,6 +80,9 @@ Fixed-size pointer arguments use these buffer sizes:
 | user-op hash output | 32 |
 | signing preimage output | 69 |
 | P-256 `r` / `s` scalar | 32 |
+| session secret / user-op hash | 32 |
+| permission id | 4 |
+| nonce key output | 32 |
 
 See `src/lib.rs` for the canonical per-function size contracts.
 

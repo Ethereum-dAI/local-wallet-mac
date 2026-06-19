@@ -10,6 +10,7 @@ This package is the Apple-facing layer for:
 - Kernel/WebAuthn signature encoding
 - dummy Kernel/WebAuthn signature encoding for gas estimation
 - Kernel account initialization helpers and address prediction
+- Kernel session-permission composition, session signature wrapping, session dummy signatures, and permission revoke calldata
 
 ## Important Setup
 
@@ -51,7 +52,7 @@ For monorepo-style local development, copy `rust-core/.cargo/config.toml.example
 
 ## Call Flow
 
-Address prediction and UserOperation signing across the FFI boundary, including buffer ownership:
+Address prediction, UserOperation signing, and session-key helpers across the FFI boundary, including buffer ownership:
 
 ```mermaid
 sequenceDiagram
@@ -89,4 +90,22 @@ sequenceDiagram
     FFI-->>Bridge: WalletBuffer (signature)
     Bridge->>Hdr: wallet_buffer_free(buf)
     Bridge-->>App: signed UserOperation
+
+    App->>Bridge: sessionBuildPermission(configJSON)
+    Bridge->>Hdr: wallet_session_build_permission(...)
+    Hdr->>FFI: extern "C"
+    FFI->>Sig: build Kernel permission data
+    Sig-->>FFI: permission id, enable data, selector data, nonce keys
+    FFI-->>Bridge: fixed outputs + WalletBuffer values
+    Bridge->>Hdr: wallet_buffer_free(buf)
+    Bridge-->>App: SessionPermission
+
+    App->>Bridge: sessionSignAndWrap(secret, userOpHash, mode)
+    Bridge->>Hdr: wallet_session_sign_and_wrap(...)
+    Hdr->>FFI: extern "C"
+    FFI->>Sig: sign UserOperation hash and wrap Kernel session signature
+    Sig-->>FFI: encoded session signature
+    FFI-->>Bridge: WalletBuffer
+    Bridge->>Hdr: wallet_buffer_free(buf)
+    Bridge-->>App: session-signed UserOperation
 ```

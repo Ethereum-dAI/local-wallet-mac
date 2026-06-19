@@ -7,7 +7,7 @@ This is the macOS app repo. The current release line is **v0.1 alpha**: pre-1.0,
 - **Protocol SDK** (`wallet-signature`, `wallet-kernel`, `wallet-addresses`): https://github.com/Ethereum-dAI/local-wallet-protocol
 - **Daemon** (`wallet-node` and supporting crates): https://github.com/Ethereum-dAI/local-wallet-daemon
 
-The mac app handles key custody (Secure Enclave + Keychain) and delegates verified chain reads, ERC-4337 bundling, and receipt tracking to the daemon process. The FFI bridge in `rust-core/crates/ffi/` connects them in-process for deterministic crypto operations.
+The mac app handles key custody (Secure Enclave + Keychain), session-key policy state, and local transaction construction. It delegates verified chain reads, ERC-4337 bundling, and receipt tracking to the daemon process. The FFI bridge in `rust-core/crates/ffi/` connects them in-process for deterministic crypto and Kernel permission operations.
 
 This is not the final product wallet UX. Treat it as an experimental working implementation and reference app for early testers.
 
@@ -104,7 +104,7 @@ Two call paths originate in the Swift app:
 ```
 Swift app → swift-bridge → wallet-ffi (C ABI) → wallet-signature / wallet-kernel
 ```
-Covers: address prediction, UserOp hashing, WebAuthn preimage construction, signature encoding. Swift signs the 69-byte preimage with the Secure Enclave. CryptoKit hashes internally — pass the preimage, not the 32-byte digest. Buffers returned across FFI must be freed with `wallet_free_buffer` exactly once.
+Covers: address prediction, UserOp hashing, WebAuthn preimage construction, signature encoding, session-permission composition, session signature wrapping, dummy signatures for gas estimation, and Kernel permission revoke calldata. Swift signs the 69-byte passkey preimage with the Secure Enclave. CryptoKit hashes internally — pass the preimage, not the 32-byte digest. Session-key secrets stay in the macOS Keychain and never cross into Rust; buffers returned across FFI must be freed with `wallet_free_buffer` exactly once.
 
 **JSON-RPC to the daemon** (network/state/persistence):
 ```
@@ -121,7 +121,9 @@ The current demo exercises two complementary layers — wallet plumbing and a lo
 - Secure Enclave + Keychain key lifecycle
 - Kernel smart account address prediction
 - Sepolia account inspection over public RPC
-- Local UserOperation building for native ETH transfers, ERC-20 transfers, and exact-input Uniswap v3 swaps
+- Local UserOperation building for native ETH transfers, ERC-20 transfers, exact-input Uniswap v3 swaps, and approval+swap batches when ERC-20 input swaps need allowance
+- Session-key policy settings for ETH caps, ERC-20 token caps, SwapRouter02 approvals, rate limits, gas budget, session duration, and inactivity timeout
+- Touch ID approval to enable or revoke session-key permissions, with the first in-policy action lazily installing the permission on-chain when needed
 - Local `wallet-node` submission through the app-owned bundler EOA on Sepolia or mainnet
 - Local daemon integration for bundler EOA admin (rotate/export/delete), Helios-backed reads, gas estimation, submission, and receipt polling
 
@@ -130,7 +132,7 @@ The current demo exercises two complementary layers — wallet plumbing and a lo
 - On-device Gemma 4 E4B inference via `llama.cpp` (no network at inference time)
 - Streaming chat with thinking/reasoning disclosure, copy / regenerate / edit-and-resend on bubbles, stop button, code-block copy, and a smart auto-scroll that does not yank the user when scrolled up
 - SQLite-backed conversation history (`chat.sqlite` in Application Support), with delete / rename / date-bucketed sidebar
-- Tool intent recognition (transfer, swap) — natural language and `/transfer` / `/swap` slash commands surface an in-chat review card. Supported transfers and exact-input swaps can be confirmed, signed with Secure Enclave, submitted through local `wallet-node`, and summarized with Etherscan links.
+- Tool intent recognition (transfer, swap) — natural language and `/transfer` / `/swap` slash commands surface an in-chat review card. Supported transfers and exact-input swaps can be confirmed, signed with an active in-policy session key or with Secure Enclave passkey fallback, submitted through local `wallet-node`, and summarized with Etherscan links.
 - Per-card thumbs-up / thumbs-down feedback (with optional note) persisted to `chat.sqlite`, plus a "Download rankings" action in the chat-header gear menu that exports the captured intents as JSON
 - Inline slash autocomplete and a "Tools" popover in the footer with ready-to-edit command scaffolds
 - Onboarding flow for local model download, hardware inspection, and provisioning

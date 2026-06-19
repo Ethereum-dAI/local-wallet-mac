@@ -13,7 +13,7 @@ The other crates that were previously here have moved to sibling repositories:
 - **`local-wallet-protocol`** — `wallet-signature`, `wallet-kernel`, `wallet-addresses`. Stable, semver-managed libraries. No networking, no secrets, no FFI.
 - **`local-wallet-daemon`** — `wallet-node`, `wallet-bundler`, `wallet-chain`, `wallet-node-api`, `wallet-node-store`. App-coupled daemon stack, pre-1.0.
 
-`wallet-ffi` depends on `wallet-signature` and `wallet-kernel` via git deps (with optional path overrides for local development). See `Cargo.toml` for the pinned revisions.
+`wallet-ffi` depends on `wallet-signature` and `wallet-kernel` via git deps (with optional path overrides for local development). See `Cargo.toml` for the pinned revisions. Besides passkey UserOperation helpers, it exposes the Kernel session-permission helpers consumed by the macOS app for session-key enable, signing, estimation, and revoke flows.
 
 ## Build And Test
 

@@ -8,8 +8,9 @@ What this demo currently exercises:
 - public-key derivation and local wallet metadata persistence
 - precomputed Kernel smart-account address derivation
 - balance/deployment inspection on Ethereum Sepolia or mainnet
-- local ERC-4337 UserOperation building for native ETH transfers, ERC-20 transfers, and exact-input Uniswap v3 swaps
-- Secure Enclave signing + local `wallet-node` submission through the app-owned bundler EOA
+- local ERC-4337 UserOperation building for native ETH transfers, ERC-20 transfers, exact-input Uniswap v3 swaps, and approval+swap batches when ERC-20 input swaps need allowance
+- Secure Enclave passkey signing, session-key signing for in-policy actions, and local `wallet-node` submission through the app-owned bundler EOA
+- session-key policy controls for ETH caps, ERC-20 token caps, SwapRouter02 approvals, rate limits, gas budget, session duration, and inactivity timeout
 - debug logging for bootstrap, inspection, gas estimation, signing, submission, and receipt polling
 - on-device Gemma 4 E4B chat with streaming, tool intent recognition (transfer / swap), slash commands, and an in-chat review card — the chat layer is documented in [Chat layer](#chat-layer) and [Tool layer](#tool-layer) below
 
@@ -62,9 +63,23 @@ xcodegen generate
 - `BundlerClient.swift`
   - Legacy hosted ERC-4337 bundler RPC client retained for older composer paths. Chat-confirmed transfer and swap intents use local `wallet-node` instead.
 - `UserOperationBuilder.swift`
-  - Local draft construction for the current transaction intents.
+  - Local draft construction for the current transaction intents, including session-mode swap batches and ERC-20 approval+swap execution batches.
 - `UserOperationModels.swift`
   - Demo-side models for draft representation and bundler payload shaping.
+- `UserOperationSigning.swift`
+  - Selects passkey or session-key signing, wraps Kernel session signatures, and carries enable-mode session artifacts when the permission is not installed yet.
+- `SessionKeyStore.swift`
+  - Session-scoped secp256k1 secret storage in the macOS Keychain.
+- `SessionPolicyConfig.swift`
+  - Codable session policy settings, defaults, token caps, validation, and persisted session records.
+- `SessionEnableAssembler.swift`
+  - Builds Kernel permission config JSON, enable data, selector data, nonce keys, and the passkey-signed enable digest.
+- `SessionPolicyMirror.swift`
+  - Local preflight mirror for the configured session policy so out-of-policy intents fall back to passkey signing before submission.
+- `SessionRevokeAssembler.swift`
+  - Builds the Kernel permission uninstall execution used by session-key revoke.
+- `SessionSwapRouterRegistry.swift`
+  - Known Uniswap SwapRouter02 addresses accepted by the session policy on supported chains.
 - `DemoModels.swift`
   - View-model structs used by the current demo dashboard and transaction composer.
 - `DemoSettingsStore.swift`
@@ -103,7 +118,8 @@ xcodegen generate
 
 - Mainnet and Sepolia are the supported app chains.
 - The chat tool path supports native ETH transfers, ERC-20 transfers from the local token registry, and exact-input Uniswap v3 swaps.
-- ERC-20 input swaps require an existing allowance from the Kernel smart account to SwapRouter02. Approval UserOperations are intentionally not built yet, so the UI blocks those swaps with an "Approval required" state.
+- ERC-20 input swaps can include an approval+swap batch when allowance is missing. Session policy limits approvals to known SwapRouter02 spenders by default and caps approval amounts by token.
+- Session keys require a deployed Kernel account. If the account is not deployed, or if an intent is outside the active policy, the app falls back to Secure Enclave passkey approval.
 - The UI is intentionally a workbench/demo shell, not the final wallet interface.
 - Swap routing is intentionally local/on-chain only: the app asks `wallet-node` to query Uniswap v3 factory/pools/quoter through Helios-backed reads. No aggregator API or third-party quote service is used.
 

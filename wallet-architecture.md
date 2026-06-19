@@ -28,7 +28,7 @@ Version 5.4 \- Draft \- April 16, 2026
 
 3.1 Why Kernel smart accounts
 
-3.2 Step-up approval architecture
+3.2 Session signing architecture
 
 3.3 On-chain spending policy
 
@@ -38,7 +38,7 @@ Version 5.4 \- Draft \- April 16, 2026
 
 4.2 User root key \- secure enclave P-256
 
-4.3 LLM key and session permissions \- macOS Keychain
+4.3 Session key and session permissions \- macOS Keychain
 
 4.4 Bundler operator key \- macOS Keychain
 
@@ -74,9 +74,9 @@ Version 5.4 \- Draft \- April 16, 2026
 
 8.4 Restore and account discovery
 
-**9\. Step-Up Approval, Spending Limits, and Transaction Privacy**
+**9\. Session Policy, Spending Limits, and Transaction Privacy**
 
-9.1 Step-up approval and spending limit tiers
+9.1 Session policy and passkey fallback
 
 9.2 Pre-inclusion privacy: Flashbots Protect
 
@@ -118,16 +118,16 @@ This document describes the architecture and security design of a privacy-first,
 
 The wallet uses a P-256 key generated inside the device Secure Enclave as the sole ownership authority over the user's smart accounts. This key never materialises in application memory under any circumstances \- it signs inside hardware silicon and cannot be exported by any API. There is no seed phrase, no mnemonic backup, and no exportable root secret. Recovery from device loss is handled entirely on-chain via a pre-installed recovery module.
 
-On top of this hardware root of trust, the wallet runs an LLM agent that can act autonomously on behalf of the user \- sending transactions, interacting with DeFi protocols, and managing assets \- within a strict on-chain spending policy the user defines per account. The agent operates via a persistent LLM key with per-session permission grants that define what it can do and expire when the session closes. Above the policy threshold, every transaction requires explicit user approval via Touch ID. The LLM never has access to the root key, and prompt injection cannot break the spending limits because they are enforced by the smart contract, not by the application.
+On top of this hardware root of trust, the wallet runs an LLM agent that can prepare transactions and ask the user to confirm them. In-policy actions can be signed by a session-scoped secp256k1 key stored in the macOS Keychain; actions outside the configured policy fall back to explicit Secure Enclave passkey approval. The LLM never has access to the root key, and prompt injection cannot break the spending limits because the Kernel permission enforces the installed policy.
 
 Privacy is treated as a default, not a setting. The wallet runs entirely locally. Helios, the bundler, and the Tor client are compiled into the app binary. The LLM model is downloaded once at first launch and runs on-device. No transaction data, query history, or conversation context leaves the machine except as a signed Ethereum transaction submitted through Flashbots Protect over Tor. There are no external services, no hosted APIs, and no telemetry.
 
-The smart accounts are Kernel ERC-4337 contracts with a WebAuthn validator that verifies P-256 signatures on-chain via the EIP-7951 precompile. The stack is built in Rust with a Swift layer for Secure Enclave access on macOS. The Rust core is platform-agnostic and the security adapter layer is the only thing that changes per operating system.
+The smart accounts are Kernel ERC-4337 contracts with a WebAuthn validator that verifies P-256 signatures on-chain via the EIP-7951 precompile for root/passkey operations. Session-key operations use Kernel permission data approved by that root key and remain bounded by the installed policy. The stack is built in Rust with a Swift layer for Secure Enclave access on macOS. The Rust core is platform-agnostic and the security adapter layer is the only thing that changes per operating system.
 
 | Principle | How it is expressed in this design |
 | :---- | :---- |
 | Hardware root of trust | P-256 key generated in Secure Enclave. Never in RAM. No seed phrase. Software compromise cannot extract it. |
-| Bounded agent autonomy | LLM key bounded by on-chain spending policy. Step-up approval above threshold. Policy enforced by smart contract. |
+| Bounded agent autonomy | Session key bounded by on-chain spending policy. Out-of-policy actions fall back to Secure Enclave passkey approval. |
 | Privacy by default | Everything local. Helios, bundler, Tor compiled in. Flashbots Protect over Tor for submission. No external services. |
 | Honesty about limits | Session key and bundler key in Keychain are extractable by kernel exploit. Builder sees UserOperation calldata. Both documented explicitly. |
 | Minimal attack surface | Custom bundler, no third-party bundler code. LLM agent is untrusted. Prompt injection bounded at contract level. Supply chain controls on every dependency. |
@@ -309,74 +309,70 @@ A traditional EOA is controlled by a secp256k1 private key that exists in softwa
 | :---- | :---- | :---- |
 | Root key extractable | Yes \- secp256k1 exists in RAM or on disk, derivable from seed phrase | No \- P-256 key generated inside Secure Enclave, cannot be extracted by any software path including kernel exploits |
 | Root key compromise via software | Realistic threat | Eliminated by hardware design |
-| Session key compromised | N/A \- no session keys | Bounded by spending limit \+ expires on wallet close. Damage is contained and time-limited. |
+| Session key compromised | N/A \- no session keys | Bounded by spending limits, timers, and on-chain `validUntil`. Damage is contained and time-limited. |
 | Device loss without recovery module | Seed phrase covers this | Funds permanently inaccessible \- recovery module is the mitigation |
 | Programmable rules | None | Spending limits, timelocks, contract whitelists |
 | Key rotation without moving funds | Impossible | Possible \- replace authorized signer |
-| LLM agent integration | Agent needs direct key access | Agent uses step-up session key \- bounded by limit, never a co-equal owner |
-| Permission plugin cost | N/A | Zero \- off-chain authorization, no on-chain tx |
+| LLM agent integration | Agent needs direct key access | Agent uses a bounded session key for approved in-policy actions; passkey approval remains the fallback |
+| Permission plugin cost | N/A | No standalone enable transaction; permission install data can be bundled with the first session UserOperation |
 
-## **3.2 Step-up approval architecture**
+## **3.2 Session signing architecture**
 
-| Property | User Key (per-account owner) | LLM key (step-up threshold) |
+| Property | User Key (per-account owner) | Session key (assistant signing path) |
 | :---- | :---- | :---- |
-| Purpose | Owner of each individual Kernel account | Routine autonomous agent operations within spending limit |
-| Storage | Secure Enclave P-256 (CryptoKit) | macOS Keychain, secp256k1 |
+| Purpose | Owner of each individual Kernel account | Approved transfer and swap actions inside the active session policy |
+| Storage | Secure Enclave P-256 (CryptoKit) | macOS Keychain generic password, secp256k1, scoped by chain and account |
 | Access control | biometryCurrentSet \- Touch ID required | None \- silent reads by signing module. No Touch ID. |
-| Authorization | Permanent signer on Kernel contract | Off-chain signed message, timestamp-bounded |
-| On-chain registration | Yes \- permanent | No \- verified at execution time only |
+| Authorization | Permanent signer on Kernel contract | Passkey-signed enable digest plus Kernel permission data |
+| On-chain registration | Yes \- permanent | Lazily installed with the first session-signed UserOperation, then reused until expiry or revoke |
 | Spending authority | Unlimited | Bounded by session authorization policy |
-| Lifespan | Permanent until explicitly rotated | One wallet session \- deleted on close |
-| Gas cost to rotate | Small on-chain tx | Zero \- just open a new session |
+| Lifespan | Permanent until explicitly rotated | Session-scoped; persisted while active, deleted on local expiry or revoke |
+| Gas cost to rotate | Small on-chain tx | No standalone enable tx; first session UserOperation carries enable data. Revoke is an on-chain UserOperation. |
 | Compromise blast radius | Not applicable \- P-256 key is hardware-bound, software extraction impossible | Capped at session spending limit, expires automatically |
 
 ## **3.3 On-chain spending policy**
 
-Spending rules are encoded in the permission plugin installed by the root key at session open. The Kernel contract enforces them at execution time. They cannot be bypassed by the LLM, UI, or signing module.
+Spending rules are encoded in the Kernel permission data approved by the root key. The app stores that session record locally, and the first in-policy session-signed UserOperation can install the permission on-chain in enable mode. Once installed, later in-policy UserOperations use the installed permission mode. Rules cannot be bypassed by the LLM, UI, or signing module.
 
 **Example session authorization:**
 
-SessionKeyAuthorization {
+SessionPermissionConfig {
 
-  signer: LLM secp256k1 key (persistent Keychain key)
+  account: Kernel account address
 
-  validAfter:  now
+  chainId: active chain
 
-  validUntil:  now \+ 8h
+  sessionKey: session secp256k1 signer address
 
-  permissions: \[
+  validUntil: now \+ session duration
 
-   {
+  gasBudgetWei: 0.05 ETH default
 
-     contract:  USDC\_ADDRESS,
+  rateLimitCount: 20 default
 
-     function:  transfer,
+  rateLimitIntervalSec: 24h default
 
-     maxPerTx:  50 USDC,
+  allowedCalls: [
 
-     maxPerDay: 200 USDC,
+    native ETH transfer up to per-action ETH cap when enabled
 
-   }
+    known ERC-20 transfer up to per-token cap
 
-  \]
+    known ERC-20 approve up to per-token cap, SwapRouter02 only by default
 
-  ethTransfers:    NEVER
+    Uniswap SwapRouter02 exact-input swap with recipient and amount rules
 
-  nftTransfers:    NEVER
-
-  newContracts:    NEVER
-
-  whitelistedContracts: \[USDC, DAI, WETH\]
+  ]
 
 }
 
-// Signed by user key (Touch ID) at session open
+// Enable digest signed by user key (Touch ID)
 
-// Verified by Kernel contract at every tx execution
+// Permission installed lazily by the first in-policy session UserOperation
 
-// Cannot be modified during session
+// Kernel validates policy at every UserOperation execution
 
-| Prompt injection boundary A fully successful prompt injection that compromises the LLM agent is still bounded by the step-up threshold. The attacker cannot exceed per-tx or daily limits, cannot touch ETH or NFTs, cannot interact with non-whitelisted contracts, and the permission plugin expires on wallet close. |
+| Prompt injection boundary A fully successful prompt injection that compromises the LLM agent is still bounded by the active session policy. The attacker cannot exceed per-action token caps, rate limits, gas budget, timer bounds, or allowed contract/function rules. Actions outside policy fall back to passkey approval instead of session signing. |
 | :---- |
 
 # **4\. Key Architecture**
@@ -388,10 +384,10 @@ The wallet uses three distinct keys with different roles, storage locations, and
 | Key | Type | Storage | Role | Extractable |
 | :---- | :---- | :---- | :---- | :---- |
 | User root key | P-256 (secp256r1) | Secure Enclave (CryptoKit) | Signs UserOperations, authorizes account changes, recovery root | No \- hardware enforced |
-| LLM key | secp256k1 | macOS Keychain (same as bundler key) | Routine LLM transactions within spending policy | Yes \- bounded by on-chain spending policy |
+| Session key | secp256k1 | macOS Keychain (same storage class as bundler key) | Approved assistant transactions within session policy | Yes \- bounded by on-chain spending policy |
 | Bundler operator key | secp256k1 | macOS Keychain | Signs handleOps() wrapper tx to pay gas | Yes \- but can only drain gas float, not funds |
 
-| Key insight: only the root key controls funds The bundler key signs the Ethereum transaction that submits the bundle but cannot authorize any UserOperation. An attacker who steals the bundler key can drain only the gas float (a small operational amount). The Kernel contract's WebAuthn validator enforces that every UserOperation requires a valid P-256 signature from the Secure Enclave root key. No secp256k1 EOA holds authority over the Smart Account. |
+| Key insight: only the root key controls unrestricted authority The bundler key signs the Ethereum transaction that submits the bundle but cannot authorize any UserOperation. An attacker who steals the bundler key can drain only the gas float. The Secure Enclave root key approves account ownership and session permissions; session-key UserOperations are bounded by Kernel policy. No secp256k1 EOA has unrestricted authority over the Smart Account. |
 | :---- |
 
 ## **4.2 User root key \- secure enclave P-256**
@@ -445,9 +441,9 @@ EIP-7702 allows an EOA to delegate execution logic to a smart contract. The crit
 | Smart account bypass | Not possible | Yes \- via raw EOA key |
 | First-use gas cost | \~200k gas (deployment) | \~25k gas (delegation tx) |
 
-## **4.3 LLM key and session permissions \- macOS Keychain**
+## **4.3 Session key and session permissions \- macOS Keychain**
 
-The LLM key is a persistent secp256k1 key stored in the macOS Keychain. It is the signer within a Kernel permission plugin (regular validator). The key itself does not change each session \- what changes is the permission configuration: the policies, spending limits, and expiry timestamp. The key is only regenerated if it is compromised.
+The session key is a secp256k1 secret stored in the macOS Keychain as a generic password. It is scoped by chain and Kernel account address, and it signs UserOperations only when the active intent is inside the saved session policy. The app creates the key when the user enables session keys for a deployed account, stores a passkey-approved permission record locally, and deletes the key when the session expires locally or revoke is confirmed.
 
 | Property | Value |
 | :---- | :---- |
@@ -455,58 +451,58 @@ The LLM key is a persistent secp256k1 key stored in the macOS Keychain. It is th
 | Accessibility | kSecAttrAccessibleWhenUnlockedThisDeviceOnly |
 | Access control | None \- silent reads by signing module. No Touch ID. |
 | Curve | secp256k1 |
-| Lifespan | Persistent \- survives sessions. Regenerated only if compromised. |
-| Autonomous operation | Yes \- LLM can sign without user interaction |
+| Lifespan | Session-scoped \- persists while the local session record is active, then deleted on expiry or revoke |
+| Autonomous operation | Yes for approved in-policy transfer and swap actions |
 | If compromised | Attacker bounded by on-chain spending policy. Key expires at session end. |
 
-**Session open:**
+**Enable session keys:**
 
-* LLM key already in Keychain \- no new key generated
+* App requires the Kernel account to be deployed
 
-* Root key (Touch ID) installs or updates the Kernel permission plugin for this session
+* App creates or reads the account-scoped session key from Keychain
 
-* Root key (Touch ID) signs off-chain session authorization
+* App reads Kernel `currentNonce`
 
-* validAfter: now
+* App builds Kernel permission config JSON, enable data, selector data, default nonce key, and enable-mode nonce key
 
-* validUntil: now \+ max session duration (configurable, default 8h)
+* Root key (Touch ID) signs the permission enable digest
 
-* policyVersion: current on-chain policy version
+* App stores the session record locally and marks session signing enabled
 
-* revocationNonce: current on-chain revocation counter
-
-* Authorization stored in signing module memory only \- never written to disk
-
-* Zero gas cost \- nothing hits the chain at session start
+* No standalone enable transaction is sent. The first approved in-policy action installs the permission on-chain in enable mode.
 
 **During session:**
 
-* LLM calls sign\_transaction tool \- never sees the key directly
+* Chat or slash command produces a transfer or swap intent
 
-* Signing module reads LLM key from Keychain silently \- no Touch ID
+* App mirrors the session policy locally. If the intent is outside policy, missing data, expired, inactive, or pending revoke, the app falls back to passkey approval
 
-* Checks on-chain policy, loads key into locked memory page
+* In-policy intent uses the session key silently from Keychain
 
-* Signs UserOperation, explicit\_bzero immediately after
+* First session-signed UserOperation uses enable mode and carries enable data, selector data, and enable signature
+
+* Later session-signed UserOperations use installed mode after the install receipt is observed
+
+* Swap UserOperations can include ERC-20 approval calls before the swap when allowance is missing
 
 * Bundler signs handleOps() transaction and submits via Flashbots Protect over Tor
 
-* Only actual transactions cost gas \- key management is free
+* Only submitted UserOperations cost gas. Session enable is bundled with the first in-policy action, not sent as a separate transaction.
 
-**Session end (wallet closes or inactivity timeout):**
+**Session end or revoke:**
 
-* LLM key remains in Keychain \- permission plugin expires via validUntil timestamp
+* Local expiry removes the session record, disables local session signing, and deletes the Keychain session secret
 
-* Authorization discarded from signing module memory
+* On-chain `validUntil` is the fallback boundary if the app does not clean up local state
 
-* Next open: root key (Touch ID) installs new permission plugin with updated time bounds and policies
+* Explicit revoke submits a passkey-signed UserOperation that uninstalls the Kernel permission, then clears local session state after receipt
 
 | Expiry Mechanism | What it does | Trigger |
 | :---- | :---- | :---- |
-| Keychain deletion | Permission plugin validUntil \- Kernel contract rejects further LLM UserOps after expiry. Primary on-chain boundary. | Wallet closes / inactivity timeout |
-| Authorization timestamp | Kernel contract rejects expired auth \- belt-and-suspenders fallback. | validUntil timestamp passes |
-| Policy version check | Kernel rejects auth with stale policyVersion \- policy edits take effect immediately. | User edits account policy |
-| Revocation nonce | Kernel rejects auth if nonce changed \- panic button for immediate revocation. | User explicitly revokes |
+| Keychain deletion | App cannot read the local session key, so silent signing stops. | Local duration or inactivity expiry |
+| Permission timestamp | Kernel rejects expired session UserOperations after `validUntil`. | Session duration passes |
+| Local policy mirror | App refuses session signing and falls back to passkey before submission. | Intent is outside configured policy |
+| Permission uninstall | Kernel permission is removed on-chain. | User explicitly revokes |
 
 ## **4.4 Bundler operator key \- macOS Keychain**
 
@@ -554,7 +550,7 @@ The system is split into three independent process tiers. A compromise in any si
 
 │ enforces session spending policy    │ network: NONE
 
-│ manages LLM key permission lifecycle      │ file: one encrypted key path
+│ manages session key permission lifecycle  │ file: account-scoped key path
 
 │ unwrap → sign → zero → return sig only │ no external calls ever
 
@@ -716,15 +712,15 @@ Account separation is by Kernel contract address, not by key.
 
 ## **8.2 Session key across accounts**
 
-* One persistent LLM key, with per-session permission plugins installed on each Kernel account
+* One session key record per chain and Kernel account address
 
 * Each Kernel contract enforces its own spending policy independently
 
-* The LLM key is the signer within a permission plugin \- per-account limits are on-chain per contract
+* The session key is the signer within a Kernel permission \- per-account limits are encoded in that permission
 
-* A savings account can have zero LLM spending authority regardless of LLM key
+* An account can disable native transfers, ERC-20 transfers, approvals, or swaps independently
 
-| Per-account policy is the source of truth Per-account policy is the durable on-chain rule set, versioned. Session authorization is a time-bounded delegation referencing the current policyVersion. Policy edits increment policyVersion immediately invalidating existing sessions. The user configures policy at account creation, not every session. |
+| Per-account policy is the source of truth The app stores a policy snapshot in each session record and mirrors it before signing. The Kernel permission is the on-chain enforcement boundary once installed. Editing policy affects the next session-key enable flow; actions outside the current snapshot fall back to passkey approval. |
 | :---- |
 
 ## **8.3 Account creation**
@@ -741,10 +737,10 @@ Account separation is by Kernel contract address, not by key.
 
 **Example account types:**
 
-| Account | LLM Spending Authority | Use Case |
+| Account | Session Signing Authority | Use Case |
 | :---- | :---- | :---- |
-| Daily | 50 USDC per tx, 200 USDC per day | General LLM agent operations |
-| DeFi | Higher limits, whitelisted protocols only | DeFi interactions via agent |
+| Daily | Moderate token caps and session duration | General assistant operations |
+| DeFi | Higher token caps, router-limited approvals and swaps | DeFi interactions via assistant |
 | Savings | None \- user key required for everything | Long-term holdings, maximum security |
 | Business | Separate limits and whitelist | Separate on-chain identity and history |
 
@@ -783,28 +779,32 @@ New Enclave key installed as owner. Rename accounts to continue.
 | Privacy note All accounts share one P-256 Enclave root key as owner. Account separation is by contract address only \- the root key itself is not visible on-chain. Behavioral analysis across accounts is possible if both addresses are shared publicly with the same counterparties \- this is true of any multi-account wallet. |
 | :---- |
 
-# **9\. Step-Up Approval, Spending Limits, and Transaction Privacy**
+# **9\. Session Policy, Spending Limits, and Transaction Privacy**
 
-## **9.1 Step-up approval and spending limit tiers**
+## **9.1 Session policy and passkey fallback**
 
-The LLM key signs transactions freely below the configured threshold. Above the threshold, the Kernel contract requires the user key as an additional co-signature \- step-up approval. Tiers are stored as durable per-account policy on-chain. Session authorization at session open is a separate time-bounded delegation referencing the current policy version, not a re-encoding of the policy.
+The session key signs only actions inside the active policy snapshot. Anything outside the policy uses the passkey path, which asks the user for Secure Enclave approval and signs with the root key. The current app implements fallback rather than a two-signature co-signature flow.
 
-| Tier | Max Per Transaction | Max Per Day | Best For |
-| :---- | :---- | :---- | :---- |
-| Conservative | 10 USDC | 50 USDC | Savings accounts, low-trust LLM operations |
-| Standard (default) | 50 USDC | 200 USDC | Daily use, general agent operations |
-| Active | 200 USDC | 1000 USDC | DeFi operations, higher-volume agent use |
-| Custom | User defined | User defined | Power users with specific requirements |
+| Policy knob | Default | Enforcement |
+| :---- | :---- | :---- |
+| ETH transfers | Enabled, 0.1 ETH per action | Native transfer value and ETH input sent to SwapRouter02 |
+| ERC-20 transfers | Enabled for known token list | Per-token transfer amount cap |
+| ERC-20 approvals | SwapRouter02 only | Approval spender and approval amount cap |
+| Swaps | Enabled for known Uniswap SwapRouter02 addresses | Router, recipient, input amount, and token scope |
+| Rate limit | 20 actions per 24h | Local mirror before signing and Kernel permission data |
+| Gas budget | 0.05 ETH | Kernel permission data |
+| Session duration | 8h default, 4h to 24h options | Local expiry plus on-chain `validUntil` |
+| Inactivity timeout | 1h default, 10m to 4h | Local session cleanup |
 
-* ETH transfers: never permitted for LLM key regardless of tier
+* ETH transfers: permitted only when enabled and under the ETH cap
 
-* NFT transfers: never permitted for LLM key regardless of tier
+* NFT transfers: never permitted for session key regardless of policy
 
-* New contract interactions: never permitted for LLM key regardless of tier
+* New contract interactions: never permitted for session key regardless of policy
 
-* Contract whitelist: defaults to top DeFi protocols, editable per account
+* Contract whitelist: known local token registry plus known Uniswap SwapRouter02 addresses
 
-* Savings account preset: LLM key has zero spending authority \- user key required for everything
+* Disabled policy surfaces: passkey approval required
 
 ## **9.2 Pre-inclusion privacy: Flashbots Protect**
 
@@ -842,7 +842,7 @@ Flashbots Protect is the default transaction submission path. It routes transact
 
 # **10\. Session Duration Policy**
 
-Two independent timers run concurrently. Whichever fires first ends the session. The LLM key remains in the Keychain but the permission plugin expires \- the Kernel contract rejects any further LLM UserOps. A new Touch ID is required to install a fresh permission plugin for the next session.
+Two independent timers run concurrently. Whichever fires first ends local session signing. The app removes the local session record and deletes the Keychain session key when it observes expiry. The Kernel permission's `validUntil` timestamp is the on-chain fallback, so expired session UserOperations are rejected even if local cleanup did not run.
 
 ## **10.1 Timer configuration**
 
@@ -859,22 +859,22 @@ Two independent timers run concurrently. Whichever fires first ends the session.
 | Action | Resets Timer |
 | :---- | :---- |
 | UI interaction \- any user input | Yes |
-| LLM agent signing a transaction | Yes |
+| Session-key signing a transaction | Yes |
 | Background price feed update | No |
 | Passive balance or state check | No |
 | Network sync via Helios | No |
 
 ## **10.3 Session end behavior**
 
-* LLM key remains in Keychain \- permission plugin expires via validUntil timestamp immediately
+* Local session record is removed and local session signing is disabled
 
-* Authorization discarded from signing module memory
+* Keychain session key is deleted
 
-* LLM agent paused \- cannot sign until new session opened
+* Assistant actions outside a new active session require passkey approval
 
 * UI shows session expired prompt
 
-* New session requires Touch ID \- root key installs fresh permission plugin with new expiry and policies
+* New session requires Touch ID to approve a fresh session permission; first in-policy action installs it on-chain if needed
 
 # **11\. UI and Platform Architecture**
 
@@ -992,14 +992,14 @@ What the architecture does NOT protect against. Honesty about limitations is a d
 
 | Limitation | Why | Mitigation / Acceptance |
 | :---- | :---- | :---- |
-| LLM key briefly in RAM at signing | Keychain key read into locked memory page at signing | explicit\_bzero after signing. Blast radius bounded by per-session permission policy. Permission plugin expires at session end. |
+| Session key briefly in RAM at signing | Keychain key read into app memory at signing | Blast radius bounded by per-session permission policy. Local expiry deletes the key, and the Kernel permission expires via `validUntil`. |
 | RPC query privacy | Helios verifies correctness but RPC sees your IP and queries | Per-session RPC rotation via Helios, Tor for Flashbots submission |
 | Builder sees UserOperation | The handleOps() calldata is readable by the Flashbots builder before inclusion | Tor hides IP. Hash-only hints limit searcher metadata. Builder trust is unavoidable without encrypted mempool (future: Aztec). |
-| Kernel-level OS compromise | Session key and bundler key in Keychain can be extracted by a kernel exploit. Root P-256 key in Secure Enclave is protected even from kernel exploits. | LLM key blast radius bounded by per-session permission policy. Bundler key only loses gas float. Root key hardware-protected. Accepted residual risk. |
+| Kernel-level OS compromise | Session key and bundler key in Keychain can be extracted by a kernel exploit. Root P-256 key in Secure Enclave is protected even from kernel exploits. | Session key blast radius bounded by per-session permission policy. Bundler key only loses gas float. Root key hardware-protected. Accepted residual risk. |
 | Smart contract vulnerability | Kernel contract could have bugs | Use only audited releases, monitor security advisories |
 | Supply chain risk | Cargo dependencies are third-party code | Pin all hashes in Cargo.lock, minimize deps, audit critical crates |
 | Timing / side-channel | Rust memory safety is not constant-time | subtle crate, k256 constant-time signing, explicit audit |
-| LLM key extractable | Session key is secp256k1 in Keychain. OS compromise can extract it. | Accepted. Blast radius bounded by per-session permission policy. Permission plugin expires at session end. Root P-256 key in Enclave unaffected. |
+| Session key extractable | Session key is secp256k1 in Keychain. OS compromise can extract it. | Accepted. Blast radius bounded by per-session permission policy. Permission plugin expires via `validUntil`. Root P-256 key in Enclave unaffected. |
 
 # **14\. Tech Stack**
 
@@ -1011,7 +1011,7 @@ What the architecture does NOT protect against. Honesty about limitations is a d
 | Constant-time ops | subtle crate | Prevents timing side-channel attacks |
 | Policy engine | Rust (custom) | No external deps \- critical path, minimal attack surface |
 | Smart account | Kernel (ERC-4337) | Audited, session keys via Kernel WebAuthn validator module, off-chain authorization |
-| Session keys | Kernel WebAuthn validator \+ session key plugin | Audited module, off-chain authorization \- zero rotation gas cost |
+| Session keys | Kernel WebAuthn validator \+ session key plugin | Audited module. Enable data can be bundled into the first session UserOperation; revoke is an on-chain UserOperation. |
 | Light client | Helios Rust SDK (compiled into app) | Cryptographic verification, fast sync. Not downloaded at runtime. |
 | Local bundler | Custom bundler (Rust, compiled into app) | Localhost only. Compiled in \- not downloaded at runtime. |
 | Tor | arti Rust crate (compiled in) | Official Tor Project Rust implementation. No binary download, no subprocess. |
@@ -1047,15 +1047,15 @@ Closed decisions and reasoning. Do not reopen without strong justification.
 | :---- | :---- | :---- |
 | Chain scope | Ethereum only (Phase 1\) | Enables ERC-4337 \+ Kernel \+ EIP-7951 stack. Avoids multi-chain complexity. Kernel WebAuthn validator available on EVM chains. |
 | Account model | Kernel smart account (ERC-4337) | Audited by ChainLight and Kalos. 6 million+ accounts. Native WebAuthn/P-256 validator required for Secure Enclave signing via EIP-7951. |
-| Approval model | Step-up approval. Session key signs below limit. User key co-signs above limit. | One owner (user key), one session-scoped signer (LLM key). Tiered authorization, not shared custody. |
-| Policy model | Per-account policy is source of truth. Session auth is a separate time-bounded delegation referencing policyVersion and revocationNonce. | Policy edit increments policyVersion on-chain, immediately invalidating existing sessions. revocationNonce is a panic button. Kernel contract enforces both at tx execution time. |
+| Approval model | Session key signs in-policy actions. Out-of-policy actions use passkey approval. | One owner (user key), one session-scoped signer. The current app uses fallback, not co-signing. |
+| Policy model | Session policy snapshot is stored locally and encoded into Kernel permission data. | App mirrors policy before signing; Kernel enforces the installed permission at execution time. |
 | Restore metadata model | On-chain state always recoverable. Local metadata (names, labels) may be lost. Fallback: Account 1, Account 2 etc. | Funds, signer state, policy, installed modules all on-chain. Display names are local-only. Encrypted metadata backup export deferred to Phase 2\. |
 | Module versioning on restore | Kernel version and installed modules read from chain at restore. Only compatible features offered. | Social recovery and future modules recoverable only if installed before device loss. Cannot be added retroactively without user key. |
-| Session key cost | Zero \- off-chain authorization | Kernel validates signed auth at tx time. No on-chain addOwner/removeOwner needed. |
-| Session key lifespan | One wallet session \- deleted on close | Fresh key per session. Compromised old session key is cryptographically useless. |
-| Expiry mechanism | Keychain deletion (primary) \+ timestamp (fallback) \+ policyVersion \+ revocationNonce | Keychain deletion is the local boundary. Timestamp is on-chain fallback. policyVersion and revocationNonce provide immediate on-chain revocation. Multiple independent layers. |
-| LLM key access | Via signing module tool only. Session key in Keychain, read by signing module only. | LLM cannot access Keychain directly. Only signing module process reads the session key. |
-| LLM key storage | macOS Keychain \- same model as bundler key. Silent reads, no Touch ID. | Security relies on on-chain spending policy not key storage. Bounded blast radius. Expires at session end. |
+| Session key cost | No standalone enable transaction. | The first in-policy session UserOperation carries enable data if the permission is not installed yet. Explicit revoke submits an on-chain UserOperation. |
+| Session key lifespan | Active session record \- deleted on local expiry or revoke. | Compromised old session key becomes useless after local deletion or on-chain `validUntil` expiry. |
+| Expiry mechanism | Keychain deletion (local) \+ `validUntil` (on-chain fallback) \+ permission uninstall on revoke. | Multiple independent layers stop silent signing locally and reject expired session UserOperations on-chain. |
+| Session key access | Via signing module tool only. Session key in Keychain, read by signing module only. | LLM cannot access Keychain directly. Only signing module process reads the session key. |
+| Session key storage | macOS Keychain \- same storage class as bundler key. Silent reads, no Touch ID. | Security relies on on-chain spending policy not key storage. Bounded blast radius. Expires at session end. |
 | Spending policy location | On-chain (Kernel contract) | Cannot be bypassed by UI, LLM, or signing module compromise. |
 | Rust for crypto core | Yes \- permanent investment | Memory safety, portability. Only platform adapter changes per OS. |
 | Self-enclosed default | Yes \- no external services at all | Privacy-first means local only. No hosted fallbacks are offered. |
@@ -1070,7 +1070,7 @@ Closed decisions and reasoning. Do not reopen without strong justification.
 | Multi-account | One P-256 Enclave key owns all accounts. Separation by CREATE2 contract address with unique salt per account. | No BIP-32 derivation. No mnemonic. Root key compromise affects all accounts simultaneously \- recovery module is the mitigation. |
 | Smart contract choice | Kernel | Kernel native WebAuthn/P-256 validator required for Secure Enclave signing. EIP-7951 on mainnet since Fusaka (Dec 2025). |
 | Apple key protection model | Model 1 (enclave-resident signing) for root key. EIP-7951 live on mainnet since Fusaka (Dec 2025). | Root P-256 key signs directly in Enclave. Never in RAM. secp256k1 eliminated for root key. Session key uses Model 2 \- acceptable given bounded blast radius. |
-| Spending limits | Four preset tiers: Conservative / Standard / Active / Custom. Configured per account at creation. | On-chain enforcement via Kernel contract. ETH, NFTs, new contracts never permitted for session key regardless of tier. |
+| Spending limits | User-configurable ETH cap, ERC-20 token caps, approval scope, rate limit, gas budget, duration, and inactivity timeout. | On-chain enforcement via Kernel permission plus local preflight mirror. Native ETH is allowed only when enabled and under cap; NFTs and unknown contracts remain out of policy. |
 | MEV protection | Flashbots Protect via Tor, hash-only hints. Signed handleOps() tx not raw UserOp. | Builder sees UserOp in calldata \- honest limit of pre-inclusion privacy. No automatic public fallback. User prompted after 25 blocks. |
 | Full on-chain privacy | Aztec deferred \- not production ready. Designed as future opt-in mode. | Aztec solves the on-chain record problem. Flashbots only solves pre-inclusion. Both needed for full privacy. |
 | Session duration | User adjustable: 4h/8h/12h/16h/20h/24h, default 8h | Hard ceiling varies by user preference. Both timers run concurrently, first to fire ends the session. |
@@ -1080,4 +1080,3 @@ Closed decisions and reasoning. Do not reopen without strong justification.
 | Linux sandboxing | Deferred to Phase 3 \- out of scope for Phase 1 | Separate engineering problem. D-Bus \+ seccomp \+ namespaces when actively planned. |
 | Paymaster | Not offered | Gas sponsorship requires external trust. User pays own gas always. |
 | Hosted LLM | Not offered | Provider would see all conversation and tx context. No hosted option exists. |
-

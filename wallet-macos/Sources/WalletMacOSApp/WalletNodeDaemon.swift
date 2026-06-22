@@ -141,6 +141,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
         bundlerSecret: BundlerSecretRecord,
         chain: ChainConfiguration,
         gasPolicy: GasPolicy,
+        heliosVerificationEnabled: Bool = true,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) async throws -> WalletNodeDaemon {
         try await Task.detached(priority: .userInitiated) {
@@ -148,6 +149,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
                 bundlerSecret: bundlerSecret,
                 chain: chain,
                 gasPolicy: gasPolicy,
+                heliosVerificationEnabled: heliosVerificationEnabled,
                 environment: environment
             )
         }.value
@@ -157,10 +159,15 @@ final class WalletNodeDaemon: @unchecked Sendable {
         bundlerSecret: BundlerSecretRecord,
         chain: ChainConfiguration,
         gasPolicy: GasPolicy,
+        heliosVerificationEnabled: Bool,
         environment: [String: String]
     ) throws -> WalletNodeDaemon {
         let execPath = try resolveExecutablePath(environment: environment)
-        try writeDaemonConfig(chain: chain, gasPolicy: gasPolicy)
+        try writeDaemonConfig(
+            chain: chain,
+            gasPolicy: gasPolicy,
+            heliosVerificationEnabled: heliosVerificationEnabled
+        )
 
         var readyPipe: [Int32] = [-1, -1]
         var alivePipe: [Int32] = [-1, -1]
@@ -256,7 +263,11 @@ final class WalletNodeDaemon: @unchecked Sendable {
             .path
     }
 
-    private static func writeDaemonConfig(chain: ChainConfiguration, gasPolicy: GasPolicy) throws {
+    private static func writeDaemonConfig(
+        chain: ChainConfiguration,
+        gasPolicy: GasPolicy,
+        heliosVerificationEnabled: Bool
+    ) throws {
         let directory = try daemonSupportDirectory()
         try FileManager.default.createDirectory(
             at: directory,
@@ -264,7 +275,12 @@ final class WalletNodeDaemon: @unchecked Sendable {
             attributes: [.posixPermissions: 0o700]
         )
         let configURL = directory.appendingPathComponent("config.toml")
-        try daemonConfigTOML(chain: chain, gasPolicy: gasPolicy).write(to: configURL, atomically: true, encoding: .utf8)
+        try daemonConfigTOML(
+            chain: chain,
+            gasPolicy: gasPolicy,
+            heliosVerificationEnabled: heliosVerificationEnabled
+        )
+        .write(to: configURL, atomically: true, encoding: .utf8)
     }
 
     static func managedLogFileURL(fileManager: FileManager = .default) -> URL? {
@@ -310,15 +326,21 @@ final class WalletNodeDaemon: @unchecked Sendable {
         daemonConfigTOML(chain: chain, gasPolicy: gasPolicy(for: chain))
     }
 
-    static func daemonConfigTOML(chain: ChainConfiguration, gasPolicy: GasPolicy) -> String {
+    static func daemonConfigTOML(
+        chain: ChainConfiguration,
+        gasPolicy: GasPolicy,
+        heliosVerificationEnabled: Bool = true
+    ) -> String {
         let executionRPC = tomlEscaped(chain.rpcURL.absoluteString)
         let consensusRPC = tomlEscaped(chain.consensusRPCURL.absoluteString)
         let entryPoint = tomlEscaped(chain.entryPoint)
+        let readVerification = heliosVerificationEnabled ? "helios" : "execution_rpc"
         return """
         [network]
         chain_id = \(chain.id)
         execution_rpc = "\(executionRPC)"
         consensus_rpc = "\(consensusRPC)"
+        read_verification = "\(readVerification)"
 
         [bundler]
         entry_points = ["\(entryPoint)"]

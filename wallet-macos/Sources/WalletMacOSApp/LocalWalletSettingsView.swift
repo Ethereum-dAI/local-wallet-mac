@@ -793,6 +793,19 @@ struct LocalWalletSettingsView: View {
                         text: activeConsensusRPCBinding
                     )
                     VStack(alignment: .leading, spacing: 8) {
+                        Toggle(isOn: $networkDraft.heliosVerificationEnabled) {
+                            Text("Verify reads with Helios")
+                                .font(.system(size: 13, weight: .bold))
+                        }
+                        Text(
+                            networkDraft.heliosVerificationEnabled
+                                ? "Read calls use Helios with the configured consensus RPC."
+                                : "Read calls use the execution RPC directly."
+                        )
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
                         Toggle(isOn: $networkDraft.autoGasModeEnabled) {
                             Text("Automatic gas pricing")
                                 .font(.system(size: 13, weight: .bold))
@@ -879,6 +892,10 @@ struct LocalWalletSettingsView: View {
                     SettingsKeyValue(title: "Execution RPC", value: snapshot.executionRPCURL),
                     SettingsKeyValue(title: "Helios archive node", value: snapshot.archiveNodeURL),
                     SettingsKeyValue(title: "Consensus RPC", value: snapshot.consensusRPCURL),
+                    SettingsKeyValue(
+                        title: "Read verification",
+                        value: snapshot.networkSettings.heliosVerificationEnabled ? "Helios" : "Execution RPC"
+                    ),
                     SettingsKeyValue(title: "Max fee cap", value: snapshot.maxFeePerGasCap),
                     SettingsKeyValue(title: "Priority fee cap", value: snapshot.maxPriorityFeePerGasCap),
                     SettingsKeyValue(title: "EntryPoint", value: snapshot.entryPointAddress),
@@ -1057,6 +1074,10 @@ struct LocalWalletSettingsView: View {
                     SettingsKeyValue(title: "Execution RPC", value: snapshot.executionRPCURL),
                     SettingsKeyValue(title: "Helios archive node", value: snapshot.archiveNodeURL),
                     SettingsKeyValue(title: "Consensus RPC", value: snapshot.consensusRPCURL),
+                    SettingsKeyValue(
+                        title: "Read verification",
+                        value: snapshot.networkSettings.heliosVerificationEnabled ? "Helios" : "Execution RPC"
+                    ),
                     SettingsKeyValue(title: "wallet-node", value: snapshot.walletNodeMode),
                     SettingsKeyValue(title: "Relayer message", value: snapshot.relayerMessage),
                     SettingsKeyValue(title: "Bridge status", value: snapshot.bridgeStatus),

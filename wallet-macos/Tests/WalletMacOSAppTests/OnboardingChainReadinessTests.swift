@@ -22,6 +22,10 @@ import Testing
         "status": "verified_reads_ready",
         "chainId": 11_155_111,
         "networkProfile": "sepolia",
+        "readVerification": [
+            "mode": "helios",
+            "verified": true,
+        ],
         "helios": [
             "ready": true,
             "checkpointLoaded": true,
@@ -43,6 +47,8 @@ import Testing
     #expect(status.reason == nil)
     #expect(status.chainId == 11_155_111)
     #expect(status.networkProfile == "sepolia")
+    #expect(status.readVerification.mode == "helios")
+    #expect(status.readVerification.verified)
     #expect(status.helios.ready)
     #expect(status.helios.checkpointLoaded)
     #expect(status.helios.head?.number == 7_654_321)
@@ -73,6 +79,8 @@ import Testing
     #expect(status.status == "syncing_consensus")
     #expect(status.chainId == 1)
     #expect(status.networkProfile == "mainnet")
+    #expect(status.readVerification.mode == "helios")
+    #expect(status.readVerification.verified)
     #expect(status.helios.ready == false)
     #expect(status.helios.checkpointLoaded == false)
     #expect(status.helios.head == nil)
@@ -85,6 +93,10 @@ import Testing
         "reason": "helios_lagging",
         "chainId": 11_155_111,
         "networkProfile": "sepolia",
+        "readVerification": [
+            "mode": "execution_rpc",
+            "verified": false,
+        ],
         "helios": [
             "ready": true,
             "checkpointLoaded": true,
@@ -105,6 +117,8 @@ import Testing
     let summary = status.onboardingDebugSummary
 
     #expect(summary.contains("status=degraded"))
+    #expect(summary.contains("readVerification=execution_rpc"))
+    #expect(summary.contains("readsVerified=false"))
     #expect(summary.contains("helios.ready=true"))
     #expect(summary.contains("head=#7654321"))
     #expect(summary.contains("bundler.reason=bundler_eoa_needs_topup"))

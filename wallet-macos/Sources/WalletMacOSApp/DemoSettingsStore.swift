@@ -26,6 +26,7 @@ struct DemoNetworkSettings: Equatable {
     var sepoliaConsensusRPCURL: String
     var sepoliaMaxFeePerGasGwei: String
     var sepoliaMaxPriorityFeePerGasGwei: String
+    var heliosVerificationEnabled: Bool
     var autoGasModeEnabled: Bool
     var autoGasTier: GasTier
 
@@ -41,6 +42,7 @@ struct DemoNetworkSettings: Equatable {
         sepoliaConsensusRPCURL: ChainConfiguration.ethereumSepolia.consensusRPCURL.absoluteString,
         sepoliaMaxFeePerGasGwei: WalletNodeDaemon.GasPolicy.sepolia.maxFeePerGasGwei,
         sepoliaMaxPriorityFeePerGasGwei: WalletNodeDaemon.GasPolicy.sepolia.maxPriorityFeePerGasGwei,
+        heliosVerificationEnabled: true,
         autoGasModeEnabled: true,
         autoGasTier: .standard
     )
@@ -241,6 +243,7 @@ struct DemoSettingsStore {
         static let sepoliaConsensusRPCURL = "com.localwallet.demo.sepolia-consensus-rpc-url"
         static let sepoliaMaxFeePerGasGwei = "com.localwallet.demo.sepolia-max-fee-per-gas-gwei"
         static let sepoliaMaxPriorityFeePerGasGwei = "com.localwallet.demo.sepolia-max-priority-fee-per-gas-gwei"
+        static let heliosVerificationEnabled = "com.localwallet.demo.helios-verification-enabled"
         static let autoGasModeEnabled = "com.localwallet.demo.auto-gas-mode-enabled"
         static let autoGasTier = "com.localwallet.demo.auto-gas-tier"
         static let unlockRelayerOnLaunch = "com.localwallet.demo.unlock-relayer-on-launch"
@@ -331,6 +334,8 @@ struct DemoSettingsStore {
                 ?? DemoNetworkSettings.defaults.sepoliaMaxFeePerGasGwei,
             sepoliaMaxPriorityFeePerGasGwei: defaults.string(forKey: Keys.sepoliaMaxPriorityFeePerGasGwei)
                 ?? DemoNetworkSettings.defaults.sepoliaMaxPriorityFeePerGasGwei,
+            heliosVerificationEnabled: defaults.object(forKey: Keys.heliosVerificationEnabled) as? Bool
+                ?? DemoNetworkSettings.defaults.heliosVerificationEnabled,
             autoGasModeEnabled: defaults.object(forKey: Keys.autoGasModeEnabled) as? Bool
                 ?? DemoNetworkSettings.defaults.autoGasModeEnabled,
             autoGasTier: defaults.string(forKey: Keys.autoGasTier)
@@ -350,6 +355,7 @@ struct DemoSettingsStore {
         defaults.set(settings.sepoliaConsensusRPCURL, forKey: Keys.sepoliaConsensusRPCURL)
         defaults.set(settings.sepoliaMaxFeePerGasGwei, forKey: Keys.sepoliaMaxFeePerGasGwei)
         defaults.set(settings.sepoliaMaxPriorityFeePerGasGwei, forKey: Keys.sepoliaMaxPriorityFeePerGasGwei)
+        defaults.set(settings.heliosVerificationEnabled, forKey: Keys.heliosVerificationEnabled)
         defaults.set(settings.autoGasModeEnabled, forKey: Keys.autoGasModeEnabled)
         defaults.set(settings.autoGasTier.rawValue, forKey: Keys.autoGasTier)
     }

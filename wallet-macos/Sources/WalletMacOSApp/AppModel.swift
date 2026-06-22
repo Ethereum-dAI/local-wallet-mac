@@ -459,6 +459,7 @@ final class AppModel: ObservableObject {
         appendSection("Update Network Settings")
         appendLog("network: active profile \(validated.activeNetworkName)")
         appendLog("network: execution RPC \(validated.activeRPCURL)")
+        appendLog("network: read verification \(validated.heliosVerificationEnabled ? "helios" : "execution_rpc")")
         appendLog("network: gas caps max \(validated.activeMaxFeePerGasGwei) gwei, priority \(validated.activeMaxPriorityFeePerGasGwei) gwei")
         settingsStore.setNetworkSettings(validated)
         configuration = DemoAppConfiguration(networkSettings: validated)
@@ -616,6 +617,7 @@ final class AppModel: ObservableObject {
             "executionRPC=\(activeChain.rpcURL.absoluteString)",
             "archiveRPC=\(activeChain.archiveRPCURL?.absoluteString ?? "Not set")",
             "consensusRPC=\(activeChain.consensusRPCURL.absoluteString)",
+            "readVerification=\(networkSettings.heliosVerificationEnabled ? "helios" : "execution_rpc")",
             "entryPoint=\(activeChain.entryPoint)",
             "",
             "[wallet]",
@@ -657,6 +659,8 @@ final class AppModel: ObservableObject {
                 "reason=\(status.reason ?? "None")",
                 "chainId=\(status.chainId)",
                 "profile=\(status.networkProfile)",
+                "readVerification=\(status.readVerification.mode)",
+                "readsVerified=\(status.readVerification.verified)",
                 "helios.ready=\(status.helios.ready)",
                 "helios.checkpointLoaded=\(status.helios.checkpointLoaded)",
                 "helios.checkpointAgeDays=\(status.helios.checkpointAgeDays.map { String(format: "%.3f", $0) } ?? "None")",
@@ -1018,13 +1022,15 @@ final class AppModel: ObservableObject {
         let keyRef = "bundler-eoa:default:\(activeChain.id):1"
         let chain = activeChain
         let gasPolicy = networkSettings.resolvedDaemonGasPolicy
+        let heliosVerificationEnabled = networkSettings.heliosVerificationEnabled
         let launchTask = Task {
             let bundlerSecret = try BundlerKeyStore.shared.unlockForDaemonLaunch(keyRef: keyRef)
             syncUnlockedRelayerAddress(keyRef: keyRef, secret: bundlerSecret.secret)
             return try await WalletNodeDaemon.launch(
                 bundlerSecret: bundlerSecret,
                 chain: chain,
-                gasPolicy: gasPolicy
+                gasPolicy: gasPolicy,
+                heliosVerificationEnabled: heliosVerificationEnabled
             )
         }
         walletNodeLaunchTask = launchTask
@@ -2755,6 +2761,9 @@ enum NetworkSettingsChangePolicy {
         if old.activeRPCURL != new.activeRPCURL
             || old.activeArchiveNodeURL != new.activeArchiveNodeURL
             || old.activeConsensusRPCURL != new.activeConsensusRPCURL {
+            return true
+        }
+        if old.heliosVerificationEnabled != new.heliosVerificationEnabled {
             return true
         }
         return old.resolvedDaemonGasPolicy != new.resolvedDaemonGasPolicy

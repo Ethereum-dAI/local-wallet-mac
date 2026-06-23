@@ -427,6 +427,64 @@ public struct WalletSignature {
         return try takeFFIBuffer(outPtr, outLen)
     }
 
+    public static func sessionInstallValidationsCalldata(
+        permissionId: Data,
+        nonce: UInt32,
+        validationData: Data,
+        hookData: Data = Data()
+    ) throws -> Data {
+        guard permissionId.count == 4 else {
+            throw WalletError.invalidInput
+        }
+
+        var outPtr: UnsafePointer<UInt8>?
+        var outLen: UInt32 = 0
+
+        let result = permissionId.withUnsafeBytes { permissionPtr in
+            validationData.withUnsafeBytes { validationPtr in
+                hookData.withUnsafeBytes { hookPtr in
+                    wallet_session_install_validations_calldata(
+                        permissionPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        nonce,
+                        validationPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        UInt32(validationData.count),
+                        hookPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        UInt32(hookData.count),
+                        &outPtr,
+                        &outLen
+                    )
+                }
+            }
+        }
+        try checkResult(result)
+        return try takeFFIBuffer(outPtr, outLen)
+    }
+
+    public static func sessionGrantAccessCalldata(
+        permissionId: Data,
+        selector: Data
+    ) throws -> Data {
+        guard permissionId.count == 4, selector.count == 4 else {
+            throw WalletError.invalidInput
+        }
+
+        var outPtr: UnsafePointer<UInt8>?
+        var outLen: UInt32 = 0
+
+        let result = permissionId.withUnsafeBytes { permissionPtr in
+            selector.withUnsafeBytes { selectorPtr in
+                wallet_session_grant_access_calldata(
+                    permissionPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    selectorPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    &outPtr,
+                    &outLen
+                )
+            }
+        }
+        try checkResult(result)
+        return try takeFFIBuffer(outPtr, outLen)
+    }
+
     public static func predictKernelAccountAddress(
         factoryAddress: Data,
         implementation: Data,

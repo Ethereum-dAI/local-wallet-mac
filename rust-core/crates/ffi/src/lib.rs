@@ -6,9 +6,10 @@ use std::panic::catch_unwind;
 use wallet_kernel::{
     call_policy, ecdsa_signer_entry, enable_digest, encode_enable_data, encode_initialize_call,
     encode_permission_nonce_key, encode_selector_data_default_action, gas_policy,
-    invalidate_nonce_calldata, permission_id, permission_validation_id,
-    predict_kernel_account_address, rate_limit_policy, timestamp_policy,
-    uninstall_permission_calldata, AllowRule, AllowedCall, Condition,
+    grant_access_calldata, install_validations_calldata, invalidate_nonce_calldata,
+    permission_id, permission_validation_id, predict_kernel_account_address,
+    rate_limit_policy, timestamp_policy, uninstall_permission_calldata, AllowRule,
+    AllowedCall, Condition,
 };
 use wallet_signature::{
     abi_encode_dummy_signature as signature_abi_encode_dummy_signature,
@@ -965,6 +966,98 @@ pub unsafe extern "C" fn wallet_session_uninstall_permission_calldata(
             out_ptr,
             out_len,
         ) {
+            Ok(()) => WalletResult::Ok as i32,
+            Err(result) => result as i32,
+        }
+    });
+
+    result.unwrap_or(WalletResult::InternalError as i32)
+}
+
+/// Calldata for `installValidations` — installs a session permission as a
+/// root(owner)-validated self-call (install runs in execution, bypassing the
+/// permission's GasPolicy). `nonce` must equal the account's `currentNonce()`.
+///
+/// # Safety
+/// `permission_id` must point to 4 bytes; `validation_data`/`hook_data` must be
+/// valid when their lengths are non-zero. Caller frees the buffer with `wallet_free_buffer`.
+#[no_mangle]
+pub unsafe extern "C" fn wallet_session_install_validations_calldata(
+    permission_id: *const u8,
+    nonce: u32,
+    validation_data: *const u8,
+    validation_data_len: u32,
+    hook_data: *const u8,
+    hook_data_len: u32,
+    out_ptr: *mut *const u8,
+    out_len: *mut u32,
+) -> i32 {
+    let result = catch_unwind(|| {
+        if permission_id.is_null() || out_ptr.is_null() || out_len.is_null() {
+            return WalletResult::InvalidInput as i32;
+        }
+        if (validation_data_len > 0 && validation_data.is_null())
+            || (hook_data_len > 0 && hook_data.is_null())
+        {
+            return WalletResult::InvalidInput as i32;
+        }
+        let permission_id =
+            match <[u8; 4]>::try_from(std::slice::from_raw_parts(permission_id, 4)) {
+                Ok(value) => value,
+                Err(_) => return WalletResult::InvalidInput as i32,
+            };
+        let validation_data = if validation_data_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(validation_data, validation_data_len as usize)
+        };
+        let hook_data = if hook_data_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(hook_data, hook_data_len as usize)
+        };
+
+        match write_heap_buffer(
+            install_validations_calldata(permission_id, nonce, validation_data, hook_data),
+            out_ptr,
+            out_len,
+        ) {
+            Ok(()) => WalletResult::Ok as i32,
+            Err(result) => result as i32,
+        }
+    });
+
+    result.unwrap_or(WalletResult::InternalError as i32)
+}
+
+/// Calldata for `grantAccess(vId, selector, true)` — grants an installed session
+/// permission access to a selector (session user ops call `execute`).
+///
+/// # Safety
+/// `permission_id` and `selector` must each point to 4 bytes. Caller frees the
+/// buffer with `wallet_free_buffer`.
+#[no_mangle]
+pub unsafe extern "C" fn wallet_session_grant_access_calldata(
+    permission_id: *const u8,
+    selector: *const u8,
+    out_ptr: *mut *const u8,
+    out_len: *mut u32,
+) -> i32 {
+    let result = catch_unwind(|| {
+        if permission_id.is_null() || selector.is_null() || out_ptr.is_null() || out_len.is_null() {
+            return WalletResult::InvalidInput as i32;
+        }
+        let permission_id =
+            match <[u8; 4]>::try_from(std::slice::from_raw_parts(permission_id, 4)) {
+                Ok(value) => value,
+                Err(_) => return WalletResult::InvalidInput as i32,
+            };
+        let selector = match <[u8; 4]>::try_from(std::slice::from_raw_parts(selector, 4)) {
+            Ok(value) => value,
+            Err(_) => return WalletResult::InvalidInput as i32,
+        };
+
+        match write_heap_buffer(grant_access_calldata(permission_id, selector), out_ptr, out_len) {
             Ok(()) => WalletResult::Ok as i32,
             Err(result) => result as i32,
         }

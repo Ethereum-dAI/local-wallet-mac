@@ -2,7 +2,7 @@
 .claude/
 .codex/
 .commandcode/
-CLAUDE.md
+# CLAUDE.md is tracked: it is the shared cross-repo guide (app + protocol + daemon).
 TODO.md
 ARCHITECTURE.md
 OPEN-POINTS.md

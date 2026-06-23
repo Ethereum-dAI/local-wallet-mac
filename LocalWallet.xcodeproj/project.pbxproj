@@ -22,6 +22,7 @@
 		4D68E3171DC04C53AFBF1B08 /* LocalAIModelDownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87B7492C00C0FC4BF364591F /* LocalAIModelDownloadManager.swift */; };
 		5585A7F7AFC372BAB580154A /* GasPricing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59F31B5232BAD096F9535BAF /* GasPricing.swift */; };
 		5892F9D823EE2D86519E819F /* SessionSwapRouterRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA70447386F5101E9E65125F /* SessionSwapRouterRegistry.swift */; };
+		5A31AA040BA90105CE798293 /* SessionInstallAssembler.swift in Sources */ = {isa = PBXBuildFile; fileRef = B82DDCF7F9697658E8AAC426 /* SessionInstallAssembler.swift */; };
 		5A43B2D9426FBAE3A87FC324 /* UserOperationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA6F8962EB73A62EDF82FBDD /* UserOperationModels.swift */; };
 		5FAA2DEC9EAAA084756B2579 /* WebAuthnValidator.json in Resources */ = {isa = PBXBuildFile; fileRef = 7FDBD8207805F91A08B2FA8F /* WebAuthnValidator.json */; };
 		615AE4DBE68ECDD43606DDD8 /* OnboardingProvisioningService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80EEACA183C6F7A248A93A62 /* OnboardingProvisioningService.swift */; };
@@ -98,6 +99,7 @@
 		AA6F8962EB73A62EDF82FBDD /* UserOperationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserOperationModels.swift; sourceTree = "<group>"; };
 		AE110FB5D2CF3D2479562BF8 /* wallet-macos */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "wallet-macos"; path = "wallet-macos"; sourceTree = SOURCE_ROOT; };
 		B1A8F61B6561070E85291106 /* SessionEnableAssembler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionEnableAssembler.swift; sourceTree = "<group>"; };
+		B82DDCF7F9697658E8AAC426 /* SessionInstallAssembler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionInstallAssembler.swift; sourceTree = "<group>"; };
 		B9D44A78B0A9523321B9F367 /* DemoModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoModels.swift; sourceTree = "<group>"; };
 		BF4BC97318D96D64FC625767 /* KernelImplementation.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = KernelImplementation.json; sourceTree = "<group>"; };
 		CA70447386F5101E9E65125F /* SessionSwapRouterRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionSwapRouterRegistry.swift; sourceTree = "<group>"; };
@@ -212,6 +214,7 @@
 				88B8477E49E875FE72789134 /* OnboardingView.swift */,
 				8A23DA49317E3EDDFC173857 /* QRCodeImageFactory.swift */,
 				B1A8F61B6561070E85291106 /* SessionEnableAssembler.swift */,
+				B82DDCF7F9697658E8AAC426 /* SessionInstallAssembler.swift */,
 				0C515CE6F978A9E670671762 /* SessionKeyStore.swift */,
 				A75AE2969A03910673908505 /* SessionPolicyConfig.swift */,
 				D77908DB25C2FD6278F88B91 /* SessionPolicyMirror.swift */,
@@ -345,6 +348,7 @@
 				358609ACFFB38A364EA64D18 /* OnboardingView.swift in Sources */,
 				F090CBF43D86C2A57BC2D110 /* QRCodeImageFactory.swift in Sources */,
 				653B8565FAB6CCF1BD5BB0A0 /* SessionEnableAssembler.swift in Sources */,
+				5A31AA040BA90105CE798293 /* SessionInstallAssembler.swift in Sources */,
 				E77D1B06C709482E5FEBE4D0 /* SessionKeyStore.swift in Sources */,
 				9DA03157F1C516F1206CF209 /* SessionPolicyConfig.swift in Sources */,
 				728F3C84A2C1C492C163286E /* SessionPolicyMirror.swift in Sources */,

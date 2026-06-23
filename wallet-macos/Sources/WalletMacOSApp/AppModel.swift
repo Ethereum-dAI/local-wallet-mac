@@ -1532,6 +1532,112 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// Installs the session permission on-chain via a passkey(root)-validated user
+    /// op before its first use. The install (installValidations + grantAccess) runs
+    /// in the execution phase, so it is paid as a normal transaction and is NOT
+    /// charged against the permission's GasPolicy. Blocks until the receipt confirms;
+    /// afterwards the permission validates in installed mode. No-op when there is no
+    /// applicable session plan or it is already installed.
+    private func installSessionPermissionIfNeeded(
+        for intent: TransactionIntent,
+        logContext: String
+    ) async throws {
+        let now = Date()
+        guard let plan = activeSessionPlan(for: intent, now: now), !plan.record.installedOnChain else {
+            return
+        }
+        guard let currentRecord = walletRecord,
+              let accountAddress = currentRecord.kernelAccountAddress
+        else {
+            return
+        }
+        let sessionRecord = plan.record
+        appendLog("\(logContext): session permission not installed onchain; installing via passkey before first use")
+
+        // installValidations requires config.nonce == the account's current install
+        // nonce, so read it fresh rather than trusting the stored value.
+        let installNonce = try await withWalletNodeWarmupRetry(
+            operation: "\(logContext) session-install currentNonce"
+        ) {
+            try await withWalletNodeClient(
+                operation: "\(logContext) session-install currentNonce"
+            ) { client in
+                try await client.kernelCurrentNonce(accountAddress: accountAddress)
+            }
+        }
+
+        let installCalldata = try WalletSignature.sessionInstallValidationsCalldata(
+            permissionId: sessionRecord.permissionId,
+            nonce: installNonce,
+            validationData: sessionRecord.enableData
+        )
+        let grantCalldata = try WalletSignature.sessionGrantAccessCalldata(
+            permissionId: sessionRecord.permissionId,
+            selector: Data([0xe9, 0xae, 0x5c, 0x53])
+        )
+        let executions = try SessionInstallAssembler.executions(
+            accountAddress: accountAddress,
+            installCalldata: installCalldata,
+            grantCalldata: grantCalldata
+        )
+
+        bridgeStatus = "Preparing session key (one-time on-chain setup)…"
+        activeBundlerStatus = "Installing session key"
+        let submitted = try await executeUserOperation(
+            logContext: "\(logContext) session-install",
+            signingReason: "Activate session key for \(activeChain.name)",
+            intent: nil,
+            historyDraft: SessionInstallAssembler.historyDraft(
+                accountAddress: accountAddress,
+                validationNonce: installNonce
+            )
+        ) { [self] buildContext in
+            guard buildContext.isDeployed else {
+                throw AppError.sessionKeysRequireDeployedAccount
+            }
+            return try await buildUserOperationDraft(
+                executions: executions,
+                isDeployedOverride: true,
+                nonceKey192: nil
+            )
+        }
+
+        let chainID = activeChain.id
+        if submitted.success == nil {
+            bridgeStatus = "Session key setup submitted. Waiting for confirmation…"
+            activeBundlerStatus = "Waiting for session key setup"
+            let receipt = try await waitForLocalReceipt(
+                userOpHash: submitted.userOpHash,
+                chainID: chainID,
+                logContext: "\(logContext) session-install"
+            )
+            recordReceiptHistory(receipt, chainID: chainID, logContext: "\(logContext) session-install")
+            guard receipt.success else {
+                let reason: String
+                if let revertReason = receipt.revertReason, !revertReason.isEmpty {
+                    reason = "Session key setup reverted: \(revertReason)"
+                } else {
+                    reason = "Session key setup reverted onchain."
+                }
+                throw AppError.userOperationReceiptReverted(reason)
+            }
+        }
+
+        guard let latestRecord = walletRecord else { return }
+        var installedRecord = latestRecord.sessionRecords.first {
+            $0.chainId == chainID && $0.permissionId == sessionRecord.permissionId
+        } ?? sessionRecord
+        installedRecord.installedOnChain = true
+        let refreshed = latestRecord.replacingSessionRecord(
+            installedRecord,
+            isDeployed: latestRecord.isDeployed,
+            updatedAt: Date()
+        )
+        try metadataStore.save(refreshed)
+        self.walletRecord = refreshed
+        appendLog("\(logContext): session permission installed onchain; send will use installed mode")
+    }
+
     func executeNativeTransfer(
         recipient: String,
         amountETH: String,
@@ -1702,7 +1808,11 @@ final class AppModel: ObservableObject {
         logContext: String,
         signingReason: String
     ) async throws -> UserOperationSendResult {
-        try await executeUserOperation(
+        // Lazily install the session permission on its first use (a separate
+        // passkey-validated op) so the one-time install runs in execution and is
+        // not charged to the session GasPolicy. Afterwards this send is installed-mode.
+        try await installSessionPermissionIfNeeded(for: intent, logContext: logContext)
+        return try await executeUserOperation(
             logContext: logContext,
             signingReason: signingReason,
             intent: intent,

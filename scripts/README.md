@@ -28,19 +28,19 @@ Prerequisites:
 - `cbindgen`
 - `jq` is optional; the script has a fallback for locating Cargo `OUT_DIR`
 
-### `run-kernel-mainnet-fork-check.sh`
+### Kernel mainnet-fork fixture (moved)
 
-Starts Anvil against an Ethereum mainnet fork and runs the ignored `wallet-node` Kernel/EntryPoint fork fixture.
+The Kernel/EntryPoint mainnet-fork check no longer lives here. After the multi-repo split it ships with the daemon, at `../local-wallet-daemon/scripts/run-kernel-mainnet-fork-check.sh`. Run it from that repo; see the daemon repo's docs for its `ETH_RPC_URL` / `WALLET_FORK_BLOCK_NUMBER` env contract.
+
+### `run-bundler-key-hardening-gate.sh`
+
+The automated gate for the bundler key hardening work. It runs the daemon-side Rust checks against the sibling `../local-wallet-daemon` checkout (format, workspace tests, clippy with `-D warnings`, a `wallet-node` release build, and the fd / Unix-transport / HTTP `--include-ignored` integration suites), then the Swift bridge and macOS app `swift test` suites, generates the Xcode project with `xcodegen` and builds the signed `LocalWalletApp` target, and finishes with a `git diff --check` whitespace check.
 
 ```bash
-ETH_RPC_URL=https://your-mainnet-rpc.example \
-WALLET_FORK_BLOCK_NUMBER=25001071 \
-./scripts/run-kernel-mainnet-fork-check.sh
+./scripts/run-bundler-key-hardening-gate.sh
 ```
 
-The script sources `.env` by default. Set `WALLET_FORK_ENV_FILE=.env.fork` to use another ignored env file.
-
-Pinned historical blocks require an archive-capable RPC. If `WALLET_FORK_BLOCK_NUMBER` is omitted, the script forks latest state.
+Override the daemon location with `LW_DAEMON_DIR=/path/to/local-wallet-daemon`. Requires `xcodegen` for the signed app-target build.
 
 ### `package-macos-demo.sh`
 

@@ -459,6 +459,7 @@ final class AppModel: ObservableObject {
         appendSection("Update Network Settings")
         appendLog("network: active profile \(validated.activeNetworkName)")
         appendLog("network: execution RPC \(validated.activeRPCURL)")
+        appendLog("network: read verification \(validated.heliosVerificationEnabled ? "helios" : "execution_rpc")")
         appendLog("network: gas caps max \(validated.activeMaxFeePerGasGwei) gwei, priority \(validated.activeMaxPriorityFeePerGasGwei) gwei")
         settingsStore.setNetworkSettings(validated)
         configuration = DemoAppConfiguration(networkSettings: validated)
@@ -616,6 +617,7 @@ final class AppModel: ObservableObject {
             "executionRPC=\(activeChain.rpcURL.absoluteString)",
             "archiveRPC=\(activeChain.archiveRPCURL?.absoluteString ?? "Not set")",
             "consensusRPC=\(activeChain.consensusRPCURL.absoluteString)",
+            "readVerification=\(networkSettings.heliosVerificationEnabled ? "helios" : "execution_rpc")",
             "entryPoint=\(activeChain.entryPoint)",
             "",
             "[wallet]",
@@ -657,6 +659,8 @@ final class AppModel: ObservableObject {
                 "reason=\(status.reason ?? "None")",
                 "chainId=\(status.chainId)",
                 "profile=\(status.networkProfile)",
+                "readVerification=\(status.readVerification.mode)",
+                "readsVerified=\(status.readVerification.verified)",
                 "helios.ready=\(status.helios.ready)",
                 "helios.checkpointLoaded=\(status.helios.checkpointLoaded)",
                 "helios.checkpointAgeDays=\(status.helios.checkpointAgeDays.map { String(format: "%.3f", $0) } ?? "None")",
@@ -1018,13 +1022,15 @@ final class AppModel: ObservableObject {
         let keyRef = "bundler-eoa:default:\(activeChain.id):1"
         let chain = activeChain
         let gasPolicy = networkSettings.resolvedDaemonGasPolicy
+        let heliosVerificationEnabled = networkSettings.heliosVerificationEnabled
         let launchTask = Task {
             let bundlerSecret = try BundlerKeyStore.shared.unlockForDaemonLaunch(keyRef: keyRef)
             syncUnlockedRelayerAddress(keyRef: keyRef, secret: bundlerSecret.secret)
             return try await WalletNodeDaemon.launch(
                 bundlerSecret: bundlerSecret,
                 chain: chain,
-                gasPolicy: gasPolicy
+                gasPolicy: gasPolicy,
+                heliosVerificationEnabled: heliosVerificationEnabled
             )
         }
         walletNodeLaunchTask = launchTask
@@ -1456,6 +1462,21 @@ final class AppModel: ObservableObject {
         if !settingsStore.sessionKeysEnabled {
             appendLog("session-revoke: local toggle is off, but a session record exists; revoking anyway")
         }
+        guard sessionRecord.installedOnChain else {
+            try clearPendingSessionKeyLocally(
+                sessionRecord,
+                from: record,
+                now: Date(),
+                logContext: "session-revoke",
+                reason: "cleared pending session key locally; no onchain permission was installed"
+            )
+            return UserOperationSendResult(
+                userOpHash: "local-session-key-clear",
+                transactionHash: nil,
+                success: true,
+                signedBySession: false
+            )
+        }
 
         let deinitData = try WalletSignature.sessionEmptyPermissionDeinitData(enableData: sessionRecord.enableData)
         let execution = try SessionRevokeAssembler.executionRequest(
@@ -1500,6 +1521,11 @@ final class AppModel: ObservableObject {
     func revokeSessionKeysAndWaitForReceipt() async throws -> UserOperationSendResult {
         let chainID = activeChain.id
         let submitted = try await revokeSessionKeys()
+        if submitted.success != nil {
+            activeBundlerStatus = "Session key disabled"
+            bridgeStatus = "Session key disabled locally."
+            return submitted
+        }
         bridgeStatus = "Session key revoke submitted. Waiting for the receipt."
         activeBundlerStatus = "Waiting for revoke receipt"
 
@@ -1786,58 +1812,76 @@ final class AppModel: ObservableObject {
             isDeployed: liveInspection.isDeployed,
             sessionPlan: sessionPlan
         )
-        let draft = try await buildDraft(buildContext)
+        let draft: UserOperationDraft
+        do {
+            draft = try await buildDraft(buildContext)
+        } catch {
+            clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+            throw error
+        }
         appendDraftLogSummary(draft, context: logContext)
 
-        let enrichedDraft = try await enrichDraftWithLocalBundlerEstimation(
-            draft,
-            logContext: logContext,
-            sessionPlan: sessionPlan
-        )
+        let enrichedDraft: UserOperationDraft
+        do {
+            enrichedDraft = try await enrichDraftWithLocalBundlerEstimation(
+                draft,
+                logContext: logContext,
+                sessionPlan: sessionPlan
+            )
+        } catch {
+            clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+            throw error
+        }
         builtUserOperationDraft = enrichedDraft
 
-        let signatureResult = try UserOperationSigning.signForSend(
-            draft: enrichedDraft,
-            session: sessionPlan?.signingContext,
-            passkeySigner: { [self] preimage in
-                appendLog("\(logContext): computed signing preimage (\(preimage.count) bytes)")
-                appendLog("\(logContext): requesting Secure Enclave signature")
-                let signature = try keyStore.sign(preimage: preimage, reason: signingReason)
-                appendLog("\(logContext): signature components r=\(signature.r.shortHex) s=\(signature.s.shortHex)")
-                return signature
-            },
-            passkeyWrapper: { [self] userOpHash, signature in
-                var lowS = signature.s
-                let originalS = lowS
-                try WalletSignature.normaliseLowS(s: &lowS)
-                appendLog(
-                    "\(logContext): low-s normalization \(originalS == lowS ? "not needed" : "applied")"
-                )
-                let encoded = try WalletSignature.abiEncodeSignature(
-                    userOpHash: userOpHash,
-                    r: signature.r,
-                    s: lowS,
-                    usePrecompiled: false
-                )
-                appendLog("\(logContext): encoded Kernel/WebAuthn signature (\(encoded.count) bytes)")
-                return encoded
-            },
-            sessionSecretReader: { keyRef in
-                try SessionKeyStore.shared.read(keyRef: keyRef).secret
-            },
-            sessionWrapper: { [self] secret, userOpHash, mode, enableData, selectorData, enableSig in
-                let signature = try WalletSignature.sessionSignAndWrap(
-                    secret: secret,
-                    userOpHash: userOpHash,
-                    mode: mode,
-                    enableData: enableData,
-                    selectorData: selectorData,
-                    enableSig: enableSig
-                )
-                appendLog("\(logContext): encoded session signature (\(signature.count) bytes)")
-                return signature
-            }
-        )
+        let signatureResult: UserOperationSignatureResult
+        do {
+            signatureResult = try UserOperationSigning.signForSend(
+                draft: enrichedDraft,
+                session: sessionPlan?.signingContext,
+                passkeySigner: { [self] preimage in
+                    appendLog("\(logContext): computed signing preimage (\(preimage.count) bytes)")
+                    appendLog("\(logContext): requesting Secure Enclave signature")
+                    let signature = try keyStore.sign(preimage: preimage, reason: signingReason)
+                    appendLog("\(logContext): signature components r=\(signature.r.shortHex) s=\(signature.s.shortHex)")
+                    return signature
+                },
+                passkeyWrapper: { [self] userOpHash, signature in
+                    var lowS = signature.s
+                    let originalS = lowS
+                    try WalletSignature.normaliseLowS(s: &lowS)
+                    appendLog(
+                        "\(logContext): low-s normalization \(originalS == lowS ? "not needed" : "applied")"
+                    )
+                    let encoded = try WalletSignature.abiEncodeSignature(
+                        userOpHash: userOpHash,
+                        r: signature.r,
+                        s: lowS,
+                        usePrecompiled: false
+                    )
+                    appendLog("\(logContext): encoded Kernel/WebAuthn signature (\(encoded.count) bytes)")
+                    return encoded
+                },
+                sessionSecretReader: { keyRef in
+                    try SessionKeyStore.shared.read(keyRef: keyRef).secret
+                },
+                sessionWrapper: { [self] secret, userOpHash, mode, enableData, selectorData, enableSig in
+                    let signature = try WalletSignature.sessionSignAndWrap(
+                        secret: secret,
+                        userOpHash: userOpHash,
+                        mode: mode,
+                        enableData: enableData,
+                        selectorData: selectorData,
+                        enableSig: enableSig
+                    )
+                    appendLog("\(logContext): encoded session signature (\(signature.count) bytes)")
+                    return signature
+                }
+            )
+        } catch {
+            clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+            throw error
+        }
         appendLog("\(logContext): final userOpHash \(signatureResult.userOpHash.shortHex)")
         if signatureResult.usedSession {
             recordSessionActivity(now: Date(), source: "session signing", isUserInput: false)
@@ -1849,11 +1893,17 @@ final class AppModel: ObservableObject {
         bridgeStatus = "Submitting UserOperation to local wallet-node on \(activeChain.name)..."
         activeBundlerStatus = "Submitting UserOperation"
 
-        let sentUserOpHash = try await withWalletNodeClient(operation: "\(logContext) submit") { client in
-            try await client.sendUserOperation(
-                draft: enrichedDraft,
-                signature: signatureResult.signature
-            )
+        let sentUserOpHash: String
+        do {
+            sentUserOpHash = try await withWalletNodeClient(operation: "\(logContext) submit") { client in
+                try await client.sendUserOperation(
+                    draft: enrichedDraft,
+                    signature: signatureResult.signature
+                )
+            }
+        } catch {
+            clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+            throw error
         }
         lastSubmittedUserOperationHash = sentUserOpHash
         if let sessionPlan, !sessionPlan.record.installedOnChain {
@@ -1911,6 +1961,61 @@ final class AppModel: ObservableObject {
             logContext: logContext
         )
         return true
+    }
+
+    private func clearPendingSessionInstallAfterPreSubmitFailure(
+        _ sessionPlan: SessionUserOperationPlan?,
+        logContext: String
+    ) {
+        guard let sessionRecord = sessionPlan?.record, !sessionRecord.installedOnChain else {
+            return
+        }
+        do {
+            try clearPendingSessionKeyLocally(
+                sessionRecord,
+                now: Date(),
+                logContext: logContext,
+                reason: "cleared pending session key locally after pre-submit failure; no onchain permission was installed"
+            )
+        } catch {
+            appendLog("\(logContext): pending session key cleanup failed — \(error.localizedDescription)")
+        }
+    }
+
+    private func clearPendingSessionKeyLocally(
+        _ sessionRecord: SessionRecord,
+        from record: WalletRecord? = nil,
+        now: Date,
+        logContext: String,
+        reason: String
+    ) throws {
+        guard !sessionRecord.installedOnChain else {
+            return
+        }
+        guard let walletRecord = record ?? self.walletRecord else {
+            throw AppError.corruptedMetadataStore
+        }
+
+        let refreshed = walletRecord.removingSessionRecord(
+            chainID: sessionRecord.chainId,
+            isDeployed: walletRecord.isDeployed,
+            updatedAt: now
+        )
+        try metadataStore.save(refreshed)
+        self.walletRecord = refreshed
+        pendingSessionInstallByUserOpHash = pendingSessionInstallByUserOpHash.filter { _, pendingRecord in
+            pendingRecord.chainId != sessionRecord.chainId
+                || pendingRecord.permissionId != sessionRecord.permissionId
+        }
+        if sessionRecord.chainId == activeChain.id {
+            settingsStore.setSessionKeysEnabled(false)
+        }
+        do {
+            try SessionKeyStore.shared.delete(keyRef: sessionRecord.sessionKeyRef)
+        } catch {
+            appendLog("\(logContext): pending session key cleanup failed - \(error.localizedDescription)")
+        }
+        appendLog("\(logContext): \(reason)")
     }
 
     private func expireLocalSession(
@@ -2755,6 +2860,9 @@ enum NetworkSettingsChangePolicy {
         if old.activeRPCURL != new.activeRPCURL
             || old.activeArchiveNodeURL != new.activeArchiveNodeURL
             || old.activeConsensusRPCURL != new.activeConsensusRPCURL {
+            return true
+        }
+        if old.heliosVerificationEnabled != new.heliosVerificationEnabled {
             return true
         }
         return old.resolvedDaemonGasPolicy != new.resolvedDaemonGasPolicy

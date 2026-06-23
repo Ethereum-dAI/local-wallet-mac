@@ -112,6 +112,11 @@ struct WalletNodeClient {
             let head: BlockHead?
         }
 
+        struct ReadVerification: Equatable {
+            let mode: String
+            let verified: Bool
+        }
+
         struct Bundler: Equatable {
             let ready: Bool
             let needsTopup: Bool?
@@ -123,6 +128,7 @@ struct WalletNodeClient {
         let reason: String?
         let chainId: UInt64
         let networkProfile: String
+        let readVerification: ReadVerification
         let helios: Helios
         let bundler: Bundler?
     }
@@ -969,6 +975,9 @@ extension WalletNodeClient.NetworkStatus {
             reason: Self.optionalString(json["reason"]),
             chainId: chainId,
             networkProfile: networkProfile,
+            readVerification: (json["readVerification"] as? [String: Any]).flatMap {
+                ReadVerification(json: $0)
+            } ?? ReadVerification(mode: "helios", verified: true),
             helios: try Helios(json: heliosJSON),
             bundler: (json["bundler"] as? [String: Any]).flatMap { Bundler(json: $0) }
         )
@@ -995,6 +1004,17 @@ extension WalletNodeClient.NetworkStatus {
             return UInt64(value)
         }
         return nil
+    }
+}
+
+extension WalletNodeClient.NetworkStatus.ReadVerification {
+    init?(json: [String: Any]) {
+        guard let mode = json["mode"] as? String,
+              let verified = json["verified"] as? Bool
+        else {
+            return nil
+        }
+        self.init(mode: mode, verified: verified)
     }
 }
 

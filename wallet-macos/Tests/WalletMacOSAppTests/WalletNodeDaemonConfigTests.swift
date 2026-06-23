@@ -8,6 +8,7 @@ import Testing
     #expect(toml.contains(#"chain_id = 11155111"#))
     #expect(toml.contains(#"execution_rpc = "https://sepolia.drpc.org""#))
     #expect(toml.contains(#"consensus_rpc = "http://unstable.sepolia.beacon-api.nimbus.team""#))
+    #expect(toml.contains(#"read_verification = "helios""#))
     #expect(toml.contains(#"max_fee_per_gas = "0xba43b7400""#))
     #expect(toml.contains(#"max_priority_fee_per_gas = "0x12a05f200""#))
 }
@@ -43,6 +44,16 @@ import Testing
 
     #expect(toml.contains(#"max_fee_per_gas = "0xdf8475800""#))
     #expect(toml.contains(#"max_priority_fee_per_gas = "0x9502f900""#))
+}
+
+@Test func daemonConfigCanDisableHeliosVerification() throws {
+    let toml = WalletNodeDaemon.daemonConfigTOML(
+        chain: .ethereumSepolia,
+        gasPolicy: .sepolia,
+        heliosVerificationEnabled: false
+    )
+
+    #expect(toml.contains(#"read_verification = "execution_rpc""#))
 }
 
 @Test func gasPolicyRejectsPriorityAboveMax() throws {

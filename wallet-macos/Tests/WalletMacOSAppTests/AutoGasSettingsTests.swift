@@ -12,6 +12,7 @@ private func freshStore() -> DemoSettingsStore {
     let settings = store.networkSettings
     #expect(settings.autoGasModeEnabled == true)
     #expect(settings.autoGasTier == .standard)
+    #expect(settings.heliosVerificationEnabled == true)
 }
 
 @Test func defaultSepoliaRPCsUseDrpcAndNimbus() {
@@ -71,11 +72,13 @@ private func freshStore() -> DemoSettingsStore {
     var settings = store.networkSettings
     settings.autoGasModeEnabled = true
     settings.autoGasTier = .fast
+    settings.heliosVerificationEnabled = false
     store.setNetworkSettings(settings)
 
     let reloaded = store.networkSettings
     #expect(reloaded.autoGasModeEnabled == true)
     #expect(reloaded.autoGasTier == .fast)
+    #expect(reloaded.heliosVerificationEnabled == false)
 }
 
 @Test func unknownPersistedTierFallsBackToStandard() {
@@ -128,6 +131,15 @@ private func freshStore() -> DemoSettingsStore {
     old.autoGasModeEnabled = false
     var new = old
     new.autoGasModeEnabled = true
+
+    #expect(NetworkSettingsChangePolicy.requiresWalletNodeRestart(from: old, to: new))
+}
+
+@Test func heliosVerificationChangeRequiresWalletNodeRestart() {
+    var old = DemoNetworkSettings.defaults
+    old.heliosVerificationEnabled = true
+    var new = old
+    new.heliosVerificationEnabled = false
 
     #expect(NetworkSettingsChangePolicy.requiresWalletNodeRestart(from: old, to: new))
 }

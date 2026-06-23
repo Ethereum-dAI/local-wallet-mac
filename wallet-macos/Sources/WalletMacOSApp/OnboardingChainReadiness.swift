@@ -54,8 +54,9 @@ struct OnboardingChainReadinessService {
         onStatus: (WalletNodeClient.NetworkStatus) -> Void
     ) async throws -> WalletNodeClient.NetworkStatus {
         let startedAt = Date()
-        let chain = networkSettingsStore.networkSettings.activeChain
-        let gasPolicy = networkSettingsStore.networkSettings.resolvedDaemonGasPolicy
+        let networkSettings = networkSettingsStore.networkSettings
+        let chain = networkSettings.activeChain
+        let gasPolicy = networkSettings.resolvedDaemonGasPolicy
         let keyRef = "bundler-eoa:default:\(chain.id):1"
         onEvent("launch: preparing wallet-node for \(chain.name) chainId=\(chain.id)")
         let bundlerSecret = try BundlerKeyStore.shared.unlockForOnboardingDaemonLaunch(keyRef: keyRef)
@@ -65,7 +66,8 @@ struct OnboardingChainReadinessService {
         let daemon = try await WalletNodeDaemon.launch(
             bundlerSecret: bundlerSecret,
             chain: chain,
-            gasPolicy: gasPolicy
+            gasPolicy: gasPolicy,
+            heliosVerificationEnabled: networkSettings.heliosVerificationEnabled
         )
         onEvent("launch: wallet-node started; polling network status")
         if let logURL = WalletNodeDaemon.managedLogFileURL() {
@@ -85,7 +87,8 @@ struct OnboardingChainReadinessService {
             onStatus(status)
             onEvent("status: \(status.onboardingDebugSummary)")
             if status.helios.ready {
-                onEvent("probe: Helios ready; inspecting kernel account \(kernelAddress.onboardingShortAddress)")
+                let readSurface = status.readVerification.verified ? "Helios ready" : "execution RPC reads ready"
+                onEvent("probe: \(readSurface); inspecting kernel account \(kernelAddress.onboardingShortAddress)")
                 do {
                     let inspection = try await daemon.client.inspectAccount(address: kernelAddress)
                     onEvent(
@@ -115,7 +118,11 @@ struct OnboardingChainReadinessService {
                     )
                 }
 
-                onEvent("ready: verified reads passed onboarding probes")
+                onEvent(
+                    status.readVerification.verified
+                        ? "ready: verified reads passed onboarding probes"
+                        : "ready: execution RPC reads passed onboarding probes"
+                )
                 return status
             }
 
@@ -147,6 +154,8 @@ extension WalletNodeClient.NetworkStatus {
             "status=\(status)",
             "chainId=\(chainId)",
             "profile=\(networkProfile)",
+            "readVerification=\(readVerification.mode)",
+            "readsVerified=\(readVerification.verified)",
             "helios.ready=\(helios.ready)",
             "checkpointLoaded=\(helios.checkpointLoaded)",
         ]

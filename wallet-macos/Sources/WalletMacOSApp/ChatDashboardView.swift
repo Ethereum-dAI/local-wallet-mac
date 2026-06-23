@@ -2016,7 +2016,8 @@ private final class ChatDashboardModel: ObservableObject {
         if !requiresRestart {
             return "Saved \(validated.activeNetworkName) network settings. No wallet-node restart was needed."
         }
-        return "Saved \(validated.activeNetworkName) network settings. wallet-node will use max \(validated.activeMaxFeePerGasGwei) gwei and priority \(validated.activeMaxPriorityFeePerGasGwei) gwei caps."
+        let readVerification = validated.heliosVerificationEnabled ? "Helios read verification" : "execution RPC reads"
+        return "Saved \(validated.activeNetworkName) network settings. wallet-node will use \(readVerification), max \(validated.activeMaxFeePerGasGwei) gwei and priority \(validated.activeMaxPriorityFeePerGasGwei) gwei caps."
     }
 
     func enableSessionKeysFromSettings() async throws -> String {

@@ -9,9 +9,9 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Protocol crates (git deps, rev pinned from Phase 1)
-wallet-signature = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "44972b1fef024cec36d63faac63121455fabcb49" }
-wallet-kernel    = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "44972b1fef024cec36d63faac63121455fabcb49" }
-wallet-addresses = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "44972b1fef024cec36d63faac63121455fabcb49" }
+wallet-signature = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "ea28622aabcc4b0256d86fef8e0fee4d9cd37858" }
+wallet-kernel    = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "ea28622aabcc4b0256d86fef8e0fee4d9cd37858" }
+wallet-addresses = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "ea28622aabcc4b0256d86fef8e0fee4d9cd37858" }
 
 # wallet-node-api from daemon (forces cbindgen materialization in build-ffi.sh).
 wallet-node-api  = { git = "https://github.com/Ethereum-dAI/local-wallet-daemon.git", rev = "ce2d9812ee55f532fe58bb615273a82964353bb5" }

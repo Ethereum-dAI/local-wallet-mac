@@ -11,6 +11,7 @@ final class OnboardingSettingsStore {
         static let installedModelPath = "com.localwallet.demo.onboarding.installed-model-path"
         static let bundlerKeyRef = "com.localwallet.demo.onboarding.bundler-key-ref"
         static let bundlerAddress = "com.localwallet.demo.onboarding.bundler-address"
+        static let contextWindowTokens = "com.localwallet.demo.onboarding.context-window-tokens"
     }
 
     let defaults: UserDefaults
@@ -96,6 +97,16 @@ final class OnboardingSettingsStore {
         }
     }
 
+    var contextWindowTokens: Int {
+        get {
+            let stored = defaults.integer(forKey: Keys.contextWindowTokens)
+            return stored > 0 ? stored : 4096
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.contextWindowTokens)
+        }
+    }
+
     func markCompleted() {
         defaults.set(true, forKey: Keys.completed)
     }
@@ -112,6 +123,7 @@ struct LocalAIModel: Identifiable, Equatable {
     let artifactFileName: String
     let artifactURL: URL
     let sha256: String
+    let maxContextTokens: Int
 
     static let recommended = LocalAIModel(
         id: "google/gemma-4-E4B-it",
@@ -123,7 +135,10 @@ struct LocalAIModel: Identifiable, Equatable {
         artifactRepo: "ggml-org/gemma-4-E4B-it-GGUF",
         artifactFileName: "gemma-4-E4B-it-Q4_K_M.gguf",
         artifactURL: URL(string: "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf?download=true")!,
-        sha256: "90ce98129eb3e8cc57e62433d500c97c624b1e3af1fcc85dd3b55ad7e0313e9f"
+        sha256: "90ce98129eb3e8cc57e62433d500c97c624b1e3af1fcc85dd3b55ad7e0313e9f",
+        // Trained context for Gemma 4 E4B. Confirm against the model card; presets are
+        // filtered to this value. Conservative cap keeps the KV cache bounded.
+        maxContextTokens: 32768
     )
 
     static let available: [LocalAIModel] = [

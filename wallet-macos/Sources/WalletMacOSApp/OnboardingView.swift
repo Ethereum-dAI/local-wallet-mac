@@ -70,10 +70,8 @@ private final class OnboardingState: ObservableObject {
     @Published var step: OnboardingStep = .welcome
     @Published var selectedNetworkID: String
     @Published var mainnetRPCURL: String
-    @Published var mainnetArchiveNodeURL: String
     @Published var mainnetConsensusRPCURL: String
     @Published var sepoliaRPCURL: String
-    @Published var sepoliaArchiveNodeURL: String
     @Published var sepoliaConsensusRPCURL: String
     @Published var selectedModelID: String
     @Published var installState: InstallState = .idle
@@ -116,10 +114,8 @@ private final class OnboardingState: ObservableObject {
         let networkSettings = networkSettingsStore.networkSettings
         self.selectedNetworkID = OnboardingNetwork.sepolia.rawValue
         self.mainnetRPCURL = networkSettings.mainnetRPCURL
-        self.mainnetArchiveNodeURL = networkSettings.mainnetArchiveNodeURL
         self.mainnetConsensusRPCURL = networkSettings.mainnetConsensusRPCURL
         self.sepoliaRPCURL = networkSettings.sepoliaRPCURL
-        self.sepoliaArchiveNodeURL = networkSettings.sepoliaArchiveNodeURL
         self.sepoliaConsensusRPCURL = networkSettings.sepoliaConsensusRPCURL
         let storedModelID = settingsStore.selectedModelID
         self.selectedModelID = LocalAIModel.available.contains { $0.id == storedModelID }
@@ -151,10 +147,8 @@ private final class OnboardingState: ObservableObject {
     var canContinueFromNetwork: Bool {
         Self.isValidRequiredURL(sepoliaRPCURL)
             && Self.isValidOptionalURL(sepoliaConsensusRPCURL)
-            && Self.isValidOptionalURL(sepoliaArchiveNodeURL)
             && Self.isValidRequiredURL(mainnetRPCURL)
             && Self.isValidOptionalURL(mainnetConsensusRPCURL)
-            && Self.isValidOptionalURL(mainnetArchiveNodeURL)
     }
 
     var canContinueFromModel: Bool {
@@ -429,22 +423,17 @@ private final class OnboardingState: ObservableObject {
 
     private func persistNetwork() {
         let trimmedMainnetRPC = mainnetRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedMainnetArchive = mainnetArchiveNodeURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedMainnetConsensus = mainnetConsensusRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedSepoliaRPC = sepoliaRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedSepoliaArchive = sepoliaArchiveNodeURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedSepoliaConsensus = sepoliaConsensusRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
         settingsStore.rpcURL = trimmedSepoliaRPC
-        settingsStore.archiveNodeURL = trimmedSepoliaArchive
         settingsStore.consensusRPCURL = trimmedSepoliaConsensus
 
         var networkSettings = networkSettingsStore.networkSettings
         networkSettings.isTestnetModeEnabled = true
         networkSettings.mainnetRPCURL = trimmedMainnetRPC
-        networkSettings.mainnetArchiveNodeURL = trimmedMainnetArchive
         networkSettings.mainnetConsensusRPCURL = trimmedMainnetConsensus
         networkSettings.sepoliaRPCURL = trimmedSepoliaRPC
-        networkSettings.sepoliaArchiveNodeURL = trimmedSepoliaArchive
         networkSettings.sepoliaConsensusRPCURL = trimmedSepoliaConsensus
         if let validated = try? networkSettings.validated() {
             networkSettingsStore.setNetworkSettings(validated)
@@ -818,7 +807,6 @@ private struct NetworkStep: View {
                     VStack(alignment: .leading, spacing: 10) {
                         InfoRow(icon: "network", title: "Execution RPC", detail: "Used for current EVM state, transaction preparation, submission, balances, and receipts.")
                         InfoRow(icon: "checkmark.shield", title: "Consensus RPC", detail: "Used by Helios to verify Ethereum reads against the canonical beacon chain.")
-                        InfoRow(icon: "clock.arrow.circlepath", title: "Archive node", detail: "Optional endpoint for historical reads and richer wallet timelines.")
                     }
                     .padding(16)
                 }
@@ -840,11 +828,6 @@ private struct NetworkStep: View {
                 placeholder: "Consensus RPC URL",
                 text: $state.sepoliaConsensusRPCURL
             )
-            OnboardingTextField(
-                label: "Archive Node URL",
-                placeholder: "Optional",
-                text: $state.sepoliaArchiveNodeURL
-            )
         case .mainnet:
             OnboardingTextField(
                 label: "Execution RPC URL",
@@ -855,11 +838,6 @@ private struct NetworkStep: View {
                 label: "Consensus RPC URL",
                 placeholder: "Consensus RPC URL",
                 text: $state.mainnetConsensusRPCURL
-            )
-            OnboardingTextField(
-                label: "Archive Node URL",
-                placeholder: "Optional",
-                text: $state.mainnetArchiveNodeURL
             )
         }
     }

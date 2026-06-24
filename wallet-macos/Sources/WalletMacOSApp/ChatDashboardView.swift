@@ -2010,7 +2010,6 @@ private final class ChatDashboardModel: ObservableObject {
         )
         try walletModel.updateNetworkSettings(validated)
         onboardingSettingsStore.rpcURL = validated.sepoliaRPCURL
-        onboardingSettingsStore.archiveNodeURL = validated.sepoliaArchiveNodeURL
         refreshAccountIdentity()
         if !requiresRestart {
             return "Saved \(validated.activeNetworkName) network settings. No wallet-node restart was needed."

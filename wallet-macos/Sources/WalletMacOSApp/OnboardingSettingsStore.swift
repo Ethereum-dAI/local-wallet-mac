@@ -4,7 +4,6 @@ final class OnboardingSettingsStore {
     private enum Keys {
         static let completed = "com.localwallet.demo.onboarding.completed"
         static let rpcURL = "com.localwallet.demo.onboarding.rpc-url"
-        static let archiveNodeURL = "com.localwallet.demo.onboarding.archive-node-url"
         static let consensusRPCURL = "com.localwallet.demo.onboarding.consensus-rpc-url"
         static let selectedModelID = "com.localwallet.demo.onboarding.selected-model-id"
         static let installedModelID = "com.localwallet.demo.onboarding.installed-model-id"
@@ -29,15 +28,6 @@ final class OnboardingSettingsStore {
         }
         set {
             defaults.set(newValue, forKey: Keys.rpcURL)
-        }
-    }
-
-    var archiveNodeURL: String {
-        get {
-            defaults.string(forKey: Keys.archiveNodeURL) ?? ""
-        }
-        set {
-            defaults.set(newValue, forKey: Keys.archiveNodeURL)
         }
     }
 

@@ -22,4 +22,12 @@ struct ContextWindowSettingsTests {
     @Test func recommendedModelHasContextMax() {
         #expect(LocalAIModel.recommended.maxContextTokens >= 4096)
     }
+
+    @Test func inferenceServiceUsesStoredContextWindow() {
+        let suite = UserDefaults(suiteName: "context-window-tests-\(UUID().uuidString)")!
+        let store = OnboardingSettingsStore(defaults: suite)
+        store.contextWindowTokens = 8192
+        let service = EmbeddedLlamaInferenceService(settingsStore: store)
+        #expect(service.contextSize == 8192)
+    }
 }

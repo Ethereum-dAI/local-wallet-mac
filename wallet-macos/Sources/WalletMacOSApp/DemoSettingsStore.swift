@@ -2,14 +2,11 @@ import Foundation
 
 enum DemoNetworkSettingsError: LocalizedError {
     case invalidRequiredURL(field: String, value: String)
-    case invalidOptionalURL(field: String, value: String)
 
     var errorDescription: String? {
         switch self {
         case .invalidRequiredURL(let field, let value):
             return "\(field) must be a valid URL. Current value: \(value)"
-        case .invalidOptionalURL(let field, let value):
-            return "\(field) must be blank or a valid URL. Current value: \(value)"
         }
     }
 }
@@ -17,12 +14,10 @@ enum DemoNetworkSettingsError: LocalizedError {
 struct DemoNetworkSettings: Equatable {
     var isTestnetModeEnabled: Bool
     var mainnetRPCURL: String
-    var mainnetArchiveNodeURL: String
     var mainnetConsensusRPCURL: String
     var mainnetMaxFeePerGasGwei: String
     var mainnetMaxPriorityFeePerGasGwei: String
     var sepoliaRPCURL: String
-    var sepoliaArchiveNodeURL: String
     var sepoliaConsensusRPCURL: String
     var sepoliaMaxFeePerGasGwei: String
     var sepoliaMaxPriorityFeePerGasGwei: String
@@ -33,12 +28,10 @@ struct DemoNetworkSettings: Equatable {
     static let defaults = DemoNetworkSettings(
         isTestnetModeEnabled: true,
         mainnetRPCURL: ChainConfiguration.ethereum.rpcURL.absoluteString,
-        mainnetArchiveNodeURL: "",
         mainnetConsensusRPCURL: ChainConfiguration.ethereum.consensusRPCURL.absoluteString,
         mainnetMaxFeePerGasGwei: WalletNodeDaemon.GasPolicy.mainnet.maxFeePerGasGwei,
         mainnetMaxPriorityFeePerGasGwei: WalletNodeDaemon.GasPolicy.mainnet.maxPriorityFeePerGasGwei,
         sepoliaRPCURL: ChainConfiguration.ethereumSepolia.rpcURL.absoluteString,
-        sepoliaArchiveNodeURL: "",
         sepoliaConsensusRPCURL: ChainConfiguration.ethereumSepolia.consensusRPCURL.absoluteString,
         sepoliaMaxFeePerGasGwei: WalletNodeDaemon.GasPolicy.sepolia.maxFeePerGasGwei,
         sepoliaMaxPriorityFeePerGasGwei: WalletNodeDaemon.GasPolicy.sepolia.maxPriorityFeePerGasGwei,
@@ -59,7 +52,6 @@ struct DemoNetworkSettings: Equatable {
         let base = isTestnetModeEnabled ? ChainConfiguration.ethereumSepolia : ChainConfiguration.ethereum
         return base.overridingNetworkURLs(
             rpcURL: Self.url(from: activeRPCURL) ?? base.rpcURL,
-            archiveRPCURL: Self.url(from: activeArchiveNodeURL),
             consensusRPCURL: Self.url(from: activeConsensusRPCURL) ?? base.consensusRPCURL
         )
     }
@@ -70,10 +62,6 @@ struct DemoNetworkSettings: Equatable {
 
     var activeRPCURL: String {
         isTestnetModeEnabled ? sepoliaRPCURL : mainnetRPCURL
-    }
-
-    var activeArchiveNodeURL: String {
-        isTestnetModeEnabled ? sepoliaArchiveNodeURL : mainnetArchiveNodeURL
     }
 
     var activeConsensusRPCURL: String {
@@ -105,7 +93,6 @@ struct DemoNetworkSettings: Equatable {
     func validated() throws -> DemoNetworkSettings {
         var settings = self
         settings.mainnetRPCURL = try Self.normalizedRequiredURL(mainnetRPCURL, field: "Mainnet execution RPC")
-        settings.mainnetArchiveNodeURL = try Self.normalizedOptionalURL(mainnetArchiveNodeURL, field: "Mainnet archive RPC")
         settings.mainnetConsensusRPCURL = try Self.normalizedDefaultedURL(
             mainnetConsensusRPCURL,
             defaultValue: Self.defaults.mainnetConsensusRPCURL,
@@ -120,7 +107,6 @@ struct DemoNetworkSettings: Equatable {
         settings.mainnetMaxFeePerGasGwei = mainnetGasPolicy.maxFeePerGasGwei
         settings.mainnetMaxPriorityFeePerGasGwei = mainnetGasPolicy.maxPriorityFeePerGasGwei
         settings.sepoliaRPCURL = try Self.normalizedRequiredURL(sepoliaRPCURL, field: "Sepolia execution RPC")
-        settings.sepoliaArchiveNodeURL = try Self.normalizedOptionalURL(sepoliaArchiveNodeURL, field: "Sepolia archive RPC")
         settings.sepoliaConsensusRPCURL = try Self.normalizedDefaultedURL(
             sepoliaConsensusRPCURL,
             defaultValue: Self.defaults.sepoliaConsensusRPCURL,
@@ -143,13 +129,11 @@ struct DemoNetworkSettings: Equatable {
         var settings = self
         if isTestnetModeEnabled {
             settings.sepoliaRPCURL = Self.defaults.sepoliaRPCURL
-            settings.sepoliaArchiveNodeURL = Self.defaults.sepoliaArchiveNodeURL
             settings.sepoliaConsensusRPCURL = Self.defaults.sepoliaConsensusRPCURL
             settings.sepoliaMaxFeePerGasGwei = Self.defaults.sepoliaMaxFeePerGasGwei
             settings.sepoliaMaxPriorityFeePerGasGwei = Self.defaults.sepoliaMaxPriorityFeePerGasGwei
         } else {
             settings.mainnetRPCURL = Self.defaults.mainnetRPCURL
-            settings.mainnetArchiveNodeURL = Self.defaults.mainnetArchiveNodeURL
             settings.mainnetConsensusRPCURL = Self.defaults.mainnetConsensusRPCURL
             settings.mainnetMaxFeePerGasGwei = Self.defaults.mainnetMaxFeePerGasGwei
             settings.mainnetMaxPriorityFeePerGasGwei = Self.defaults.mainnetMaxPriorityFeePerGasGwei
@@ -161,17 +145,6 @@ struct DemoNetworkSettings: Equatable {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: trimmed), url.scheme != nil, url.host != nil else {
             throw DemoNetworkSettingsError.invalidRequiredURL(field: field, value: value)
-        }
-        return url.absoluteString
-    }
-
-    private static func normalizedOptionalURL(_ value: String, field: String) throws -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            return ""
-        }
-        guard let url = URL(string: trimmed), url.scheme != nil, url.host != nil else {
-            throw DemoNetworkSettingsError.invalidOptionalURL(field: field, value: value)
         }
         return url.absoluteString
     }
@@ -234,12 +207,10 @@ struct DemoSettingsStore {
     private enum Keys {
         static let testnetModeEnabled = "com.localwallet.demo.testnet-mode-enabled"
         static let mainnetRPCURL = "com.localwallet.demo.mainnet-rpc-url"
-        static let mainnetArchiveNodeURL = "com.localwallet.demo.mainnet-archive-node-url"
         static let mainnetConsensusRPCURL = "com.localwallet.demo.mainnet-consensus-rpc-url"
         static let mainnetMaxFeePerGasGwei = "com.localwallet.demo.mainnet-max-fee-per-gas-gwei"
         static let mainnetMaxPriorityFeePerGasGwei = "com.localwallet.demo.mainnet-max-priority-fee-per-gas-gwei"
         static let sepoliaRPCURL = "com.localwallet.demo.sepolia-rpc-url"
-        static let sepoliaArchiveNodeURL = "com.localwallet.demo.sepolia-archive-node-url"
         static let sepoliaConsensusRPCURL = "com.localwallet.demo.sepolia-consensus-rpc-url"
         static let sepoliaMaxFeePerGasGwei = "com.localwallet.demo.sepolia-max-fee-per-gas-gwei"
         static let sepoliaMaxPriorityFeePerGasGwei = "com.localwallet.demo.sepolia-max-priority-fee-per-gas-gwei"
@@ -251,7 +222,6 @@ struct DemoSettingsStore {
         static let sessionKeysEnabled = "com.localwallet.demo.session-keys-enabled"
         static let sessionPolicy = "com.localwallet.demo.session-policy"
         static let legacyOnboardingRPCURL = "com.localwallet.demo.onboarding.rpc-url"
-        static let legacyOnboardingArchiveNodeURL = "com.localwallet.demo.onboarding.archive-node-url"
         static let legacyOnboardingConsensusRPCURL = "com.localwallet.demo.onboarding.consensus-rpc-url"
     }
 
@@ -326,7 +296,6 @@ struct DemoSettingsStore {
         DemoNetworkSettings(
             isTestnetModeEnabled: isTestnetModeEnabled,
             mainnetRPCURL: defaults.string(forKey: Keys.mainnetRPCURL) ?? DemoNetworkSettings.defaults.mainnetRPCURL,
-            mainnetArchiveNodeURL: defaults.string(forKey: Keys.mainnetArchiveNodeURL) ?? DemoNetworkSettings.defaults.mainnetArchiveNodeURL,
             mainnetConsensusRPCURL: defaults.string(forKey: Keys.mainnetConsensusRPCURL) ?? DemoNetworkSettings.defaults.mainnetConsensusRPCURL,
             mainnetMaxFeePerGasGwei: defaults.string(forKey: Keys.mainnetMaxFeePerGasGwei)
                 ?? DemoNetworkSettings.defaults.mainnetMaxFeePerGasGwei,
@@ -336,9 +305,6 @@ struct DemoSettingsStore {
                 defaults.string(forKey: Keys.sepoliaRPCURL)
                     ?? defaults.string(forKey: Keys.legacyOnboardingRPCURL)
             ),
-            sepoliaArchiveNodeURL: defaults.string(forKey: Keys.sepoliaArchiveNodeURL)
-                ?? defaults.string(forKey: Keys.legacyOnboardingArchiveNodeURL)
-                ?? DemoNetworkSettings.defaults.sepoliaArchiveNodeURL,
             sepoliaConsensusRPCURL: DemoNetworkSettings.defaultingSepoliaConsensusRPCURL(
                 defaults.string(forKey: Keys.sepoliaConsensusRPCURL)
                     ?? defaults.string(forKey: Keys.legacyOnboardingConsensusRPCURL)
@@ -359,12 +325,10 @@ struct DemoSettingsStore {
     func setNetworkSettings(_ settings: DemoNetworkSettings) {
         defaults.set(settings.isTestnetModeEnabled, forKey: Keys.testnetModeEnabled)
         defaults.set(settings.mainnetRPCURL, forKey: Keys.mainnetRPCURL)
-        defaults.set(settings.mainnetArchiveNodeURL, forKey: Keys.mainnetArchiveNodeURL)
         defaults.set(settings.mainnetConsensusRPCURL, forKey: Keys.mainnetConsensusRPCURL)
         defaults.set(settings.mainnetMaxFeePerGasGwei, forKey: Keys.mainnetMaxFeePerGasGwei)
         defaults.set(settings.mainnetMaxPriorityFeePerGasGwei, forKey: Keys.mainnetMaxPriorityFeePerGasGwei)
         defaults.set(settings.sepoliaRPCURL, forKey: Keys.sepoliaRPCURL)
-        defaults.set(settings.sepoliaArchiveNodeURL, forKey: Keys.sepoliaArchiveNodeURL)
         defaults.set(settings.sepoliaConsensusRPCURL, forKey: Keys.sepoliaConsensusRPCURL)
         defaults.set(settings.sepoliaMaxFeePerGasGwei, forKey: Keys.sepoliaMaxFeePerGasGwei)
         defaults.set(settings.sepoliaMaxPriorityFeePerGasGwei, forKey: Keys.sepoliaMaxPriorityFeePerGasGwei)

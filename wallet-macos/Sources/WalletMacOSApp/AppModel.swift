@@ -633,7 +633,6 @@ final class AppModel: ObservableObject {
             "name=\(activeChain.name)",
             "chainId=\(activeChain.id)",
             "executionRPC=\(activeChain.rpcURL.absoluteString)",
-            "archiveRPC=\(activeChain.archiveRPCURL?.absoluteString ?? "Not set")",
             "consensusRPC=\(activeChain.consensusRPCURL.absoluteString)",
             "readVerification=\(networkSettings.heliosVerificationEnabled ? "helios" : "execution_rpc")",
             "entryPoint=\(activeChain.entryPoint)",
@@ -2987,7 +2986,6 @@ enum NetworkSettingsChangePolicy {
             return true
         }
         if old.activeRPCURL != new.activeRPCURL
-            || old.activeArchiveNodeURL != new.activeArchiveNodeURL
             || old.activeConsensusRPCURL != new.activeConsensusRPCURL {
             return true
         }

@@ -840,7 +840,6 @@ private final class ChatDashboardModel: ObservableObject {
             chainID: String(chain.id),
             executionRPCURL: chain.rpcURL.absoluteString,
             configuredRPCURL: networkSettings.activeRPCURL,
-            archiveNodeURL: chain.archiveRPCURL?.absoluteString ?? "Not set",
             consensusRPCURL: chain.consensusRPCURL.absoluteString,
             maxFeePerGasCap: "\(gasPolicy.maxFeePerGasGwei) gwei",
             maxPriorityFeePerGasCap: "\(gasPolicy.maxPriorityFeePerGasGwei) gwei",
@@ -2014,7 +2013,6 @@ private final class ChatDashboardModel: ObservableObject {
         )
         try walletModel.updateNetworkSettings(validated)
         onboardingSettingsStore.rpcURL = validated.sepoliaRPCURL
-        onboardingSettingsStore.archiveNodeURL = validated.sepoliaArchiveNodeURL
         refreshAccountIdentity()
         if !requiresRestart {
             return "Saved \(validated.activeNetworkName) network settings. No wallet-node restart was needed."
@@ -2089,36 +2087,6 @@ private final class ChatDashboardModel: ObservableObject {
                 state: .failed,
                 detail: error.localizedDescription,
                 latencyMilliseconds: Self.latencyMilliseconds(since: executionStart)
-            ))
-        }
-
-        if let archiveURL = chain.archiveRPCURL {
-            let archiveStart = Date()
-            do {
-                let chainID = try await Self.probeExecutionChainID(rpcURL: archiveURL)
-                let matches = chainID == chain.id
-                checks.append(SettingsHealthCheck(
-                    title: "Archive RPC",
-                    state: matches ? .healthy : .warning,
-                    detail: matches
-                        ? "Archive endpoint responded for chain \(chainID)."
-                        : "Archive endpoint returned chain ID \(chainID), expected \(chain.id).",
-                    latencyMilliseconds: Self.latencyMilliseconds(since: archiveStart)
-                ))
-            } catch {
-                checks.append(SettingsHealthCheck(
-                    title: "Archive RPC",
-                    state: .failed,
-                    detail: error.localizedDescription,
-                    latencyMilliseconds: Self.latencyMilliseconds(since: archiveStart)
-                ))
-            }
-        } else {
-            checks.append(SettingsHealthCheck(
-                title: "Archive RPC",
-                state: .skipped,
-                detail: "No archive endpoint configured.",
-                latencyMilliseconds: nil
             ))
         }
 

@@ -198,6 +198,7 @@ struct LocalWalletSettingsSnapshot: Equatable {
     let walletNodeVersion: String
     let rustFFIBuild: String
     let localLLMBackend: String
+    let swapSlippageBps: UInt64
 
     static func appVersionText(bundle: Bundle = .main) -> (version: String, build: String) {
         let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
@@ -248,6 +249,7 @@ struct LocalWalletSettingsView: View {
     let onCopyDebugReport: () async -> String
     let onClearDebugLog: () -> Void
     let onSetUnlockRelayerOnLaunch: (Bool) -> Void
+    let onSetSwapSlippageBps: (UInt64) -> Void
     let onClose: () -> Void
 
     @State private var selectedTab: LocalWalletSettingsTab
@@ -264,6 +266,9 @@ struct LocalWalletSettingsView: View {
     @State private var advancedMessage: SettingsMessage?
     @State private var unlockRelayerOnLaunch: Bool
     @State private var sessionPolicyDraft: SessionPolicyDraft
+    @State private var slippageBpsDraft: UInt64
+    @State private var slippagePercentField: String
+    @State private var transactionsMessage: SettingsMessage?
     @State private var isTestingNetwork = false
     @State private var isRunningDiagnostics = false
     @State private var isRotatingRelayer = false
@@ -298,6 +303,7 @@ struct LocalWalletSettingsView: View {
         onCopyDebugReport: @escaping () async -> String,
         onClearDebugLog: @escaping () -> Void,
         onSetUnlockRelayerOnLaunch: @escaping (Bool) -> Void,
+        onSetSwapSlippageBps: @escaping (UInt64) -> Void,
         onClose: @escaping () -> Void
     ) {
         self.snapshot = snapshot
@@ -323,6 +329,7 @@ struct LocalWalletSettingsView: View {
         self.onCopyDebugReport = onCopyDebugReport
         self.onClearDebugLog = onClearDebugLog
         self.onSetUnlockRelayerOnLaunch = onSetUnlockRelayerOnLaunch
+        self.onSetSwapSlippageBps = onSetSwapSlippageBps
         self.onClose = onClose
         self._networkDraft = State(initialValue: snapshot.networkSettings)
         self._unlockRelayerOnLaunch = State(initialValue: snapshot.unlockRelayerOnLaunch)
@@ -330,6 +337,8 @@ struct LocalWalletSettingsView: View {
             policy: snapshot.session.configuredPolicy,
             chainID: Self.chainID(from: snapshot.chainID)
         ))
+        self._slippageBpsDraft = State(initialValue: snapshot.swapSlippageBps)
+        self._slippagePercentField = State(initialValue: Self.formatSlippagePercent(SwapSlippage.percent(fromBps: snapshot.swapSlippageBps)))
         self._selectedTab = State(initialValue: initialTab)
     }
 
@@ -357,6 +366,10 @@ struct LocalWalletSettingsView: View {
                 policy: newValue,
                 chainID: Self.chainID(from: snapshot.chainID)
             )
+        }
+        .onChange(of: snapshot.swapSlippageBps) { _, newValue in
+            slippageBpsDraft = newValue
+            slippagePercentField = Self.formatSlippagePercent(SwapSlippage.percent(fromBps: newValue))
         }
         .alert(item: $pendingConfirmation) { confirmation in
             Alert(
@@ -590,6 +603,8 @@ struct LocalWalletSettingsView: View {
                         modelsTab
                     case .network:
                         networkTab
+                    case .transactions:
+                        transactionsTab
                     case .diagnostics:
                         diagnosticsTab
                     case .data:
@@ -1744,6 +1759,80 @@ struct LocalWalletSettingsView: View {
         }
     }
 
+    private var transactionsTab: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SettingsSection(title: "Swaps") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Slippage tolerance")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(SettingsPalette.primaryText)
+                    Text("Maximum price movement allowed before a swap reverts. Applies to every new swap quote.")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(SettingsPalette.secondaryText)
+                    HStack(spacing: 8) {
+                        ForEach(SwapSlippage.presetPercents, id: \.self) { preset in
+                            Button {
+                                persistSlippage(SwapSlippage.bps(fromPercent: preset))
+                            } label: {
+                                Text(Self.formatSlippagePercent(preset))
+                                    .font(.system(size: 13, weight: .bold))
+                            }
+                            .buttonStyle(SettingsSecondaryButtonStyle())
+                        }
+                        Spacer()
+                    }
+                    HStack(spacing: 8) {
+                        TextField("Custom %", text: $slippagePercentField)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 120)
+                            .onSubmit { commitCustomSlippage() }
+                        Button("Apply") { commitCustomSlippage() }
+                            .buttonStyle(SettingsSecondaryButtonStyle())
+                        Spacer()
+                    }
+                    SettingsKeyValueRows(rows: [
+                        SettingsKeyValue(
+                            title: "Current",
+                            value: "\(Self.formatSlippagePercent(SwapSlippage.percent(fromBps: slippageBpsDraft))) (\(slippageBpsDraft) bps)"
+                        ),
+                    ])
+                    if let transactionsMessage {
+                        SettingsMessageBanner(message: transactionsMessage)
+                    }
+                }
+            }
+        }
+    }
+
+    private func commitCustomSlippage() {
+        let normalized = slippagePercentField
+            .trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "%", with: "")
+            .replacingOccurrences(of: ",", with: ".")
+        guard let percent = Double(normalized), percent > 0 else {
+            transactionsMessage = SettingsMessage(kind: .error, text: "Enter a percentage between 0.1 and 50.")
+            return
+        }
+        let bps = percent > 50 ? SwapSlippage.maxBps : SwapSlippage.bps(fromPercent: percent)
+        persistSlippage(bps)
+    }
+
+    private func persistSlippage(_ bps: UInt64) {
+        let clamped = SwapSlippage.clampBps(bps)
+        slippageBpsDraft = clamped
+        slippagePercentField = Self.formatSlippagePercent(SwapSlippage.percent(fromBps: clamped))
+        onSetSwapSlippageBps(clamped)
+        transactionsMessage = SettingsMessage(
+            kind: .success,
+            text: "Swap slippage set to \(Self.formatSlippagePercent(SwapSlippage.percent(fromBps: clamped)))."
+        )
+    }
+
+    private static func formatSlippagePercent(_ percent: Double) -> String {
+        let formatted = String(format: "%g", percent)
+        return "\(formatted)%"
+    }
+
     private var advancedTab: some View {
         VStack(alignment: .leading, spacing: 18) {
             SettingsSection(title: "Daemon") {
@@ -2293,6 +2382,7 @@ enum LocalWalletSettingsTab: String, CaseIterable, Identifiable {
     case info
     case models
     case network
+    case transactions
     case diagnostics
     case data
     case wallet
@@ -2311,6 +2401,8 @@ enum LocalWalletSettingsTab: String, CaseIterable, Identifiable {
             return "Models"
         case .network:
             return "Network"
+        case .transactions:
+            return "Transactions"
         case .diagnostics:
             return "Diagnostics"
         case .data:
@@ -2336,6 +2428,8 @@ enum LocalWalletSettingsTab: String, CaseIterable, Identifiable {
             return "Local model runtime and generation preferences"
         case .network:
             return "Chain, RPC, and contract configuration"
+        case .transactions:
+            return "Swap slippage and transaction preferences"
         case .diagnostics:
             return "Network, wallet-node, and relayer health checks"
         case .data:
@@ -2361,6 +2455,8 @@ enum LocalWalletSettingsTab: String, CaseIterable, Identifiable {
             return "sparkles"
         case .network:
             return "network"
+        case .transactions:
+            return "arrow.left.arrow.right"
         case .diagnostics:
             return "stethoscope"
         case .data:

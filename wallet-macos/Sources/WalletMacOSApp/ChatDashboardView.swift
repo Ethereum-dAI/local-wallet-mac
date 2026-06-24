@@ -886,7 +886,8 @@ private final class ChatDashboardModel: ObservableObject {
             releaseChannel: "Preview",
             walletNodeVersion: "Managed by local wallet-node",
             rustFFIBuild: "Linked libwallet_ffi",
-            localLLMBackend: "llama.cpp"
+            localLLMBackend: "llama.cpp",
+            swapSlippageBps: walletModel.swapSlippageBps
         )
     }
 
@@ -2201,6 +2202,10 @@ private final class ChatDashboardModel: ObservableObject {
         refreshAccountIdentity()
     }
 
+    func setSwapSlippageBps(_ bps: UInt64) {
+        walletModel.setSwapSlippageBps(bps)
+    }
+
     private func appendMessage(_ message: ChatMessage, to conversationID: UUID) {
         guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
             return
@@ -3260,6 +3265,9 @@ struct LocalWalletChatDashboardView: View {
             },
             onSetUnlockRelayerOnLaunch: { isEnabled in
                 model.setUnlockRelayerOnLaunch(isEnabled)
+            },
+            onSetSwapSlippageBps: { bps in
+                model.setSwapSlippageBps(bps)
             },
             onClose: {
                 selectedSection = .chat

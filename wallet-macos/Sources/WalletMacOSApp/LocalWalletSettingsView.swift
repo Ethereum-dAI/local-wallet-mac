@@ -156,7 +156,6 @@ struct LocalWalletSettingsSnapshot: Equatable {
     let chainID: String
     let executionRPCURL: String
     let configuredRPCURL: String
-    let archiveNodeURL: String
     let consensusRPCURL: String
     let maxFeePerGasCap: String
     let maxPriorityFeePerGasCap: String
@@ -779,12 +778,6 @@ struct LocalWalletSettingsView: View {
                         text: activeExecutionRPCBinding
                     )
                     SettingsEditableField(
-                        title: "Archive node",
-                        placeholder: "Optional",
-                        detail: "Optional Helios endpoint for historical state reads. Helios is the light-client layer wallet-node uses to verify Ethereum reads without trusting a plain RPC response blindly.",
-                        text: activeArchiveRPCBinding
-                    )
-                    SettingsEditableField(
                         title: "Consensus RPC",
                         placeholder: networkDraft.isTestnetModeEnabled
                             ? DemoNetworkSettings.defaults.sepoliaConsensusRPCURL
@@ -890,7 +883,6 @@ struct LocalWalletSettingsView: View {
                     SettingsKeyValue(title: "Runtime network", value: snapshot.chainName),
                     SettingsKeyValue(title: "Chain ID", value: snapshot.chainID),
                     SettingsKeyValue(title: "Execution RPC", value: snapshot.executionRPCURL),
-                    SettingsKeyValue(title: "Helios archive node", value: snapshot.archiveNodeURL),
                     SettingsKeyValue(title: "Consensus RPC", value: snapshot.consensusRPCURL),
                     SettingsKeyValue(
                         title: "Read verification",
@@ -927,20 +919,6 @@ struct LocalWalletSettingsView: View {
         )
     }
 
-    private var activeArchiveRPCBinding: Binding<String> {
-        Binding(
-            get: {
-                networkDraft.isTestnetModeEnabled ? networkDraft.sepoliaArchiveNodeURL : networkDraft.mainnetArchiveNodeURL
-            },
-            set: { value in
-                if networkDraft.isTestnetModeEnabled {
-                    networkDraft.sepoliaArchiveNodeURL = value
-                } else {
-                    networkDraft.mainnetArchiveNodeURL = value
-                }
-            }
-        )
-    }
 
     private var activeConsensusRPCBinding: Binding<String> {
         Binding(
@@ -1062,7 +1040,7 @@ struct LocalWalletSettingsView: View {
                         SettingsMessageBanner(
                             message: SettingsMessage(
                                 kind: .info,
-                                text: "Run diagnostics to check execution RPC, Helios archive endpoint, consensus RPC, wallet-node status, chain ID, latest block, latency, and current relayer state."
+                                text: "Run diagnostics to check execution RPC, consensus RPC, wallet-node status, chain ID, latest block, latency, and current relayer state."
                             )
                         )
                     }
@@ -1072,7 +1050,6 @@ struct LocalWalletSettingsView: View {
             SettingsSection(title: "Runtime Snapshot") {
                 SettingsKeyValueRows(rows: [
                     SettingsKeyValue(title: "Execution RPC", value: snapshot.executionRPCURL),
-                    SettingsKeyValue(title: "Helios archive node", value: snapshot.archiveNodeURL),
                     SettingsKeyValue(title: "Consensus RPC", value: snapshot.consensusRPCURL),
                     SettingsKeyValue(
                         title: "Read verification",

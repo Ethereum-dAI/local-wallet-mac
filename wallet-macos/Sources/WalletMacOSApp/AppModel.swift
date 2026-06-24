@@ -615,7 +615,6 @@ final class AppModel: ObservableObject {
             "name=\(activeChain.name)",
             "chainId=\(activeChain.id)",
             "executionRPC=\(activeChain.rpcURL.absoluteString)",
-            "archiveRPC=\(activeChain.archiveRPCURL?.absoluteString ?? "Not set")",
             "consensusRPC=\(activeChain.consensusRPCURL.absoluteString)",
             "readVerification=\(networkSettings.heliosVerificationEnabled ? "helios" : "execution_rpc")",
             "entryPoint=\(activeChain.entryPoint)",

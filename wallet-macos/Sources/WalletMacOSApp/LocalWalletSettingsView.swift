@@ -149,6 +149,8 @@ struct LocalWalletSettingsSnapshot: Equatable {
     let textModelInstallStatus: String
     let textModelPath: String
     let contextWindow: String
+    let contextWindowTokens: Int
+    let contextWindowMaxTokens: Int
     let multimodalModelName: String
     let multimodalModelStatus: String
     let networkSettings: DemoNetworkSettings
@@ -250,6 +252,7 @@ struct LocalWalletSettingsView: View {
     let onClearDebugLog: () -> Void
     let onSetUnlockRelayerOnLaunch: (Bool) -> Void
     let onSetSwapSlippageBps: (UInt64) -> Void
+    let onSetContextWindowTokens: (Int) -> Void
     let onClose: () -> Void
 
     @State private var selectedTab: LocalWalletSettingsTab
@@ -268,6 +271,7 @@ struct LocalWalletSettingsView: View {
     @State private var sessionPolicyDraft: SessionPolicyDraft
     @State private var slippageBpsDraft: UInt64
     @State private var slippagePercentField: String
+    @State private var contextWindowDraft: Int
     @State private var transactionsMessage: SettingsMessage?
     @State private var isTestingNetwork = false
     @State private var isRunningDiagnostics = false
@@ -304,6 +308,7 @@ struct LocalWalletSettingsView: View {
         onClearDebugLog: @escaping () -> Void,
         onSetUnlockRelayerOnLaunch: @escaping (Bool) -> Void,
         onSetSwapSlippageBps: @escaping (UInt64) -> Void,
+        onSetContextWindowTokens: @escaping (Int) -> Void,
         onClose: @escaping () -> Void
     ) {
         self.snapshot = snapshot
@@ -330,6 +335,7 @@ struct LocalWalletSettingsView: View {
         self.onClearDebugLog = onClearDebugLog
         self.onSetUnlockRelayerOnLaunch = onSetUnlockRelayerOnLaunch
         self.onSetSwapSlippageBps = onSetSwapSlippageBps
+        self.onSetContextWindowTokens = onSetContextWindowTokens
         self.onClose = onClose
         self._networkDraft = State(initialValue: snapshot.networkSettings)
         self._unlockRelayerOnLaunch = State(initialValue: snapshot.unlockRelayerOnLaunch)
@@ -339,6 +345,7 @@ struct LocalWalletSettingsView: View {
         ))
         self._slippageBpsDraft = State(initialValue: snapshot.swapSlippageBps)
         self._slippagePercentField = State(initialValue: Self.formatSlippagePercent(SwapSlippage.percent(fromBps: snapshot.swapSlippageBps)))
+        self._contextWindowDraft = State(initialValue: snapshot.contextWindowTokens)
         self._selectedTab = State(initialValue: initialTab)
     }
 
@@ -370,6 +377,9 @@ struct LocalWalletSettingsView: View {
         .onChange(of: snapshot.swapSlippageBps) { _, newValue in
             slippageBpsDraft = newValue
             slippagePercentField = Self.formatSlippagePercent(SwapSlippage.percent(fromBps: newValue))
+        }
+        .onChange(of: snapshot.contextWindowTokens) { _, newValue in
+            contextWindowDraft = newValue
         }
         .alert(item: $pendingConfirmation) { confirmation in
             Alert(
@@ -725,8 +735,36 @@ struct LocalWalletSettingsView: View {
                     SettingsKeyValue(title: "Install status", value: snapshot.textModelInstallStatus),
                     SettingsKeyValue(title: "Path", value: snapshot.textModelPath),
                     SettingsKeyValue(title: "Runtime", value: snapshot.textModelRuntimeStatus),
-                    SettingsKeyValue(title: "Context", value: snapshot.contextWindow),
                 ])
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Context window")
+                            .font(.system(size: 12, weight: .heavy))
+                            .foregroundStyle(SettingsPalette.mutedText)
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { contextWindowDraft },
+                            set: { newValue in
+                                contextWindowDraft = newValue
+                                onSetContextWindowTokens(newValue)
+                                modelMessage = SettingsMessage(
+                                    kind: .success,
+                                    text: "Context window set to \(newValue) tokens. Applies after you restart the app."
+                                )
+                            }
+                        )) {
+                            ForEach(ContextWindowPresets.options(maxTokens: snapshot.contextWindowMaxTokens), id: \.self) { tokens in
+                                Text("\(tokens) tokens").tag(tokens)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 160)
+                    }
+                    Text("Active: \(snapshot.contextWindow). Changes apply after restart. Larger windows use more memory.")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(SettingsPalette.secondaryText)
+                }
+                .padding(.top, 4)
                 Divider().overlay(SettingsPalette.border).padding(.vertical, 4)
                 HStack(spacing: 12) {
                     Toggle("Show thinking", isOn: $thinkingEnabled)

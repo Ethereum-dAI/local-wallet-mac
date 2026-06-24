@@ -538,6 +538,14 @@ final class AppModel: ObservableObject {
         appendLog("transactions: swap slippage set to \(SwapSlippage.percent(fromBps: clamped))%")
     }
 
+    func setContextWindowTokens(_ tokens: Int) {
+        let model = LocalAIModel.available.first { $0.id == onboardingSettingsStore.selectedModelID } ?? .recommended
+        let clamped = ContextWindowPresets.clamp(tokens, maxTokens: model.maxContextTokens)
+        guard onboardingSettingsStore.contextWindowTokens != clamped else { return }
+        onboardingSettingsStore.contextWindowTokens = clamped
+        appendLog("models: context window set to \(clamped) tokens (applies after restart)")
+    }
+
     func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
         guard unlockRelayerOnLaunch != isEnabled else {
             return

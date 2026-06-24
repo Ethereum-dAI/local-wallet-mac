@@ -48,7 +48,7 @@ It does not launch or manage the daemon directly. Daemon process spawning lives 
 
 ## Local Development
 
-For monorepo-style local development, copy `rust-core/.cargo/config.toml.example` to `rust-core/.cargo/config.toml` and ensure `local-wallet-protocol` and `local-wallet-daemon` are checked out as siblings of this repo. The example config file contains `[patch.crates-io]` overrides that redirect the git dependencies to your local checkouts.
+For monorepo-style local development, copy `rust-core/.cargo/config.toml.example` to `rust-core/.cargo/config.toml` and ensure `local-wallet-protocol` and `local-wallet-daemon` are checked out as siblings of this repo. The example config file contains Cargo `paths` overrides that redirect the git dependencies to your local sibling checkouts.
 
 ## Call Flow
 

@@ -26,12 +26,20 @@ to test a non-default binary path.
 
 ## Design
 
-The shim uses option B: `posix_spawn_file_actions_adddup2` maps the daemon's
-ready pipe write end to child fd `3` and the alive pipe read end to child fd `4`.
+The shim uses option B: `posix_spawn_file_actions_adddup2` maps three pipe
+ends into the child:
+
+- **fd `3` — ready** (daemon→app): the daemon's ready pipe write end. The
+  daemon writes a ready JSON carrying the bearer token and socket path.
+- **fd `4` — alive** (app→daemon): the alive pipe read end. EOF on this fd (the
+  app closing its write end) triggers daemon shutdown.
+- **fd `5` — secret** (app→daemon): the secret pipe read end. The app writes the
+  bundler-EOA secret payload here at startup.
+
 The daemon is always launched as:
 
 ```text
-wallet-node --ready-fd 3 --alive-fd 4
+wallet-node --ready-fd 3 --alive-fd 4 --secret-fd 5
 ```
 
 Fixed fd numbering keeps the Swift side independent from the parent process's
@@ -47,18 +55,21 @@ daemon's reported version should refuse to integrate rather than guess.
 ## Failure Modes
 
 - `FD_CLOEXEC`: fds duplicated with `adddup2` are available in the child at
-  fd `3` and fd `4`, but unrelated parent-only pipe ends must be marked
+  fd `3`, fd `4`, and fd `5`, but unrelated parent-only pipe ends must be marked
   close-on-exec or closed through file actions so they do not leak.
 - Alive pipe: if the child inherits the alive pipe write end, closing the app's
   write end will not produce EOF and the daemon will stay alive.
-- Fd numbering: callers should treat fd `3` as daemon-owned ready write and fd
-  `4` as daemon-owned alive read after spawn. Passing the same fd for both roles
-  is rejected with `EINVAL`.
+- Fd numbering: callers should treat fd `3` as daemon-owned ready write, fd `4`
+  as daemon-owned alive read, and fd `5` as daemon-owned secret read after
+  spawn. Passing the same fd for more than one role is rejected with `EINVAL`.
 - Spawn errors: `wallet_node_spawn_helper` returns the `errno`-style integer
   from `posix_spawn` or file-action setup; the Swift wrapper surfaces this as
   `SpawnError`.
 
 ## Daemon-Side Lifecycle
+
+At startup the daemon reads its bundler-EOA secret payload from fd `5` (the
+app's write end of the secret pipe).
 
 The spawned daemon owns two complementary lifecycle guarantees on top of the
 fd-4 alive pipe: it watches fd `4` for EOF and shuts down when the parent app

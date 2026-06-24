@@ -23,6 +23,8 @@ The C ABI currently exposes helpers for:
 - Kernel `initialize(...)` calldata encoding
 - Kernel session-permission construction
 - Kernel session signature wrapping and session dummy signatures
+- Kernel session permission `installValidations` calldata (root-validated self-call install)
+- Kernel session `grantAccess(...)` selector-grant calldata
 - Kernel session nonce invalidation, empty permission deinit data, and permission uninstall calldata
 - freeing buffers allocated by Rust
 
@@ -46,6 +48,7 @@ That script writes:
 
 ```text
 swift-bridge/Sources/WalletFFI/wallet_ffi.h
+swift-bridge/Sources/WalletFFI/wallet_node_api_version.h
 swift-bridge/lib/libwallet_ffi.a
 ```
 
@@ -67,6 +70,8 @@ The buffer-returning functions are:
 - `wallet_session_build_permission` — Kernel session permission enable and selector data
 - `wallet_session_sign_and_wrap` — Kernel session signature bytes for installed or enable mode
 - `wallet_session_dummy_signature` — gas-estimation dummy session signature bytes
+- `wallet_session_install_validations_calldata` — Kernel `installValidations(...)` calldata (root-validated self-call install)
+- `wallet_session_grant_access_calldata` — Kernel `grantAccess(vId, selector, true)` calldata
 - `wallet_session_invalidate_nonce_calldata` — Kernel `invalidateNonce(...)` calldata
 - `wallet_session_empty_permission_deinit_data` — deinit data for empty session permissions
 - `wallet_session_uninstall_permission_calldata` — Kernel permission uninstall calldata

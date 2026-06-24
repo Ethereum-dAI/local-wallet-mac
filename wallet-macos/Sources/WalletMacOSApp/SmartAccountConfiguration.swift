@@ -18,7 +18,6 @@ struct ChainConfiguration: Equatable {
     let shortName: String
     let isTestnet: Bool
     let rpcURL: URL
-    let archiveRPCURL: URL?
     let consensusRPCURL: URL
     let bundlerURL: URL?
     let entryPoint: String
@@ -34,7 +33,6 @@ struct ChainConfiguration: Equatable {
         shortName: "mainnet",
         isTestnet: false,
         rpcURL: URL(string: "https://ethereum-rpc.publicnode.com")!,
-        archiveRPCURL: nil,
         consensusRPCURL: URL(string: "https://lodestar-mainnet.chainsafe.io")!,
         bundlerURL: nil,
         entryPoint: "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
@@ -52,7 +50,6 @@ struct ChainConfiguration: Equatable {
         shortName: "sepolia",
         isTestnet: true,
         rpcURL: URL(string: "https://sepolia.drpc.org")!,
-        archiveRPCURL: nil,
         consensusRPCURL: URL(string: "http://unstable.sepolia.beacon-api.nimbus.team")!,
         bundlerURL: configuredSepoliaBundlerURL(),
         entryPoint: "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
@@ -89,7 +86,6 @@ struct ChainConfiguration: Equatable {
 
     func overridingNetworkURLs(
         rpcURL: URL,
-        archiveRPCURL: URL?,
         consensusRPCURL: URL
     ) -> ChainConfiguration {
         ChainConfiguration(
@@ -98,7 +94,6 @@ struct ChainConfiguration: Equatable {
             shortName: shortName,
             isTestnet: isTestnet,
             rpcURL: rpcURL,
-            archiveRPCURL: archiveRPCURL,
             consensusRPCURL: consensusRPCURL,
             bundlerURL: bundlerURL,
             entryPoint: entryPoint,

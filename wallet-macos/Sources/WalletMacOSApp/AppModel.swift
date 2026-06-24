@@ -2967,7 +2967,6 @@ enum NetworkSettingsChangePolicy {
             return true
         }
         if old.activeRPCURL != new.activeRPCURL
-            || old.activeArchiveNodeURL != new.activeArchiveNodeURL
             || old.activeConsensusRPCURL != new.activeConsensusRPCURL {
             return true
         }

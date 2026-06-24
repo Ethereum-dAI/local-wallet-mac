@@ -247,6 +247,7 @@ struct DemoSettingsStore {
         static let autoGasModeEnabled = "com.localwallet.demo.auto-gas-mode-enabled"
         static let autoGasTier = "com.localwallet.demo.auto-gas-tier"
         static let unlockRelayerOnLaunch = "com.localwallet.demo.unlock-relayer-on-launch"
+        static let swapSlippageBps = "com.localwallet.demo.swap-slippage-bps"
         static let sessionKeysEnabled = "com.localwallet.demo.session-keys-enabled"
         static let sessionPolicy = "com.localwallet.demo.session-policy"
         static let legacyOnboardingRPCURL = "com.localwallet.demo.onboarding.rpc-url"
@@ -280,6 +281,18 @@ struct DemoSettingsStore {
 
     func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
         defaults.set(isEnabled, forKey: Keys.unlockRelayerOnLaunch)
+    }
+
+    var swapSlippageBps: UInt64 {
+        if defaults.object(forKey: Keys.swapSlippageBps) == nil {
+            return SwapSlippage.defaultBps
+        }
+        let stored = defaults.integer(forKey: Keys.swapSlippageBps)
+        return SwapSlippage.clampBps(UInt64(max(0, stored)))
+    }
+
+    func setSwapSlippageBps(_ bps: UInt64) {
+        defaults.set(Int(SwapSlippage.clampBps(bps)), forKey: Keys.swapSlippageBps)
     }
 
     var sessionKeysEnabled: Bool {

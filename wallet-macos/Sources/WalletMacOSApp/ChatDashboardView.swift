@@ -831,6 +831,8 @@ private final class ChatDashboardModel: ObservableObject {
             textModelInstallStatus: installStatus,
             textModelPath: installedPath.isEmpty ? "Not set" : installedPath,
             contextWindow: "\(inferenceService.contextSize) tokens",
+            contextWindowTokens: onboardingSettingsStore.contextWindowTokens,
+            contextWindowMaxTokens: selectedModel.maxContextTokens,
             multimodalModelName: "Not configured",
             multimodalModelStatus: "No local vision model selected",
             networkSettings: networkSettings,
@@ -886,7 +888,8 @@ private final class ChatDashboardModel: ObservableObject {
             releaseChannel: "Preview",
             walletNodeVersion: "Managed by local wallet-node",
             rustFFIBuild: "Linked libwallet_ffi",
-            localLLMBackend: "llama.cpp"
+            localLLMBackend: "llama.cpp",
+            swapSlippageBps: walletModel.swapSlippageBps
         )
     }
 
@@ -2201,6 +2204,14 @@ private final class ChatDashboardModel: ObservableObject {
         refreshAccountIdentity()
     }
 
+    func setSwapSlippageBps(_ bps: UInt64) {
+        walletModel.setSwapSlippageBps(bps)
+    }
+
+    func setContextWindowTokens(_ tokens: Int) {
+        walletModel.setContextWindowTokens(tokens)
+    }
+
     private func appendMessage(_ message: ChatMessage, to conversationID: UUID) {
         guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
             return
@@ -3260,6 +3271,12 @@ struct LocalWalletChatDashboardView: View {
             },
             onSetUnlockRelayerOnLaunch: { isEnabled in
                 model.setUnlockRelayerOnLaunch(isEnabled)
+            },
+            onSetSwapSlippageBps: { bps in
+                model.setSwapSlippageBps(bps)
+            },
+            onSetContextWindowTokens: { tokens in
+                model.setContextWindowTokens(tokens)
             },
             onClose: {
                 selectedSection = .chat

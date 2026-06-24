@@ -119,11 +119,17 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
     init(
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
         downloadManager: LocalAIModelDownloadManager = LocalAIModelDownloadManager(),
-        runtime: LlamaRuntime = LlamaRuntime()
+        runtime: LlamaRuntime? = nil
     ) {
         self.settingsStore = settingsStore
         self.downloadManager = downloadManager
-        self.runtime = runtime
+        if let runtime {
+            self.runtime = runtime
+        } else {
+            let model = LocalAIModel.available.first { $0.id == settingsStore.selectedModelID } ?? .recommended
+            let tokens = ContextWindowPresets.clamp(settingsStore.contextWindowTokens, maxTokens: model.maxContextTokens)
+            self.runtime = LlamaRuntime(configuration: LocalLLMConfiguration(contextSize: Int32(tokens)))
+        }
     }
 
     var runtimeStatus: String {

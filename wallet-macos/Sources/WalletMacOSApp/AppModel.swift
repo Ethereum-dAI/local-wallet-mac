@@ -71,6 +71,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var isExportingLocalRelayer = false
     @Published private(set) var isDeletingLocalRelayer = false
     @Published private(set) var unlockRelayerOnLaunch: Bool
+    @Published private(set) var swapSlippageBps: UInt64
     @Published private(set) var liveGasPrice: WalletNodeClient.UserOperationGasPrice?
     @Published private(set) var liveBaseFeeWei: Data?
     @Published private(set) var liveGasUpdatedAt: Date?
@@ -172,6 +173,7 @@ final class AppModel: ObservableObject {
         self.walletHistoryStore = walletHistoryStore
         self.configuration = DemoAppConfiguration(networkSettings: settingsStore.networkSettings)
         self.unlockRelayerOnLaunch = settingsStore.unlockRelayerOnLaunch
+        self.swapSlippageBps = settingsStore.swapSlippageBps
         self.localRelayerMessage = walletNodeClient == nil
             ? "Local wallet-node daemon will start on refresh."
             : "Local wallet-node daemon configured from environment."
@@ -526,6 +528,14 @@ final class AppModel: ObservableObject {
 
     func recordSessionUserActivity(now: Date = Date()) {
         recordSessionActivity(now: now, source: "UI interaction", isUserInput: true)
+    }
+
+    func setSwapSlippageBps(_ bps: UInt64) {
+        let clamped = SwapSlippage.clampBps(bps)
+        guard swapSlippageBps != clamped else { return }
+        settingsStore.setSwapSlippageBps(clamped)
+        swapSlippageBps = clamped
+        appendLog("transactions: swap slippage set to \(SwapSlippage.percent(fromBps: clamped))%")
     }
 
     func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
@@ -1722,8 +1732,9 @@ final class AppModel: ObservableObject {
         from tokenIn: WalletToken,
         to tokenOut: WalletToken,
         amount: String,
-        slippageBps: UInt64 = 100
+        slippageBps: UInt64? = nil
     ) async throws -> SwapQuote {
+        let resolvedSlippageBps = slippageBps ?? swapSlippageBps
         guard let walletAddress = walletRecord?.kernelAccountAddress else {
             throw AppError.invalidCounterfactualAddress
         }
@@ -1755,7 +1766,7 @@ final class AppModel: ObservableObject {
                 amountIn: amountIn,
                 owner: walletAddress,
                 tokenInIsNative: tokenIn.isNative,
-                slippageBps: slippageBps,
+                slippageBps: resolvedSlippageBps,
                 intermediates: intermediates
             )
         }

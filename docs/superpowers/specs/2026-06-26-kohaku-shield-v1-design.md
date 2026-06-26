@@ -2,7 +2,7 @@
 
 Date: 2026-06-26
 Status: approved for implementation
-Scope: PR #1 of a 3-PR roadmap
+Scope: PR #1 of a 2-PR roadmap
 
 ## Goal
 
@@ -12,10 +12,11 @@ a stakeholder can watch work end-to-end, with minimal new key-custody surface to
 review.
 
 Demo: `/shield 0.01` on Sepolia → on-chain `UserOperationEvent` lands → the
-sidecar's shielded balance goes **0 → 0.01**. Kill the daemon → balance read
-fails (proves reads route through the verified provider, not a second RPC).
+**shielded balance shown in the app** updates **0 → 0.01**. Kill the daemon →
+balance read fails (proves reads route through the verified provider, not a
+second RPC).
 
-Out of scope for v1 (roadmap, PR #3): withdraw/unshield, private-transfer,
+Out of scope for v1 (roadmap, PR #2): withdraw/unshield, private-transfer,
 mnemonic backup, ephemeral signing sidecar, mainnet.
 
 ## Why these choices (settled in brainstorming)
@@ -115,6 +116,11 @@ mnemonic backup, ephemeral signing sidecar, mainnet.
 - Add `shield` to the `Tool` enum in
   `Sources/WalletToolLayer/ToolIntent.swift` and a matching `ToolDefinition` in
   `ToolDefinitions.swift` (args dict is already generic).
+- **Display the shielded balance in the UI:** a view that calls the sidecar's
+  `balance()` and renders it (alongside the existing public balance), refreshed
+  after a successful shield and on a light poll. `ponytail:` reuse whatever the
+  existing public-balance view does for refresh/formatting — no new balance
+  framework.
 
 ### `local-wallet-daemon`
 - Verify `max_call_gas_limit` in `crates/wallet-bundler/src/policy.rs`
@@ -144,8 +150,7 @@ mnemonic backup, ephemeral signing sidecar, mainnet.
 
 ## Roadmap (not this PR)
 
-- **PR #2 — private balance UX / polish** on the read+shield path.
-- **PR #3 — withdraw / private-transfer:** the real privacy guarantee. Brings the
+- **PR #2 — withdraw / private-transfer:** the real privacy guarantee. Brings the
   ephemeral signing sidecar (seed over fd-5, process dies after each op), mnemonic
   backup UI, relayer broadcast (must NOT self-relay through the user's Kernel
   account — that re-links the funds), and the full security/stakeholder review.

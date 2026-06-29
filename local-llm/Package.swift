@@ -20,10 +20,10 @@ let package = Package(
             publicHeadersPath: "include",
             cxxSettings: [
                 .unsafeFlags(["-I\(llamaIncludeDir)", "-std=c++17"]),
-                // Headers vendored from llama.cpp common/ are ready for Task 1.1+
-                // (chat_render / parse_assistant_turn). CLlamaBridge.cpp does not
-                // yet consume them; the search path is in place so the next task
-                // can `#include "chat.h"` without further Package.swift changes.
+                // Headers vendored from llama.cpp common/ are consumed by
+                // CLlamaBridge.cpp (it `#include "chat.h"` and implements
+                // chat_render / parse_assistant_turn / count_tokens / generate_v2);
+                // this search path makes them resolvable.
                 .headerSearchPath("third_party/llama_cpp_common"),
                 .define("LLAMA_USE_CURL", to: "0"),
             ],

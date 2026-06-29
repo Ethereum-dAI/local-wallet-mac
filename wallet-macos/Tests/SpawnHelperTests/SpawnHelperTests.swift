@@ -196,7 +196,7 @@ private func defaultDaemonBinPath() -> String {
         .deletingLastPathComponent()
     return packageRoot
         .deletingLastPathComponent()
-        .appendingPathComponent("rust-core/target/debug/wallet-node")
+        .appendingPathComponent("local-wallet-daemon/target/debug/wallet-node")
         .path
 }
 

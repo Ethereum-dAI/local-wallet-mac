@@ -33,13 +33,17 @@ mnemonic backup, ephemeral signing sidecar, mainnet.
   **cannot** parent this seed — the mnemonic is a genuinely new root the app must
   generate, store, and (post-v1) back up. v1 keeps it testnet + device-only so the
   *custody conversation* defers to PR #2.
-- **Kohaku splits viewing vs spending keys** (viewing = scan notes / compute
-  balances, no spend authority; spending = authorize withdraws, step-up auth).
-  Both derive from the one seed. In v1 the sidecar holds the seed (read once at
-  spawn): the **viewing key** drives `balance()` and the **spending-side** material
-  derives the deposit precommitment for `prepareShield`. No fund-moving spend
-  happens in v1 (no withdraw), so the spending key is computed, never used to move
-  value — that lands in PR #2.
+- **Privacy Pools is a deterministic HD *account* model — no viewing/spending
+  split.** Per-deposit secrets derive from the mnemonic at
+  `m/28784'/1'/<account>'/<secretType>'/<deposit>'/<secretIndex>'` (secretType
+  0=nullifier, 1=salt; secretIndex 0=deposit, 1+=withdrawals); a deposit commits to
+  `precommitment = Poseidon(nullifier, salt)` (`account/keys.ts`). **Scanning for
+  balances re-derives the same secrets used to spend**, so the balance-reading key
+  is **spend-capable** — there is *no* low-privilege viewing key in Privacy Pools
+  (that split is RAILGUN-only: `viewingKeyPath`/`spendingKeyPath`). Consequence:
+  with PP you cannot separate a read-only key from a spend key; the v1 sidecar that
+  shows balances inherently holds spend-capable material — it just never *exercises*
+  a spend in v1 (no withdraw).
 
 ## Architecture
 
@@ -67,11 +71,12 @@ mnemonic backup, ephemeral signing sidecar, mainnet.
   `@kohaku-eth/provider`.
 - **Lifecycle:** long-lived for v1 (needs to poll balance). Receives the seed
   once over fd-5 at spawn.
-  - `ponytail:` long-lived sidecar holds the testnet seed for the session — NOT
-    the ephemeral per-op signing sidecar yet. Upgrade to the two-process split when
-    withdraw lands (PR #2): **viewing key → long-lived read-only sidecar**
-    (balances, no spend authority), **spending key → ephemeral signing sidecar**
-    that dies after each op.
+  - `ponytail:` long-lived sidecar holds the testnet seed for the session. PP
+    *can't* split read-only vs spend keys, so the PR #2 hardening is **not** a
+    viewing/spending two-process split — it's (a) make the signing sidecar
+    **ephemeral** (dies after each spend) and (b) keep the **master mnemonic in the
+    app** via a `deriveAt` callback (see custody), so only per-path derived keys
+    reach the sidecar.
 - **Local JSON-RPC** (over the inherited socket): `balance()`,
   `prepareShield(value)`.
 - **Implements Kohaku `Host`:**
@@ -80,8 +85,9 @@ mnemonic backup, ephemeral signing sidecar, mainnet.
     read path, no second Helios).
   - `network.fetch` → standard `fetch` (pool subgraph).
   - `storage` → JSON file in App Support (shielded notes + Merkle state).
-  - `keystore` → the mnemonic-derived seed received over fd-5; derives both the
-    viewing and spending keys.
+  - `keystore` → implements `deriveAt(path) → privkey` (the whole Kohaku keystore
+    interface). v1: seed delivered over fd-5, sidecar derives. PR #2 option:
+    `deriveAt` calls back to the app so the master seed never leaves Keychain.
 
 ## Key custody & transport
 
@@ -97,13 +103,19 @@ mnemonic backup, ephemeral signing sidecar, mainnet.
     see it; the daemon and protocol SDK never do. Byte-for-byte the pattern the
     daemon already uses for its fd-5 secret.
 - **Gates per session:** one biometric at sidecar (re)spawn for the seed read;
-  balance polling is free thereafter (the viewing key has no spend authority). The
-  deposit tx is *additionally* gated by the passkey biometric at signing. Two keys,
-  two gates.
-- **Resolved (was open):** Kohaku's viewing/spending split is confirmed, so the
-  cheap balance polling is honest — the resident key can't move funds. In v1 the
-  single sidecar still derives both from the seed; the **two-process** transport
-  (viewing → long-lived, spending → ephemeral) is the PR #2 hardening.
+  balance polling is free thereafter. The deposit tx is *additionally* gated by the
+  passkey biometric at signing. Two keys, two gates. (Cheap polling is fine, but
+  *not* because the polling key is read-only — in PP it's spend-capable; it's cheap
+  because we unlock once per session, not per `deriveAt`.)
+- **Custody lever for PP — `deriveAt(path)`, not the raw seed.** The `Keystore`
+  interface is just `deriveAt(path) → privkey`, so the host chooses where the
+  mnemonic lives. v1 (lazy): feed the seed over fd-5; the sidecar derives. PR #2
+  hardening: implement `deriveAt` as an authenticated callback into the Swift app so
+  the **master mnemonic stays in Keychain** and only per-path *derived* keys reach
+  the sidecar (a compromised sidecar then leaks pool keys, not the master that
+  controls every account/index). Caveat: a scan derives many secrets (salt+nullifier
+  per deposit/secretIndex), so gate biometric **once per session**, not per
+  `deriveAt`.
 
 ## Recovery (post-v1, but design for it now)
 
@@ -112,15 +124,15 @@ model, in three layers — only the last is fund-critical:
 1. **App closed →** the sidecar's RAM working copy is gone; reopen re-reads the seed
    from **Keychain** over fd-5 (one biometric). No loss.
 2. **`Host.storage` (notes/Merkle cache) lost →** rebuild by re-scanning the pool
-   with the **viewing key**. A cache, not a secret.
+   and re-deriving the per-deposit secrets. A cache, not a secret.
 3. **Device/Keychain lost →** re-enter the mnemonic, re-derive by `accountIndex`,
    re-scan. This is why PR #2 ships mnemonic backup. Optional multi-device: opt-in
    iCloud Keychain sync (drop `ThisDeviceOnly`).
 
-Caveat: 0xbow's *consumer* docs describe per-note backup / non-recoverable keys —
-that's the older UX, not the mnemonic-HD account model Kohaku wraps. Confirm the
-exact per-deposit derivation in `@kohaku-eth/privacy-pools` before treating "one
-mnemonic backs up everything" as final.
+Confirmed in `@kohaku-eth/privacy-pools` (`account/keys.ts`): the account model is
+fully HD-deterministic, so the 24-word mnemonic re-derives every per-deposit secret
+and withdrawal note. 0xbow's *consumer* per-note-backup UX does not apply to
+Kohaku's account-model wrapper.
 
 ## Shield flow
 
@@ -180,9 +192,11 @@ mnemonic backs up everything" as final.
 ## Roadmap (not this PR)
 
 - **PR #2 — withdraw / private-transfer:** the real privacy guarantee. Brings the
-  **two-process key transport** (viewing key → long-lived read-only sidecar;
-  spending key → ephemeral signing sidecar, dies after each op), **mnemonic backup
-  UI** (+ optional iCloud Keychain sync), relayer broadcast (must NOT self-relay
-  through the user's Kernel account — that re-links the funds), key **rotation** as
-  a guarded `accountIndex`-bump + funds migration (not a metadata swap), and the
-  full security/stakeholder review.
+  **ephemeral signing sidecar** (dies after each spend) and the **`deriveAt`
+  callback** so the master mnemonic stays in the app's Keychain (PP has no
+  viewing/spending split to exploit, so blast-radius reduction comes from keeping
+  the master out of the sidecar, not from a read-only key), **mnemonic backup UI**
+  (+ optional iCloud Keychain sync), relayer broadcast (must NOT self-relay through
+  the user's Kernel account — that re-links the funds), key **rotation** as a
+  guarded `accountIndex`-bump + funds migration (not a metadata swap), and the full
+  security/stakeholder review.

@@ -26,7 +26,7 @@ to test a non-default binary path.
 
 ## Design
 
-The shim uses option B: `posix_spawn_file_actions_adddup2` maps three pipe
+The shim uses `posix_spawn_file_actions_adddup2` to map three pipe
 ends into the child:
 
 - **fd `3` — ready** (daemon→app): the daemon's ready pipe write end. The
@@ -47,10 +47,12 @@ current descriptor table and matches the daemon's fd lifecycle tests.
 
 ## Spawn Protocol Versioning
 
-The daemon writes `daemonSpawnProtocol: <u32>` in its ready JSON. The current
-value is `1`. Future changes to the fd contract (numbering, framing,
-additional pipes) bump this integer. Spawners that don't understand the
-daemon's reported version should refuse to integrate rather than guess.
+The daemon writes `daemonSpawnProtocol: <u32>` in its ready JSON (alongside
+`apiVersion`). The current value is `1`. Future changes to the fd contract
+(numbering, framing, additional pipes) bump this integer. The app spawner
+currently reads only `apiVersion` from the ready JSON and does not yet read or
+gate on `daemonSpawnProtocol`; refusing to integrate on an unrecognized version
+is aspirational, not implemented today.
 
 ## Failure Modes
 

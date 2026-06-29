@@ -15,7 +15,7 @@ This is not the final product wallet UX. Treat it as an experimental working imp
 
 | Repo | Purpose |
 |---|---|
-| `local-wallet-protocol` | `wallet-signature`, `wallet-kernel`, `wallet-addresses` — stable, semver-managed SDK crates |
+| `local-wallet-protocol` | `wallet-signature`, `wallet-kernel`, `wallet-addresses` — pre-1.0 (0.1.0) SDK crates, consumed via pinned git rev |
 | `local-wallet-daemon` | `wallet-node`, `wallet-bundler`, `wallet-chain`, `wallet-node-api`, `wallet-node-store` — daemon binary and supporting libraries |
 | `local-wallet-mac` (this repo) | macOS app, `wallet-ffi`, `swift-bridge`, Xcode project, scripts |
 
@@ -104,7 +104,7 @@ Two call paths originate in the Swift app:
 ```
 Swift app → swift-bridge → wallet-ffi (C ABI) → wallet-signature / wallet-kernel
 ```
-Covers: address prediction, UserOp hashing, WebAuthn preimage construction, signature encoding, session-permission composition, session signature wrapping, dummy signatures for gas estimation, and Kernel permission revoke calldata. Swift signs the 69-byte passkey preimage with the Secure Enclave. CryptoKit hashes internally — pass the preimage, not the 32-byte digest. Session-key secrets stay in the macOS Keychain and never cross into Rust; buffers returned across FFI must be freed with `wallet_free_buffer` exactly once.
+Covers: address prediction, UserOp hashing, WebAuthn preimage construction, signature encoding, session-permission composition, session signature wrapping, dummy signatures for gas estimation, and Kernel permission revoke calldata. Swift signs the 69-byte passkey preimage with the Secure Enclave. CryptoKit hashes internally — pass the preimage, not the 32-byte digest. The Secure Enclave ROOT credential never leaves the enclave / never crosses the FFI — Swift signs the preimage and passes only the resulting signature. Session-key secrets live in the macOS Keychain but ARE passed across the FFI into Rust for ECDSA signing (`wallet_session_sign_and_wrap`). Buffers returned across FFI must be freed with `wallet_free_buffer` exactly once.
 
 **JSON-RPC to the daemon** (network/state/persistence):
 ```
@@ -184,6 +184,7 @@ cargo run -p wallet-node -- --http 127.0.0.1:0 --print-ready --debug
 
 ## Documentation
 
+- `wallet-architecture.md` — detailed architecture reference (FFI bridge, daemon split, key custody, session keys)
 - `LOCAL_MONOREPO_SETUP.md` — fresh clone setup for the three local repositories and Xcode
 - `swift-bridge/README.md` — Swift FFI wrapper and local dev setup
 - `wallet-macos/README.md` — macOS demo app and signing
@@ -191,6 +192,8 @@ cargo run -p wallet-node -- --http 127.0.0.1:0 --print-ready --debug
 - `rust-core/crates/ffi/README.md` — internal C ABI bridge
 - `scripts/README.md` — build and packaging scripts
 - `tools/keychain-spike/README.md` — Keychain entitlement spike
+- `SECURITY.md` — security policy, supported scope, and vulnerability disclosure
+- `CONTRIBUTING.md` — contribution guidelines and crate stability tiers
 
 Daemon and protocol documentation live in their respective repos.
 

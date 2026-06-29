@@ -9,8 +9,7 @@ Security reports are currently in scope for:
 - Secure Enclave and Keychain usage in the macOS demo app
 - ERC-4337 UserOperation hashing and signing helpers
 - Kernel/WebAuthn account prediction and signature encoding
-- Self-relayed bundler EOA handling, JSON-RPC authentication, and admin challenge flows in `wallet-node`
-- Transport binding behavior in `wallet-node` (loopback HTTP, Unix socket, fd-3/fd-4/fd-5 ready/alive/secret spawn contract)
+- The app side of the daemon-spawn contract: the `posix_spawn` shim and the fd-3/fd-4/fd-5 ready/alive/secret pipes (including the bundler-EOA secret the app writes to fd-5)
 - release packaging scripts and documented developer workflows
 
 Out of scope for now:
@@ -19,6 +18,7 @@ Out of scope for now:
 - unsupported forks or modified builds
 - hosted infrastructure that is not controlled by this project
 - issues caused by testnet RPC or bundler availability
+- `wallet-node` / `wallet-bundler` / `wallet-chain` daemon internals — self-relayed bundler EOA handling, JSON-RPC authentication, admin challenge flows, and transport binding live in the sibling [`local-wallet-daemon`](https://github.com/Ethereum-dAI/local-wallet-daemon) repo and are governed by that repo's `SECURITY.md`
 
 ## Reporting
 

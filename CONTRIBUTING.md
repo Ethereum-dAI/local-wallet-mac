@@ -2,9 +2,9 @@
 
 Local Wallet is open source under MIT/Apache-2.0. External contributions are welcome.
 
-The Rust workspace splits into two stability tiers:
+The Rust code splits into two stability tiers:
 
-- **Stable libraries** (`wallet-signature`, `wallet-kernel`) follow semver. Breaking changes ship as a major version.
+- **Stable libraries** (`wallet-signature`, `wallet-kernel`, `wallet-addresses`) live in the separate `local-wallet-protocol` repo and are consumed here as rev-pinned git dependencies (see `rust-core/Cargo.toml`), not members of this repo's single-crate (`crates/ffi`) workspace. They aim to follow semver; while at 0.x, breaking changes may ship in minor releases.
 - **App-coupled crates** (the daemon stack) are pre-1.0; the public JSON-RPC surface is documented in the `local-wallet-daemon` repo. APIs outside that documented surface may move between releases.
 
 For non-trivial changes — new methods, breaking behavior, anything touching the policy/allowlist or signing surface — please open an issue first to align on direction. Crate boundaries, app UX, and release workflows are still settling, so large unsolicited PRs that don't match an existing direction may be hard to merge.

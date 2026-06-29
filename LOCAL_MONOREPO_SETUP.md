@@ -167,7 +167,7 @@ paths = [
 ]
 ```
 
-Those paths are resolved from `local-wallet-mac/rust-core/.cargo`, so the sibling layout above is required.
+Those paths are resolved relative to `local-wallet-mac/rust-core/` (the parent of `.cargo/`), so the sibling layout above is required.
 
 You can verify that Cargo sees the workspace dependencies with:
 

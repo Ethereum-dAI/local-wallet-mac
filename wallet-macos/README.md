@@ -22,6 +22,8 @@ The direct Secure Enclave persistence model now uses permanent Keychain key item
 
 ## Open And Run
 
+Note: repo-relative paths in this README — including `LocalWallet.xcodeproj`, `project.yml`, and `scripts/` — are relative to the repo root (the parent of `wallet-macos/`, where this README lives), not to `wallet-macos/` itself.
+
 1. Open `LocalWallet.xcodeproj` in Xcode.
 2. Select the `LocalWalletApp` scheme.
 3. In `Signing & Capabilities`, choose your Apple development team for the `LocalWalletApp` target.
@@ -67,13 +69,17 @@ xcodegen generate
 - `UserOperationModels.swift`
   - Demo-side models for draft representation and bundler payload shaping.
 - `UserOperationSigning.swift`
-  - Selects passkey or session-key signing, wraps Kernel session signatures, and carries enable-mode session artifacts when the permission is not installed yet.
+  - Selects passkey or session-key signing and wraps Kernel session signatures. Once the permission has been installed on-chain (`installedOnChain`) — via a separate root/passkey op, see `SessionInstallAssembler` — session ops sign in `installed` mode; enable-mode session artifacts are carried only as the not-yet-installed fallback.
+- `BundlerKeyStore.swift`
+  - Keychain storage (service `com.localwallet.bundler-eoa.app`) for the app-owned bundler EOA secp256k1 secret used by the rotate/export/delete admin flows.
 - `SessionKeyStore.swift`
   - Session-scoped secp256k1 secret storage in the macOS Keychain.
 - `SessionPolicyConfig.swift`
   - Codable session policy settings, defaults, token caps, validation, and persisted session records.
 - `SessionEnableAssembler.swift`
   - Builds Kernel permission config JSON, enable data, selector data, nonce keys, and the passkey-signed enable digest.
+- `SessionInstallAssembler.swift`
+  - Builds the two batched self-calls (`installValidations` then `grantAccess`) that pre-install a session permission as a root/passkey-validated user op, run in the execution phase so it is not charged against the permission's own GasPolicy; once installed, later session ops switch to `installed` signature mode.
 - `SessionPolicyMirror.swift`
   - Local preflight mirror for the configured session policy so out-of-policy intents fall back to passkey signing before submission.
 - `SessionRevokeAssembler.swift`
@@ -88,6 +94,12 @@ xcodegen generate
   - JSON-RPC client for the local `wallet-node` daemon over Unix socket or HTTP, including Helios-backed chain reads, admin-authorized rotate/export/delete bundler-EOA flows, ENS resolution, and Uniswap v3 swap quotes.
 - `WalletNodeDaemon.swift`
   - Lifecycle wrapper around the spawned daemon process.
+- `GasPricing.swift`
+  - Pure gas-fee math (EIP-1559 priority/maxFee resolution with base-fee headroom) shared by the daemon launch path and UserOperation construction.
+- `GasIndicatorView.swift`
+  - Network-gas breakdown popover UI (base fee, per-tier max/priority fees, and the active gas policy).
+- `LocalWalletSettingsView.swift`
+  - Settings panel UI, including per-check health states (healthy / warning / failed / skipped).
 - `WalletRecord.swift`
   - Aggregated per-wallet record (Secure Enclave key, metadata, predicted address).
 - `AppError.swift`
@@ -111,6 +123,8 @@ xcodegen generate
   - Single source of truth for slash commands (`/transfer`, `/swap`) shared by the inline composer autocomplete and the footer "Tools" popover. Each entry carries a display name, summary, signature, and ready-to-edit scaffold with angle-bracket placeholders.
 - `OnboardingView.swift`, `OnboardingSettingsStore.swift`, `OnboardingProvisioningService.swift`
   - First-run flow for local model selection, hardware inspection, and provisioning.
+- `OnboardingChainReadiness.swift`
+  - Chain-readiness polling (timing thresholds and error states) the onboarding flow uses while waiting for the node and chain to become ready.
 - `LocalAIModelDownloadManager.swift`, `LocalHardwareInspector.swift`
   - Local GGUF model download and Apple Silicon / Metal capability inspection used by onboarding.
 

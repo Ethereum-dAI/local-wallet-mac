@@ -65,30 +65,33 @@ sequenceDiagram
     participant Krn as wallet-kernel
 
     App->>Bridge: predictAccountAddress(owner, salt)
-    Bridge->>Hdr: wallet_kernel_predict_address(...)
+    Bridge->>Hdr: wallet_predict_kernel_account_address(...)
     Hdr->>FFI: extern "C" entry
     FFI->>Krn: derive CREATE2 salt + init-code hash
     Krn-->>FFI: predicted address
-    FFI-->>Hdr: WalletBuffer { ptr, len }
-    Hdr-->>Bridge: WalletBuffer
-    Bridge->>Bridge: copy bytes into Swift Data
-    Bridge->>Hdr: wallet_buffer_free(buf)
-    Hdr->>FFI: drop owned bytes
+    FFI-->>Hdr: int32_t WalletResult (writes 20-byte out_address)
+    Hdr-->>Bridge: result + out_address
+    Bridge->>Bridge: copy out_address bytes into Swift Data
     Bridge-->>App: Address
 
     App->>Bridge: signUserOperation(packedOp, p256Key)
-    Bridge->>Hdr: wallet_signature_userop_preimage(...)
+    Bridge->>Hdr: wallet_compute_userop_hash(...)
     Hdr->>FFI: extern "C"
-    FFI->>Sig: build EntryPoint v0.7 hash + WebAuthn message
+    FFI->>Sig: build EntryPoint v0.7 UserOperation hash
+    Sig-->>FFI: 32-byte userOp hash
+    FFI-->>Bridge: int32_t WalletResult (writes 32-byte out_hash)
+    Bridge->>Hdr: wallet_compute_signing_preimage(...)
+    Hdr->>FFI: extern "C"
+    FFI->>Sig: build WebAuthn signing message
     Sig-->>FFI: 69-byte preimage
-    FFI-->>Bridge: WalletBuffer (preimage)
+    FFI-->>Bridge: int32_t WalletResult (writes 69-byte out_preimage)
     Bridge->>Bridge: SecureEnclave sign over preimage, low-s normalize
-    Bridge->>Hdr: wallet_signature_kernel_webauthn_encode(...)
+    Bridge->>Hdr: wallet_abi_encode_signature(...)
     Hdr->>FFI: extern "C"
     FFI->>Sig: encode 6-field Kernel WebAuthn signature
     Sig-->>FFI: encoded signature
-    FFI-->>Bridge: WalletBuffer (signature)
-    Bridge->>Hdr: wallet_buffer_free(buf)
+    FFI-->>Bridge: int32_t WalletResult + out_ptr/out_len (signature)
+    Bridge->>Hdr: wallet_free_buffer(ptr, len)
     Bridge-->>App: signed UserOperation
 
     App->>Bridge: sessionBuildPermission(configJSON)
@@ -96,8 +99,8 @@ sequenceDiagram
     Hdr->>FFI: extern "C"
     FFI->>Sig: build Kernel permission data
     Sig-->>FFI: permission id, enable data, selector data, nonce keys
-    FFI-->>Bridge: fixed outputs + WalletBuffer values
-    Bridge->>Hdr: wallet_buffer_free(buf)
+    FFI-->>Bridge: int32_t WalletResult (fixed out-params + out_ptr/out_len heap buffers)
+    Bridge->>Hdr: wallet_free_buffer(ptr, len)
     Bridge-->>App: SessionPermission
 
     App->>Bridge: sessionSignAndWrap(secret, userOpHash, mode)
@@ -105,7 +108,7 @@ sequenceDiagram
     Hdr->>FFI: extern "C"
     FFI->>Sig: sign UserOperation hash and wrap Kernel session signature
     Sig-->>FFI: encoded session signature
-    FFI-->>Bridge: WalletBuffer
-    Bridge->>Hdr: wallet_buffer_free(buf)
+    FFI-->>Bridge: int32_t WalletResult + out_ptr/out_len
+    Bridge->>Hdr: wallet_free_buffer(ptr, len)
     Bridge-->>App: session-signed UserOperation
 ```

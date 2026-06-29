@@ -116,7 +116,7 @@ Version 5.4 \- Draft \- April 16, 2026
 
 This document describes the architecture and security design of a privacy-first, locally-run Ethereum wallet powered by a local LLM agent. The wallet is built around a single design premise: a user's cryptographic root of trust should be unextractable by software, not merely well-protected by it. Everything else follows from that.
 
-> **Implementation status (v0.1 alpha).** This document is the cross-system design vision and runs ahead of the shipped code in places. As of v0.1 alpha the wallet uses **in-process FFI signing** (the Secure Enclave passkey signs inside the app; Rust never sees private keys), **Swift-side policy enforcement**, and a **separately spawned `wallet-node` daemon** that submits `handleOps` **directly to a bundler EOA** on Ethereum mainnet/Sepolia. Components described here that are **not yet implemented** include the XPC-isolated signing service, private submission via **Flashbots Protect / Tor (arti)**, and a bundler **compiled into the app binary**. See this repo's `README.md` "Architecture" section for the as-built design.
+> **Implementation status (v0.1 alpha).** This document is the cross-system design vision and runs ahead of the shipped code in places. As of v0.1 alpha the wallet uses **in-process FFI signing** (the Secure Enclave passkey signs inside the app; Rust never sees private keys), **Swift-side policy enforcement**, and a **separately spawned `wallet-node` daemon** that submits `handleOps` **directly to a bundler EOA** on Ethereum mainnet/Sepolia. Components described here that are **not yet implemented** include the XPC-isolated signing service, private submission via **Flashbots Protect / Tor (arti)**, a bundler **compiled into the app binary**, **Helios compiled into the app binary** (today Helios runs inside the separately spawned `wallet-node` daemon), and the build-time **supply-chain controls** in section 12 beyond the committed `Cargo.lock` (no CI, no `cargo-vet`, no reproducible-build pinning yet). See this repo's `README.md` "Architecture" section for the as-built design.
 
 The wallet uses a P-256 key generated inside the device Secure Enclave as the sole ownership authority over the user's smart accounts. This key never materialises in application memory under any circumstances \- it signs inside hardware silicon and cannot be exported by any API. There is no seed phrase, no mnemonic backup, and no exportable root secret. Recovery from device loss is handled entirely on-chain via a pre-installed recovery module.
 
@@ -124,7 +124,7 @@ On top of this hardware root of trust, the wallet runs an LLM agent that can pre
 
 Privacy is treated as a default, not a setting. The wallet runs entirely locally. Helios, the bundler, and the Tor client are compiled into the app binary. The LLM model is downloaded once at first launch and runs on-device. No transaction data, query history, or conversation context leaves the machine except as a signed Ethereum transaction submitted through Flashbots Protect over Tor. There are no external services, no hosted APIs, and no telemetry.
 
-The smart accounts are Kernel ERC-4337 contracts with a WebAuthn validator that verifies P-256 signatures on-chain via the EIP-7951 precompile for root/passkey operations. Session-key operations use Kernel permission data approved by that root key and remain bounded by the installed policy. The stack is built in Rust with a Swift layer for Secure Enclave access on macOS. The Rust core is platform-agnostic and the security adapter layer is the only thing that changes per operating system.
+The smart accounts are Kernel ERC-4337 contracts with a WebAuthn validator that verifies P-256 signatures on-chain via the RIP-7212 / EIP-7951 P-256 precompile (RIP-7212 is the name used in source) for root/passkey operations. Session-key operations use Kernel permission data approved by that root key and remain bounded by the installed policy. The stack is built in Rust with a Swift layer for Secure Enclave access on macOS. The Rust core is platform-agnostic and the security adapter layer is the only thing that changes per operating system.
 
 | Principle | How it is expressed in this design |
 | :---- | :---- |
@@ -163,7 +163,7 @@ The wallet runs entirely locally by default. No external service is required to 
 
 | Dependency | Default (local) | Opt-in (external) |
 | :---- | :---- | :---- |
-| Ethereum RPC | Helios light client \- verifies all responses cryptographically | User's own node or private RPC provider |
+| Ethereum RPC | Helios light client \- header-verifies state reads (balances, code, calls, receipts). Gas price, max priority fee, and the execution-RPC block-head lag probe are fetched unverified even when Helios is on. The app ships a `read_verification = helios \| execution_rpc` toggle; set to `execution_rpc` it disables Helios entirely (trust-your-RPC downgrade). | User's own node or private RPC provider |
 | ERC-4337 Bundler | Custom bundler running as local process \- starts on wallet open, stops on close | Local only. No external bundler option at any point. |
 | Gas paymaster | User pays own gas always | None offered \- gas sponsorship requires external trust |
 | LLM inference | Small model weights downloaded on first launch, runs locally | Only runtime download. User can load any locally installed model. No hosted option. |
@@ -171,16 +171,16 @@ The wallet runs entirely locally by default. No external service is required to 
 | Price feeds | On-chain Chainlink via Helios-verified RPC \- free contract read | N/A \- already the default |
 | Token metadata | Static bundled registry (top 500 tokens, updated each release) | Contract read for unknown tokens via Helios RPC |
 
-| Design principle The only data that leaves the machine is Ethereum transactions (via Flashbots) and RPC queries (via Helios). All RPC responses are cryptographically verified. The Flashbots builder sees the handleOps() calldata including the UserOperation before on-chain inclusion \- this is the honest limit of pre-inclusion privacy. Tor hides the IP. The on-chain record is permanent and public unless Aztec is used. |
+| Design principle The only data that leaves the machine is Ethereum transactions (via Flashbots) and RPC queries (via Helios). Helios header-verifies state reads (balances, code, calls, receipts); gas price, max priority fee, and the block-head lag probe are fetched unverified even when Helios is on, and a `read_verification = helios \| execution_rpc` toggle can disable Helios entirely (trust-your-RPC downgrade). The Flashbots builder sees the handleOps() calldata including the UserOperation before on-chain inclusion \- this is the honest limit of pre-inclusion privacy. Tor hides the IP. The on-chain record is permanent and public unless Aztec is used. |
 | :---- |
 
 ## **2.2 Helios light client**
 
-Helios is embedded via its Rust SDK directly into the wallet binary at compile time \- not downloaded at runtime, not run as a subprocess. It syncs to chain tip in seconds and cryptographically verifies all chain data against block headers. It is protected entirely by the build-time supply chain controls in section 13\.
+As built, Helios runs as a library inside the separately-spawned `wallet-node` daemon (the daemon's `wallet-chain` crate depends on `helios-ethereum`/`helios-core`), not compiled into the app binary. It is not downloaded at runtime and is not a standalone subprocess. The longer-term design target is to embed it in-process via its Rust SDK \- see the implementation-status note in the Introduction. It syncs to chain tip in seconds and header-verifies state reads (balances, code, calls, receipts) against block headers. Verification is not total: gas price, max priority fee, and the execution-RPC block-head lag probe are fetched unverified even when Helios is on, and the app ships a `read_verification = helios | execution_rpc` toggle that, set to `execution_rpc`, disables Helios entirely (trust-your-RPC downgrade).
 
 **First launch flow:**
 
-* Helios Rust SDK compiled into the wallet binary at build time \- not downloaded at runtime
+* Helios runs in the `wallet-node` daemon today (design target: Rust SDK embedded in-process) \- not downloaded at runtime
 
 * Helios syncs to chain tip \- takes seconds, not hours
 
@@ -188,7 +188,7 @@ Helios is embedded via its Rust SDK directly into the wallet binary at compile t
 
 * Helios connects to public RPC endpoints for raw data, rotated per-session to prevent query profiling
 
-* All responses verified against cryptographic block headers \- RPC cannot lie or manipulate data
+* State reads (balances, code, calls, receipts) verified against cryptographic block headers \- a verifying RPC cannot lie about them. Gas price, max priority fee, and the block-head lag probe are unverified, and the `read_verification` toggle can turn Helios off entirely.
 
 * User can optionally point Helios at their own full node for maximum privacy
 
@@ -204,7 +204,7 @@ Helios is embedded via its Rust SDK directly into the wallet binary at compile t
 
 ## **2.3 Local bundler**
 
-The ERC-4337 bundler is a custom implementation written in Rust, compiled directly into the app binary. There is no external bundler option and no third-party bundler code. The bundler does one job: simulate a UserOperation, build a signed handleOps() transaction, and submit it via Flashbots Protect over Tor.
+The ERC-4337 bundler is a custom implementation written in Rust, compiled directly into the app binary. There is no external bundler option and no third-party bundler code. The bundler does one job: simulate a UserOperation, build a signed handleOps() transaction, and submit it via Flashbots Protect over Tor. *(Not yet implemented in v0.1 alpha \- today the bundler runs inside the separately spawned `wallet-node` daemon, not compiled into the app binary, and `submit.rs` does a plain `eth_sendRawTransaction` POST rather than Flashbots-Protect-over-Tor. See the Introduction implementation-status note.)*
 
 | Why a custom bundler Open source bundlers come with large dependency trees built for general use cases. This wallet needs a bundler that does exactly one thing: simulate a UserOperation, build a handleOps() transaction, sign it, and submit via Flashbots. A purpose-built Rust implementation has zero unnecessary dependencies, fits inside the existing supply chain controls, and can be fully audited. Every line is owned. |
 | :---- |
@@ -283,7 +283,7 @@ LLM inference runs entirely locally. The model weights are the only runtime arti
 
 │ │Local Bundler │ │ Helios Light Client  │  │
 
-│ │(Custom  │ │ verifies all RPC data │  │
+│ │(Custom  │ │ header-verifies state │  │
 
 │ │Bundler) │ │                        │  │
 
@@ -316,25 +316,25 @@ A traditional EOA is controlled by a secp256k1 private key that exists in softwa
 | Programmable rules | None | Spending limits, timelocks, contract whitelists |
 | Key rotation without moving funds | Impossible | Possible \- replace authorized signer |
 | LLM agent integration | Agent needs direct key access | Agent uses a bounded session key for approved in-policy actions; passkey approval remains the fallback |
-| Permission plugin cost | N/A | No standalone enable transaction; permission install data can be bundled with the first session UserOperation |
+| Permission plugin cost | N/A | Installed up front by a separate root/passkey-validated UserOperation (installValidations + grantAccess), paid as a normal tx before first session use |
 
 ## **3.2 Session signing architecture**
 
 | Property | User Key (per-account owner) | Session key (assistant signing path) |
 | :---- | :---- | :---- |
 | Purpose | Owner of each individual Kernel account | Approved transfer and swap actions inside the active session policy |
-| Storage | Secure Enclave P-256 (CryptoKit) | macOS Keychain generic password, secp256k1, scoped by chain and account |
-| Access control | biometryCurrentSet \- Touch ID required | None \- silent reads by signing module. No Touch ID. |
-| Authorization | Permanent signer on Kernel contract | Passkey-signed enable digest plus Kernel permission data |
-| On-chain registration | Yes \- permanent | Lazily installed with the first session-signed UserOperation, then reused until expiry or revoke |
+| Storage | Secure Enclave P-256 (Security-framework `SecKey`) | macOS Keychain generic password, secp256k1, scoped by chain and account |
+| Access control | `.userPresence` \- Touch ID or device passcode, hardware-backed | None \- silent reads while unlocked (hot, software-extractable key) |
+| Authorization | Permanent signer on Kernel contract | Passkey-validated install (installValidations + grantAccess) plus Kernel permission data |
+| On-chain registration | Yes \- permanent | Installed up front by a separate root/passkey-validated UserOperation before first use, then reused until expiry or revoke |
 | Spending authority | Unlimited | Bounded by session authorization policy |
 | Lifespan | Permanent until explicitly rotated | Session-scoped; persisted while active, deleted on local expiry or revoke |
-| Gas cost to rotate | Small on-chain tx | No standalone enable tx; first session UserOperation carries enable data. Revoke is an on-chain UserOperation. |
+| Gas cost to rotate | Small on-chain tx | A separate root/passkey-validated install UserOperation (paid off the session GasPolicy) before first use. Revoke is an on-chain UserOperation. |
 | Compromise blast radius | Not applicable \- P-256 key is hardware-bound, software extraction impossible | Capped at session spending limit, expires automatically |
 
 ## **3.3 On-chain spending policy**
 
-Spending rules are encoded in the Kernel permission data approved by the root key. The app stores that session record locally, and the first in-policy session-signed UserOperation can install the permission on-chain in enable mode. Once installed, later in-policy UserOperations use the installed permission mode. Rules cannot be bypassed by the LLM, UI, or signing module.
+Spending rules are encoded in the Kernel permission data approved by the root key. The app stores that session record locally and installs the permission on-chain up front via a separate root/passkey-validated UserOperation (`installValidations` + `grantAccess`) before the first session-signed action; later in-policy UserOperations then use the installed permission. This replaced an older lazy enable-mode install (bundled into the first session UserOp) to avoid a verificationGasLimit floor/cap out-of-gas failure (commit 0c36cb0); enable-mode signing remains in the FFI as a dead fallback. Rules cannot be bypassed by the LLM, UI, or signing module.
 
 **Example session authorization:**
 
@@ -368,9 +368,9 @@ SessionPermissionConfig {
 
 }
 
-// Enable digest signed by user key (Touch ID)
+// Install (installValidations + grantAccess) signed by user key (user-presence gate)
 
-// Permission installed lazily by the first in-policy session UserOperation
+// Permission installed up front by a separate root-validated UserOperation before first session use
 
 // Kernel validates policy at every UserOperation execution
 
@@ -385,7 +385,7 @@ The wallet uses three distinct keys with different roles, storage locations, and
 
 | Key | Type | Storage | Role | Extractable |
 | :---- | :---- | :---- | :---- | :---- |
-| User root key | P-256 (secp256r1) | Secure Enclave (CryptoKit) | Signs UserOperations, authorizes account changes, recovery root | No \- hardware enforced |
+| User root key | P-256 (secp256r1) | Secure Enclave (Security-framework `SecKey`) | Signs UserOperations, authorizes account changes, recovery root | No \- hardware enforced |
 | Session key | secp256k1 | macOS Keychain (same storage class as bundler key) | Approved assistant transactions within session policy | Yes \- bounded by on-chain spending policy |
 | Bundler operator key | secp256k1 | macOS Keychain | Signs handleOps() wrapper tx to pay gas | Yes \- but can only drain gas float, not funds |
 
@@ -394,7 +394,7 @@ The wallet uses three distinct keys with different roles, storage locations, and
 
 ## **4.2 User root key \- secure enclave P-256**
 
-The root key is a P-256 key pair generated and permanently stored inside the macOS Secure Enclave using CryptoKit. It is the user's only signing identity. It never exists in RAM, never crosses any software boundary, and cannot be exported by any API. Touch ID is required for every signing operation.
+The root key is a P-256 key pair generated and permanently stored inside the macOS Secure Enclave via the Security-framework `SecKey` API (`SecKeyCreateRandomKey` with `kSecAttrTokenIDSecureEnclave`). It is the user's only signing identity. It never exists in RAM, never crosses any software boundary, and cannot be exported by any API. Every signing operation is gated by a user-presence check (Touch ID or device passcode fallback), hardware-backed.
 
 | Property | Guarantee |
 | :---- | :---- |
@@ -403,13 +403,13 @@ The root key is a P-256 key pair generated and permanently stored inside the mac
 | Export | Impossible by hardware design. No API exists to retrieve the private key. |
 | OS compromise | Protected. Root access cannot extract Enclave keys. |
 | Physical attack | Protected against standard extraction techniques. |
-| User presence | Touch ID required for every signing operation. Cannot be bypassed in software. |
+| User presence | `.userPresence` gate \- Touch ID or device passcode fallback, hardware-backed. (A `.strictBiometric` option exists in code but is not wired up.) |
 | Curve | P-256 (secp256r1). Same curve as WebAuthn and passkeys. |
-| iCloud sync | Disabled. CryptoKit SecureEnclave keys are device-bound at the hardware level. |
+| iCloud sync | Disabled. Secure Enclave `SecKey` keys are device-bound at the hardware level. |
 
-**Why CryptoKit and not the WebAuthn API:**
+**Why the Secure Enclave SecKey API and not the WebAuthn API:**
 
-CryptoKit's Secure Enclave API operates one layer below the standard WebAuthn path. It generates a P-256 key pair inside the Enclave and returns a raw (r, s) signature with no ceremony fields, no domain binding, and no mechanism to export or transmit the private key scalar. The WebAuthn ceremony fields required by the on-chain verifier (authenticatorData, clientDataJSON) are constructed manually in Rust following the Daimo specification. The on-chain contract verifies that sha256(authenticatorData || sha256(clientDataJSON)) is a valid P-256 signature under the registered public key \- a check that holds regardless of construction path. CryptoKit is chosen because it provides the hardware boundary guarantee without any cloud backup path.
+The Secure Enclave `SecKey` API (`SecKeyCreateRandomKey` + `kSecAttrTokenIDSecureEnclave`, then `SecKeyCreateSignature`) operates one layer below the standard WebAuthn path. It generates a non-extractable P-256 key pair inside the Enclave and signs with no ceremony fields, no domain binding, and no mechanism to export or transmit the private key scalar. The Enclave returns a DER-encoded signature; CryptoKit is used only to parse that DER into raw (r, s). The WebAuthn ceremony fields required by the on-chain verifier (authenticatorData, clientDataJSON) are constructed manually in Rust following the Daimo specification. The on-chain contract verifies that sha256(authenticatorData || sha256(clientDataJSON)) is a valid P-256 signature under the registered public key \- a check that holds regardless of construction path. The SE-direct `SecKey` path is chosen because it provides the hardware boundary guarantee without any cloud backup path.
 
 **No seed phrase:**
 
@@ -424,7 +424,7 @@ There is no mnemonic, no exportable root secret, and no BIP-32 derivation. The p
 
 * When EntryPoint calls validateUserOp(), Kernel routes to the WebAuthn validator
 
-* Validator verifies the P-256 signature via the EIP-7951 precompile at 0x0000000000000000000000000000000000000100
+* Validator verifies the P-256 signature via the RIP-7212 / EIP-7951 P-256 precompile at 0x0000000000000000000000000000000000000100 (RIP-7212 is the name used in the source/codebase, ~3.4k gas; it was standardized on mainnet as EIP-7951)
 
 * EIP-7951 is live on Ethereum mainnet since the Fusaka upgrade (December 2025\) \- approximately 6,900 gas
 
@@ -445,17 +445,19 @@ EIP-7702 allows an EOA to delegate execution logic to a smart contract. The crit
 
 ## **4.3 Session key and session permissions \- macOS Keychain**
 
-The session key is a secp256k1 secret stored in the macOS Keychain as a generic password. It is scoped by chain and Kernel account address, and it signs UserOperations only when the active intent is inside the saved session policy. The app creates the key when the user enables session keys for a deployed account, stores a passkey-approved permission record locally, and deletes the key when the session expires locally or revoke is confirmed.
+The session key is a secp256k1 secret stored in the macOS Keychain as a generic password with **no SecAccessControl** \- it is a hot, software-extractable key read silently while the device is unlocked. It is scoped by chain and Kernel account address, and it signs UserOperations only when the active intent is inside the saved session policy. The app creates the key when the user enables session keys for a deployed account, stores a passkey-approved permission record locally, and deletes the key when the session expires locally or revoke is confirmed. It crosses the FFI into Rust for ECDSA signing and never goes to the daemon.
+
+Scope (gas budget, rate limit, validity window, and call rules) is enforced **on-chain** by Kernel v3.3 policy modules (GasPolicy / RateLimitPolicy / TimestampPolicy / CallPolicy). The app's `SessionPolicyMirror` is only an off-chain UX pre-check that decides session-vs-passkey for a given intent \- it does **not** itself enforce the rate limit or gas budget. The inactivity timeout is client-only with no on-chain counterpart, so a stolen session key stays usable for in-policy actions until `validUntil`, rate-limit or gas-budget exhaustion, or an on-chain revoke. Session operations do not restrict a paymaster (`enforce_paymaster = false`).
 
 | Property | Value |
 | :---- | :---- |
 | Storage | macOS Keychain, kSecClassGenericPassword |
 | Accessibility | kSecAttrAccessibleWhenUnlockedThisDeviceOnly |
-| Access control | None \- silent reads by signing module. No Touch ID. |
+| Access control | None \- silent reads while unlocked (hot, software-extractable key). No SecAccessControl, no Touch ID. |
 | Curve | secp256k1 |
 | Lifespan | Session-scoped \- persists while the local session record is active, then deleted on expiry or revoke |
 | Autonomous operation | Yes for approved in-policy transfer and swap actions |
-| If compromised | Attacker bounded by on-chain spending policy. Key expires at session end. |
+| If compromised | Attacker bounded by the **on-chain** Kernel policy modules \- usable for in-policy actions until `validUntil`, rate-limit or gas-budget exhaustion, or on-chain revoke. The client-only inactivity timeout does **not** bound a stolen key, and the paymaster is not a session restriction. |
 
 **Enable session keys:**
 
@@ -465,13 +467,13 @@ The session key is a secp256k1 secret stored in the macOS Keychain as a generic 
 
 * App reads Kernel `currentNonce`
 
-* App builds Kernel permission config JSON, enable data, selector data, default nonce key, and enable-mode nonce key
+* App builds the Kernel permission config JSON and the install calldata (installValidations + grantAccess), selector data, and nonce keys
 
-* Root key (Touch ID) signs the permission enable digest
+* Root key (user-presence gate: Touch ID or passcode) signs the permission install
 
 * App stores the session record locally and marks session signing enabled
 
-* No standalone enable transaction is sent. The first approved in-policy action installs the permission on-chain in enable mode.
+* A separate root/passkey-validated install UserOperation (installValidations + grantAccess) registers the permission on-chain before first use, paid as a normal tx off the session GasPolicy. This replaced the old lazy enable-mode install \- which bundled enable data into the first session UserOp and hit a verificationGasLimit OOG (commit 0c36cb0); enable-mode signing remains a dead FFI fallback.
 
 **During session:**
 
@@ -481,15 +483,13 @@ The session key is a secp256k1 secret stored in the macOS Keychain as a generic 
 
 * In-policy intent uses the session key silently from Keychain
 
-* First session-signed UserOperation uses enable mode and carries enable data, selector data, and enable signature
-
-* Later session-signed UserOperations use installed mode after the install receipt is observed
+* Because the permission is already installed on-chain up front, every session-signed UserOperation uses the installed permission mode \- no enable data is carried on the first action
 
 * Swap UserOperations can include ERC-20 approval calls before the swap when allowance is missing
 
 * Bundler signs handleOps() transaction and submits via Flashbots Protect over Tor
 
-* Only submitted UserOperations cost gas. Session enable is bundled with the first in-policy action, not sent as a separate transaction.
+* Only submitted UserOperations cost gas. The permission install is its own root/passkey-validated UserOperation submitted before first use, not bundled into a session action.
 
 **Session end or revoke:**
 
@@ -514,10 +514,10 @@ The bundler key is a secp256k1 key stored in the macOS Keychain. It signs the Et
 | :---- | :---- |
 | Storage | macOS Keychain, kSecClassGenericPassword |
 | Accessibility | kSecAttrAccessibleWhenUnlockedThisDeviceOnly |
-| Access control | None (no SecAccessControl). Silent reads by app when screen unlocked. |
+| Access control | `.biometryCurrentSet` \- biometric gate with a ~10s reuse window plus an in-process prompt cache. Not a silent-read key. |
 | iCloud sync | Disabled (ThisDeviceOnly). Never leaves the machine. |
 | Curve | secp256k1 |
-| Rust access | security-framework crate |
+| Secret delivery | Swift reads the Keychain (biometric-gated) and passes the key to the `wallet-node` daemon over the fd-5 secret pipe, where it lives in daemon RAM. The Rust daemon never reads the Keychain itself. |
 | OS compromise | Can be extracted by kernel-level attacker. Accepted risk \- see below. |
 | Impact if stolen | Attacker can drain gas float only. Kernel account funds unaffected. |
 
@@ -582,6 +582,8 @@ The system is split into three independent process tiers. A compromise in any si
 
 Every message crossing a process boundary is treated as untrusted. The signing module validates and sanitizes all inputs from the LLM agent before acting.
 
+**As-built boundary note.** The XPC message contract below describes the intra-app LLM→signing-module boundary. The cross-process app↔daemon link is a *different* boundary: as built it is a bearer-token Unix-domain-socket HTTP/1.1 JSON-RPC channel to the `wallet-node` daemon, not XPC.
+
 | Message | From → To | Contains | Never Contains |
 | :---- | :---- | :---- | :---- |
 | sign\_transaction | LLM Agent → Signing Module | Unsigned tx, recipient, amount, token | Any key material |
@@ -590,7 +592,6 @@ Every message crossing a process boundary is treated as untrusted. The signing m
 | user\_approved | UI → Signing Module | Approval boolean \+ Touch ID result | Key material |
 | session\_start | UI → Signing Module | Session config, spending limits | Nothing sensitive |
 | session\_end | UI → Signing Module | Session close signal | Triggers enclave key deletion |
-| session\_start | UI \- Signing Module | Session config, spending policy | Nothing sensitive |
 
 # **6\. Rust Core Library**
 
@@ -599,6 +600,8 @@ Every message crossing a process boundary is treated as untrusted. The signing m
 The Rust core is the permanent, platform-agnostic investment. All security-critical logic lives here. Frontends and platform adapters are pluggable. Never coupled to Swift or macOS-specific APIs.
 
 ## **6.2 Core API surface**
+
+> **Illustrative target API.** The traits and platform structs below sketch the intended cross-platform shape and are **not** the shipped interface. The core that exists today is a flat C ABI in `rust-core/crates/ffi/` (see `rust-core/crates/ffi/README.md`): `wallet_session_build_permission`, `wallet_session_sign_and_wrap`, `wallet_session_uninstall_permission_calldata`, `wallet_predict_kernel_account_address`, and related `wallet_*` exports. There are no `KeyStore`/`PolicyEngine`/`SessionManager` traits or `AppleSecureEnclave`/`LinuxTPM`/`SoftwareFallback` structs in the codebase.
 
 trait KeyStore {
 
@@ -640,8 +643,8 @@ struct SoftwareFallback;   // Argon2id-derived \- no hardware
 
 | Platform | Security Adapter | Key Protection | Timeline |
 | :---- | :---- | :---- | :---- |
-| macOS | Apple Secure Enclave (CryptoKit) | P-256 root key directly in Enclave \- Model 1, signs via WebAuthn validator \+ EIP-7951 | Phase 1 |
-| iOS | Apple Secure Enclave (CryptoKit) | Same as macOS \- shared Swift layer | Phase 2 |
+| macOS | Apple Secure Enclave (Security-framework `SecKey`) | P-256 root key directly in Enclave \- Model 1, signs via WebAuthn validator \+ EIP-7951 | Phase 1 |
+| iOS | Apple Secure Enclave (Security-framework `SecKey`) | Same as macOS \- shared Swift layer | Phase 2 |
 | Linux | TPM 2.0 via tpm2-tools | Hardware if TPM present | Phase 3 |
 | Linux (no TPM) | SoftwareFallback | Argon2id-derived wrapping key | Phase 3 |
 | Windows | TPM 2.0 via Windows CNG | Hardware TPM-backed | Phase 4 |
@@ -770,11 +773,11 @@ Recovery module guardian approval received.
 
 Reconnecting to existing accounts...
 
-Account 1   0x111...   2.4 ETH    Kernel v3, policy v3
+Account 1   0x111...   2.4 ETH    Kernel v3.3, policy v3
 
-Account 2   0x222...   0.8 ETH    Kernel v3, policy v1
+Account 2   0x222...   0.8 ETH    Kernel v3.3, policy v1
 
-Account 3   0x333...   150 USDC   Kernel v3, policy v2
+Account 3   0x333...   150 USDC   Kernel v3.3, policy v2
 
 New Enclave key installed as owner. Rename accounts to continue.
 
@@ -810,7 +813,7 @@ The session key signs only actions inside the active policy snapshot. Anything o
 
 ## **9.2 Pre-inclusion privacy: Flashbots Protect**
 
-Flashbots Protect is the default transaction submission path. It routes transactions through a private mempool, preventing frontrunning and sandwich attacks before a transaction is included in a block. Free, requires no registration, and is strictly better than the public mempool for users.
+Flashbots Protect is the default transaction submission path. It routes transactions through a private mempool, preventing frontrunning and sandwich attacks before a transaction is included in a block. Free, requires no registration, and is strictly better than the public mempool for users. *(Not yet implemented in v0.1 alpha \- today `submit.rs` does a plain `eth_sendRawTransaction` POST; Flashbots-Protect-over-Tor is design vision, not the shipped submission path.)*
 
 | Property | Public Mempool | Flashbots Protect |
 | :---- | :---- | :---- |
@@ -876,7 +879,7 @@ Two independent timers run concurrently. Whichever fires first ends local sessio
 
 * UI shows session expired prompt
 
-* New session requires Touch ID to approve a fresh session permission; first in-policy action installs it on-chain if needed
+* New session requires a user-presence gate (Touch ID or passcode) to approve a fresh session permission; a separate root/passkey-validated install UserOperation registers it on-chain before first use
 
 # **11\. UI and Platform Architecture**
 
@@ -897,7 +900,7 @@ SwiftUI with XPC process isolation. No Tauri. The macOS security model is the st
 
 * Hardened Runtime \- prevents code injection and dylib hijacking
 
-* Secure Enclave \- hardware key protection via CryptoKit
+* Secure Enclave \- hardware key protection via the Security-framework `SecKey` API (CryptoKit only parses DER signatures into raw r‖s)
 
 ## **11.2 Future: Linux native**
 
@@ -932,47 +935,51 @@ Tauri is not ruled out for future platforms. If it matures sufficiently or the s
 
 # **12\. Supply Chain Security**
 
-Every dependency in the build is third-party code running inside the security boundary with full access to process memory. A malicious or compromised crate that touches key material is catastrophic. Four measures address this.
+Every dependency in the build is third-party code running inside the security boundary with full access to process memory. A malicious or compromised crate that touches key material is catastrophic. Four build-time measures are planned to address this; as of v0.1 alpha only the first (a committed `Cargo.lock`) is in place.
 
 ## **12.1 Critical dependency surface**
 
-These five crates directly touch key material. They are the highest-priority audit targets and the primary supply chain risk.
+These four crates directly touch key material. They are the highest-priority audit targets and the primary supply chain risk.
 
 | Crate | Role | Risk if Compromised |
 | :---- | :---- | :---- |
-| k256 | secp256k1 signing | Signs transactions with attacker-controlled key or leaks key |
+| secp256k1 (v0.30) | secp256k1 ECDSA signing \- the bundler EOA and session-key signer in `wallet-ffi` and the daemon's `wallet-node` | Signs transactions with attacker-controlled key or leaks key |
+| k256 (v0.13) | secp256k1 in the protocol `wallet-signature` crate (permission-signature path); otherwise only a transitive dependency in the app | Signs or leaks permission-signature key material |
 | zeroize | Memory zeroing after use | Skips zeroing \- key material persists in RAM |
 | subtle | Constant-time operations | Introduces timing side-channel \- key bits leaked |
 
 ## **12.2 Mitigations**
 
-**1\. cargo.lock committed and enforced**
+| Status (v0.1 alpha) Of the four controls below, only item 1's committed `rust-core/Cargo.lock` exists today. There is no CI yet (no `.github/workflows`), no `rust-toolchain.toml`, and no `cargo-vet`/supply-chain attestation directory in the repo. CI enforcement of `Cargo.lock` and items 2-4 are not yet implemented \- they describe the planned build-time hardening. |
+| :---- |
+
+**1\. cargo.lock committed (CI enforcement planned)**
 
 * Every dependency pinned to an exact content hash
 
 * A compromised crate version cannot enter the build without an explicit code change
 
-* CI rejects any build where Cargo.lock is out of sync with Cargo.toml
+* Planned: CI will reject any build where Cargo.lock is out of sync with Cargo.toml
 
-**2\. cargo-audit in CI**
+**2\. cargo-audit in CI (planned)**
 
 * Every build checked against the RustSec advisory database
 
 * Known vulnerable or compromised crates block the build automatically
 
-* No manual step required \- runs on every commit
+* Planned to run on every commit once CI exists \- no manual step required
 
-**3\. cargo-vet for critical crates**
+**3\. cargo-vet for critical crates (planned)**
 
-* The five critical crates above are explicitly audited and signed off on
+* The critical crates above are explicitly audited and signed off on
 
 * Any version update to these crates requires a new explicit audit before it enters the build
 
-* Audit attestations are committed to the repo and publicly verifiable
+* Audit attestations will be committed to the repo and publicly verifiable
 
-**4\. reproducible builds**
+**4\. reproducible builds (planned)**
 
-* Rust toolchain version pinned via rust-toolchain.toml
+* Planned: Rust toolchain version pinned via rust-toolchain.toml
 
 * Same source code produces a bit-for-bit identical binary every time
 
@@ -982,7 +989,7 @@ These five crates directly touch key material. They are the highest-priority aud
 
 * CI pipeline uses minimal permissions \- build and sign only, no broad secrets access
 
-* All GitHub Actions pinned to exact commit SHAs, not version tags
+* Planned: all GitHub Actions pinned to exact commit SHAs, not version tags
 
 ## **12.3 Runtime artifact provenance**
 
@@ -1008,18 +1015,18 @@ What the architecture does NOT protect against. Honesty about limitations is a d
 | Layer | Technology | Rationale |
 | :---- | :---- | :---- |
 | Crypto core | Rust | Memory safety, portability, constant-time ecosystem |
-| secp256k1 signing | k256 crate | Constant-time, well-audited |
+| secp256k1 signing | secp256k1 crate (app FFI \+ daemon `wallet-node`); k256 crate (protocol `wallet-signature`, permission-signature path) | secp256k1 v0.30 signs the bundler EOA and session-key ECDSA; k256 v0.13 constant-time, well-audited |
 | Memory zeroing | zeroize crate | Compiler-safe zeroing \- prevents optimization removal |
 | Constant-time ops | subtle crate | Prevents timing side-channel attacks |
 | Policy engine | Rust (custom) | No external deps \- critical path, minimal attack surface |
 | Smart account | Kernel (ERC-4337) | Audited, session keys via Kernel WebAuthn validator module, off-chain authorization |
-| Session keys | Kernel WebAuthn validator \+ session key plugin | Audited module. Enable data can be bundled into the first session UserOperation; revoke is an on-chain UserOperation. |
-| Light client | Helios Rust SDK (compiled into app) | Cryptographic verification, fast sync. Not downloaded at runtime. |
+| Session keys | Kernel WebAuthn validator \+ session key plugin | Audited module. Permission installed up front by a separate root/passkey-validated UserOperation (installValidations + grantAccess); revoke is an on-chain UserOperation. |
+| Light client | Helios Rust SDK (runs in `wallet-node` daemon today; design target compiled into app) | Cryptographic verification, fast sync. Not downloaded at runtime. |
 | Local bundler | Custom bundler (Rust, compiled into app) | Localhost only. Compiled in \- not downloaded at runtime. |
 | Tor | arti Rust crate (compiled in) | Official Tor Project Rust implementation. No binary download, no subprocess. |
 | MEV protection | Flashbots Protect via Tor (arti) | Free, hash-only hints, IP hidden via Tor |
 | Local LLM | Small quantized model (first launch download) | Full inference privacy, no hosted option |
-| macOS enclave (root key) | CryptoKit SecureEnclave.P256.Signing.PrivateKey | P-256 key never in RAM. Touch ID per op. No export API. Device-bound. |
+| macOS enclave (root key) | Security-framework `SecKey` (`SecKeyCreateRandomKey` + `kSecAttrTokenIDSecureEnclave`); CryptoKit only parses DER→raw (r, s) | P-256 key never in RAM. User-presence gate (Touch ID or passcode) per op. No export API. Device-bound. |
 | macOS keychain (bundler key) | security-framework Rust crate | secp256k1 bundler liveness key. Can only drain gas float if stolen. |
 | IPC | XPC (macOS) | OS-enforced process isolation |
 | UI \- Phase 1 | SwiftUI (macOS) | Native, best macOS sandbox support |
@@ -1053,7 +1060,7 @@ Closed decisions and reasoning. Do not reopen without strong justification.
 | Policy model | Session policy snapshot is stored locally and encoded into Kernel permission data. | App mirrors policy before signing; Kernel enforces the installed permission at execution time. |
 | Restore metadata model | On-chain state always recoverable. Local metadata (names, labels) may be lost. Fallback: Account 1, Account 2 etc. | Funds, signer state, policy, installed modules all on-chain. Display names are local-only. Encrypted metadata backup export deferred to Phase 2\. |
 | Module versioning on restore | Kernel version and installed modules read from chain at restore. Only compatible features offered. | Social recovery and future modules recoverable only if installed before device loss. Cannot be added retroactively without user key. |
-| Session key cost | No standalone enable transaction. | The first in-policy session UserOperation carries enable data if the permission is not installed yet. Explicit revoke submits an on-chain UserOperation. |
+| Session key cost | Separate up-front install UserOperation. | A root/passkey-validated install (installValidations + grantAccess) registers the permission before first use, paid off the session GasPolicy; this replaced lazy enable-mode to avoid a verificationGasLimit OOG (commit 0c36cb0). Explicit revoke submits an on-chain UserOperation. |
 | Session key lifespan | Active session record \- deleted on local expiry or revoke. | Compromised old session key becomes useless after local deletion or on-chain `validUntil` expiry. |
 | Expiry mechanism | Keychain deletion (local) \+ `validUntil` (on-chain fallback) \+ permission uninstall on revoke. | Multiple independent layers stop silent signing locally and reject expired session UserOperations on-chain. |
 | Session key access | Via signing module tool only. Session key in Keychain, read by signing module only. | LLM cannot access Keychain directly. Only signing module process reads the session key. |
@@ -1061,17 +1068,17 @@ Closed decisions and reasoning. Do not reopen without strong justification.
 | Spending policy location | On-chain (Kernel contract) | Cannot be bypassed by UI, LLM, or signing module compromise. |
 | Rust for crypto core | Yes \- permanent investment | Memory safety, portability. Only platform adapter changes per OS. |
 | Self-enclosed default | Yes \- no external services at all | Privacy-first means local only. No hosted fallbacks are offered. |
-| Helios for RPC | Yes \- compiled into app binary via Rust SDK | Cryptographic verification of all chain data. Not downloaded at runtime. Trust no RPC, verify everything. |
+| Helios for RPC | Yes \- runs in the `wallet-node` daemon today via the Rust SDK (design target: compiled into app binary) | Header-verifies state reads (balances, code, calls, receipts). Gas price, max priority fee, and the block-head probe are unverified, and a `read_verification = helios \| execution_rpc` toggle can disable Helios entirely. Not downloaded at runtime. |
 | Local bundler | Local only \- Custom bundler. One funded sender EOA per account. | Correct ERC-4337 flow: UserOp \-\> simulateValidation() \-\> handleOps() tx \-\> Flashbots. No external bundler option. No automatic public fallback. |
-| Helios integration | Rust SDK embedded directly \- not subprocess | Cleaner integration, no IPC overhead, verified data inside same process boundary |
+| Helios integration | Rust SDK embedded in the `wallet-node` daemon today (design target: embedded in the app, not a standalone Helios subprocess) | Cleaner integration, no separate Helios process; verified data inside the daemon's process boundary |
 | LLM model | Default small model downloaded on first launch \- no hosted option | No model input or conversation ever leaves the machine |
 | Price feeds | On-chain Chainlink via local Helios RPC \- default not opt-in | Free contract read, cryptographically verified, no external API dependency |
-| Supply chain \- build time | Cargo.lock pinning \+ cargo-audit in CI \+ cargo-vet for 5 critical crates \+ reproducible builds | Four layered controls protecting compiled binary. Does not protect runtime downloads. |
+| Supply chain \- build time | Today: committed `rust-core/Cargo.lock`. Planned: CI enforcement \+ cargo-audit \+ cargo-vet for the critical crates \+ reproducible builds | Four layered controls intended to protect the compiled binary; only `Cargo.lock` is in place as of v0.1 alpha. Does not protect runtime downloads. |
 | Supply chain \- runtime | Only LLM model weights downloaded at runtime. Helios, custom bundler, arti all compiled in. | Model hash pinned in binary, verified before execution, no auto-update to latest, downgrade blocked, failure \= refuse to run. |
 | Backup and recovery | No seed phrase. Recovery module is mandatory. Full guardian UX is Phase 2\. | Root key is device-bound hardware \- no seed exists to back up. Device loss is only recoverable via pre-installed recovery module. This is why recovery module setup is mandatory at account creation. |
 | Multi-account | One P-256 Enclave key owns all accounts. Separation by CREATE2 contract address with unique salt per account. | No BIP-32 derivation. No mnemonic. Root key compromise affects all accounts simultaneously \- recovery module is the mitigation. |
 | Smart contract choice | Kernel | Kernel native WebAuthn/P-256 validator required for Secure Enclave signing. EIP-7951 on mainnet since Fusaka (Dec 2025). |
-| Apple key protection model | Model 1 (enclave-resident signing) for root key. EIP-7951 live on mainnet since Fusaka (Dec 2025). | Root P-256 key signs directly in Enclave. Never in RAM. secp256k1 eliminated for root key. Session key uses Model 2 \- acceptable given bounded blast radius. |
+| Apple key protection model | Model 1 (enclave-resident signing) for root key. RIP-7212 / EIP-7951 P-256 precompile (RIP-7212 is the source name) live on mainnet since Fusaka (Dec 2025). | Root P-256 key signs directly in Enclave. Never in RAM. secp256k1 eliminated for root key. Session key uses Model 2 \- acceptable given bounded blast radius. |
 | Spending limits | User-configurable ETH cap, ERC-20 token caps, approval scope, rate limit, gas budget, duration, and inactivity timeout. | On-chain enforcement via Kernel permission plus local preflight mirror. Native ETH is allowed only when enabled and under cap; NFTs and unknown contracts remain out of policy. |
 | MEV protection | Flashbots Protect via Tor, hash-only hints. Signed handleOps() tx not raw UserOp. | Builder sees UserOp in calldata \- honest limit of pre-inclusion privacy. No automatic public fallback. User prompted after 25 blocks. |
 | Full on-chain privacy | Aztec deferred \- not production ready. Designed as future opt-in mode. | Aztec solves the on-chain record problem. Flashbots only solves pre-inclusion. Both needed for full privacy. |

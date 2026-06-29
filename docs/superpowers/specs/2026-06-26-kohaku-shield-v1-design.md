@@ -45,6 +45,27 @@ mnemonic backup, ephemeral signing sidecar, mainnet.
   shows balances inherently holds spend-capable material — it just never *exercises*
   a spend in v1 (no withdraw).
 
+## Privacy Pools vs RAILGUN (why PP for v1)
+
+Both are Kohaku shielded-pool plugins; both recover from a BIP-39 mnemonic (HD),
+both need a relayer to withdraw privately, both are currently unaudited.
+
+| Axis | Privacy Pools | RAILGUN |
+|---|---|---|
+| Code in Kohaku | TS-only (wasm circuits) | TS SDK **+ Rust crate** (`crates/railgun`) |
+| Operations | shield, unshield, `ragequit` — **deposit/withdraw only** | shield, **transfer within the shield**, unshield, + multi/batch |
+| Key model | one HD account secret; scanning re-derives **spend-capable** secrets → **no read-only viewing key** | **viewing key + spending key** split → honest read-only balances |
+| Compliance | 0xbow ASP (association sets) + `ragequit` self-exit | Private Proofs of Innocence (POI) |
+| Footprint | lighter, fewer moving parts | heavier — own broadcaster network + POI |
+
+**v1 picks Privacy Pools** — fewer ops, one key, lighter, least stakeholder
+surface. Its costs are acceptable for a shield+balance slice: the balance key being
+spend-capable doesn't bite when v1 never withdraws, and there's no in-shield
+transfer to miss yet. **RAILGUN is the upgrade path** if you later want a true
+read-only balance key (its viewing/spending split — impossible in PP) or private
+transfers within the shield. It also ships a Rust crate (the only route to drop the
+Node sidecar), but it's the heaviest option and buys nothing v1 needs.
+
 ## Architecture
 
 ```

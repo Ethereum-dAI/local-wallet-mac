@@ -2,63 +2,62 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a private deposit (shield) round-trip on Sepolia — a `privacy-helper` Node sidecar hosting Kohaku Privacy Pools, fed the shielded seed over fd-5, with chain reads routed through the daemon, plus an in-app shielded-balance display.
+**Goal:** Ship a private deposit (shield) round-trip on Sepolia — a `privacy-helper` sidecar (single self-contained binary) hosting Kohaku Privacy Pools, fed the shielded entropy over fd-5, serving JSON-RPC over a Unix socket, with chain reads routed through the daemon, plus an in-app shielded-balance display.
 
-**Architecture:** A new `local-wallet-mac/privacy-helper/` Node sidecar hosts the Kohaku `PrivacyPoolsV1Protocol`. It implements the Kohaku `Host` (`provider` forwards `eth_*` reads to the daemon's authenticated JSON-RPC; `storage` is a JSON file; `keystore` is a `MnemonicKeystore` from the seed). The Swift app spawns it exactly like `wallet-node` (fd-3 ready, fd-4 alive, fd-5 secret), exposes a `shield` tool intent that turns `prepareShield` output into a Kernel `execute` UserOp signed by the existing passkey, and renders the sidecar's `balance()` in the UI.
+**Architecture:** A new `local-wallet-mac/privacy-helper/` Node/TS project is **compiled to one executable** (`bun build --compile`) and bundled at `Contents/Resources/bin/privacy-helper` exactly like `wallet-node`. The Swift app spawns it via the existing `spawnHelper(execPath:readyWrite:aliveRead:secretRead:)` (no argv) — fd-3 ready, fd-4 alive, fd-5 secret. The sidecar reads `{ entropyHex, sidecarSocketPath, daemon: { socketPath, token } }` from fd-5, converts the entropy to a BIP-39 mnemonic (`@scure/bip39`), instantiates `PrivacyPoolsV1Protocol` with a `Host` whose `provider` forwards `eth_*` to the daemon's socket, and serves JSON-RPC (`balance`, `prepareShield`) over a Unix socket the app connects to. A `shield` tool intent turns `prepareShield` output into a Kernel `execute` UserOp signed by the existing passkey; the shielded balance renders next to the public balance.
 
-**Tech Stack:** TypeScript/Node (esbuild bundle), `@kohaku-eth/privacy-pools` + `@kohaku-eth/plugins` + `@kohaku-eth/provider`, Swift 6 / SwiftUI, the existing `wallet-node` daemon (Rust) and `wallet-ffi` signing path.
+**Tech Stack:** TypeScript compiled with `bun build --compile`, `@kohaku-eth/privacy-pools` + `@kohaku-eth/plugins` + `@kohaku-eth/provider` + `@scure/bip39`, Swift 6 / SwiftUI, the existing `wallet-node` daemon (Rust) and `wallet-ffi`/`UserOperationSigning` path.
 
 ## Global Constraints
 
-- Chains: Ethereum Mainnet (1) and Sepolia (11155111) only. **v1 targets Sepolia (11155111).**
-- PP Sepolia entrypoint: `0x34A2068192b1297f2a7f85D7D8CdE66F8F0921cB`, deploymentBlock `8461453` (`PrivacyPoolsV1_0xBow[11155111]`). Native ETH asset id uses `E_ADDRESS = 0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee`.
-- **No new daemon RPC methods** — the sidecar reuses standard `eth_*` reads.
-- **`local-wallet-protocol`: no changes.**
-- Sidecar ships as one esbuild bundle + `.wasm` proving assets inside the `.app`; `node_modules` stays dev/CI-only.
-- Shielded seed at rest: Keychain generic-password, `kSecAttrAccessControl = .biometryCurrentSet`, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, testnet-tagged. Seed/daemon-conn reach the sidecar only over fd-5 (never argv/env/disk).
-- The sidecar gets its **own** fd contract (3=ready, 4=alive, 5=secret) mirroring the daemon's; do **not** alter the daemon's fd contract.
-- Never commit to `main`. Work continues on branch `kohaku-shield-v1`. `docs/` is gitignored — `git add -f` the plan/spec docs.
+- Chains: Mainnet (1) + Sepolia (11155111) only. **v1 targets Sepolia (11155111).**
+- PP Sepolia entrypoint `0x34A2068192b1297f2a7f85D7D8CdE66F8F0921cB`, deploymentBlock `8461453` (`PrivacyPoolsV1_0xBow[11155111]`). Native ETH asset uses `E_ADDRESS = 0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee`.
+- **No new daemon RPC methods**; the sidecar reuses standard `eth_*` reads. **`local-wallet-protocol`: no changes.**
+- Sidecar ships as ONE executable at `Contents/Resources/bin/privacy-helper` (mirrors `wallet-node`); resolved via `Bundle.main.url(forResource:subdirectory:"bin")`. **Do not** add an `argv` parameter to `spawnHelper` / the spawn contract.
+- Shielded secret origin: **Swift generates 32 bytes via `SecRandomCopyBytes`**, stored as a Keychain generic-password with `kSecAttrAccessControl = .biometryCurrentSet` + `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, testnet-tagged. Entropy reaches the sidecar only over fd-5 (never argv/env/disk). The sidecar converts entropy→mnemonic; the master never persists in the sidecar (process-lifetime RAM only).
+- App↔sidecar transport is a **Unix socket** (path chosen by the app, passed in fd-5, sidecar listens, app connects with a per-launch bearer token) — stdio is NOT wired back to the app by `spawnHelper`.
+- Never commit to `main`. Work continues on branch `kohaku-shield-v1`. `docs/` is gitignored — `git add -f` the docs.
 - Spec: `docs/superpowers/specs/2026-06-26-kohaku-shield-v1-design.md`.
 
 ---
 
 ## File structure
 
-**New — `local-wallet-mac/privacy-helper/` (Node sidecar):**
-- `package.json`, `tsconfig.json`, `build.mjs` — project + esbuild bundling.
-- `src/rpc.ts` — newline-delimited JSON-RPC loop over stdin/stdout (app ↔ sidecar).
-- `src/daemon-provider.ts` — `EthereumProvider` backed by the daemon's Unix-socket JSON-RPC.
-- `src/secret.ts` — read + parse the fd-5 payload (`{ seedHex, daemon: { socketPath, token } }`).
-- `src/pp.ts` — build the `Host`, instantiate `PrivacyPoolsV1Protocol`, expose `balance()` / `prepareShield()`.
-- `src/index.ts` — entry: read fd-5, signal ready on fd-3, watch fd-4, serve RPC.
-- `test/daemon-provider.test.ts`, `test/pp.test.ts`, `test/rpc.test.ts` — `node:test`.
+**New — `local-wallet-mac/privacy-helper/` (compiled to one binary):**
+- `package.json`, `tsconfig.json`, `.gitignore` (`node_modules/`, `dist/`).
+- `src/rpc.ts` — JSON-RPC over an HTTP server bound to a Unix socket (bearer-checked).
+- `src/daemon-provider.ts` — `EthereumProvider` backed by the daemon's Unix-socket (or HTTP) JSON-RPC.
+- `src/secret.ts` — read + parse the fd-5 payload.
+- `src/pp.ts` — entropy→mnemonic, build `Host`, instantiate `PrivacyPoolsV1Protocol`, `balanceHexWei()` / `prepareShieldEth()`.
+- `src/index.ts` — entry: read fd-5, serve RPC on the socket, ready on fd-3, exit on fd-4 EOF.
+- `test/*.test.ts` — `node:test` (run with `bun test` or `node --test`).
+- `build.mjs` is replaced by a `bun build --compile` script in `package.json`.
 
 **Modified — Swift (`local-wallet-mac/wallet-macos/Sources/`):**
-- `WalletMacOSApp/ShieldedSeedStore.swift` (NEW) — Keychain custody of the shielded seed.
-- `WalletMacOSApp/PrivacyHelperSidecar.swift` (NEW) — spawn/lifecycle, mirrors `WalletNodeDaemon.swift`.
-- `WalletToolLayer/ToolIntent.swift` — add `shield` to `Tool`.
-- `WalletToolLayer/ToolDefinitions.swift` — add the `shield` `ToolDefinition` + include in `phase1`.
-- The view that renders public balance (shielded-balance row) — located in Step of Task 9.
-- `project.yml` — bundle the sidecar artifact as an app resource.
+- `WalletMacOSApp/ShieldedSeedStore.swift` (NEW) — Keychain custody of 32-byte entropy.
+- `WalletMacOSApp/PrivacyHelperSidecar.swift` (NEW) — spawn/lifecycle + JSON-RPC client, mirrors `WalletNodeDaemon.swift`.
+- `WalletToolLayer/ToolIntent.swift:5` — add `shield` to `Tool`.
+- `WalletToolLayer/ToolDefinitions.swift` — add `shield` `ToolDefinition` + include in `phase1`.
+- `WalletMacOSApp/AppModel.swift` — `executeShield(amountETH:)`, `@Published shieldedBalanceDisplay`, `refreshShieldedBalance()`.
+- `WalletMacOSApp/ChatDashboardView.swift:~2406` — add `.shield` to `executeIfSupported`; render shielded balance near line ~2232.
+- `project.yml` — bundle `privacy-helper` binary as a `bin/` resource.
 
 **Modified — daemon (`local-wallet-daemon`):**
-- `crates/wallet-bundler/src/policy.rs` — confirm/raise `max_call_gas_limit` for ZK deposits.
+- `crates/wallet-bundler/src/policy.rs` — confirm/raise `max_call_gas_limit` for ZK deposits (only if Task 11 rejects on gas).
 
 ---
 
-## Task 1: Scaffold the `privacy-helper` Node project
+## Task 1: Scaffold project + JSON-RPC-over-Unix-socket server
 
 **Files:**
-- Create: `local-wallet-mac/privacy-helper/package.json`
-- Create: `local-wallet-mac/privacy-helper/tsconfig.json`
-- Create: `local-wallet-mac/privacy-helper/build.mjs`
-- Create: `local-wallet-mac/privacy-helper/src/rpc.ts`
-- Test: `local-wallet-mac/privacy-helper/test/rpc.test.ts`
+- Create: `privacy-helper/package.json`, `privacy-helper/tsconfig.json`, `privacy-helper/.gitignore`
+- Create: `privacy-helper/src/rpc.ts`
+- Test: `privacy-helper/test/rpc.test.ts`
 
 **Interfaces:**
-- Produces: `createRpcServer(handlers: Record<string, (params: any) => Promise<any>>, input: NodeJS.ReadableStream, output: NodeJS.WritableStream): void` — reads newline-delimited JSON-RPC 2.0 requests, writes one JSON response line each.
+- Produces: `serveRpc(opts: { socketPath: string; token: string; handlers: Record<string, (params: any) => Promise<any>> }): Promise<import("node:http").Server>` — an HTTP server on the Unix socket; each POST is one JSON-RPC 2.0 request; requires `Authorization: Bearer <token>`.
 
-- [ ] **Step 1: Create `package.json`**
+- [ ] **Step 1: `package.json`**
 
 ```json
 {
@@ -67,142 +66,147 @@
   "type": "module",
   "version": "0.0.0",
   "scripts": {
-    "build": "node build.mjs",
-    "test": "node --test --experimental-strip-types test/"
+    "build": "bun build src/index.ts --compile --outfile dist/privacy-helper",
+    "test": "bun test"
   },
   "dependencies": {
     "@kohaku-eth/privacy-pools": "*",
     "@kohaku-eth/plugins": "*",
-    "@kohaku-eth/provider": "*"
+    "@kohaku-eth/provider": "*",
+    "@scure/bip39": "^1.3.0"
   },
-  "devDependencies": {
-    "esbuild": "^0.23.0",
-    "typescript": "^5.5.0"
-  }
+  "devDependencies": { "typescript": "^5.5.0" }
 }
 ```
 
-- [ ] **Step 2: Create `tsconfig.json`**
+- [ ] **Step 2: `tsconfig.json`**
 
 ```json
 {
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "noEmit": true
+    "target": "ES2022", "module": "ESNext", "moduleResolution": "bundler",
+    "strict": true, "esModuleInterop": true, "skipLibCheck": true, "noEmit": true
   },
   "include": ["src", "test"]
 }
 ```
 
-- [ ] **Step 3: Create `build.mjs` (esbuild → one bundled file)**
+- [ ] **Step 3: `.gitignore`**
 
-```js
-import { build } from "esbuild";
-
-await build({
-  entryPoints: ["src/index.ts"],
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  target: "node20",
-  outfile: "dist/privacy-helper.mjs",
-  banner: { js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);" },
-  loader: { ".wasm": "file" },
-});
-console.log("built dist/privacy-helper.mjs");
+```
+node_modules/
+dist/
 ```
 
-- [ ] **Step 4: Write the failing test for the RPC loop**
+- [ ] **Step 4: Failing test**
 
 ```ts
 // test/rpc.test.ts
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { PassThrough } from "node:stream";
-import { createRpcServer } from "../src/rpc.ts";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs";
+import { serveRpc } from "../src/rpc.ts";
 
-test("dispatches a request and writes a result line", async () => {
-  const input = new PassThrough();
-  const output = new PassThrough();
-  createRpcServer({ ping: async () => "pong" }, input, output);
-
-  const line = new Promise<string>((resolve) => {
-    output.once("data", (b) => resolve(b.toString().trim()));
+const socketPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "rpc-")), "s.sock");
+const post = (body: object, token = "tok") =>
+  new Promise<any>((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const req = http.request(
+      { socketPath, path: "/", method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(data), authorization: `Bearer ${token}` } },
+      (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => resolve({ status: res.statusCode, body: d ? JSON.parse(d) : null })); },
+    );
+    req.on("error", reject); req.write(data); req.end();
   });
-  input.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }) + "\n");
 
-  assert.equal(await line, JSON.stringify({ jsonrpc: "2.0", id: 1, result: "pong" }));
+test("dispatches an authed request", async () => {
+  const server = await serveRpc({ socketPath, token: "tok", handlers: { ping: async () => "pong" } });
+  after(() => server.close());
+  const r = await post({ jsonrpc: "2.0", id: 1, method: "ping" });
+  assert.deepEqual(r.body, { jsonrpc: "2.0", id: 1, result: "pong" });
+});
+
+test("rejects a bad token with 401", async () => {
+  const r = await post({ jsonrpc: "2.0", id: 2, method: "ping" }, "nope");
+  assert.equal(r.status, 401);
 });
 ```
 
-- [ ] **Step 5: Run the test, verify it fails**
+- [ ] **Step 5: Run, verify fail**
 
-Run: `cd local-wallet-mac/privacy-helper && npm install && npm test`
+Run: `cd local-wallet-mac/privacy-helper && bun install && bun test`
 Expected: FAIL — `Cannot find module '../src/rpc.ts'`.
 
 - [ ] **Step 6: Implement `src/rpc.ts`**
 
 ```ts
-import { createInterface } from "node:readline";
+import http from "node:http";
 
 type Handler = (params: any) => Promise<any>;
 
-export function createRpcServer(
-  handlers: Record<string, Handler>,
-  input: NodeJS.ReadableStream,
-  output: NodeJS.WritableStream,
-): void {
-  const rl = createInterface({ input });
-  rl.on("line", async (line) => {
-    if (!line.trim()) return;
-    let id: unknown = null;
-    try {
-      const req = JSON.parse(line);
-      id = req.id ?? null;
-      const handler = handlers[req.method];
-      if (!handler) throw new Error(`unknown method: ${req.method}`);
-      const result = await handler(req.params);
-      output.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      output.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }) + "\n");
+export function serveRpc(opts: {
+  socketPath: string;
+  token: string;
+  handlers: Record<string, Handler>;
+}): Promise<http.Server> {
+  const server = http.createServer((req, res) => {
+    if (req.headers.authorization !== `Bearer ${opts.token}`) {
+      res.statusCode = 401;
+      res.end();
+      return;
     }
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", async () => {
+      let id: unknown = null;
+      try {
+        const reqObj = JSON.parse(body);
+        id = reqObj.id ?? null;
+        const handler = opts.handlers[reqObj.method];
+        if (!handler) throw new Error(`unknown method: ${reqObj.method}`);
+        const result = await handler(reqObj.params);
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
+      } catch (e) {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message: e instanceof Error ? e.message : String(e) } }));
+      }
+    });
+  });
+  return new Promise((resolve) => {
+    try { require("node:fs").unlinkSync(opts.socketPath); } catch { /* fresh */ }
+    server.listen(opts.socketPath, () => resolve(server));
   });
 }
 ```
 
-- [ ] **Step 7: Run the test, verify it passes**
+- [ ] **Step 7: Run, verify pass**
 
-Run: `npm test`
-Expected: PASS.
+Run: `bun test`
+Expected: PASS (both cases).
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add -f privacy-helper/package.json privacy-helper/tsconfig.json privacy-helper/build.mjs privacy-helper/src/rpc.ts privacy-helper/test/rpc.test.ts
-git commit -m "feat(privacy-helper): scaffold Node sidecar + JSON-RPC loop"
+git add -f privacy-helper/package.json privacy-helper/tsconfig.json privacy-helper/.gitignore privacy-helper/src/rpc.ts privacy-helper/test/rpc.test.ts
+git commit -m "feat(privacy-helper): scaffold + JSON-RPC over Unix socket (bearer-checked)"
 ```
-
-> Note: `privacy-helper/` may be partly gitignored if a parent rule catches `dist/` or `node_modules/`. Add a `privacy-helper/.gitignore` with `node_modules/` and `dist/`; `git add -f` only source files.
 
 ---
 
 ## Task 2: Daemon-backed `EthereumProvider`
 
 **Files:**
-- Create: `local-wallet-mac/privacy-helper/src/daemon-provider.ts`
-- Test: `local-wallet-mac/privacy-helper/test/daemon-provider.test.ts`
+- Create: `privacy-helper/src/daemon-provider.ts`
+- Test: `privacy-helper/test/daemon-provider.test.ts`
 
 **Interfaces:**
-- Consumes: the daemon's standard `eth_*` JSON-RPC over a Unix socket with a `Bearer` token (e.g. `eth_chainId`, `eth_getCode`, `eth_call`, `eth_getLogs`, `eth_blockNumber`, `eth_getTransactionReceipt`, `eth_gasPrice`, `eth_estimateGas`, `eth_getBalance`, `eth_getTransactionCount`).
-- Produces: `createDaemonProvider(conn: { socketPath: string; token: string }): EthereumProvider` (from `@kohaku-eth/provider`), plus an internal `rpc(method, params)` used by every method.
+- Consumes: daemon `eth_*` JSON-RPC over a Unix socket with a `Bearer` token (`eth_chainId`, `eth_getCode`, `eth_call`, `eth_getLogs`, `eth_blockNumber`, `eth_getTransactionReceipt`, `eth_gasPrice`, `eth_estimateGas`, `eth_getBalance`, `eth_getTransactionCount`).
+- Produces: `createDaemonProvider(conn: { socketPath?: string; url?: string; token: string }): EthereumProvider`. Supports a Unix socket (app/prod) **and** an HTTP base URL (standalone dev gate). Internal `rpc(method, params)`.
 
-- [ ] **Step 1: Write the failing test (method→RPC translation against a mock Unix-socket server)**
+- [ ] **Step 1: Failing test (mock Unix-socket daemon)** — *(identical structure to the prior plan revision; keep both cases: `getChainId` → `eth_chainId` parses `0xaa36a7` → `11155111n`; `getCode` forwards `[addr, "latest"]` → `0x1234`.)*
 
 ```ts
 // test/daemon-provider.test.ts
@@ -214,49 +218,35 @@ import path from "node:path";
 import fs from "node:fs";
 import { createDaemonProvider } from "../src/daemon-provider.ts";
 
-let server: http.Server;
-let socketPath: string;
-let lastBody: any;
-
+let server: http.Server, socketPath: string, lastBody: any;
 before(async () => {
-  socketPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ph-")), "d.sock");
+  socketPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dp-")), "d.sock");
   server = http.createServer((req, res) => {
-    let data = "";
-    req.on("data", (c) => (data += c));
+    let d = ""; req.on("data", (c) => (d += c));
     req.on("end", () => {
-      lastBody = JSON.parse(data);
-      const map: Record<string, unknown> = {
-        eth_chainId: "0xaa36a7", // 11155111
-        eth_getCode: "0x1234",
-      };
+      lastBody = JSON.parse(d);
+      const map: Record<string, unknown> = { eth_chainId: "0xaa36a7", eth_getCode: "0x1234" };
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ jsonrpc: "2.0", id: lastBody.id, result: map[lastBody.method] }));
     });
   });
   await new Promise<void>((r) => server.listen(socketPath, r));
 });
-
 after(() => server.close());
 
-test("getChainId issues eth_chainId with bearer auth and parses hex", async () => {
-  const p = createDaemonProvider({ socketPath, token: "tok123" });
-  const chainId = await p.getChainId();
-  assert.equal(chainId, 11155111n);
+test("getChainId parses hex", async () => {
+  const p = createDaemonProvider({ socketPath, token: "t" });
+  assert.equal(await p.getChainId(), 11155111n);
   assert.equal(lastBody.method, "eth_chainId");
 });
-
-test("getCode forwards address param", async () => {
-  const p = createDaemonProvider({ socketPath, token: "tok123" });
-  const code = await p.getCode("0xabc");
-  assert.equal(code, "0x1234");
+test("getCode forwards [addr, latest]", async () => {
+  const p = createDaemonProvider({ socketPath, token: "t" });
+  assert.equal(await p.getCode("0xabc"), "0x1234");
   assert.deepEqual(lastBody.params, ["0xabc", "latest"]);
 });
 ```
 
-- [ ] **Step 2: Run the test, verify it fails**
-
-Run: `npm test`
-Expected: FAIL — `Cannot find module '../src/daemon-provider.ts'`.
+- [ ] **Step 2: Run, verify fail** — Run: `bun test`. Expected: FAIL (module missing).
 
 - [ ] **Step 3: Implement `src/daemon-provider.ts`**
 
@@ -264,207 +254,172 @@ Expected: FAIL — `Cannot find module '../src/daemon-provider.ts'`.
 import http from "node:http";
 import type { EthereumProvider } from "@kohaku-eth/provider";
 
-export function createDaemonProvider(conn: { socketPath: string; token: string }): EthereumProvider {
+export function createDaemonProvider(conn: { socketPath?: string; url?: string; token: string }): EthereumProvider {
   let nextId = 1;
   const rpc = (method: string, params: unknown[] = []): Promise<any> =>
     new Promise((resolve, reject) => {
       const body = JSON.stringify({ jsonrpc: "2.0", id: nextId++, method, params });
-      const req = http.request(
-        {
-          socketPath: conn.socketPath,
-          path: "/",
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "content-length": Buffer.byteLength(body),
-            authorization: `Bearer ${conn.token}`,
-          },
-        },
-        (res) => {
-          let data = "";
-          res.on("data", (c) => (data += c));
-          res.on("end", () => {
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.error) reject(new Error(parsed.error.message ?? "rpc error"));
-              else resolve(parsed.result);
-            } catch (e) {
-              reject(e);
-            }
-          });
-        },
-      );
-      req.on("error", reject);
-      req.write(body);
-      req.end();
+      const common = { method: "POST", path: "/", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body), authorization: `Bearer ${conn.token}` } };
+      const options = conn.socketPath ? { ...common, socketPath: conn.socketPath } : { ...common, ...hostPort(conn.url!) };
+      const req = http.request(options as http.RequestOptions, (res) => {
+        let d = ""; res.on("data", (c) => (d += c));
+        res.on("end", () => { try { const p = JSON.parse(d); p.error ? reject(new Error(p.error.message ?? "rpc error")) : resolve(p.result); } catch (e) { reject(e); } });
+      });
+      req.on("error", reject); req.write(body); req.end();
     });
-
-  const toBig = (hex: string) => BigInt(hex);
-
+  const toBig = (h: string) => BigInt(h);
   return {
     _internal: rpc,
     getChainId: async () => toBig(await rpc("eth_chainId")),
     getBlockNumber: async () => toBig(await rpc("eth_blockNumber")),
-    getBalance: async (address) => toBig(await rpc("eth_getBalance", [address, "latest"])),
-    getCode: async (address) => await rpc("eth_getCode", [address, "latest"]),
+    getBalance: async (a) => toBig(await rpc("eth_getBalance", [a, "latest"])),
+    getCode: async (a) => await rpc("eth_getCode", [a, "latest"]),
     getGasPrice: async () => toBig(await rpc("eth_gasPrice")),
-    getTransactionCount: async (address, block) =>
-      Number(toBig(await rpc("eth_getTransactionCount", [address, block ?? "latest"]))),
-    getTransactionReceipt: async (txHash) => (await rpc("eth_getTransactionReceipt", [txHash])) ?? null,
+    getTransactionCount: async (a, b) => Number(toBig(await rpc("eth_getTransactionCount", [a, b ?? "latest"]))),
+    getTransactionReceipt: async (h) => (await rpc("eth_getTransactionReceipt", [h])) ?? null,
     getLogs: async (params) => await rpc("eth_getLogs", [params]),
-    estimateGas: async (call) => toBig(await rpc("eth_estimateGas", [call])),
-    call: async (call) => (await rpc("eth_call", [call, "latest"])) as `0x${string}` | undefined,
+    estimateGas: async (c) => toBig(await rpc("eth_estimateGas", [c])),
+    call: async (c) => (await rpc("eth_call", [c, "latest"])) as `0x${string}` | undefined,
     request: async ({ method, params }) => await rpc(method, (params as unknown[]) ?? []),
-    waitForTransaction: async (txHash) => {
-      // ponytail: poll receipt; good enough for a sidecar that only reads.
-      for (;;) {
-        const r = await rpc("eth_getTransactionReceipt", [txHash]);
-        if (r) return;
-        await new Promise((res) => setTimeout(res, 1500));
-      }
-    },
+    waitForTransaction: async (h) => { for (;;) { if (await rpc("eth_getTransactionReceipt", [h])) return; await new Promise((r) => setTimeout(r, 1500)); } },
   } as EthereumProvider;
+}
+
+function hostPort(url: string): { host: string; port: number } {
+  const u = new URL(url);
+  return { host: u.hostname, port: Number(u.port || 80) };
 }
 ```
 
-- [ ] **Step 4: Run the test, verify it passes**
-
-Run: `npm test`
-Expected: PASS (both cases).
+- [ ] **Step 4: Run, verify pass** — Run: `bun test`. Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add -f privacy-helper/src/daemon-provider.ts privacy-helper/test/daemon-provider.test.ts
-git commit -m "feat(privacy-helper): EthereumProvider backed by daemon Unix-socket RPC"
+git commit -m "feat(privacy-helper): EthereumProvider over daemon socket/HTTP"
 ```
 
 ---
 
 ## Task 3: fd-5 secret payload reader
 
-**Files:**
-- Create: `local-wallet-mac/privacy-helper/src/secret.ts`
-- Test: `local-wallet-mac/privacy-helper/test/secret.test.ts`
+**Files:** Create `privacy-helper/src/secret.ts`; Test `privacy-helper/test/secret.test.ts`.
 
 **Interfaces:**
-- Consumes: a single JSON object written to fd-5 then EOF: `{ "seedHex": "0x…", "daemon": { "socketPath": "…", "token": "…" } }`.
-- Produces: `readSecretPayload(fd: number): Promise<{ seedHex: string; daemon: { socketPath: string; token: string } }>`.
+- Consumes: one JSON object on fd-5 then EOF: `{ "entropyHex": "0x…32bytes", "sidecarSocketPath": "…", "daemon": { "socketPath": "…", "token": "…" } }`.
+- Produces: `readSecretPayload(fd: number): Promise<{ entropyHex: string; sidecarSocketPath: string; daemon: { socketPath: string; token: string } }>`.
 
-- [ ] **Step 1: Write the failing test (pipe a payload through a real fd)**
+- [ ] **Step 1: Failing test**
 
 ```ts
 // test/secret.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { readSecretPayload } from "../src/secret.ts";
 
-test("reads and parses the fd payload to EOF", async () => {
-  const [r, w] = (() => {
-    const path = require("node:os").tmpdir() + "/sec-" + Date.now();
-    fs.writeFileSync(path, "");
-    return [path, path] as const;
-  })();
-  const payload = { seedHex: "0xdead", daemon: { socketPath: "/tmp/d.sock", token: "t" } };
-  fs.writeFileSync(w, JSON.stringify(payload));
-  const fd = fs.openSync(r, "r");
-  const got = await readSecretPayload(fd);
-  assert.deepEqual(got, payload);
+test("parses fd payload to EOF", async () => {
+  const p = path.join(os.tmpdir(), "sec-" + Date.now());
+  const payload = { entropyHex: "0x" + "ab".repeat(32), sidecarSocketPath: "/tmp/ph.sock", daemon: { socketPath: "/tmp/d.sock", token: "t" } };
+  fs.writeFileSync(p, JSON.stringify(payload));
+  const fd = fs.openSync(p, "r");
+  assert.deepEqual(await readSecretPayload(fd), payload);
 });
 ```
 
-- [ ] **Step 2: Run the test, verify it fails**
-
-Run: `npm test`
-Expected: FAIL — `Cannot find module '../src/secret.ts'`.
+- [ ] **Step 2: Run, verify fail** — `bun test` → FAIL (module missing).
 
 - [ ] **Step 3: Implement `src/secret.ts`**
 
 ```ts
 import fs from "node:fs";
 
-export async function readSecretPayload(
-  fd: number,
-): Promise<{ seedHex: string; daemon: { socketPath: string; token: string } }> {
+export async function readSecretPayload(fd: number): Promise<{
+  entropyHex: string; sidecarSocketPath: string; daemon: { socketPath: string; token: string };
+}> {
   const chunks: Buffer[] = [];
-  const stream = fs.createReadStream("", { fd, autoClose: true });
-  for await (const chunk of stream) chunks.push(chunk as Buffer);
-  const text = Buffer.concat(chunks).toString("utf8").trim();
-  const parsed = JSON.parse(text);
-  if (typeof parsed.seedHex !== "string" || !parsed.daemon?.socketPath || !parsed.daemon?.token) {
+  for await (const chunk of fs.createReadStream("", { fd, autoClose: true })) chunks.push(chunk as Buffer);
+  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8").trim());
+  if (typeof parsed.entropyHex !== "string" || !parsed.sidecarSocketPath || !parsed.daemon?.socketPath || !parsed.daemon?.token) {
     throw new Error("invalid fd-5 secret payload");
   }
   return parsed;
 }
 ```
 
-- [ ] **Step 4: Run the test, verify it passes**
-
-Run: `npm test`
-Expected: PASS.
+- [ ] **Step 4: Run, verify pass** — `bun test` → PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add -f privacy-helper/src/secret.ts privacy-helper/test/secret.test.ts
-git commit -m "feat(privacy-helper): read seed+daemon-conn from fd-5 payload"
+git commit -m "feat(privacy-helper): read entropy+socket+daemon-conn from fd-5"
 ```
 
 ---
 
-## Task 4: Privacy Pools host + `balance()` / `prepareShield()`
+## Task 4: PP host (entropy→mnemonic) + balance/prepareShield mappers
 
-**Files:**
-- Create: `local-wallet-mac/privacy-helper/src/pp.ts`
-- Test: `local-wallet-mac/privacy-helper/test/pp.test.ts`
+**Files:** Create `privacy-helper/src/pp.ts`; Test `privacy-helper/test/pp.test.ts`.
 
 **Interfaces:**
-- Consumes: `EthereumProvider` (Task 2); `MnemonicKeystore`, `MemoryStorage` from `@kohaku-eth/plugins`; `PrivacyPoolsV1Protocol`, `PrivacyPoolsV1_0xBow`, `E_ADDRESS` from `@kohaku-eth/privacy-pools`.
+- Consumes: `EthereumProvider` (T2); `MnemonicKeystore` from `@kohaku-eth/plugins`; `PrivacyPoolsV1Protocol`, `PrivacyPoolsV1_0xBow`, `E_ADDRESS` from `@kohaku-eth/privacy-pools`; `entropyToMnemonic` + english wordlist from `@scure/bip39`.
 - Produces:
-  - `createPrivacyPools(opts: { seedHex: string; provider: EthereumProvider; chainId: 11155111 }): { balanceEthWei(): Promise<string>; prepareShieldEth(amountWei: string): Promise<{ to: string; data: string; value: string }> }`.
-  - `balanceEthWei` returns the approved native-ETH balance as a decimal wei string.
-  - `prepareShieldEth` returns the first deposit tx as `{ to, data, value }` (hex strings) for the app to wrap in a Kernel `execute`.
+  - `mnemonicFromEntropyHex(hex: string): string` — `entropyToMnemonic(bytes, wordlist)`.
+  - `pickEthBalanceHexWei(balances, eAddr): string` — approved native-ETH amount as **`0x`-prefixed hex** wei (to match Swift `WeiFormatter.ethDisplayString(fromHexWei:)`).
+  - `mapShieldTx(op): { to: string; data: string; value: string }`.
+  - `createPrivacyPools({ entropyHex, provider, storage, chainId }): { balanceHexWei(): Promise<string>; prepareShieldEth(amountWei: string): Promise<{ to; data; value }> }`.
 
-- [ ] **Step 1: Write the failing test (inject a fake plugin to assert wiring + mapping)**
+- [ ] **Step 1: Failing test (pure helpers)**
 
 ```ts
 // test/pp.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mapShieldTx, pickEthBalance } from "../src/pp.ts";
+import { pickEthBalanceHexWei, mapShieldTx, mnemonicFromEntropyHex } from "../src/pp.ts";
 
-test("pickEthBalance sums approved native-ETH entries to a wei string", () => {
-  const E = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const E = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+test("pickEthBalanceHexWei returns approved native balance as hex", () => {
   const balances = [
-    { asset: { contract: E, __type: "erc20" }, amount: 1000n },
-    { asset: { contract: E, __type: "erc20" }, amount: 7n, tag: "pending" },
+    { asset: { contract: E }, amount: 1000n },
+    { asset: { contract: E }, amount: 7n, tag: "pending" },
   ];
-  assert.equal(pickEthBalance(balances as any, E), "1000");
+  assert.equal(pickEthBalanceHexWei(balances as any, E), "0x3e8"); // 1000
 });
 
-test("mapShieldTx extracts to/data/value from the PublicOperation", () => {
-  const op = { txns: [{ to: "0xpool", data: "0xabcd", value: 5n }] };
-  assert.deepEqual(mapShieldTx(op as any), { to: "0xpool", data: "0xabcd", value: "5" });
+test("mapShieldTx extracts to/data/value", () => {
+  assert.deepEqual(mapShieldTx({ txns: [{ to: "0xpool", data: "0xabcd", value: 5n }] } as any), { to: "0xpool", data: "0xabcd", value: "5" });
+});
+
+test("mnemonicFromEntropyHex yields 24 words for 32-byte entropy", () => {
+  const m = mnemonicFromEntropyHex("0x" + "00".repeat(32));
+  assert.equal(m.split(" ").length, 24);
 });
 ```
 
-- [ ] **Step 2: Run the test, verify it fails**
-
-Run: `npm test`
-Expected: FAIL — `Cannot find module '../src/pp.ts'`.
+- [ ] **Step 2: Run, verify fail** — `bun test` → FAIL (module missing).
 
 - [ ] **Step 3: Implement `src/pp.ts`**
 
 ```ts
-import { MnemonicKeystore, MemoryStorage, type Host } from "@kohaku-eth/plugins";
+import { MnemonicKeystore, type Host, type Storage } from "@kohaku-eth/plugins";
 import { PrivacyPoolsV1Protocol, PrivacyPoolsV1_0xBow, E_ADDRESS } from "@kohaku-eth/privacy-pools";
 import type { EthereumProvider } from "@kohaku-eth/provider";
+import { entropyToMnemonic } from "@scure/bip39";
+import { wordlist } from "@scure/bip39/wordlists/english.js";
 
-// Pure helpers (unit-tested):
-export function pickEthBalance(balances: { asset: { contract: string }; amount: bigint; tag?: string }[], eAddr: string): string {
+export function mnemonicFromEntropyHex(hex: string): string {
+  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  return entropyToMnemonic(Uint8Array.from(Buffer.from(clean, "hex")), wordlist);
+}
+
+export function pickEthBalanceHexWei(balances: { asset: { contract: string }; amount: bigint; tag?: string }[], eAddr: string): string {
   const approved = balances.find((b) => b.asset.contract.toLowerCase() === eAddr.toLowerCase() && b.tag !== "pending");
-  return (approved?.amount ?? 0n).toString();
+  return "0x" + (approved?.amount ?? 0n).toString(16);
 }
 
 export function mapShieldTx(op: { txns: { to: string; data: string; value: bigint }[] }): { to: string; data: string; value: string } {
@@ -473,192 +428,121 @@ export function mapShieldTx(op: { txns: { to: string; data: string; value: bigin
   return { to: tx.to, data: tx.data, value: (tx.value ?? 0n).toString() };
 }
 
-export function createPrivacyPools(opts: { seedHex: string; provider: EthereumProvider; chainId: 11155111 }) {
-  // seedHex is a BIP-39 mnemonic-derived key transport; for v1 we accept a mnemonic
-  // string. MnemonicKeystore expects a mnemonic — see Swift side (Task 5) which stores one.
+export function createPrivacyPools(opts: { entropyHex: string; provider: EthereumProvider; storage: Storage; chainId: 11155111 }) {
   const host: Host = {
     network: { fetch: (input, init) => fetch(input as any, init) },
-    storage: new MemoryStorage(), // ponytail: swapped for file storage in Task wiring (index.ts); MemoryStorage keeps Task 4 pure.
-    keystore: new MnemonicKeystore(opts.seedHex),
+    storage: opts.storage,
+    keystore: new MnemonicKeystore(mnemonicFromEntropyHex(opts.entropyHex)),
     provider: opts.provider,
   };
-
   const { entrypoint } = PrivacyPoolsV1_0xBow[opts.chainId];
   const pp = new PrivacyPoolsV1Protocol(host, { entrypoint, accountIndex: 0 });
   const ethAsset = { __type: "erc20" as const, contract: E_ADDRESS };
-
   return {
-    async balanceEthWei(): Promise<string> {
-      const balances = await pp.balance([ethAsset]);
-      return pickEthBalance(balances as any, E_ADDRESS);
+    async balanceHexWei(): Promise<string> {
+      return pickEthBalanceHexWei((await pp.balance([ethAsset])) as any, E_ADDRESS);
     },
-    async prepareShieldEth(amountWei: string): Promise<{ to: string; data: string; value: string }> {
-      const op = await pp.prepareShield({ asset: ethAsset, amount: BigInt(amountWei) });
-      return mapShieldTx(op as any);
+    async prepareShieldEth(amountWei: string) {
+      return mapShieldTx((await pp.prepareShield({ asset: ethAsset, amount: BigInt(amountWei) })) as any);
     },
   };
 }
 ```
 
-- [ ] **Step 4: Run the test, verify it passes**
-
-Run: `npm test`
-Expected: PASS (both pure-helper cases). `createPrivacyPools` is exercised in Task 5's integration gate.
+- [ ] **Step 4: Run, verify pass** — `bun test` → PASS (3 cases).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add -f privacy-helper/src/pp.ts privacy-helper/test/pp.test.ts
-git commit -m "feat(privacy-helper): PP host wiring + balance/prepareShield mappers"
+git commit -m "feat(privacy-helper): entropy->mnemonic host + balance(hex)/prepareShield mappers"
 ```
 
 ---
 
-## Task 5: Sidecar entrypoint + standalone Sepolia integration gate
+## Task 5: Entrypoint, file storage, compiled binary + Sepolia gate
 
-**Files:**
-- Create: `local-wallet-mac/privacy-helper/src/index.ts`
-- Create: `local-wallet-mac/privacy-helper/src/file-storage.ts`
-- Manual gate: run against a dev daemon on Sepolia.
+**Files:** Create `privacy-helper/src/index.ts`, `privacy-helper/src/file-storage.ts`, `privacy-helper/README.md`.
 
 **Interfaces:**
-- Consumes: `createRpcServer` (T1), `createDaemonProvider` (T2), `readSecretPayload` (T3), `createPrivacyPools` (T4).
-- Produces: a runnable sidecar. RPC methods exposed to the app: `balance() → string (wei)`, `prepareShield({ amountWei }) → { to, data, value }`. fd contract: reads fd-5 payload, writes `"ready\n"` to fd-3, exits on fd-4 EOF.
+- Consumes: T1–T4. RPC methods exposed to the app: `balance() → string (0x hex wei)`, `prepareShield({ amountWei }) → { to, data, value }`.
+- Produces: a compiled binary `dist/privacy-helper`. fd contract: reads fd-5, listens on `sidecarSocketPath`, writes `"ready\n"` to fd-3, exits on fd-4 EOF.
 
-- [ ] **Step 1: Implement `src/file-storage.ts` (Kohaku `Storage` backed by a JSON file)**
+- [ ] **Step 1: `src/file-storage.ts`** — *(unchanged from prior revision)*
 
 ```ts
 import fs from "node:fs";
 import type { Storage } from "@kohaku-eth/plugins";
-
 export function createFileStorage(filePath: string): Storage {
-  const read = (): Record<string, string> => {
-    try { return JSON.parse(fs.readFileSync(filePath, "utf8")); } catch { return {}; }
-  };
+  const read = (): Record<string, string> => { try { return JSON.parse(fs.readFileSync(filePath, "utf8")); } catch { return {}; } };
   return {
     _brand: "Storage",
-    async get(key) { return read()[key] ?? null; },
-    async set(key, value) {
-      const all = read();
-      all[key] = value;
-      fs.writeFileSync(filePath, JSON.stringify(all), { mode: 0o600 });
-    },
+    async get(k) { return read()[k] ?? null; },
+    async set(k, v) { const all = read(); all[k] = v; fs.writeFileSync(filePath, JSON.stringify(all), { mode: 0o600 }); },
   };
 }
 ```
 
-- [ ] **Step 2: Implement `src/index.ts`**
+- [ ] **Step 2: `src/index.ts`**
 
 ```ts
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { createRpcServer } from "./rpc.ts";
+import { serveRpc } from "./rpc.ts";
 import { createDaemonProvider } from "./daemon-provider.ts";
 import { readSecretPayload } from "./secret.ts";
-import { MnemonicKeystore, type Host } from "@kohaku-eth/plugins";
-import { PrivacyPoolsV1Protocol, PrivacyPoolsV1_0xBow, E_ADDRESS } from "@kohaku-eth/privacy-pools";
+import { createPrivacyPools } from "./pp.ts";
 import { createFileStorage } from "./file-storage.ts";
 
-const READY_FD = 3;
-const ALIVE_FD = 4;
-const SECRET_FD = 5;
-const CHAIN_ID = 11155111 as const;
+const READY_FD = 3, ALIVE_FD = 4, SECRET_FD = 5, CHAIN_ID = 11155111 as const;
 
 async function main() {
-  const { seedHex, daemon } = await readSecretPayload(SECRET_FD);
+  const { entropyHex, sidecarSocketPath, daemon } = await readSecretPayload(SECRET_FD);
   const provider = createDaemonProvider(daemon);
-
-  const storageFile = path.join(
-    process.env.HOME ?? os.tmpdir(),
-    "Library/Application Support/LocalWallet/privacy-pools-sepolia.json",
-  );
+  const storageFile = path.join(process.env.HOME ?? os.tmpdir(), "Library/Application Support/LocalWallet/privacy-pools-sepolia.json");
   fs.mkdirSync(path.dirname(storageFile), { recursive: true });
+  const pp = createPrivacyPools({ entropyHex, provider, storage: createFileStorage(storageFile), chainId: CHAIN_ID });
 
-  const host: Host = {
-    network: { fetch: (input, init) => fetch(input as any, init) },
-    storage: createFileStorage(storageFile),
-    keystore: new MnemonicKeystore(seedHex),
-    provider,
-  };
-  const { entrypoint } = PrivacyPoolsV1_0xBow[CHAIN_ID];
-  const pp = new PrivacyPoolsV1Protocol(host, { entrypoint, accountIndex: 0 });
-  const ethAsset = { __type: "erc20" as const, contract: E_ADDRESS };
-
-  createRpcServer(
-    {
-      balance: async () => {
-        const balances = await pp.balance([ethAsset]);
-        const approved = (balances as any[]).find((b) => b.asset.contract.toLowerCase() === E_ADDRESS && b.tag !== "pending");
-        return (approved?.amount ?? 0n).toString();
-      },
-      prepareShield: async ({ amountWei }: { amountWei: string }) => {
-        const op = await pp.prepareShield({ asset: ethAsset, amount: BigInt(amountWei) });
-        const tx = (op as any).txns[0];
-        return { to: tx.to, data: tx.data, value: (tx.value ?? 0n).toString() };
-      },
+  await serveRpc({
+    socketPath: sidecarSocketPath,
+    token: daemon.token, // reuse the per-launch token for app↔sidecar auth too
+    handlers: {
+      balance: async () => pp.balanceHexWei(),
+      prepareShield: async ({ amountWei }: { amountWei: string }) => pp.prepareShieldEth(amountWei),
     },
-    process.stdin,
-    process.stdout,
-  );
+  });
 
-  // ready + liveness
   fs.writeSync(READY_FD, "ready\n");
-  const alive = fs.createReadStream("", { fd: ALIVE_FD });
-  alive.on("end", () => process.exit(0));
+  fs.createReadStream("", { fd: ALIVE_FD }).on("end", () => process.exit(0));
 }
-
-main().catch((e) => {
-  fs.writeSync(2, `privacy-helper fatal: ${e?.message ?? e}\n`);
-  process.exit(1);
-});
+main().catch((e) => { fs.writeSync(2, `privacy-helper fatal: ${e?.message ?? e}\n`); process.exit(1); });
 ```
 
-- [ ] **Step 3: Build the bundle**
+- [ ] **Step 3: Build the binary**
 
-Run: `cd local-wallet-mac/privacy-helper && npm run build`
-Expected: `built dist/privacy-helper.mjs`, no errors.
+Run: `cd local-wallet-mac/privacy-helper && bun install && bun run build`
+Expected: `dist/privacy-helper` exists and is executable (`file dist/privacy-helper` → Mach-O).
 
-- [ ] **Step 4: Manual Sepolia integration gate (standalone, proves the TS↔daemon seam)**
-
-```bash
-# Terminal A — dev daemon on Sepolia (loopback HTTP, prints token + httpAddr):
-cd ../local-wallet-daemon
-cargo run -p wallet-node -- --http 127.0.0.1:0 --print-ready --debug
-# note the printed bearer token + http addr; for the sidecar's Unix-socket provider,
-# instead run the daemon in socket mode (the app uses sockets); for this gate either
-# adapt createDaemonProvider to an http base-URL variant, OR point socketPath at the
-# daemon's Unix socket if running in socket mode.
-```
-
-Drive the built sidecar with a hand-written fd-5 payload (seed = a throwaway test mnemonic) and a couple of RPC lines on stdin; confirm:
-- `balance` returns `"0"` for a fresh mnemonic.
-- `prepareShield` with `{ "amountWei": "10000000000000000" }` returns `{ to: <Sepolia entrypoint or pool>, data: 0x…, value: "10000000000000000" }`.
-- Kill the daemon → `balance` errors (reads route through the daemon, not a 2nd RPC). **This is the spec's provider-routing check.**
-
-Record the exact commands you used in `privacy-helper/README.md` so the gate is repeatable.
+- [ ] **Step 4: Manual Sepolia gate (standalone)** — start a dev daemon (`cd ../local-wallet-daemon && cargo run -p wallet-node -- --http 127.0.0.1:0 --print-ready --debug`; note token+addr). Hand-write an fd-5 payload (throwaway 32-byte entropy, `daemon.url` = the http addr, a temp `sidecarSocketPath`), run `dist/privacy-helper` with that fd, then `curl --unix-socket <sidecarSocketPath> -H "Authorization: Bearer <token>" -d '{"jsonrpc":"2.0","id":1,"method":"balance"}' http://x/`. Confirm: `balance` → `"0x0"`; `prepareShield {"amountWei":"10000000000000000"}` → `{to,data,value:"10000000000000000"}`; kill the daemon → `balance` errors. Record commands in `README.md`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add -f privacy-helper/src/index.ts privacy-helper/src/file-storage.ts privacy-helper/README.md
-git commit -m "feat(privacy-helper): entrypoint, file storage, standalone Sepolia gate"
+git commit -m "feat(privacy-helper): entrypoint + file storage + compiled binary + Sepolia gate"
 ```
 
 ---
 
-## Task 6: Shielded seed Keychain custody (Swift)
+## Task 6: Shielded-entropy Keychain custody (Swift)
 
-**Files:**
-- Create: `local-wallet-mac/wallet-macos/Sources/WalletMacOSApp/ShieldedSeedStore.swift`
-- Test: `local-wallet-mac/wallet-macos/Tests/WalletMacOSAppTests/ShieldedSeedStoreTests.swift`
+**Files:** Create `wallet-macos/Sources/WalletMacOSApp/ShieldedSeedStore.swift`; Test `wallet-macos/Tests/WalletMacOSAppTests/ShieldedSeedStoreTests.swift`.
 
 **Interfaces:**
-- Produces: `struct ShieldedSeedStore { func loadOrCreateMnemonic(reason: String) throws -> String; func deleteMnemonic() throws }`. Stores a BIP-39 mnemonic string as a Keychain generic-password with biometric + `ThisDeviceOnly` access control. (Mirrors the `SecAccessControlCreateWithFlags` pattern in `KeyStore.swift:111-144`, but `kSecClassGenericPassword` instead of a Secure-Enclave `SecKey`, because the seed must be readable to feed the sidecar.)
+- Produces: `struct ShieldedSeedStore { func loadOrCreateEntropyHex(reason: String) throws -> String; func deleteEntropy() throws }`. Stores 32 random bytes (from `SecRandomCopyBytes`) as a Keychain generic-password (biometric + `ThisDeviceOnly`), returns `0x`-prefixed hex. Mirrors the `SecAccessControlCreateWithFlags` pattern in `KeyStore.swift:111-144` but `kSecClassGenericPassword` (the secret must be readable to feed the sidecar). **No BIP-39 in Swift** — the sidecar converts entropy→mnemonic.
 
-- [ ] **Step 1: Write the unit-testable slice — access-control flag construction**
-
-Keychain round-trips need a signed bundle (`OSStatus -34018` under `swift test`), so the **unit** test covers only the pure access-control construction; the round-trip is a manual gate (Step 4).
+- [ ] **Step 1: Failing unit test (access-control construction; Keychain round-trip is a signed-bundle gate)**
 
 ```swift
 // Tests/WalletMacOSAppTests/ShieldedSeedStoreTests.swift
@@ -668,17 +552,17 @@ import XCTest
 final class ShieldedSeedStoreTests: XCTestCase {
     func testAccessControlIsBiometricAndThisDeviceOnly() throws {
         var err: Unmanaged<CFError>?
-        let ac = ShieldedSeedStore.makeAccessControl(&err)
+        XCTAssertNotNil(ShieldedSeedStore.makeAccessControl(&err))
         XCTAssertNil(err)
-        XCTAssertNotNil(ac)
+    }
+    func testEntropyHexShapeFromBytes() {
+        let hex = ShieldedSeedStore.hexString(from: Data(repeating: 0xab, count: 32))
+        XCTAssertEqual(hex, "0x" + String(repeating: "ab", count: 32))
     }
 }
 ```
 
-- [ ] **Step 2: Run the test, verify it fails**
-
-Run: `cd local-wallet-mac && ./scripts/build-ffi.sh && cd wallet-macos && swift test --filter ShieldedSeedStoreTests`
-Expected: FAIL — `ShieldedSeedStore` not found.
+- [ ] **Step 2: Run, verify fail** — Run: `cd local-wallet-mac && ./scripts/build-ffi.sh && cd wallet-macos && swift test --filter ShieldedSeedStoreTests`. Expected: FAIL (type missing).
 
 - [ ] **Step 3: Implement `ShieldedSeedStore.swift`**
 
@@ -692,111 +576,79 @@ struct ShieldedSeedStore {
     private let account = "privacy-pools-sepolia"  // testnet-tagged
 
     static func makeAccessControl(_ error: inout Unmanaged<CFError>?) -> SecAccessControl? {
-        SecAccessControlCreateWithFlags(
-            nil,
-            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            [.biometryCurrentSet],
-            &error
-        )
+        SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.biometryCurrentSet], &error)
     }
 
-    func loadOrCreateMnemonic(reason: String) throws -> String {
+    static func hexString(from data: Data) -> String { "0x" + data.map { String(format: "%02x", $0) }.joined() }
+
+    func loadOrCreateEntropyHex(reason: String) throws -> String {
         if let existing = try load(reason: reason) { return existing }
-        let mnemonic = Self.generateMnemonic()
-        try store(mnemonic)
-        return mnemonic
+        var bytes = Data(count: 32)
+        let status = bytes.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
+        guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
+        let hex = Self.hexString(from: bytes)
+        try store(hex)
+        return hex
     }
 
     private func load(reason: String) throws -> String? {
-        let context = LAContext()
-        context.localizedReason = reason
+        let context = LAContext(); context.localizedReason = reason
         let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecUseAuthenticationContext as String: context,
+            kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+            kSecAttrAccount as String: account, kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne, kSecUseAuthenticationContext as String: context,
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = result as? Data,
-              let s = String(data: data, encoding: .utf8) else {
+        guard status == errSecSuccess, let data = result as? Data, let s = String(data: data, encoding: .utf8) else {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
         }
         return s
     }
 
-    private func store(_ mnemonic: String) throws {
+    private func store(_ hex: String) throws {
         var acErr: Unmanaged<CFError>?
         guard let ac = Self.makeAccessControl(&acErr) else { throw acErr!.takeRetainedValue() as Error }
         let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: Data(mnemonic.utf8),
+            kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+            kSecAttrAccount as String: account, kSecValueData as String: Data(hex.utf8),
             kSecAttrAccessControl as String: ac,
         ]
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
     }
 
-    func deleteMnemonic() throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
+    func deleteEntropy() throws {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
         let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
-        }
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
     }
-
-    // ponytail: 24-word BIP-39 generation. Reuse an existing BIP-39 helper if the app
-    // already vendors one (grep for "mnemonic"/"bip39"); else add @scure/bip39's wordlist
-    // equivalent in Swift. For v1 testnet a CSPRNG-backed 256-bit entropy → wordlist map.
-    static func generateMnemonic() -> String { /* see Step 3a */ fatalError("implement in 3a") }
 }
 ```
 
-- [ ] **Step 3a: Resolve mnemonic generation (no placeholder)**
+- [ ] **Step 4: Manual Keychain round-trip gate** — run the app from Xcode (`LocalWalletApp`), trigger entropy creation, confirm Face/Touch ID on read + persistence across relaunch. (`swift test` can't: `OSStatus -34018` outside a signed bundle.)
 
-Run: `grep -rin "mnemonic\|bip39\|bip-39" local-wallet-mac/wallet-macos/Sources local-wallet-protocol 2>/dev/null`
-- If a BIP-39 generator exists, call it and delete the `generateMnemonic` stub's `fatalError`.
-- If none exists: the **sidecar already depends on a BIP-39 lib** (`@scure/bip39` via Kohaku). Rather than add Swift BIP-39, generate the mnemonic **in the sidecar** on first run (expose an RPC `newMnemonic()` returning a phrase) and have Swift store what the sidecar returns. Update `loadOrCreateMnemonic` to take a `make: () async throws -> String` closure the caller wires to the sidecar. Pick this path if no Swift BIP-39 exists — it avoids a new Swift dependency.
+- [ ] **Step 5: Run unit test, verify pass; commit**
 
-> Decision recorded here so the implementer doesn't invent a Swift BIP-39: **prefer the sidecar-generated mnemonic** unless the grep finds an existing Swift generator.
-
-- [ ] **Step 4: Manual Keychain round-trip gate (signed bundle)**
-
-Build/run the app from Xcode (`LocalWalletApp` scheme). Trigger seed creation, confirm Face/Touch ID prompts on read, confirm the item persists across relaunch. (`swift test` cannot cover this — `OSStatus -34018` outside a signed bundle, per CLAUDE.md.)
-
-- [ ] **Step 5: Run the unit test, verify it passes; commit**
-
-Run: `cd wallet-macos && swift test --filter ShieldedSeedStoreTests`
-Expected: PASS.
+Run: `cd wallet-macos && swift test --filter ShieldedSeedStoreTests` → PASS.
 
 ```bash
 git add wallet-macos/Sources/WalletMacOSApp/ShieldedSeedStore.swift wallet-macos/Tests/WalletMacOSAppTests/ShieldedSeedStoreTests.swift
-git commit -m "feat(app): shielded-seed Keychain custody (biometric, device-only, testnet)"
+git commit -m "feat(app): shielded-entropy Keychain custody (biometric, device-only, testnet)"
 ```
 
 ---
 
-## Task 7: Spawn the sidecar (Swift, mirrors `WalletNodeDaemon`)
+## Task 7: Spawn the sidecar + JSON-RPC client (Swift)
 
-**Files:**
-- Create: `local-wallet-mac/wallet-macos/Sources/WalletMacOSApp/PrivacyHelperSidecar.swift`
-- Modify: `local-wallet-mac/project.yml` (bundle `privacy-helper/dist/privacy-helper.mjs` + node runtime as a resource)
-- Test: `local-wallet-mac/wallet-macos/Tests/WalletMacOSAppTests/PrivacyHelperSidecarTests.swift`
+**Files:** Create `wallet-macos/Sources/WalletMacOSApp/PrivacyHelperSidecar.swift`; modify `project.yml`; Test `wallet-macos/Tests/WalletMacOSAppTests/PrivacyHelperSidecarTests.swift`.
 
 **Interfaces:**
-- Consumes: the running daemon's `ReadyEvent { token, socketPath }` (from `WalletNodeDaemon`, `WalletNodeDaemon.swift:114-134`); `ShieldedSeedStore` (Task 6); the `spawnHelper`/pipe/`readLineWithTimeout` pattern (`WalletNodeDaemon.swift:172-226`).
-- Produces: `final class PrivacyHelperSidecar { static func launch(seedMnemonic: String, daemonSocketPath: String, daemonToken: String) async throws -> PrivacyHelperSidecar; func balanceWei() async throws -> String; func prepareShield(amountWei: String) async throws -> (to: String, data: String, value: String) }`. fd-5 payload is JSON `{ seedHex, daemon: { socketPath, token } }` (here `seedHex` carries the mnemonic string for `MnemonicKeystore`).
+- Consumes: `spawnHelper(execPath:readyWrite:aliveRead:secretRead:) throws -> pid_t` (SpawnHelper); the pipe/`setCloseOnExec`/`closeIfOpen`/`readLineWithTimeout(fd:timeout:)` helpers (`WalletNodeDaemon.swift:172-226, 436-529`); the running `WalletNodeDaemon` `ReadyEvent { token, socketPath }`; `ShieldedSeedStore` (T6).
+- Produces: `final class PrivacyHelperSidecar { static func launch(entropyHex: String, daemonSocketPath: String, daemonToken: String) async throws -> PrivacyHelperSidecar; func balanceHexWei() async throws -> String; func prepareShield(amountWei: String) async throws -> (to: String, data: String, value: String) }`.
 
-- [ ] **Step 1: Write the spawn integration test (mirrors `SpawnHelperTests`)**
+- [ ] **Step 1: Integration test (mirrors `SpawnHelperTests`; skips if the binary isn't built)**
 
 ```swift
 // Tests/WalletMacOSAppTests/PrivacyHelperSidecarTests.swift
@@ -804,31 +656,26 @@ import XCTest
 @testable import WalletMacOSApp
 
 final class PrivacyHelperSidecarTests: XCTestCase {
-    // Integration: needs the built dist/privacy-helper.mjs + node. Skips if absent.
     func testLaunchAndBalanceZero() async throws {
-        try XCTSkipUnless(PrivacyHelperSidecar.bundledScriptExists, "build privacy-helper first")
-        // Spawn against a mock daemon socket that answers eth_* with empty results.
-        let mock = try MockDaemonSocket.start()  // helper that serves eth_getLogs=[] etc.
+        try XCTSkipUnless(PrivacyHelperSidecar.resolveBinaryPath() != nil, "build privacy-helper first")
+        let mock = try MockDaemonSocket.start { method in method == "eth_getLogs" ? [] : "0x0" } // empty chain
         defer { mock.stop() }
         let sidecar = try await PrivacyHelperSidecar.launch(
-            seedMnemonic: "test test test test test test test test test test test junk",
-            daemonSocketPath: mock.socketPath,
-            daemonToken: "tok"
-        )
-        let bal = try await sidecar.balanceWei()
-        XCTAssertEqual(bal, "0")
+            entropyHex: "0x" + String(repeating: "11", count: 32),
+            daemonSocketPath: mock.socketPath, daemonToken: "tok")
+        let bal = try await sidecar.balanceHexWei()
+        XCTAssertEqual(bal, "0x0")
     }
 }
 ```
 
-- [ ] **Step 2: Run it, verify it fails**
+> `MockDaemonSocket` is a tiny test helper (a `Network.framework`/`socket` listener answering JSON-RPC) — add it under `Tests/WalletMacOSAppTests/Support/`. If a daemon mock already exists in the test target (grep `Mock` + `socket`), reuse it.
 
-Run: `cd wallet-macos && swift test --filter PrivacyHelperSidecarTests`
-Expected: FAIL — `PrivacyHelperSidecar` not found.
+- [ ] **Step 2: Run, verify fail** — Run: `swift test --filter PrivacyHelperSidecarTests`. Expected: FAIL (type missing).
 
 - [ ] **Step 3: Implement `PrivacyHelperSidecar.swift`**
 
-Mirror `WalletNodeDaemon.launchBlocking` (`WalletNodeDaemon.swift:158-226`): create ready/alive/secret pipes, `setCloseOnExec`, `spawnHelper(execPath: <node>, args: [scriptPath], readyWrite:3, aliveRead:4, secretRead:5)`, write the JSON fd-5 payload via `writeSecretPayload`-style helper, `readLineWithTimeout(fd: readyPipe[0], timeout: 8)` expecting `"ready"`. The app↔sidecar JSON-RPC runs over the child's **stdin/stdout** (capture both pipes); implement `balanceWei()`/`prepareShield()` by writing one request line and awaiting the matching `id` response line.
+Copy the spawn skeleton from `WalletNodeDaemon.launchBlocking` (`WalletNodeDaemon.swift:158-226`): three `pipe()` pairs, `setCloseOnExec` on all six ends, `spawnHelper(execPath: binaryPath, readyWrite: readyPipe[1], aliveRead: alivePipe[0], secretRead: secretPipe[0])`, close child ends in parent, write the fd-5 JSON payload, `readLineWithTimeout(fd: readyPipe[0], timeout: 8)` expecting `"ready"`. The app then connects to `sidecarSocketPath` (the app chose it) and calls JSON-RPC over it.
 
 ```swift
 import Darwin
@@ -836,253 +683,243 @@ import Foundation
 import SpawnHelper
 
 final class PrivacyHelperSidecar: @unchecked Sendable {
-    static var bundledScriptExists: Bool { resolveScriptPath() != nil }
+    private let pid: pid_t
+    private var aliveWriteFD: Int32
+    private let socketPath: String
+    private let token: String
 
-    // resolveScriptPath(): Bundle.main resource "privacy-helper.mjs", else
-    // #filePath-relative ../../privacy-helper/dist/privacy-helper.mjs (dev), mirroring
-    // WalletNodeDaemon.resolveExecutablePath / sourceRootWalletNodePath.
-    static func resolveScriptPath() -> String? { /* mirror WalletNodeDaemon.swift:228-264 */ return nil }
-    static func resolveNodePath() -> String { "/usr/bin/env" } // args: ["node", scriptPath]; ponytail: bundle node for release
-
-    static func launch(seedMnemonic: String, daemonSocketPath: String, daemonToken: String) async throws -> PrivacyHelperSidecar {
-        // ... pipes + spawnHelper + fd-5 JSON payload + ready read, exactly mirroring
-        // WalletNodeDaemon.launchBlocking. Payload:
-        //   {"seedHex": seedMnemonic, "daemon": {"socketPath": daemonSocketPath, "token": daemonToken}}
-        fatalError("mirror WalletNodeDaemon.launchBlocking; see Step 3 notes")
+    private init(pid: pid_t, aliveWriteFD: Int32, socketPath: String, token: String) {
+        self.pid = pid; self.aliveWriteFD = aliveWriteFD; self.socketPath = socketPath; self.token = token
     }
 
-    func balanceWei() async throws -> String { /* JSON-RPC over child stdio: {"method":"balance"} */ fatalError() }
-    func prepareShield(amountWei: String) async throws -> (to: String, data: String, value: String) { fatalError() }
+    static func resolveBinaryPath() -> String? {
+        if let p = ProcessInfo.processInfo.environment["LOCAL_WALLET_PRIVACY_HELPER_BIN"], FileManager.default.isExecutableFile(atPath: p) { return p }
+        if let p = Bundle.main.url(forResource: "privacy-helper", withExtension: nil, subdirectory: "bin")?.path { return p }
+        // dev: ../../privacy-helper/dist/privacy-helper relative to #filePath (mirror WalletNodeDaemon.sourceRootWalletNodePath)
+        let dev = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("privacy-helper/dist/privacy-helper").path
+        return FileManager.default.isExecutableFile(atPath: dev) ? dev : nil
+    }
+
+    static func launch(entropyHex: String, daemonSocketPath: String, daemonToken: String) async throws -> PrivacyHelperSidecar {
+        try await Task.detached(priority: .userInitiated) {
+            try launchBlocking(entropyHex: entropyHex, daemonSocketPath: daemonSocketPath, daemonToken: daemonToken)
+        }.value
+    }
+
+    private static func launchBlocking(entropyHex: String, daemonSocketPath: String, daemonToken: String) throws -> PrivacyHelperSidecar {
+        guard let exec = resolveBinaryPath() else { throw AppError.localDaemonLaunchFailed("privacy-helper binary not found") }
+        // app owns both the sidecar socket path and a per-launch token
+        let socketPath = NSTemporaryDirectory() + "ph-\(UUID().uuidString).sock"
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "entropyHex": entropyHex, "sidecarSocketPath": socketPath,
+            "daemon": ["socketPath": daemonSocketPath, "token": daemonToken],
+        ])
+        // ... three pipes + setCloseOnExec + spawnHelper(exec, readyPipe[1], alivePipe[0], secretPipe[0]) ...
+        // ... write `payload` to secretPipe[1]; close; readLineWithTimeout(fd: readyPipe[0], 8) == "ready" ...
+        // (structure copied verbatim from WalletNodeDaemon.launchBlocking; helpers are private there —
+        //  either reuse via @testable/internal access or lift the pipe helpers into a shared SpawnSupport file.)
+        return PrivacyHelperSidecar(pid: /*pid*/0, aliveWriteFD: /*alivePipe[1]*/ -1, socketPath: socketPath, token: daemonToken)
+    }
+
+    private func rpc(_ method: String, _ params: [Any] = []) async throws -> Any {
+        // POST {jsonrpc,id,method,params} over the Unix socket at socketPath with Authorization: Bearer token.
+        // Mirror WalletNodeClient's unix-socket transport (Configuration(transport:.unixSocket, bearerToken:)).
+        fatalError("mirror WalletNodeClient unix-socket POST")
+    }
+    func balanceHexWei() async throws -> String { try await rpc("balance") as! String }
+    func prepareShield(amountWei: String) async throws -> (to: String, data: String, value: String) {
+        let r = try await rpc("prepareShield", [["amountWei": amountWei]]) as! [String: String]
+        return (r["to"]!, r["data"]!, r["value"]!)
+    }
 }
 ```
 
-> The `fatalError` bodies above are **structural markers, not the deliverable** — the implementer fills them by copying the cited `WalletNodeDaemon` spawn code (it is the proven, in-repo pattern) and the Task-1 JSON-RPC framing. Do not ship `fatalError`. Verify by the Step-1 test passing.
+> The two `// ...` blocks and the `rpc` body must be filled by copying the cited, in-repo code (`WalletNodeDaemon.launchBlocking` for spawn; `WalletNodeClient`'s unix-socket transport for `rpc`). Recommendation: **lift the private pipe helpers** (`setCloseOnExec`, `closeIfOpen`, `readLineWithTimeout`, `writeSecretPayload`-style) into a shared `SpawnSupport.swift` so both `WalletNodeDaemon` and `PrivacyHelperSidecar` use them (DRY) — do this as the first sub-step. Verify by Step 1's test passing; do not ship `fatalError`.
 
-- [ ] **Step 4: Bundle the sidecar in `project.yml`**
+- [ ] **Step 4: Bundle in `project.yml`** — add `privacy-helper/dist/privacy-helper` to `LocalWalletApp` resources under `bin/` (mirror the `wallet-node` resource entry). `xcodegen generate`.
 
-Add `privacy-helper/dist/privacy-helper.mjs` to the `LocalWalletApp` target resources (alongside the daemon binary entry). Then `xcodegen generate`.
+- [ ] **Step 5: Run, verify pass; commit**
 
-- [ ] **Step 5: Run the integration test, verify it passes; commit**
-
-Run: `cd local-wallet-mac/privacy-helper && npm run build && cd ../wallet-macos && swift test --filter PrivacyHelperSidecarTests`
-Expected: PASS (balance `"0"` against the mock daemon).
+Run: `cd local-wallet-mac/privacy-helper && bun run build && cd ../wallet-macos && swift test --filter PrivacyHelperSidecarTests` → PASS.
 
 ```bash
-git add wallet-macos/Sources/WalletMacOSApp/PrivacyHelperSidecar.swift wallet-macos/Tests/WalletMacOSAppTests/PrivacyHelperSidecarTests.swift project.yml
-git commit -m "feat(app): spawn privacy-helper sidecar (fd-3/4/5), JSON-RPC over stdio"
+git add wallet-macos/Sources/WalletMacOSApp/PrivacyHelperSidecar.swift wallet-macos/Tests/WalletMacOSAppTests project.yml
+git commit -m "feat(app): spawn privacy-helper sidecar (single binary, fd-3/4/5, unix-socket RPC)"
 ```
 
 ---
 
-## Task 8: `shield` tool intent → Kernel `execute` UserOp
+## Task 8: `shield` tool intent → Kernel `execute` deposit UserOp
 
-**Files:**
-- Modify: `local-wallet-mac/wallet-macos/Sources/WalletToolLayer/ToolIntent.swift:4-6`
-- Modify: `local-wallet-mac/wallet-macos/Sources/WalletToolLayer/ToolDefinitions.swift`
-- Modify: the app's send path that handles `transfer`/`swap` intents (grep below) — add a `shield` branch.
-- Test: `local-wallet-mac/wallet-macos/Tests/WalletToolLayerTests/ShieldIntentTests.swift`
+**Files:** Modify `ToolIntent.swift:5`, `ToolDefinitions.swift`, `AppModel.swift`, `ChatDashboardView.swift:~2406`. Test `Tests/WalletToolLayerTests/ShieldIntentTests.swift`.
 
 **Interfaces:**
-- Consumes: `PrivacyHelperSidecar.prepareShield` (Task 7); the existing UserOp build+sign+submit path (Kernel `execute(to,value,data)` → passkey sign → `localwallet_sendUserOperation`).
-- Produces: `ToolIntent.Tool.shield`; `ToolDefinitions.shield`; a send-path branch that maps `args["amount"]` (ETH decimal) → wei → `prepareShield` → Kernel `execute` UserOp.
+- Consumes: `PrivacyHelperSidecar.prepareShield` (T7); `EtherAmountParser.wei(fromETHString:) -> Data`; the transfer pipeline — `AppModel.executeNativeTransfer(recipient:amountETH:logContext:signingReason:) -> UserOperationSendResult` and its internal `executeTransfer`/`UserOperationBuilder` building `KernelExecutionRequest(target:value:callData:)` → `UserOperationSigning.signForSend(...)` → `WalletNodeClient.sendUserOperation(draft:signature:) -> String`.
+- Produces: `ToolIntent.Tool.shield`; `ToolDefinitions.shield`; `AppModel.executeShield(amountETH:) async throws -> UserOperationSendResult`; a `.shield` branch in `ChatDashboardView.executeIfSupported`.
 
-- [ ] **Step 1: Add `shield` to the `Tool` enum (failing test first)**
+- [ ] **Step 1: Failing test (enum + definition)**
 
 ```swift
 // Tests/WalletToolLayerTests/ShieldIntentTests.swift
 import XCTest
 @testable import WalletToolLayer
-
 final class ShieldIntentTests: XCTestCase {
-    func testShieldToolDecodes() throws {
-        let intent = ToolIntent(tool: .shield, args: ["amount": "0.01"], source: .slash)
-        XCTAssertEqual(intent.tool, .shield)
-    }
-    func testShieldDefinitionInPhase1() {
-        XCTAssertTrue(ToolDefinitions.phase1.contains { $0.name == "shield" })
-    }
+    func testShieldToolDecodes() { XCTAssertEqual(ToolIntent(tool: .shield, args: ["amount": "0.01"], source: .slash).tool, .shield) }
+    func testShieldInPhase1() { XCTAssertTrue(ToolDefinitions.phase1.contains { $0.name == "shield" }) }
 }
 ```
 
-- [ ] **Step 2: Run, verify it fails**
+- [ ] **Step 2: Run, verify fail** — `cd wallet-macos && swift test --filter ShieldIntentTests` → FAIL.
 
-Run: `cd wallet-macos && swift test --filter ShieldIntentTests`
-Expected: FAIL — `.shield` not a member; `phase1` lacks shield.
+- [ ] **Step 3: Add the enum case + definition**
 
-- [ ] **Step 3: Implement the enum + definition**
-
-In `ToolIntent.swift:5`:
+`ToolIntent.swift:5`:
 ```swift
-public enum Tool: String, Codable, Sendable {
-    case transfer, swap, shield
-}
+public enum Tool: String, Codable, Sendable { case transfer, swap, shield }
 ```
-
-In `ToolDefinitions.swift` (add, and include in `phase1`):
+`ToolDefinitions.swift` (add + include in `phase1`):
 ```swift
 public static let shield = ToolDefinition(
     name: "shield",
     description: """
-    Deposit native ETH from the user's smart account into the Privacy Pool (shield).     Use when the user asks to shield, make private, or deposit into the privacy pool.     Sepolia only in this version. If the amount is missing or ambiguous, ask a short     clarifying question instead of calling the tool.
+    Deposit native ETH from the user's smart account into the Privacy Pool (shield).     Use when the user asks to shield, make private, or privately deposit ETH. Sepolia only.     If the amount is missing or ambiguous, ask one short clarifying question instead of calling the tool.
     """,
     parametersJSONSchema: #"""
     {"type":"object","properties":{"amount":{"type":"string","description":"ETH amount to shield as a decimal string, e.g. \"0.01\". Native ETH only."}},"required":["amount"]}
     """#
 )
-
 public static let phase1: [ToolDefinition] = [transfer, swap, shield]
 ```
 
-- [ ] **Step 4: Run, verify it passes**
+- [ ] **Step 4: Run, verify pass** — `swift test --filter ShieldIntentTests` → PASS.
 
-Run: `swift test --filter ShieldIntentTests`
-Expected: PASS.
+- [ ] **Step 5: Add `AppModel.executeShield` (mirror `executeNativeTransfer`)**
 
-- [ ] **Step 5: Wire the send-path branch**
+In `AppModel.swift`, next to `executeNativeTransfer` (line ~1685), add:
+```swift
+func executeShield(amountETH: String) async throws -> UserOperationSendResult {
+    guard let sidecar = privacyHelper else { throw AppError.localDaemonLaunchFailed("privacy-helper not running") }
+    let amountWei = try EtherAmountParser.wei(fromETHString: amountETH) // 32-byte BE Data (validation)
+    let tx = try await sidecar.prepareShield(amountWei: decimalString(fromWeiData: amountWei))
+    // Build a single Kernel execute(to: tx.to, value: tx.value, data: tx.data) request and run the
+    // SAME build->sign->submit path executeNativeTransfer uses (executeTransfer), substituting this
+    // KernelExecutionRequest for the native-transfer one (UserOperationBuilder.swift:336-345):
+    let request = KernelExecutionRequest(
+        target: tx.to,
+        value: try EtherAmountParser.wei(fromDecimalWeiString: tx.value),
+        callData: Data(hexString: tx.data)
+    )
+    let result = try await executeTransfer(
+        requests: [request],
+        logContext: "chat-shield",
+        signingReason: "Authorize shielding \(amountETH) ETH on \(activeChain.name)"
+    )
+    refreshShieldedBalance()
+    return result
+}
+```
+> `executeTransfer(requests:logContext:signingReason:)` is the existing internal builder (`AppModel.swift:1851`); confirm its exact parameter label for the request array via `grep -n "func executeTransfer" AppModel.swift` and match it. If `EtherAmountParser` lacks a `fromDecimalWeiString` / `Data(hexString:)`, add the trivial helpers (the sidecar `value` is already wei as a decimal string; `data` is `0x` hex). These are pure — cover each with one assertion in `WalletToolLayerTests`.
 
-Run: `grep -rln "case .transfer\|Tool.transfer\|\.swap" wallet-macos/Sources/WalletMacOSApp` to find the intent dispatcher.
-In that dispatcher add a `.shield` branch:
-1. parse `args["amount"]` ETH decimal → wei (reuse the existing ETH-decimal→wei helper used by `transfer`; grep `weiFrom`/`parseEther`/`decimal`),
-2. `let tx = try await sidecar.prepareShield(amountWei: wei)`,
-3. build a Kernel `execute(to: tx.to, value: UInt256(tx.value), data: tx.data)` UserOp via the **same** builder `transfer` uses,
-4. sign with the passkey + submit via the existing `sendUserOperation` path,
-5. on success, trigger a shielded-balance refresh (Task 9).
+- [ ] **Step 6: Wire the dispatcher branch**
 
-> No new signing/submit code — this branch only differs from `transfer` in *where the calldata comes from* (sidecar `prepareShield` instead of a plain ETH transfer). Reuse everything else.
+In `ChatDashboardView.executeIfSupported` (`ChatDashboardView.swift:~2390`): widen the guard to include `.shield`, and add to the switch:
+```swift
+case .shield:
+    let amount = intent.args["amount"] ?? ""
+    let result = try await self.walletModel.executeShield(amountETH: amount)
+    // surface result like the .transfer case does
+```
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Build, commit**
 
+Run: `cd wallet-macos && swift build`
 ```bash
-git add wallet-macos/Sources/WalletToolLayer/ToolIntent.swift wallet-macos/Sources/WalletToolLayer/ToolDefinitions.swift wallet-macos/Sources/WalletMacOSApp wallet-macos/Tests/WalletToolLayerTests/ShieldIntentTests.swift
-git commit -m "feat(app): shield tool intent -> Kernel execute deposit UserOp"
+git add wallet-macos/Sources/WalletToolLayer wallet-macos/Sources/WalletMacOSApp/AppModel.swift wallet-macos/Sources/WalletMacOSApp/ChatDashboardView.swift wallet-macos/Tests/WalletToolLayerTests/ShieldIntentTests.swift
+git commit -m "feat(app): shield intent -> Kernel execute deposit via prepareShield"
 ```
 
 ---
 
 ## Task 9: Shielded-balance display (Swift UI)
 
-**Files:**
-- Modify: the SwiftUI view rendering the public ETH balance (grep below).
-- Test: a ViewModel-level unit test for the wei→ETH formatting + refresh trigger.
+**Files:** Modify `AppModel.swift`, `ChatDashboardView.swift:~2232`. Test `Tests/WalletMacOSAppTests/ShieldedBalanceTests.swift`.
 
 **Interfaces:**
-- Consumes: `PrivacyHelperSidecar.balanceWei` (Task 7).
-- Produces: a "Shielded" balance row that shows `balanceWei` formatted as ETH, refreshed after a successful shield (Task 8) and on a light poll.
+- Consumes: `PrivacyHelperSidecar.balanceHexWei` (T7); `WeiFormatter.ethDisplayString(fromHexWei:) -> String` (existing).
+- Produces: `@Published private(set) var shieldedBalanceDisplay: String`; `func refreshShieldedBalance()`; a "Shielded" row in the dashboard.
 
-- [ ] **Step 1: Locate the balance view + its view model**
-
-Run: `grep -rln "balance" wallet-macos/Sources/WalletMacOSApp | grep -i view`
-Identify the view model that fetches/holds the public balance.
-
-- [ ] **Step 2: Write a failing formatting/refresh unit test**
+- [ ] **Step 1: Failing test (formatting reuse + default)**
 
 ```swift
 // Tests/WalletMacOSAppTests/ShieldedBalanceTests.swift
 import XCTest
 @testable import WalletMacOSApp
-
 final class ShieldedBalanceTests: XCTestCase {
-    func testWeiToEthString() {
-        XCTAssertEqual(ShieldedBalanceFormatter.eth(fromWei: "10000000000000000"), "0.01")
-        XCTAssertEqual(ShieldedBalanceFormatter.eth(fromWei: "0"), "0")
+    func testFormatsHexWeiViaSharedFormatter() {
+        XCTAssertEqual(WeiFormatter.ethDisplayString(fromHexWei: "0x2386f26fc10000"), "0.01 ETH") // 1e16 wei
     }
 }
 ```
 
-- [ ] **Step 3: Run, verify it fails**
+- [ ] **Step 2: Run, verify fail/pass** — `swift test --filter ShieldedBalanceTests`. (If it already passes, the formatter is confirmed; proceed — the value is to lock the format contract the UI relies on.)
 
-Run: `cd wallet-macos && swift test --filter ShieldedBalanceTests`
-Expected: FAIL — `ShieldedBalanceFormatter` not found.
-
-- [ ] **Step 4: Implement the formatter + the view row**
+- [ ] **Step 3: Add the AppModel state + refresh**
 
 ```swift
-enum ShieldedBalanceFormatter {
-    static func eth(fromWei wei: String) -> String {
-        guard let v = Decimal(string: wei) else { return "—" }
-        let eth = v / Decimal(sign: .plus, exponent: 18, significand: 1)
-        var s = "\(eth)"
-        if s.contains(".") { while s.hasSuffix("0") { s.removeLast() }; if s.hasSuffix(".") { s.removeLast() } }
-        return s
+@Published private(set) var shieldedBalanceDisplay: String = "—"
+
+func refreshShieldedBalance() {
+    guard let sidecar = privacyHelper else { return }
+    Task {
+        do {
+            let hexWei = try await sidecar.balanceHexWei()
+            await MainActor.run { self.shieldedBalanceDisplay = WeiFormatter.ethDisplayString(fromHexWei: hexWei) }
+        } catch { appendLog("shielded-balance refresh failed: \(error.localizedDescription)") }
     }
 }
 ```
-Add a "Shielded" row to the balance view that calls `sidecar.balanceWei()`, formats via `ShieldedBalanceFormatter.eth`, refreshes after a shield and on a light timer. `ponytail:` reuse the existing public-balance row's layout/refresh; no new balance framework.
+Call `refreshShieldedBalance()` after sidecar launch, after a successful shield (already wired in T8), and from the existing `refreshBalance()` (`AppModel.swift:392`) so the manual refresh button covers both.
 
-- [ ] **Step 5: Run, verify it passes; commit**
+- [ ] **Step 4: Add the UI row** — near `ChatDashboardView.swift:2232` where `kernelBalance` is shown, add a "Shielded" line bound to `walletModel.shieldedBalanceDisplay`, reusing the same row layout.
 
-Run: `swift test --filter ShieldedBalanceTests`
-Expected: PASS.
+- [ ] **Step 5: Build, commit**
 
+Run: `swift build`
 ```bash
-git add wallet-macos/Sources/WalletMacOSApp wallet-macos/Tests/WalletMacOSAppTests/ShieldedBalanceTests.swift
-git commit -m "feat(app): shielded balance row (wei->ETH), refresh after shield"
+git add wallet-macos/Sources/WalletMacOSApp/AppModel.swift wallet-macos/Sources/WalletMacOSApp/ChatDashboardView.swift wallet-macos/Tests/WalletMacOSAppTests/ShieldedBalanceTests.swift
+git commit -m "feat(app): shielded balance row (hex wei via WeiFormatter), refresh after shield"
 ```
 
 ---
 
 ## Task 10: Daemon gas-cap check for ZK deposits
 
-**Files:**
-- Inspect/Modify: `local-wallet-daemon/crates/wallet-bundler/src/policy.rs`
-- Test: existing daemon test suite + mainnet-fork fixture.
+**Files:** Inspect/Modify `local-wallet-daemon/crates/wallet-bundler/src/policy.rs`.
 
-**Interfaces:**
-- Produces: a `max_call_gas_limit` high enough that a Kernel `execute` wrapping a Privacy Pools deposit passes `EntryPointSimulations.simulateValidation` without policy rejection.
-
-- [ ] **Step 1: Read the current cap**
-
-Run: `grep -n "max_call_gas_limit" local-wallet-daemon/crates/wallet-bundler/src/policy.rs`
-Record the current value and where it's enforced.
-
-- [ ] **Step 2: Decide if a change is needed**
-
-The Sepolia gate (Task 5) plus the first end-to-end shield (Task 11) will reveal whether a deposit is rejected on gas. If Task 11's UserOp is rejected with a gas-cap policy error, raise the cap to fit a ZK pool deposit (PP deposits are gas-heavy). If it passes, **no change** — record "cap sufficient" and skip Steps 3-4.
-
-- [ ] **Step 3: If needed, raise the cap (TDD)**
-
-Add/adjust the policy unit test asserting a deposit-sized `callGasLimit` is accepted, raise `max_call_gas_limit`, then:
-
-Run: `cd local-wallet-daemon && cargo test -p wallet-bundler && cargo fmt --check && cargo clippy --workspace -- -D warnings`
-Expected: PASS / clean.
-
-- [ ] **Step 4: Re-run the canonical fork fixture (policy change → required)**
-
-Run: `ETH_RPC_URL=<archive-rpc> WALLET_FORK_BLOCK_NUMBER=25001071 ./scripts/run-kernel-mainnet-fork-check.sh`
-Expected: PASS (per CLAUDE.md, required for any policy change).
-
-- [ ] **Step 5: Commit (only if changed)**
-
-```bash
-cd local-wallet-daemon
-git add crates/wallet-bundler/src/policy.rs
-git commit -m "fix(bundler): raise max_call_gas_limit to fit ZK pool deposits"
-# then bump the daemon rev pin in local-wallet-mac per CLAUDE.md if shipping
-```
+- [ ] **Step 1:** `grep -n "max_call_gas_limit" local-wallet-daemon/crates/wallet-bundler/src/policy.rs` — record value + enforcement.
+- [ ] **Step 2:** Only act if Task 11's shield UserOp is rejected on a gas-cap policy error. If it passes, record "cap sufficient" and skip 3-4.
+- [ ] **Step 3 (if needed):** add a policy unit test for a deposit-sized `callGasLimit`, raise the cap, then `cd local-wallet-daemon && cargo test -p wallet-bundler && cargo fmt --check && cargo clippy --workspace -- -D warnings` → PASS/clean.
+- [ ] **Step 4 (if changed):** `ETH_RPC_URL=<archive-rpc> WALLET_FORK_BLOCK_NUMBER=25001071 ./scripts/run-kernel-mainnet-fork-check.sh` → PASS (required for any policy change).
+- [ ] **Step 5 (if changed):** commit; then bump the daemon rev pin in `local-wallet-mac` per CLAUDE.md if shipping.
 
 ---
 
 ## Task 11: End-to-end shield round-trip on Sepolia (acceptance)
 
-**Files:** none (acceptance gate).
-
-- [ ] **Step 1: Run the app on Sepolia from Xcode**, ensure the daemon + sidecar both spawn (check logs for sidecar `ready`).
-
-- [ ] **Step 2: Confirm provider routing** — with the app running, the shielded balance shows `0`; kill the daemon process → the shielded-balance refresh errors (reads route through the daemon). Restart.
-
-- [ ] **Step 3: Issue `/shield 0.01`** (or natural language). Approve the passkey (Face/Touch ID) prompt.
-
-- [ ] **Step 4: Verify on-chain** — a `UserOperationEvent` lands; the deposit is observable at the Sepolia entrypoint `0x34A2068192b1297f2a7f85D7D8CdE66F8F0921cB`.
-
-- [ ] **Step 5: Verify the UI** — shielded balance updates `0 → 0.01`.
-
-- [ ] **Step 6: Regression** — existing `/transfer` and `/swap` flows still work with the sidecar running.
-
-- [ ] **Step 7: Record results** in the PR description (tx hash, screenshots). Open the PR from `kohaku-shield-v1`.
+- [ ] **Step 1:** Run the app on Sepolia from Xcode; confirm both daemon + sidecar spawn (sidecar `ready` in logs).
+- [ ] **Step 2:** Provider routing — shielded balance shows `0`; kill the daemon → shielded refresh errors; restart.
+- [ ] **Step 3:** `/shield 0.01`; approve Face/Touch ID.
+- [ ] **Step 4:** Verify a `UserOperationEvent` lands; deposit observable at the Sepolia entrypoint `0x34A2068192b1297f2a7f85D7D8CdE66F8F0921cB`.
+- [ ] **Step 5:** Shielded balance updates `0 → 0.01`.
+- [ ] **Step 6:** Regression — `/transfer` and `/swap` still work with the sidecar running.
+- [ ] **Step 7:** Record tx hash + screenshots in the PR; open the PR from `kohaku-shield-v1`.
 
 ---
 
 ## Self-review notes
 
-- **Spec coverage:** sidecar (T1-5), provider/Helios unification (T2 + T7 wiring), Keychain custody biometric+device-only (T6), fd-5 transport (T3/T7), shield intent + Kernel execute (T8), balance display (T9), daemon gas cap (T10), all verification bullets (T5 routing, T11 e2e + regression). Recovery/rotation are explicitly PR #2 (not in this plan).
-- **Known honest gaps for the implementer:** (a) the app↔daemon transport for the *standalone* Task-5 gate may need an http base-URL variant of `createDaemonProvider` since dev mode is loopback HTTP while the app uses a Unix socket — both supported by `http.request` (`socketPath` vs `host/port`); add the variant if the gate needs it. (b) mnemonic generation is resolved in Task 6 Step 3a (prefer sidecar-generated). (c) Swift spawn/UI tasks carry `fatalError` structural markers that MUST be replaced by mirroring the cited in-repo code — they are not shippable as written.
+- **Spec coverage:** sidecar (T1-5); provider/Helios unification (T2 + T5/T7 wiring); Keychain custody biometric+device-only (T6); fd-5 transport (T3/T7); shield intent → Kernel execute (T8); balance display (T9); daemon gas cap (T10); verification bullets (T5 routing, T11 e2e + regression). Recovery/rotation remain PR #2.
+- **Decisions baked in:** sidecar = single `bun --compile` binary in `Resources/bin` (matches the `wallet-node` precedent; `spawnHelper` has no argv); entropy generated in Swift (`SecRandomCopyBytes`), sidecar does `entropyToMnemonic` (no Swift BIP-39); app↔sidecar over a Unix socket (stdio isn't wired back by `spawnHelper`); balance carried as hex wei to reuse `WeiFormatter`.
+- **Remaining `fatalError` markers (Task 7 only):** the spawn body + `rpc` body, to be filled by copying the cited in-repo code; the plan recommends lifting the private pipe helpers into a shared `SpawnSupport.swift` first. These are the only non-shippable markers and are explicitly flagged.
+- **Verify-before-completion:** every sidecar task has runnable `bun test`; Swift tasks have unit tests where possible and named manual gates (signed bundle, Sepolia) where not.

@@ -116,13 +116,20 @@ Node sidecar), but it's the heaviest option and buys nothing v1 needs.
   .biometryCurrentSet` + `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.
   **Every read triggers Face/Touch ID.** (User constraint: any key we process
   demands biometric.)
-- **Transport (fd-5):** Swift reads the seed (biometric prompt) → `pipe()` →
-  `posix_spawn_file_actions_adddup2(readEnd → 5)` in the child, close write end
-  in child → parent writes raw 32 seed bytes to the write end, closes it (EOF) →
-  Node reads fd 5 to EOF, closes it, derives Privacy Pools keys.
-  - Seed never touches `argv`, env, or disk. Only the app and the sidecar ever
-    see it; the daemon and protocol SDK never do. Byte-for-byte the pattern the
-    daemon already uses for its fd-5 secret.
+- **Origin + transport (fd-5):** Swift **generates 32 bytes of entropy**
+  (`SecRandomCopyBytes`) — the secret originates in the app, not Node. It reaches
+  the sidecar as a JSON payload on fd-5: `{ entropyHex, sidecarSocketPath, daemon:
+  { socketPath, token } }`. The sidecar converts entropy→BIP-39 mnemonic
+  (`@scure/bip39`) and feeds `MnemonicKeystore`; the mnemonic never persists there.
+  - Entropy never touches `argv`, env, or disk. Only the app and the sidecar ever
+    see it; the daemon and protocol SDK never do. Same fd-5 pattern the daemon
+    already uses for its bundler secret.
+- **Packaging + IPC:** the sidecar is a **single self-contained executable**
+  (`bun --compile`) bundled at `Contents/Resources/bin/privacy-helper` and spawned
+  via the existing `spawnHelper` (no argv) — matching the `wallet-node` precedent.
+  App↔sidecar JSON-RPC runs over a **Unix socket** (the app chooses the path,
+  passes it in fd-5, the sidecar listens, the app connects with the per-launch
+  token) — `spawnHelper` does not wire stdio back to the app.
 - **Gates per session:** one biometric at sidecar (re)spawn for the seed read;
   balance polling is free thereafter. The deposit tx is *additionally* gated by the
   passkey biometric at signing. Two keys, two gates. (Cheap polling is fine, but

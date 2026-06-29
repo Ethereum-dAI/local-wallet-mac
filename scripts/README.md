@@ -26,7 +26,7 @@ Prerequisites:
 
 - Rust target `aarch64-apple-darwin`
 - `cbindgen`
-- `jq` is optional; the script has a fallback for locating Cargo `OUT_DIR`
+- The script locates the Cargo `OUT_DIR` via `find`, first under `target/aarch64-apple-darwin/release/build` and then `target/release/build`; no `jq` is required.
 
 ### Kernel mainnet-fork fixture (moved)
 

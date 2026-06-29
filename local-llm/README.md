@@ -13,7 +13,7 @@ When Homebrew or the release build prefix bumps `llama.cpp`, re-vendor the `comm
 
 ## Minja / template-render spike (2026-05-18)
 
-**Result: PASS.** `common_chat_templates_apply` against the cached Gemma 4 E4B template renders both system+user-only and system+user+tools shapes correctly. The Gemma DSL markers (`<|turn>system`, `<|tool>declaration:transfer`, `<|"|>` quoting, `<|turn>model\n` generation prompt suffix) all appear as expected. Tests under `Tests/LocalLLMTests/TemplateRenderSpikeTests.swift` verify the contract; both pass on Apple Silicon with the Q4_K_M GGUF installed at `~/Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_K_M.gguf`. Proceeding with Phase 1 of the bridge upgrade.
+**Result: PASS.** `common_chat_templates_apply` against the cached Gemma 4 E4B template renders both system+user-only and system+user+tools shapes correctly. The Gemma DSL markers (`<|turn>system`, `<|tool>declaration:transfer`, `<|"|>` quoting, `<|turn>model\n` generation prompt suffix) all appear as expected. Tests under `Tests/LocalLLMTests/TemplateRenderSpikeTests.swift` verify the contract; both pass on Apple Silicon with the Q4_K_M GGUF installed at `~/Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_K_M.gguf`. This spike unblocked Phase 1 of the bridge upgrade, since merged to `main`.
 
 ## Public API
 
@@ -118,7 +118,7 @@ The `BenchEntry` JSON shape (one entry per measurement):
 
 ## Acceptance status (2026-05-18)
 
-Phase 0 + Phase 1 + Phase 2 + Phase 3 of the bridge upgrade are landed on `local-llm/bridge-upgrade`. 21/21 tests pass on the host with `swift test --no-parallel`. The full test suite covers:
+Phase 0 + Phase 1 + Phase 2 + Phase 3 of the bridge upgrade are merged to `main`. 21/21 tests pass on the host with `swift test --no-parallel`. The full test suite covers:
 
 - C ABI smoke (`missingModelThrows`)
 - Model + template metadata (`chatTemplateMetadataIsAvailableAfterLoad`)
@@ -131,4 +131,9 @@ Phase 0 + Phase 1 + Phase 2 + Phase 3 of the bridge upgrade are landed on `local
 - `ChatMessage / ToolDefinition / SamplerOptions` round-trips (4 tests)
 - Legacy v1 smoke (`gemmaSmokeTestWhenModelExists`) — deprecation warning emitted at call site
 
-Known open points (Gemma 4 channel-marker fallback, `<|tool_call>` DSL fallback parser, Task-level vs llama.cpp-level stop semantics, tool-layer phase 2) are tracked in the central, gitignored `docs/OPEN_ITEMS.md` at the repo root — see OPEN-55 / OPEN-56 / OPEN-58 / OPEN-57 respectively.
+Known open points, tracked here:
+
+- Gemma 4 channel-marker fallback
+- `<|tool_call>` DSL fallback parser
+- Task-level vs llama.cpp-level stop semantics
+- tool-layer phase 2

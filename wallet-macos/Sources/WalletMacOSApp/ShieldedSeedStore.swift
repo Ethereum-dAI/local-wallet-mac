@@ -6,6 +6,11 @@ struct ShieldedSeedStore {
     private let service = "com.localwallet.wallet-macos.shielded-seed"
     private let account = "privacy-pools-sepolia"  // testnet-tagged
 
+    // NOTE: .biometryCurrentSet invalidates this item on biometric re-enrollment
+    // (Face ID reset / fingerprint added or removed) — the entropy is then destroyed
+    // and a new seed is generated on next use. Acceptable for a testnet, device-only
+    // seed with no backup; MUST be revisited (mnemonic backup / .biometryAny) before
+    // any mainnet promotion, where this would mean silent loss of shielded funds.
     static func makeAccessControl(_ error: inout Unmanaged<CFError>?) -> SecAccessControl? {
         SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.biometryCurrentSet], &error)
     }

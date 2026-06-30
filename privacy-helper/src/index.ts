@@ -26,6 +26,6 @@ async function main() {
   });
 
   fs.writeSync(READY_FD, "ready\n");
-  fs.createReadStream("", { fd: ALIVE_FD }).on("end", () => process.exit(0));
+  fs.createReadStream(null as unknown as string, { fd: ALIVE_FD }).on("end", () => process.exit(0)).resume();
 }
 main().catch((e) => { fs.writeSync(2, `privacy-helper fatal: ${e?.message ?? e}\n`); process.exit(1); });

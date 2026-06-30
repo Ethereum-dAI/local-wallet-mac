@@ -13,3 +13,19 @@ test("parses fd payload to EOF", async () => {
   const fd = fs.openSync(p, "r");
   assert.deepEqual(await readSecretPayload(fd), payload);
 });
+
+test("rejects payload missing daemon.token", async () => {
+  const p = path.join(os.tmpdir(), "sec-missing-" + Date.now());
+  const payload = { entropyHex: "0x" + "ab".repeat(32), sidecarSocketPath: "/tmp/ph.sock", daemon: { socketPath: "/tmp/d.sock" } };
+  fs.writeFileSync(p, JSON.stringify(payload));
+  const fd = fs.openSync(p, "r");
+  await assert.rejects(readSecretPayload(fd), { message: "invalid fd-5 secret payload" });
+});
+
+test("rejects payload with wrong-typed entropyHex", async () => {
+  const p = path.join(os.tmpdir(), "sec-wrongtype-" + Date.now());
+  const payload = { entropyHex: 123, sidecarSocketPath: "/tmp/ph.sock", daemon: { socketPath: "/tmp/d.sock", token: "t" } };
+  fs.writeFileSync(p, JSON.stringify(payload));
+  const fd = fs.openSync(p, "r");
+  await assert.rejects(readSecretPayload(fd), { message: "invalid fd-5 secret payload" });
+});

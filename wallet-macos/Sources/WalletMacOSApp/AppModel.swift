@@ -116,6 +116,10 @@ final class AppModel: ObservableObject {
     private var walletNodeDaemon: WalletNodeDaemon?
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
     private var walletNodeLaunchFailure: WalletNodeLaunchFailure?
+    /// The privacy-helper sidecar, launched once after the daemon is ready. Used by
+    /// shielding (Tasks 8 & 9). Launch is best-effort: if it fails the rest of the app
+    /// still works, only shielding is unavailable.
+    private var privacyHelper: PrivacyHelperSidecar?
     private var optimisticNextNonce: [String: UInt64] = [:]
     private var pendingSessionInstallByUserOpHash: [String: SessionRecord] = [:]
     private var pendingSessionRevokeByUserOpHash: [String: SessionRecord] = [:]
@@ -1064,6 +1068,7 @@ final class AppModel: ObservableObject {
             if let logURL = WalletNodeDaemon.managedLogFileURL() {
                 appendLog("relayer: wallet-node logs \(logURL.path)")
             }
+            await ensurePrivacyHelper(daemon: daemon)
             return daemon.client
         } catch {
             walletNodeLaunchTask = nil
@@ -1075,6 +1080,31 @@ final class AppModel: ObservableObject {
                 )
             )
             throw error
+        }
+    }
+
+    /// Launches the privacy-helper sidecar once, after the daemon is ready, wiring it to
+    /// the daemon's authenticated Unix socket. Best-effort: any failure is logged and the
+    /// rest of the app continues (only shielding is unavailable). Loading the shielded
+    /// seed triggers a biometric prompt, so this is only attempted when no sidecar is
+    /// already running.
+    private func ensurePrivacyHelper(daemon: WalletNodeDaemon) async {
+        guard privacyHelper == nil else {
+            return
+        }
+        do {
+            let entropyHex = try ShieldedSeedStore().loadOrCreateEntropyHex(
+                reason: "Unlock your private balance"
+            )
+            let helper = try await PrivacyHelperSidecar.launch(
+                entropyHex: entropyHex,
+                daemonSocketPath: daemon.socketPath,
+                daemonToken: daemon.bearerToken
+            )
+            privacyHelper = helper
+            appendLog("privacy-helper: sidecar started")
+        } catch {
+            appendLog("privacy-helper: sidecar launch failed (shielding unavailable) - \(error.localizedDescription)")
         }
     }
 
@@ -1116,6 +1146,9 @@ final class AppModel: ObservableObject {
             walletNodeLaunchTask = nil
             walletNodeClient = nil
             walletNodeDaemon = nil
+            // The sidecar holds the old daemon socket path; drop it so the next launch
+            // re-points it at the relaunched daemon. Closing the handle signals fd-4 EOF.
+            privacyHelper = nil
 
             let relaunchedClient = try await ensureWalletNodeClient()
             return try await body(relaunchedClient)

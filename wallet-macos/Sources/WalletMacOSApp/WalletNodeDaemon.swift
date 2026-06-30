@@ -119,12 +119,20 @@ final class WalletNodeDaemon: @unchecked Sendable {
 
     let client: WalletNodeClient
 
+    /// The daemon's authenticated Unix-socket transport details, exposed so the app can
+    /// hand them to the privacy-helper sidecar (which proxies chain reads through the
+    /// daemon). Sourced from the ready event; do not mutate.
+    let socketPath: String
+    let bearerToken: String
+
     private let pid: pid_t
     private var aliveWriteFD: Int32
 
     private init(pid: pid_t, aliveWriteFD: Int32, ready: ReadyEvent) {
         self.pid = pid
         self.aliveWriteFD = aliveWriteFD
+        self.socketPath = ready.socketPath
+        self.bearerToken = ready.token
         self.client = WalletNodeClient(
             configuration: WalletNodeClient.Configuration(
                 transport: .unixSocket(ready.socketPath),

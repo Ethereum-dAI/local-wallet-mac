@@ -228,3 +228,11 @@ Kohaku's account-model wrapper.
   the user's Kernel account — that re-links the funds), key **rotation** as a
   guarded `accountIndex`-bump + funds migration (not a metadata swap), and the full
   security/stakeholder review.
+  - **Biometric-flag decision (2026-06-30):** the seed's Keychain access control
+    **stays `.biometryCurrentSet`** (strictest). It is destroyed on biometric
+    re-enrollment — that is acceptable in v1 (testnet, device-only) and made
+    *recoverable* in PR #2 by the **mnemonic backup** (re-import after re-enrollment /
+    device loss). The fix is the backup, **not** relaxing the flag to
+    `.biometryAny`/`.userPresence`. Custody model chosen: local biometric +
+    self-custody mnemonic (no iCloud escrow). The mnemonic backup is the
+    **prerequisite for any mainnet promotion**.

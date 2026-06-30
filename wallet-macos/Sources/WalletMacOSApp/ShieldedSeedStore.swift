@@ -7,10 +7,12 @@ struct ShieldedSeedStore {
     private let account = "privacy-pools-sepolia"  // testnet-tagged
 
     // NOTE: .biometryCurrentSet invalidates this item on biometric re-enrollment
-    // (Face ID reset / fingerprint added or removed) — the entropy is then destroyed
-    // and a new seed is generated on next use. Acceptable for a testnet, device-only
-    // seed with no backup; MUST be revisited (mnemonic backup / .biometryAny) before
-    // any mainnet promotion, where this would mean silent loss of shielded funds.
+    // (Face ID reset / fingerprint added or removed) — the entropy is then destroyed.
+    // DECISION (2026-06-30): KEEP .biometryCurrentSet (strictest). v1 is Sepolia testnet,
+    // so device-only + no-backup loss on re-enrollment is acceptable. The fix is NOT to
+    // relax the flag — it is to add a BIP-39 mnemonic backup (PR #2) so re-enrollment /
+    // device loss / Keychain wipe is recoverable by re-import. That backup is the
+    // prerequisite for any mainnet promotion. Do not weaken this flag; back the seed up.
     static func makeAccessControl(_ error: inout Unmanaged<CFError>?) -> SecAccessControl? {
         SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.biometryCurrentSet], &error)
     }

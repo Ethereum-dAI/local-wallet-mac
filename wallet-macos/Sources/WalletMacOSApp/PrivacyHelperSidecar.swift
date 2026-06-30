@@ -76,14 +76,14 @@ final class PrivacyHelperSidecar: @unchecked Sendable {
 
     static func launch(
         entropyHex: String,
-        daemonSocketPath: String,
-        daemonToken: String
+        providerRpcURL: String,
+        authToken: String
     ) async throws -> PrivacyHelperSidecar {
         try await Task.detached(priority: .userInitiated) {
             try launchBlocking(
                 entropyHex: entropyHex,
-                daemonSocketPath: daemonSocketPath,
-                daemonToken: daemonToken
+                providerRpcURL: providerRpcURL,
+                authToken: authToken
             )
         }.value
     }
@@ -93,22 +93,25 @@ final class PrivacyHelperSidecar: @unchecked Sendable {
     // parent, write the fd-5 payload, wait for "ready" on fd-3, keep alivePipe[1] open.
     private static func launchBlocking(
         entropyHex: String,
-        daemonSocketPath: String,
-        daemonToken: String
+        providerRpcURL: String,
+        authToken: String
     ) throws -> PrivacyHelperSidecar {
         guard let execPath = resolveBinaryPath() else {
             throw AppError.localDaemonLaunchFailed("privacy-helper binary not found")
         }
 
         // The app owns the sidecar socket path; the sidecar listens there and the app
-        // connects to that known path. The auth token is the daemon's per-launch token.
+        // connects to that known path, authenticating with `authToken`. The sidecar's
+        // chain provider reads directly from `providerRpcURL` (a full-node RPC) — NOT
+        // the daemon's Helios path, which can't serve the Privacy Pools historical
+        // eth_getLogs scan. (Token field carries the app↔sidecar auth secret.)
         let socketPath = NSTemporaryDirectory() + "ph-\(UUID().uuidString).sock"
         let payload = try JSONSerialization.data(withJSONObject: [
             "entropyHex": entropyHex,
             "sidecarSocketPath": socketPath,
             "daemon": [
-                "socketPath": daemonSocketPath,
-                "token": daemonToken,
+                "url": providerRpcURL,
+                "token": authToken,
             ],
         ])
 
@@ -163,7 +166,7 @@ final class PrivacyHelperSidecar: @unchecked Sendable {
                 pid: pid,
                 aliveWriteFD: alivePipe[1],
                 socketPath: socketPath,
-                token: daemonToken
+                token: authToken
             )
         } catch {
             closeIfOpen(&readyPipe[0])

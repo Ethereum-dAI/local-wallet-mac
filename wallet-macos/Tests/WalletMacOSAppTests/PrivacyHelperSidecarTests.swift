@@ -21,15 +21,14 @@ final class PrivacyHelperSidecarTests: XCTestCase {
             "privacy-helper binary not built; run `cd privacy-helper && bun run build`"
         )
 
-        // No daemon RPC is issued in this test, so this path is never contacted.
-        let daemonSocketPath = NSTemporaryDirectory() + "ph-test-daemon-\(UUID().uuidString).sock"
-
-        // launch() internally waits for "ready" on fd-3 and throws if it is absent or
-        // malformed, so a successful return already asserts the ready handshake.
+        // No chain RPC is issued in this launch-only test, so the provider URL is never
+        // contacted (the provider is lazy). launch() internally waits for "ready" on
+        // fd-3 and throws if it is absent or malformed, so a successful return already
+        // asserts the ready handshake.
         let sidecar = try await PrivacyHelperSidecar.launch(
             entropyHex: "0x" + String(repeating: "11", count: 32),
-            daemonSocketPath: daemonSocketPath,
-            daemonToken: "tok"
+            providerRpcURL: "http://127.0.0.1:1/",
+            authToken: "tok"
         )
 
         // Keep the sidecar alive until the end of the test; deinit closes fd-4 (EOF →

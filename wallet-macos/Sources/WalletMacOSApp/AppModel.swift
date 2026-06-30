@@ -1106,14 +1106,24 @@ final class AppModel: ObservableObject {
         guard privacyHelper == nil else {
             return
         }
+        // The sidecar's pool scan needs a full-node RPC (eth_getLogs over the pool's
+        // whole history); the daemon's Helios path can't serve that. Supply it via
+        // LOCAL_WALLET_PRIVACY_RPC_URL (kept out of source/config — set it in the Xcode
+        // scheme's environment). Without it, shielding is simply unavailable.
+        let rpcURL = (ProcessInfo.processInfo.environment["LOCAL_WALLET_PRIVACY_RPC_URL"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rpcURL.isEmpty else {
+            appendLog("privacy-helper: LOCAL_WALLET_PRIVACY_RPC_URL not set; shielding unavailable")
+            return
+        }
         do {
             let entropyHex = try ShieldedSeedStore().loadOrCreateEntropyHex(
                 reason: "Unlock your private balance"
             )
             let helper = try await PrivacyHelperSidecar.launch(
                 entropyHex: entropyHex,
-                daemonSocketPath: daemon.socketPath,
-                daemonToken: daemon.bearerToken
+                providerRpcURL: rpcURL,
+                authToken: daemon.bearerToken
             )
             privacyHelper = helper
             appendLog("privacy-helper: sidecar started")

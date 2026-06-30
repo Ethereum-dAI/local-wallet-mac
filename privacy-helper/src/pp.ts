@@ -30,7 +30,7 @@ export function createPrivacyPools(opts: { entropyHex: string; provider: Ethereu
   // PrivacyPoolsV1_0xBow[chainId].entrypoint has shape { entrypointAddress, deploymentBlock }
   // but IEntrypoint expects { address, deploymentBlock } — remap here.
   const raw = PrivacyPoolsV1_0xBow[opts.chainId].entrypoint;
-  const entrypoint = { address: raw.entrypointAddress as `0x${string}`, deploymentBlock: raw.deploymentBlock };
+  const entrypoint = { address: BigInt(raw.entrypointAddress), deploymentBlock: raw.deploymentBlock };
   const pp = new PrivacyPoolsV1Protocol(host, { entrypoint, accountIndex: 0 });
   const ethAsset = { __type: "erc20" as const, contract: E_ADDRESS as `0x${string}` };
   return {

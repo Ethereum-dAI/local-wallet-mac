@@ -27,6 +27,7 @@ export function serveRpc(opts: {
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
       } catch (e) {
+        process.stderr.write(`[rpc] handler error: ${(e as any)?.stack ?? e}\n`);
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message: e instanceof Error ? e.message : String(e) } }));
       }

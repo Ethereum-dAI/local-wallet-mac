@@ -1,8 +1,9 @@
-import { MnemonicKeystore, type Host, type Storage } from "@kohaku-eth/plugins";
+import { type Host, type Storage } from "@kohaku-eth/plugins";
 import { PrivacyPoolsV1Protocol, PrivacyPoolsV1_0xBow, E_ADDRESS } from "@kohaku-eth/privacy-pools";
 import type { EthereumProvider } from "@kohaku-eth/provider";
 import { entropyToMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
+import { createSyncKeystore } from "./sync-keystore.ts";
 
 export function mnemonicFromEntropyHex(hex: string): string {
   const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
@@ -28,7 +29,7 @@ export function createPrivacyPools(opts: { entropyHex: string; provider: Ethereu
         fetch(input as any, { ...init, signal: (init as any)?.signal ?? AbortSignal.timeout(10_000) }),
     },
     storage: opts.storage,
-    keystore: new MnemonicKeystore(mnemonicFromEntropyHex(opts.entropyHex)),
+    keystore: createSyncKeystore(mnemonicFromEntropyHex(opts.entropyHex)),
     provider: opts.provider,
   };
   // PrivacyPoolsV1_0xBow[chainId].entrypoint has shape { entrypointAddress, deploymentBlock }

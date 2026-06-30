@@ -1,4 +1,5 @@
 import http from "node:http";
+import https from "node:https";
 import type { EthereumProvider, CallData } from "@kohaku-eth/provider";
 import type { Filter } from "ox/Filter";
 
@@ -12,11 +13,32 @@ export function createDaemonProvider(conn: { socketPath?: string; url?: string; 
   const rpc = (method: string, params: unknown[] = []): Promise<any> =>
     new Promise((resolve, reject) => {
       const body = JSON.stringify({ jsonrpc: "2.0", id: nextId++, method, params });
-      const common = { method: "POST", path: "/", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body), authorization: `Bearer ${conn.token}` } };
-      const options = conn.socketPath ? { ...common, socketPath: conn.socketPath } : { ...common, ...hostPort(conn.url!) };
-      const req = http.request(options as http.RequestOptions, (res) => {
+      const headers: Record<string, string | number> = { "content-type": "application/json", "content-length": Buffer.byteLength(body) };
+      // Unix socket (daemon) → http at "/", authenticated with the daemon bearer token.
+      // HTTP(S) URL (direct RPC, e.g. Infura) → honor the URL's protocol/host/port/path
+      // and send NO Authorization header: a public RPC reads an `Authorization: Bearer`
+      // as a (failing) JWT and rejects the request ("JWT is invalid"). The API key is
+      // already in the URL path.
+      let reqFn = http.request;
+      let options: http.RequestOptions;
+      if (conn.socketPath) {
+        headers.authorization = `Bearer ${conn.token}`;
+        options = { method: "POST", path: "/", headers, socketPath: conn.socketPath };
+      } else {
+        const u = parseUrl(conn.url!);
+        reqFn = u.isHttps ? (https.request as typeof http.request) : http.request;
+        options = { method: "POST", path: u.path, headers, host: u.host, port: u.port };
+      }
+      const req = reqFn(options, (res) => {
         let d = ""; res.on("data", (c) => (d += c));
-        res.on("end", () => { try { const p = JSON.parse(d); p.error ? reject(new Error(p.error.message ?? "rpc error")) : resolve(p.result); } catch (e) { reject(e); } });
+        res.on("end", () => {
+          try {
+            const p = JSON.parse(d);
+            p.error ? reject(new Error(`${method}: ${p.error.message ?? "rpc error"}`)) : resolve(p.result);
+          } catch {
+            reject(new Error(`${method}: non-JSON response (status ${res.statusCode}): ${d.slice(0, 200)}`));
+          }
+        });
       });
       req.on("error", reject);
       req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(`daemon RPC ${method} timed out after ${REQUEST_TIMEOUT_MS}ms`)));
@@ -39,7 +61,13 @@ export function createDaemonProvider(conn: { socketPath?: string; url?: string; 
   } as EthereumProvider;
 }
 
-export function hostPort(url: string): { host: string; port: number } {
+export function parseUrl(url: string): { host: string; port: number; path: string; isHttps: boolean } {
   const u = new URL(url);
-  return { host: u.hostname, port: Number(u.port || (u.protocol === "https:" ? 443 : 80)) };
+  const isHttps = u.protocol === "https:";
+  return {
+    host: u.hostname,
+    port: Number(u.port || (isHttps ? 443 : 80)),
+    path: (u.pathname || "/") + u.search, // Infura: /v3/<key>; daemon-style: /
+    isHttps,
+  };
 }

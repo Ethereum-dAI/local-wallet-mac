@@ -5,7 +5,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { createDaemonProvider, hostPort } from "../src/daemon-provider.ts";
+import { createDaemonProvider, parseUrl } from "../src/daemon-provider.ts";
 
 let server: http.Server, socketPath: string, lastBody: any;
 before(async () => {
@@ -33,8 +33,13 @@ test("getCode forwards [addr, latest]", async () => {
   assert.equal(await p.getCode("0xabc"), "0x1234");
   assert.deepEqual(lastBody.params, ["0xabc", "latest"]);
 });
-test("hostPort resolves implied ports by protocol", () => {
-  assert.equal(hostPort("https://host/").port, 443);
-  assert.equal(hostPort("http://host:8545/").port, 8545);
-  assert.equal(hostPort("http://host/").port, 80);
+test("parseUrl resolves port, path, and protocol", () => {
+  const infura = parseUrl("https://sepolia.infura.io/v3/KEY");
+  assert.equal(infura.port, 443);
+  assert.equal(infura.path, "/v3/KEY"); // path must be honored, not "/"
+  assert.equal(infura.isHttps, true);
+  assert.equal(parseUrl("http://host:8545/").port, 8545);
+  assert.equal(parseUrl("http://host:8545/").isHttps, false);
+  assert.equal(parseUrl("http://host/").port, 80);
+  assert.equal(parseUrl("http://host/rpc?k=1").path, "/rpc?k=1");
 });

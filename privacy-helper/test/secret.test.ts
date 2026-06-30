@@ -22,6 +22,22 @@ test("rejects payload missing daemon.token", async () => {
   await assert.rejects(readSecretPayload(fd), { message: "invalid fd-5 secret payload" });
 });
 
+test("accepts daemon with only url + token (no socketPath)", async () => {
+  const p = path.join(os.tmpdir(), "sec-url-" + Date.now());
+  const payload = { entropyHex: "0x" + "ab".repeat(32), sidecarSocketPath: "/tmp/ph.sock", daemon: { url: "http://127.0.0.1:8545", token: "t" } };
+  fs.writeFileSync(p, JSON.stringify(payload));
+  const fd = fs.openSync(p, "r");
+  assert.deepEqual(await readSecretPayload(fd), payload);
+});
+
+test("rejects daemon with neither socketPath nor url", async () => {
+  const p = path.join(os.tmpdir(), "sec-notransport-" + Date.now());
+  const payload = { entropyHex: "0x" + "ab".repeat(32), sidecarSocketPath: "/tmp/ph.sock", daemon: { token: "t" } };
+  fs.writeFileSync(p, JSON.stringify(payload));
+  const fd = fs.openSync(p, "r");
+  await assert.rejects(readSecretPayload(fd), { message: "invalid fd-5 secret payload" });
+});
+
 test("rejects payload with wrong-typed entropyHex", async () => {
   const p = path.join(os.tmpdir(), "sec-wrongtype-" + Date.now());
   const payload = { entropyHex: 123, sidecarSocketPath: "/tmp/ph.sock", daemon: { socketPath: "/tmp/d.sock", token: "t" } };

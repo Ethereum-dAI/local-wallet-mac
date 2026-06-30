@@ -17,6 +17,21 @@ final class PrivacyHelperSidecar: @unchecked Sendable {
     private let socketPath: String
     private let token: String
 
+    /// Blocking socket I/O runs here, NOT on the Swift cooperative thread pool.
+    /// `callBlocking` makes a synchronous `read()`/`write()`; the sidecar's `balance`
+    /// can be slow (pool sync over the network). Running it via `Task.detached` would
+    /// block cooperative-pool threads and, if enough pile up, deadlock all Swift
+    /// concurrency (forward-progress violation) and freeze the UI. GCD's pool grows,
+    /// so blocking it is safe.
+    private static let ioQueue = DispatchQueue(
+        label: "ai.ethereum.localwallet.privacy-helper.rpc",
+        attributes: .concurrent
+    )
+
+    /// Per-call socket timeout. The sidecar may legitimately take time on the first
+    /// pool sync, but it must NEVER block a caller indefinitely.
+    private static let socketTimeoutSeconds = 30
+
     private init(pid: pid_t, aliveWriteFD: Int32, socketPath: String, token: String) {
         self.pid = pid
         self.aliveWriteFD = aliveWriteFD
@@ -177,9 +192,18 @@ final class PrivacyHelperSidecar: @unchecked Sendable {
         ])
         let socketPath = self.socketPath
         let token = self.token
-        let data = try await Task.detached(priority: .userInitiated) {
-            try PrivacyHelperSidecar.callBlocking(socketPath: socketPath, bearerToken: token, body: body)
-        }.value
+        // Run the blocking socket I/O on a GCD queue, NOT the cooperative pool.
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            PrivacyHelperSidecar.ioQueue.async {
+                do {
+                    continuation.resume(returning: try PrivacyHelperSidecar.callBlocking(
+                        socketPath: socketPath, bearerToken: token, body: body
+                    ))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
 
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw AppError.localDaemonLaunchFailed("privacy-helper returned an invalid response")
@@ -312,6 +336,13 @@ final class PrivacyHelperSidecar: @unchecked Sendable {
             close(fd)
         }
 
+        // Bound every read/write so a slow or hung sidecar can never block the caller
+        // forever. On expiry, read()/write() return -1 with errno EAGAIN/EWOULDBLOCK.
+        var timeout = timeval(tv_sec: socketTimeoutSeconds, tv_usec: 0)
+        let optLen = socklen_t(MemoryLayout<timeval>.size)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, optLen)
+        _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, optLen)
+
         try connect(fd: fd, socketPath: socketPath)
 
         var request = Data()
@@ -385,6 +416,9 @@ final class PrivacyHelperSidecar: @unchecked Sendable {
             if count < 0 {
                 if errno == EINTR {
                     continue
+                }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw AppError.localDaemonLaunchFailed("privacy-helper response timed out after \(socketTimeoutSeconds)s")
                 }
                 throw AppError.localDaemonLaunchFailed("failed to read privacy-helper response: errno \(errno)")
             }

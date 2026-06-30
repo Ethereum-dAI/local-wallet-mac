@@ -11,7 +11,7 @@
     "@kohaku-eth/privacy-pools": "0.0.1",
     "@kohaku-eth/plugins": "0.0.1-alpha.10",
     "@kohaku-eth/provider": "0.1.0-alpha.8",
-    "@scure/bip39": "^1.3.0"
+    "@scure/bip39": "1.6.0"
   },
-  "devDependencies": { "typescript": "^5.5.0" }
+  "devDependencies": { "typescript": "5.9.3" }
 }

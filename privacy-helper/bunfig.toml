@@ -1,0 +1,5 @@
+[install]
+# Pin exact versions on `bun add` (no caret/tilde ranges) — supply-chain hygiene.
+exact = true
+# Refuse to silently mutate the lockfile during install; fail if package.json drifts.
+frozenLockfile = true

@@ -2,6 +2,11 @@ import http from "node:http";
 import type { EthereumProvider, CallData } from "@kohaku-eth/provider";
 import type { Filter } from "ox/Filter";
 
+// Per-request timeout so a slow/non-responding daemon (e.g. Helios verifying a huge
+// eth_getLogs range) can never hang the sidecar — it fails fast and the error
+// propagates up to the app, which shows "—" rather than freezing.
+const REQUEST_TIMEOUT_MS = 10_000;
+
 export function createDaemonProvider(conn: { socketPath?: string; url?: string; token: string }): EthereumProvider {
   let nextId = 1;
   const rpc = (method: string, params: unknown[] = []): Promise<any> =>
@@ -13,7 +18,9 @@ export function createDaemonProvider(conn: { socketPath?: string; url?: string; 
         let d = ""; res.on("data", (c) => (d += c));
         res.on("end", () => { try { const p = JSON.parse(d); p.error ? reject(new Error(p.error.message ?? "rpc error")) : resolve(p.result); } catch (e) { reject(e); } });
       });
-      req.on("error", reject); req.write(body); req.end();
+      req.on("error", reject);
+      req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(`daemon RPC ${method} timed out after ${REQUEST_TIMEOUT_MS}ms`)));
+      req.write(body); req.end();
     });
   const toBig = (h: string) => BigInt(h);
   return {

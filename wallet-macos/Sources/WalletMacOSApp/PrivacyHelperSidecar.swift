@@ -28,9 +28,9 @@ final class PrivacyHelperSidecar: @unchecked Sendable {
         attributes: .concurrent
     )
 
-    /// Per-call socket timeout. The sidecar may legitimately take time on the first
-    /// pool sync, but it must NEVER block a caller indefinitely.
-    private static let socketTimeoutSeconds = 30
+    /// Per-call socket timeout — a backstop above the sidecar's own ~10s internal
+    /// timeouts (daemon RPC + ASP fetch). It must NEVER block a caller indefinitely.
+    private static let socketTimeoutSeconds = 15
 
     private init(pid: pid_t, aliveWriteFD: Int32, socketPath: String, token: String) {
         self.pid = pid

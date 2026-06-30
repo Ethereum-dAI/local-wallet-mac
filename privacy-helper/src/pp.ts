@@ -22,7 +22,11 @@ export function mapShieldTx(op: { txns: { to: string; data: string; value: bigin
 
 export function createPrivacyPools(opts: { entropyHex: string; provider: EthereumProvider; storage: Storage; chainId: 11155111 }) {
   const host: Host = {
-    network: { fetch: (input, init) => fetch(input as any, init) },
+    // Bound the ASP/network fetch so a hung endpoint can't stall sync() forever.
+    network: {
+      fetch: (input, init) =>
+        fetch(input as any, { ...init, signal: (init as any)?.signal ?? AbortSignal.timeout(10_000) }),
+    },
     storage: opts.storage,
     keystore: new MnemonicKeystore(mnemonicFromEntropyHex(opts.entropyHex)),
     provider: opts.provider,

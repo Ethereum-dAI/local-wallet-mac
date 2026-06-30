@@ -1685,6 +1685,9 @@ private final class ChatDashboardModel: ObservableObject {
                 return nil
             }
             return chatSigningPreview(for: walletModel.sessionSigningPreview(for: transactionIntent))
+        case .shield:
+            // Shield uses passkey signing (not session-key eligible) — no preview needed.
+            return nil
         }
     }
 
@@ -2388,7 +2391,7 @@ private final class ChatDashboardModel: ObservableObject {
         transferPreflightStatus: ChatTransferPreflightStatus? = nil,
         swapPreview: ChatSwapPreview? = nil
     ) {
-        guard intent.tool == .transfer || intent.tool == .swap else {
+        guard intent.tool == .transfer || intent.tool == .swap || intent.tool == .shield else {
             return
         }
         guard !executingIntentIDs.contains(intent.id) else {
@@ -2448,6 +2451,10 @@ private final class ChatDashboardModel: ObservableObject {
                         signingReason: "\(signingAction) on \(self.walletModel.activeChain.name)"
                     )
                     self.appendSwapExecutionResult(result, for: intent, request: request)
+                case .shield:
+                    let amount = intent.args["amount"] ?? ""
+                    let result = try await self.walletModel.executeShield(amountETH: amount)
+                    self.appendShieldExecutionResult(result, for: intent, amountETH: amount)
                 }
             } catch {
                 self.appendExecutionError(error, for: intent)
@@ -2734,6 +2741,74 @@ private final class ChatDashboardModel: ObservableObject {
                 symbol: request.toToken.symbol
             ),
             route: swapRouteLabel(for: request),
+            userOpHash: result.userOpHash,
+            transactionHash: result.transactionHash,
+            status: status,
+            createdAt: Date()
+        )
+        appendMessage(.onchainTransaction(summary), to: conversationID)
+        reloadWalletHistory()
+    }
+
+    private func appendShieldExecutionResult(
+        _ result: AppModel.UserOperationSendResult,
+        for intent: ToolIntent,
+        amountETH: String
+    ) {
+        guard let conversationID = activeConversationIDIfPresent else {
+            return
+        }
+
+        var responsePayload: [String: Any] = [
+            "status": "submitted",
+            "intent_id": intent.id.uuidString,
+            "user_op_hash": result.userOpHash,
+            "amount_eth": amountETH,
+            "signed_by": result.signedBySession ? "session_key" : "passkey",
+        ]
+        if let transactionHash = result.transactionHash {
+            responsePayload["transaction_hash"] = transactionHash
+        }
+        if let success = result.success {
+            responsePayload["success"] = success
+        }
+        appendMessage(
+            ChatMessage(
+                kind: .toolResponse,
+                role: .tool,
+                text: jsonString(responsePayload),
+                toolCallId: intent.id.uuidString
+            ),
+            to: conversationID
+        )
+
+        let status: OnchainTransactionSummary.Status
+        if result.success == true {
+            status = .included
+        } else if result.success == false {
+            status = .reverted
+        } else if result.transactionHash != nil {
+            status = .submitted
+        } else {
+            status = .pending
+        }
+
+        let summary = OnchainTransactionSummary(
+            chainName: walletModel.activeChain.name,
+            chainID: walletModel.activeChain.id,
+            amount: amountETH,
+            token: "ETH",
+            recipient: "Privacy Pool",
+            recipientName: "Privacy Pool",
+            resolvedRecipient: nil,
+            resolutionChainName: nil,
+            resolutionChainID: nil,
+            ccipReadUsed: nil,
+            operation: .transfer,
+            signingMode: result.signedBySession ? "session" : "passkey",
+            amountOut: nil,
+            minimumReceived: nil,
+            route: nil,
             userOpHash: result.userOpHash,
             transactionHash: result.transactionHash,
             status: status,

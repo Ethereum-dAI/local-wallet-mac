@@ -2,7 +2,7 @@ import Foundation
 
 public struct ToolIntent: Codable, Equatable, Identifiable, Sendable {
     public enum Tool: String, Codable, Sendable {
-        case transfer, swap
+        case transfer, swap, shield
     }
 
     public enum Source: String, Codable, Sendable {

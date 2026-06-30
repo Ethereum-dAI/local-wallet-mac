@@ -22,7 +22,17 @@ public enum ToolDefinitions {
         """#
     )
 
-    public static let phase1: [ToolDefinition] = [transfer, swap]
+    public static let shield = ToolDefinition(
+        name: "shield",
+        description: """
+        Deposit native ETH from the user's smart account into the Privacy Pool (shield).         Use when the user asks to shield, make private, or privately deposit ETH. Sepolia only.         If the amount is missing or ambiguous, ask one short clarifying question instead of calling the tool.
+        """,
+        parametersJSONSchema: #"""
+        {"type":"object","properties":{"amount":{"type":"string","description":"ETH amount to shield as a decimal string, e.g. \"0.01\". Native ETH only."}},"required":["amount"]}
+        """#
+    )
+
+    public static let phase1: [ToolDefinition] = [transfer, swap, shield]
 
     public static let systemNudge: String = """
     When the user clearly expresses intent to perform an on-chain action (transfer, swap,     etc.), you MUST call the corresponding tool with structured arguments instead of     describing the action in prose. If essential information is missing, ask one short     clarifying question in natural language and wait for the answer before calling the     tool. Never invent recipient addresses, ENS names, contact names, token symbols, or     amounts that the user has not provided.

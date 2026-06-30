@@ -27,9 +27,9 @@ import LocalLLM
     #expect(required.sorted() == ["amount", "from_token", "to_token"])
 }
 
-@Test func phase1ContainsExactlyTwoTools() {
-    #expect(ToolDefinitions.phase1.count == 2)
-    #expect(ToolDefinitions.phase1.map(\.name).sorted() == ["swap", "transfer"])
+@Test func phase1ContainsExactlyThreeTools() {
+    #expect(ToolDefinitions.phase1.count == 3)
+    #expect(ToolDefinitions.phase1.map(\.name).sorted() == ["shield", "swap", "transfer"])
 }
 
 @Test func systemNudgeMentionsToolCallObligation() {

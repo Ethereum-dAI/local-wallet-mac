@@ -5,6 +5,43 @@ enum EtherAmountParser {
         try units(fromDecimalString: value, decimals: 18)
     }
 
+    /// Convert an ETH decimal string (e.g. "0.01") to a wei decimal string (e.g. "10000000000000000").
+    /// The result is suitable for passing to sidecar RPCs that expect `BigInt(amountWei)`.
+    static func weiDecimalString(fromETHString value: String) throws -> String {
+        let weiData = try wei(fromETHString: value)
+        return decimalString(fromBigEndianData: weiData)
+    }
+
+    /// Convert big-endian `Data` (e.g. from `units(fromDecimalString:decimals:)`) to a decimal string.
+    static func decimalString(fromBigEndianData data: Data) -> String {
+        // Strip leading zero bytes.
+        let trimmed = data.drop { $0 == 0 }
+        guard !trimmed.isEmpty else { return "0" }
+
+        // Convert big-endian bytes to a decimal string using repeated division-by-10.
+        var bytes = [UInt]( trimmed.map { UInt($0) } )
+        var digits = [Character]()
+
+        while !bytes.isEmpty {
+            // Divide bytes array (big-endian number) by 10, collect remainder digit.
+            var remainder: UInt = 0
+            var newBytes = [UInt]()
+            newBytes.reserveCapacity(bytes.count)
+            for byte in bytes {
+                let acc = remainder * 256 + byte
+                let q = acc / 10
+                remainder = acc % 10
+                if !newBytes.isEmpty || q != 0 {
+                    newBytes.append(q)
+                }
+            }
+            digits.append(Character(String(remainder)))
+            bytes = newBytes
+        }
+
+        return String(digits.reversed())
+    }
+
     static func units(fromDecimalString value: String, decimals: Int) throws -> Data {
         guard decimals >= 0 else {
             throw AppError.invalidAmount

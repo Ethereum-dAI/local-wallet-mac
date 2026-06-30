@@ -1728,6 +1728,24 @@ final class AppModel: ObservableObject {
         )
     }
 
+    func executeShield(amountETH: String) async throws -> UserOperationSendResult {
+        guard let sidecar = privacyHelper else {
+            throw AppError.localDaemonLaunchFailed("privacy-helper not running — shielding is not available")
+        }
+        let amountWeiDecimal = try EtherAmountParser.weiDecimalString(fromETHString: amountETH)
+        let tx = try await sidecar.prepareShield(amountWei: amountWeiDecimal)
+        let request = KernelExecutionRequest(
+            target: tx.to,
+            value: try EtherAmountParser.units(fromDecimalString: tx.value, decimals: 0),
+            callData: try Data(hexString: tx.data)
+        )
+        return try await executeBatch(
+            executions: [request],
+            logContext: "chat-shield",
+            signingReason: "Authorize shielding \(amountETH) ETH into Privacy Pool on \(activeChain.name)"
+        )
+    }
+
     func executeERC20Transfer(
         token: WalletToken,
         recipient: String,

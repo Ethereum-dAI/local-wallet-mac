@@ -76,6 +76,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveBaseFeeWei: Data?
     @Published private(set) var liveGasUpdatedAt: Date?
     @Published private(set) var reconcilerUpdatedAt: Date?
+    @Published private(set) var shieldedBalanceDisplay: String = "—"
 
     var activeChain: ChainConfiguration {
         configuration.activeChain
@@ -417,6 +418,19 @@ final class AppModel: ObservableObject {
             }
 
             isRefreshingBalance = false
+        }
+        refreshShieldedBalance()
+    }
+
+    func refreshShieldedBalance() {
+        guard let sidecar = privacyHelper else { return }
+        Task {
+            do {
+                let hexWei = try await sidecar.balanceHexWei()
+                shieldedBalanceDisplay = WeiFormatter.ethDisplayString(fromHexWei: hexWei)
+            } catch {
+                appendLog("shielded-balance refresh failed: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -1103,6 +1117,7 @@ final class AppModel: ObservableObject {
             )
             privacyHelper = helper
             appendLog("privacy-helper: sidecar started")
+            refreshShieldedBalance()
         } catch {
             appendLog("privacy-helper: sidecar launch failed (shielding unavailable) - \(error.localizedDescription)")
         }
@@ -1739,11 +1754,13 @@ final class AppModel: ObservableObject {
             value: try EtherAmountParser.units(fromDecimalString: tx.value, decimals: 0),
             callData: try Data(hexString: tx.data)
         )
-        return try await executeBatch(
+        let result = try await executeBatch(
             executions: [request],
             logContext: "chat-shield",
             signingReason: "Authorize shielding \(amountETH) ETH into Privacy Pool on \(activeChain.name)"
         )
+        refreshShieldedBalance()
+        return result
     }
 
     func executeERC20Transfer(

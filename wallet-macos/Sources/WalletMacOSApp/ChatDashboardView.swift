@@ -77,6 +77,7 @@ private struct ChatAccountIdentity: Equatable {
     let bundlerAddress: String
     let bundlerBalance: String
     let bundlerState: String
+    let shieldedBalance: String
 
     static func placeholder(
         chain: ChainConfiguration,
@@ -92,7 +93,8 @@ private struct ChatAccountIdentity: Equatable {
             kernelState: "Not inspected",
             bundlerAddress: bundlerAddress,
             bundlerBalance: "Balance unavailable",
-            bundlerState: "Not checked"
+            bundlerState: "Not checked",
+            shieldedBalance: "—"
         )
     }
 }
@@ -2253,7 +2255,8 @@ private final class ChatDashboardModel: ObservableObject {
             kernelState: kernelState,
             bundlerAddress: bundlerAddress,
             bundlerBalance: bundlerBalance,
-            bundlerState: bundlerState
+            bundlerState: bundlerState,
+            shieldedBalance: walletModel.shieldedBalanceDisplay
         )
     }
 
@@ -3424,6 +3427,25 @@ struct LocalWalletChatDashboardView: View {
                         explorerURL: explorerAddressURL(model.accountIdentity.bundlerAddress)
                     )
                 }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+                HStack(spacing: 8) {
+                    Image(systemName: "eye.slash.fill")
+                        .font(.system(size: 11, weight: .black))
+                        .foregroundStyle(ChatPalette.mutedText)
+                    Text("Shielded")
+                        .font(.system(size: 10, weight: .black))
+                        .foregroundStyle(ChatPalette.mutedText)
+                        .textCase(.uppercase)
+                    Text(model.accountIdentity.shieldedBalance)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(ChatPalette.secondaryText)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(ChatPalette.buttonCircle.opacity(0.6))
+                )
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }

@@ -5,7 +5,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { createDaemonProvider } from "../src/daemon-provider.ts";
+import { createDaemonProvider, hostPort } from "../src/daemon-provider.ts";
 
 let server: http.Server, socketPath: string, lastBody: any;
 before(async () => {
@@ -32,4 +32,9 @@ test("getCode forwards [addr, latest]", async () => {
   const p = createDaemonProvider({ socketPath, token: "t" });
   assert.equal(await p.getCode("0xabc"), "0x1234");
   assert.deepEqual(lastBody.params, ["0xabc", "latest"]);
+});
+test("hostPort resolves implied ports by protocol", () => {
+  assert.equal(hostPort("https://host/").port, 443);
+  assert.equal(hostPort("http://host:8545/").port, 8545);
+  assert.equal(hostPort("http://host/").port, 80);
 });

@@ -32,7 +32,7 @@ export function createDaemonProvider(conn: { socketPath?: string; url?: string; 
   } as EthereumProvider;
 }
 
-function hostPort(url: string): { host: string; port: number } {
+export function hostPort(url: string): { host: string; port: number } {
   const u = new URL(url);
-  return { host: u.hostname, port: Number(u.port || 80) };
+  return { host: u.hostname, port: Number(u.port || (u.protocol === "https:" ? 443 : 80)) };
 }

@@ -31,16 +31,49 @@ struct BundlerKeyStore {
         try loadForDaemonLaunch(keyRef: keyRef, createIfMissing: true)
     }
 
-    func unlockForDaemonLaunch(keyRef: String) throws -> BundlerSecretRecord {
-        try loadForDaemonLaunch(keyRef: keyRef, createIfMissing: false)
+    // The daemon keeps installed secrets in RAM only, so every stored key for
+    // the chain (active and rotated) must be re-delivered at each spawn or
+    // rotated relayers become unusable after an app restart.
+    func unlockAllForDaemonLaunch(chainId: UInt64) throws -> [BundlerSecretRecord] {
+        try unlockAllForLaunch(chainId: chainId, successTTL: BundlerSecretPromptReusePolicy.cacheTTL)
     }
 
-    func unlockForOnboardingDaemonLaunch(keyRef: String) throws -> BundlerSecretRecord {
-        try loadForDaemonLaunch(
-            keyRef: keyRef,
-            createIfMissing: false,
+    func unlockAllForOnboardingDaemonLaunch(chainId: UInt64) throws -> [BundlerSecretRecord] {
+        try unlockAllForLaunch(
+            chainId: chainId,
             successTTL: BundlerSecretPromptReusePolicy.onboardingHandoffCacheTTL
         )
+    }
+
+    private func unlockAllForLaunch(chainId: UInt64, successTTL: TimeInterval) throws -> [BundlerSecretRecord] {
+        let keyRefs = BundlerLaunchKeyPolicy.launchKeyRefs(chainId: chainId, available: try listKeyRefs())
+        guard !keyRefs.isEmpty else {
+            throw AppError.localRelayerKeyMissing
+        }
+        return try keyRefs.map { keyRef in
+            try loadForDaemonLaunch(keyRef: keyRef, createIfMissing: false, successTTL: successTTL)
+        }
+    }
+
+    // Attribute-only query: enumerating accounts does not evaluate the items'
+    // biometric access control, so this never prompts.
+    func listKeyRefs() throws -> [String] {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+        ]
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound {
+            return []
+        }
+        guard status == errSecSuccess, let items = result as? [[String: Any]] else {
+            throw mapSecurityStatus(status)
+        }
+        return items.compactMap { $0[kSecAttrAccount as String] as? String }
     }
 
     private func loadForDaemonLaunch(
@@ -177,6 +210,37 @@ struct BundlerKeyStore {
             return AppError.missingEntitlement
         }
         return NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+    }
+}
+
+enum BundlerLaunchKeyPolicy {
+    static func chainId(ofKeyRef keyRef: String) -> UInt64? {
+        components(ofKeyRef: keyRef)?.chainId
+    }
+
+    static func launchKeyRefs(chainId: UInt64, available: [String]) -> [String] {
+        available
+            .compactMap { keyRef -> (keyRef: String, index: UInt64)? in
+                guard let parsed = components(ofKeyRef: keyRef), parsed.chainId == chainId else {
+                    return nil
+                }
+                return (keyRef, parsed.index)
+            }
+            .sorted { $0.index < $1.index }
+            .map(\.keyRef)
+    }
+
+    // keyRef format: bundler-eoa:<ownerScope>:<chainId>:<index>
+    private static func components(ofKeyRef keyRef: String) -> (chainId: UInt64, index: UInt64)? {
+        let parts = keyRef.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 4,
+              parts[0] == "bundler-eoa",
+              !parts[1].isEmpty,
+              let chainId = UInt64(parts[2]),
+              let index = UInt64(parts[3]) else {
+            return nil
+        }
+        return (chainId, index)
     }
 }
 

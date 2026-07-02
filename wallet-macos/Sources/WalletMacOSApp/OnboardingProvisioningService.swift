@@ -67,7 +67,7 @@ struct OnboardingProvisioningService {
             return refreshed
         }
 
-        let coordinates = try keyStore.publicKeyCoordinates()
+        let coordinates = try keyStore.createOrLoadPublicKeyCoordinates()
         let authenticatorIdHash = KernelAccountAddressPredictor.defaultAuthenticatorIdHash
         let kernelSalt = KernelAccountAddressPredictor.defaultSalt
         let predictedAddress = try addressPredictor.predictedAddress(
@@ -95,10 +95,11 @@ struct OnboardingProvisioningService {
     }
 
     private func createOrLoadBundlerAddress() throws -> String {
-        let keyRef = settingsStore.bundlerKeyRef ?? "bundler-eoa:default:\(chain.id):1"
-        settingsStore.bundlerKeyRef = keyRef
+        let keyRef = settingsStore.bundlerKeyRef(chainId: chain.id) ?? "bundler-eoa:default:\(chain.id):1"
+        settingsStore.setBundlerKeyRef(keyRef, chainId: chain.id)
 
-        if try BundlerKeyStore.shared.hasKey(forKeyRef: keyRef), let cachedAddress = settingsStore.bundlerAddress {
+        if try BundlerKeyStore.shared.hasKey(forKeyRef: keyRef),
+           let cachedAddress = settingsStore.bundlerAddress(chainId: chain.id) {
             return cachedAddress
         }
 
@@ -109,14 +110,14 @@ struct OnboardingProvisioningService {
             )
             let addressData = try WalletSignature.bundlerAddress(fromSecret: record.secret)
             let address = "0x" + addressData.hexEncodedString
-            settingsStore.bundlerAddress = address
+            settingsStore.setBundlerAddress(address, chainId: chain.id)
             return address
         }
 
         let generated = try WalletSignature.generateBundlerSecret()
         try BundlerKeyStore.shared.add(keyRef: keyRef, secret: generated.secret)
         let address = "0x" + generated.address.hexEncodedString
-        settingsStore.bundlerAddress = address
+        settingsStore.setBundlerAddress(address, chainId: chain.id)
         return address
     }
 

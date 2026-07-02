@@ -78,21 +78,67 @@ final class OnboardingSettingsStore {
         }
     }
 
-    var bundlerKeyRef: String? {
-        get {
-            defaults.string(forKey: Keys.bundlerKeyRef)
-        }
-        set {
-            defaults.set(newValue, forKey: Keys.bundlerKeyRef)
-        }
+    // The relayer identity cache is chain-scoped: a single shared slot let a
+    // mainnet<->sepolia switch display the other chain's relayer address.
+    func bundlerKeyRef(chainId: UInt64) -> String? {
+        migrateLegacyBundlerCacheIfNeeded(chainId: chainId)
+        return defaults.string(forKey: Self.bundlerKeyRefKey(chainId: chainId))
     }
 
-    var bundlerAddress: String? {
-        get {
-            defaults.string(forKey: Keys.bundlerAddress)
+    func setBundlerKeyRef(_ value: String?, chainId: UInt64) {
+        setOrRemove(value, forKey: Self.bundlerKeyRefKey(chainId: chainId))
+    }
+
+    func bundlerAddress(chainId: UInt64) -> String? {
+        migrateLegacyBundlerCacheIfNeeded(chainId: chainId)
+        return defaults.string(forKey: Self.bundlerAddressKey(chainId: chainId))
+    }
+
+    func setBundlerAddress(_ value: String?, chainId: UInt64) {
+        setOrRemove(value, forKey: Self.bundlerAddressKey(chainId: chainId))
+    }
+
+    func clearBundlerCache(chainIds: [UInt64]) {
+        for chainId in chainIds {
+            defaults.removeObject(forKey: Self.bundlerKeyRefKey(chainId: chainId))
+            defaults.removeObject(forKey: Self.bundlerAddressKey(chainId: chainId))
         }
-        set {
-            defaults.set(newValue, forKey: Keys.bundlerAddress)
+        defaults.removeObject(forKey: Keys.bundlerKeyRef)
+        defaults.removeObject(forKey: Keys.bundlerAddress)
+    }
+
+    // The pre-chain-scoping cache was a single global slot; adopt it only for
+    // the chain the stored keyRef actually belongs to, then drop the shared
+    // slot so it can never leak across chains again.
+    private func migrateLegacyBundlerCacheIfNeeded(chainId: UInt64) {
+        guard let legacyKeyRef = defaults.string(forKey: Keys.bundlerKeyRef),
+              BundlerLaunchKeyPolicy.chainId(ofKeyRef: legacyKeyRef) == chainId else {
+            return
+        }
+        if defaults.string(forKey: Self.bundlerKeyRefKey(chainId: chainId)) == nil {
+            defaults.set(legacyKeyRef, forKey: Self.bundlerKeyRefKey(chainId: chainId))
+        }
+        if let legacyAddress = defaults.string(forKey: Keys.bundlerAddress),
+           defaults.string(forKey: Self.bundlerAddressKey(chainId: chainId)) == nil {
+            defaults.set(legacyAddress, forKey: Self.bundlerAddressKey(chainId: chainId))
+        }
+        defaults.removeObject(forKey: Keys.bundlerKeyRef)
+        defaults.removeObject(forKey: Keys.bundlerAddress)
+    }
+
+    private static func bundlerKeyRefKey(chainId: UInt64) -> String {
+        "\(Keys.bundlerKeyRef).\(chainId)"
+    }
+
+    private static func bundlerAddressKey(chainId: UInt64) -> String {
+        "\(Keys.bundlerAddress).\(chainId)"
+    }
+
+    private func setOrRemove(_ value: String?, forKey key: String) {
+        if let value {
+            defaults.set(value, forKey: key)
+        } else {
+            defaults.removeObject(forKey: key)
         }
     }
 

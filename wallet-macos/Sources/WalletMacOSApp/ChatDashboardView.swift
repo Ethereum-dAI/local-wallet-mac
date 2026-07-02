@@ -637,7 +637,7 @@ private final class ChatDashboardModel: ObservableObject {
         self.accountIdentity = ChatAccountIdentity.placeholder(
             chain: self.walletModel.activeChain,
             kernelAddress: kernelAddress,
-            bundlerAddress: settingsStore.bundlerAddress ?? "Not available"
+            bundlerAddress: settingsStore.bundlerAddress(chainId: self.walletModel.activeChain.id) ?? "Not available"
         )
         preferencesStore.activeConversationID = self.activeConversationID
         walletModelCancellable = self.walletModel.objectWillChange.sink { [weak self] _ in
@@ -2209,7 +2209,7 @@ private final class ChatDashboardModel: ObservableObject {
     func resetWalletFromSettings() throws -> String {
         walletModel.resetDemoWallet()
         refreshAccountIdentity()
-        return "Wallet reset requested. The app will create fresh local key material."
+        return "Wallet reset requested. Local wallet, relayer, and session keys were deleted; the app will create fresh key material."
     }
 
     func debugSessionReportFromSettings() async -> String {
@@ -2253,7 +2253,8 @@ private final class ChatDashboardModel: ObservableObject {
         let kernelBalance = walletModel.accountInspection?.balanceDisplay ?? "Balance unavailable"
         let kernelState = walletModel.accountInspection?.stateTitle ?? "Not inspected"
         let bundlerAddress = walletModel.localRelayerStatus?.eoa
-            ?? accountIdentity.bundlerAddress
+            ?? onboardingSettingsStore.bundlerAddress(chainId: chain.id)
+            ?? "Not available"
         let bundlerBalance = Self.displayETHBalance(walletModel.localRelayerStatus?.balance)
         let bundlerState: String
         if let status = walletModel.localRelayerStatus {

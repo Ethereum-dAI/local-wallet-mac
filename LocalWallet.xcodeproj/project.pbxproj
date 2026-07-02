@@ -10,6 +10,7 @@
 		040411231BD12B67EE891E4C /* WalletMacOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 611B7A76D937ADC7B38FEDA8 /* WalletMacOSApp.swift */; };
 		0AEF64FBB3ECFADFD9712B00 /* DemoSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FF9147DC25C40D4A7D8DA39 /* DemoSettingsStore.swift */; };
 		108F1C07C994151FA300ACAF /* ContextWindowPresets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CBD70736AA26349D04C84E5 /* ContextWindowPresets.swift */; };
+		1A1FA5DD76AA6754B41EE613 /* WalletResetCleanup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 797D42F9F537EC9B6F816DDC /* WalletResetCleanup.swift */; };
 		24FA830DF34A44E32A999886 /* KernelImplementation.json in Resources */ = {isa = PBXBuildFile; fileRef = BF4BC97318D96D64FC625767 /* KernelImplementation.json */; };
 		274EC1F7AF7D01549E14B740 /* WalletRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71035AA789A3F89268A157B9 /* WalletRecord.swift */; };
 		2E17357921E0DF8E3F920EC5 /* WeiFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71DDE5CB6A4F86F27DE37255 /* WeiFormatter.swift */; };
@@ -33,6 +34,7 @@
 		687188C3574A4EB38F617EDF /* LocalWalletSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DC4ED3DF868F54EF472978A /* LocalWalletSettingsView.swift */; };
 		6FC50B3D78A1BEDD7A8AAC56 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E4918C4C23C14A6A28B3460D /* Assets.xcassets */; };
 		728F3C84A2C1C492C163286E /* SessionPolicyMirror.swift in Sources */ = {isa = PBXBuildFile; fileRef = D77908DB25C2FD6278F88B91 /* SessionPolicyMirror.swift */; };
+		74BFB16125FA8723246EC423 /* ConcealedPasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42A37FB9615C410FF6996870 /* ConcealedPasteboard.swift */; };
 		77B9D2DC01CEB8F611EBA699 /* GasIndicatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86D8851018BC1278F03B61B8 /* GasIndicatorView.swift */; };
 		82C23E6456D6B25C14A4338E /* EtherAmountParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0565FE58E3D3C819258A03C1 /* EtherAmountParser.swift */; };
 		8A4F334C71F0A61F144B033B /* BundlerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10EF37094DF3BB75ADE15500 /* BundlerClient.swift */; };
@@ -73,6 +75,7 @@
 		1B2090660CAE81D103494C90 /* KernelFactory.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = KernelFactory.json; sourceTree = "<group>"; };
 		2FDD97F68DC79C7A31430C30 /* ChatDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDashboardView.swift; sourceTree = "<group>"; };
 		338C3CE5B2A1B13400716881 /* BundlerKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundlerKeyStore.swift; sourceTree = "<group>"; };
+		42A37FB9615C410FF6996870 /* ConcealedPasteboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConcealedPasteboard.swift; sourceTree = "<group>"; };
 		46C43E34967044CB6DFF8EEA /* ToolIntentCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolIntentCardView.swift; sourceTree = "<group>"; };
 		4C51BF10F70361BF5B075868 /* SessionRevokeAssembler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRevokeAssembler.swift; sourceTree = "<group>"; };
 		4DC4ED3DF868F54EF472978A /* LocalWalletSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalWalletSettingsView.swift; sourceTree = "<group>"; };
@@ -86,6 +89,7 @@
 		71F6CC5F8F55F7C5D22BBD6F /* HexEncoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HexEncoding.swift; sourceTree = "<group>"; };
 		7296A0E20202CF12178A7D1F /* UserOperationBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserOperationBuilder.swift; sourceTree = "<group>"; };
 		762567355B5B9F2F1A4B670F /* WalletNodeDaemon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletNodeDaemon.swift; sourceTree = "<group>"; };
+		797D42F9F537EC9B6F816DDC /* WalletResetCleanup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletResetCleanup.swift; sourceTree = "<group>"; };
 		7FDBD8207805F91A08B2FA8F /* WebAuthnValidator.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = WebAuthnValidator.json; sourceTree = "<group>"; };
 		80EEACA183C6F7A248A93A62 /* OnboardingProvisioningService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingProvisioningService.swift; sourceTree = "<group>"; };
 		86145305356A12B55B0C0B52 /* AppError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppError.swift; sourceTree = "<group>"; };
@@ -200,6 +204,7 @@
 				DB254515D29EBD3388AD3FFA /* ChainReadCallData.swift */,
 				2FDD97F68DC79C7A31430C30 /* ChatDashboardView.swift */,
 				DF0CD621D86FF51807777FFF /* ChatSQLiteStore.swift */,
+				42A37FB9615C410FF6996870 /* ConcealedPasteboard.swift */,
 				6CBD70736AA26349D04C84E5 /* ContextWindowPresets.swift */,
 				B9D44A78B0A9523321B9F367 /* DemoModels.swift */,
 				5FF9147DC25C40D4A7D8DA39 /* DemoSettingsStore.swift */,
@@ -238,6 +243,7 @@
 				923CF6BF725AB85178781926 /* WalletNodeClient.swift */,
 				762567355B5B9F2F1A4B670F /* WalletNodeDaemon.swift */,
 				71035AA789A3F89268A157B9 /* WalletRecord.swift */,
+				797D42F9F537EC9B6F816DDC /* WalletResetCleanup.swift */,
 				71DDE5CB6A4F86F27DE37255 /* WeiFormatter.swift */,
 				B888CE77FC20C7FE9DF6239B /* Resources */,
 			);
@@ -336,6 +342,7 @@
 				B1E42A5222A007C1B9A53A68 /* ChainReadCallData.swift in Sources */,
 				B2656DCF13F49D71F359FC59 /* ChatDashboardView.swift in Sources */,
 				A31DC37F436D23B0A1BB950A /* ChatSQLiteStore.swift in Sources */,
+				74BFB16125FA8723246EC423 /* ConcealedPasteboard.swift in Sources */,
 				108F1C07C994151FA300ACAF /* ContextWindowPresets.swift in Sources */,
 				C7372C6CA4E7765A2AA35B7A /* DemoModels.swift in Sources */,
 				0AEF64FBB3ECFADFD9712B00 /* DemoSettingsStore.swift in Sources */,
@@ -374,6 +381,7 @@
 				C76D43CA4AE90A97B1B8ADA0 /* WalletNodeClient.swift in Sources */,
 				B0F9B69A3FA938E86D0F3B27 /* WalletNodeDaemon.swift in Sources */,
 				274EC1F7AF7D01549E14B740 /* WalletRecord.swift in Sources */,
+				1A1FA5DD76AA6754B41EE613 /* WalletResetCleanup.swift in Sources */,
 				2E17357921E0DF8E3F920EC5 /* WeiFormatter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

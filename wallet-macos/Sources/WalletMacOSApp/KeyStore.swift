@@ -52,7 +52,7 @@ struct KeyStore {
         Data(keyTag.utf8)
     }
 
-    func createOrLoadKey(authenticationContext: LAContext? = nil) throws -> SecKey {
+    private func createOrLoadKey(authenticationContext: LAContext? = nil) throws -> SecKey {
         if let existing = try loadKey(authenticationContext: authenticationContext) {
             return existing
         }
@@ -65,16 +65,22 @@ struct KeyStore {
         try loadDirectKey(authenticationContext: authenticationContext)
     }
 
-    func publicKeyCoordinates() throws -> PublicKeyCoordinates {
+    // Provisioning entry point: the only path allowed to mint a new root key.
+    func createOrLoadPublicKeyCoordinates() throws -> PublicKeyCoordinates {
         let key = try createOrLoadKey()
         return try publicKeyCoordinates(for: key)
     }
 
+    // Signing must never mint a replacement key: metadata may still describe
+    // an account owned by the old key, and a silently regenerated key would
+    // produce signatures the account rejects with no local diagnosis.
     func sign(preimage: Data, reason: String) throws -> SignatureComponents {
         let context = LAContext()
         context.localizedReason = reason
 
-        let key = try createOrLoadKey(authenticationContext: context)
+        guard let key = try loadKey(authenticationContext: context) else {
+            throw AppError.missingKeyReference
+        }
         return try sign(preimage: preimage, with: key)
     }
 

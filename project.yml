@@ -40,8 +40,8 @@ targets:
         NSPrincipalClass: NSApplication
     settings:
       base:
-        DEVELOPMENT_TEAM: 9WL6FK3546
-        PRODUCT_BUNDLE_IDENTIFIER: com.gfior.localwallet.demo
+        DEVELOPMENT_TEAM: MZ5U9N8DBS
+        PRODUCT_BUNDLE_IDENTIFIER: ai.ethereum.localwallet.demo
         PRODUCT_NAME: Local Wallet
         SWIFT_VERSION: 6.0
         CODE_SIGN_STYLE: Automatic

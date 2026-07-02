@@ -12,7 +12,14 @@ export function createDaemonProvider(conn: { socketPath?: string; url?: string; 
   let nextId = 1;
   const rpc = (method: string, params: unknown[] = []): Promise<any> =>
     new Promise((resolve, reject) => {
-      const body = JSON.stringify({ jsonrpc: "2.0", id: nextId++, method, params });
+      // The SDK passes bigint block numbers (e.g. getLogs fromBlock/toBlock) straight
+      // through. JSON.stringify throws on bigint, and that rejection is swallowed by the
+      // SDK's redux createAsyncThunk — so sync() would silently no-op and balances read 0.
+      // Serialize every bigint as a hex quantity (the Ethereum JSON-RPC convention).
+      const body = JSON.stringify(
+        { jsonrpc: "2.0", id: nextId++, method, params },
+        (_k, v) => (typeof v === "bigint" ? "0x" + v.toString(16) : v),
+      );
       const headers: Record<string, string | number> = { "content-type": "application/json", "content-length": Buffer.byteLength(body) };
       // Unix socket (daemon) → http at "/", authenticated with the daemon bearer token.
       // HTTP(S) URL (direct RPC, e.g. Infura) → honor the URL's protocol/host/port/path
@@ -53,7 +60,14 @@ export function createDaemonProvider(conn: { socketPath?: string; url?: string; 
     getCode: async (a: string) => await rpc("eth_getCode", [a, "latest"]),
     getGasPrice: async () => toBig(await rpc("eth_gasPrice")),
     getTransactionReceipt: async (h: string) => (await rpc("eth_getTransactionReceipt", [h])) ?? null,
-    getLogs: async (params: Filter) => await rpc("eth_getLogs", [params]),
+    // The SDK (txLogToRpcLog) calls toHex(log.blockNumber) expecting a number/bigint —
+    // exactly what viem/ethers providers return. Raw JSON-RPC gives blockNumber as a hex
+    // string, and toHex() of a string hex-encodes its bytes (double-encoding → garbage
+    // block numbers / broken lastSyncedBlock). Convert it to bigint to match the contract.
+    getLogs: async (params: Filter) => {
+      const logs = (await rpc("eth_getLogs", [params])) as Array<Record<string, unknown>>;
+      return logs.map((l) => (l.blockNumber != null ? { ...l, blockNumber: BigInt(l.blockNumber as string) } : l)) as any;
+    },
     estimateGas: async (c: CallData) => toBig(await rpc("eth_estimateGas", [c])),
     call: async (c: CallData) => (await rpc("eth_call", [c, "latest"])) as `0x${string}` | undefined,
     request: async ({ method, params }: { method: string; params?: unknown }) => await rpc(method, (params as unknown[]) ?? []),

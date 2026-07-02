@@ -18,9 +18,25 @@ public struct SlashCommandParser: Sendable {
             return try parseTransfer(rest: rest)
         case "swap":
             return try parseSwap(rest: rest)
+        case "shield":
+            return try parseShield(rest: rest)
         default:
             throw SlashParseError.unknownCommand("/" + name)
         }
+    }
+
+    // /shield <amount> [ETH]  — native ETH only, so a trailing token is ignored.
+    private func parseShield(rest: String) throws -> ToolIntent {
+        if rest.contains("=") {
+            let args = try parseKeyValueArgs(rest, allowedKeys: ["amount"])
+            try require(args, key: "amount")
+            return ToolIntent(tool: .shield, args: args, source: .slash)
+        }
+        let tokens = rest.split(separator: " ").map(String.init)
+        guard let amount = tokens.first, !amount.isEmpty else {
+            throw SlashParseError.missingRequiredArgument("amount")
+        }
+        return ToolIntent(tool: .shield, args: ["amount": amount], source: .slash)
     }
 
     private func parseTransfer(rest: String) throws -> ToolIntent {

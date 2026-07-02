@@ -2,6 +2,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
@@ -35,4 +36,28 @@ test("dispatches an authed request", async () => {
 test("rejects a bad token with 401", async () => {
   const r = await post({ jsonrpc: "2.0", id: 2, method: "ping" }, "nope");
   assert.equal(r.status, 401);
+});
+
+// Regression: the Swift client (PrivacyHelperSidecar.callBlocking) and the daemon's
+// hyper transport both read the HTTP response to EOF. bun's node:http server does NOT
+// close the socket on its own, so without the explicit close-on-finish the client would
+// hang forever. This asserts the server announces `Connection: close` and the socket
+// reaches EOF after a single request — exactly mirroring the daemon's transport.
+test("closes the connection after the response (read-to-EOF terminates)", async () => {
+  const body = JSON.stringify({ jsonrpc: "2.0", id: 3, method: "ping" });
+  const raw = await new Promise<string>((resolve, reject) => {
+    const sock = net.connect({ path: socketPath });
+    sock.setTimeout(5000, () => { sock.destroy(); reject(new Error("client read timed out — server did not close")); });
+    let buf = "";
+    sock.on("data", (c) => (buf += c.toString()));
+    sock.on("end", () => resolve(buf)); // fires only when the server sends FIN
+    sock.on("error", reject);
+    sock.write(
+      `POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n` +
+        `Authorization: Bearer tok\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
+    );
+  });
+  assert.match(raw, /^HTTP\/1\.1 200/);
+  assert.match(raw.toLowerCase(), /connection: close/);
+  assert.deepEqual(JSON.parse(raw.split("\r\n\r\n")[1]), { jsonrpc: "2.0", id: 3, result: "pong" });
 });

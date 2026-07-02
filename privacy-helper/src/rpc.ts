@@ -9,6 +9,15 @@ export function serveRpc(opts: {
   handlers: Record<string, Handler>;
 }): Promise<http.Server> {
   const server = http.createServer((req, res) => {
+    // One request per connection: signal close and tear the socket down once the
+    // response is flushed. The Swift client (PrivacyHelperSidecar.callBlocking) and the
+    // daemon's hyper server both use Connection: close + read-to-EOF; bun's node:http
+    // compat layer does NOT close the socket on its own, so the client's read-to-EOF
+    // would hang forever (it returns the body + Content-Length but keeps the connection
+    // alive). Closing here makes the transport behave exactly like the daemon's.
+    res.setHeader("connection", "close");
+    res.on("finish", () => req.socket.end());
+
     if (req.headers.authorization !== `Bearer ${opts.token}`) {
       res.statusCode = 401;
       res.end();

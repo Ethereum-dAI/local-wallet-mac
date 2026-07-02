@@ -78,6 +78,7 @@ private struct ChatAccountIdentity: Equatable {
     let bundlerBalance: String
     let bundlerState: String
     let shieldedBalance: String
+    let shieldedPending: String
 
     static func placeholder(
         chain: ChainConfiguration,
@@ -94,7 +95,8 @@ private struct ChatAccountIdentity: Equatable {
             bundlerAddress: bundlerAddress,
             bundlerBalance: "Balance unavailable",
             bundlerState: "Not checked",
-            shieldedBalance: "—"
+            shieldedBalance: "—",
+            shieldedPending: "—"
         )
     }
 }
@@ -1075,6 +1077,14 @@ private final class ChatDashboardModel: ObservableObject {
             walletHistoryMessage = "Could not export wallet history: \(error.localizedDescription)"
         }
     }
+
+    /// Re-scans the shielded pool and updates the displayed approved/pending balance.
+    func refreshShieldedBalance() {
+        walletModel.refreshShieldedBalance()
+    }
+
+    /// True while a shielded-balance refresh is in flight (drives the spinner).
+    var isRefreshingShieldedBalance: Bool { walletModel.isRefreshingShieldedBalance }
 
     func refreshTokenBalances(force: Bool = false) {
         guard !isRefreshingTokenBalances else {
@@ -2256,7 +2266,8 @@ private final class ChatDashboardModel: ObservableObject {
             bundlerAddress: bundlerAddress,
             bundlerBalance: bundlerBalance,
             bundlerState: bundlerState,
-            shieldedBalance: walletModel.shieldedBalanceDisplay
+            shieldedBalance: walletModel.shieldedBalanceDisplay,
+            shieldedPending: walletModel.shieldedPendingDisplay
         )
     }
 
@@ -3429,16 +3440,43 @@ struct LocalWalletChatDashboardView: View {
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
                 HStack(spacing: 8) {
-                    Image(systemName: "eye.slash.fill")
-                        .font(.system(size: 11, weight: .black))
-                        .foregroundStyle(ChatPalette.mutedText)
-                    Text("Shielded")
+                    // Split: confirmed = ASP-approved (withdrawable); pending = deposited,
+                    // awaiting ASP inclusion. Text-only (no icons).
+                    Text("Confirmed")
                         .font(.system(size: 10, weight: .black))
                         .foregroundStyle(ChatPalette.mutedText)
                         .textCase(.uppercase)
                     Text(model.accountIdentity.shieldedBalance)
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(ChatPalette.secondaryText)
+                    Text("Pending")
+                        .font(.system(size: 10, weight: .black))
+                        .foregroundStyle(ChatPalette.mutedText)
+                        .textCase(.uppercase)
+                    Text(model.accountIdentity.shieldedPending)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(ChatPalette.mutedText)
+                    // Manual refresh — re-scans the pool (e.g. to catch a deposit's
+                    // pending→approved transition, which the ASP applies asynchronously).
+                    // Spins while a refresh is in flight; the flag is bounded by the
+                    // sidecar's 30s RPC timeout, so it can't spin forever.
+                    Button {
+                        model.refreshShieldedBalance()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 10, weight: .black))
+                            .foregroundStyle(ChatPalette.mutedText)
+                            .rotationEffect(.degrees(model.isRefreshingShieldedBalance ? 360 : 0))
+                            .animation(
+                                model.isRefreshingShieldedBalance
+                                    ? .linear(duration: 0.8).repeatForever(autoreverses: false)
+                                    : .default,
+                                value: model.isRefreshingShieldedBalance
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.isRefreshingShieldedBalance)
+                    .help("Refresh shielded balance")
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
@@ -3860,6 +3898,11 @@ struct LocalWalletChatDashboardView: View {
                 icon: "arrow.triangle.swap",
                 title: "Swap",
                 prompt: "Swap 100 USDC for ETH"
+            ),
+            WelcomeStarter(
+                icon: "shield.lefthalf.filled",
+                title: "Shield",
+                prompt: "Shield 0.01 ETH"
             ),
             WelcomeStarter(
                 icon: "slash.circle.fill",

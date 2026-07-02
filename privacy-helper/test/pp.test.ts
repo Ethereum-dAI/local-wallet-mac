@@ -1,16 +1,20 @@
 // test/pp.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickEthBalanceHexWei, mapShieldTx, mnemonicFromEntropyHex } from "../src/pp.ts";
+import { splitEthBalanceHexWei, mapShieldTx, mnemonicFromEntropyHex } from "../src/pp.ts";
 
 const E = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
-test("pickEthBalanceHexWei returns approved native balance as hex", () => {
+test("splitEthBalanceHexWei separates approved from pending native balance", () => {
   const balances = [
     { asset: { contract: E }, amount: 1000n },
     { asset: { contract: E }, amount: 7n, tag: "pending" },
   ];
-  assert.equal(pickEthBalanceHexWei(balances as any, E), "0x3e8"); // 1000
+  assert.deepEqual(splitEthBalanceHexWei(balances as any, E), { approved: "0x3e8", pending: "0x7" });
+});
+
+test("splitEthBalanceHexWei is 0x0/0x0 when the asset has no notes", () => {
+  assert.deepEqual(splitEthBalanceHexWei([] as any, E), { approved: "0x0", pending: "0x0" });
 });
 
 test("mapShieldTx extracts to/data/value", () => {

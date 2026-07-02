@@ -77,6 +77,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveGasUpdatedAt: Date?
     @Published private(set) var reconcilerUpdatedAt: Date?
     @Published private(set) var shieldedBalanceDisplay: String = "—"
+    @Published private(set) var shieldedPendingDisplay: String = "—"
+    @Published private(set) var isRefreshingShieldedBalance: Bool = false
 
     var activeChain: ChainConfiguration {
         configuration.activeChain
@@ -424,10 +426,20 @@ final class AppModel: ObservableObject {
 
     func refreshShieldedBalance() {
         guard let sidecar = privacyHelper else { return }
+        guard !isRefreshingShieldedBalance else { return } // ignore taps while one is in flight
+        isRefreshingShieldedBalance = true
         Task {
+            // The flag drives the spinner in the UI. It always clears: the sidecar RPC is
+            // bounded by PrivacyHelperSidecar.socketTimeoutSeconds (30s), so shieldedBalance()
+            // returns or throws within that window — the icon can never spin forever.
+            defer { isRefreshingShieldedBalance = false }
             do {
-                let hexWei = try await sidecar.balanceHexWei()
-                shieldedBalanceDisplay = WeiFormatter.ethDisplayString(fromHexWei: hexWei)
+                let (approvedHex, pendingHex, _) = try await sidecar.shieldedBalance()
+                // Split display: confirmed (ASP-approved) vs pending (deposited, awaiting
+                // ASP inclusion). On testnet the ASP publishes no approved set, so confirmed
+                // stays 0 and the deposit shows under pending.
+                shieldedBalanceDisplay = WeiFormatter.ethDisplayString(fromHexWei: approvedHex)
+                shieldedPendingDisplay = WeiFormatter.ethDisplayString(fromHexWei: pendingHex)
             } catch {
                 appendLog("shielded-balance refresh failed: \(error.localizedDescription)")
             }
@@ -1097,23 +1109,28 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Launches the privacy-helper sidecar once, after the daemon is ready, wiring it to
-    /// the daemon's authenticated Unix socket. Best-effort: any failure is logged and the
-    /// rest of the app continues (only shielding is unavailable). Loading the shielded
-    /// seed triggers a biometric prompt, so this is only attempted when no sidecar is
-    /// already running.
+    /// The full-node RPC the privacy-helper sidecar uses for its pool scan. This is the
+    /// SAME execution RPC the wallet is configured with (the network-settings "Execution
+    /// RPC" → `activeChain.rpcURL`) — one source of truth, no separate file. The sidecar
+    /// can't go through the daemon's Helios path, which won't serve the historical
+    /// eth_getLogs scan. LOCAL_WALLET_PRIVACY_RPC_URL still overrides it for local dev.
+    private func privacyHelperRpcURL() -> String {
+        let env = (ProcessInfo.processInfo.environment["LOCAL_WALLET_PRIVACY_RPC_URL"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return env.isEmpty ? activeChain.rpcURL.absoluteString : env
+    }
+
+    /// Launches the privacy-helper sidecar once, after the daemon is ready. Best-effort:
+    /// any failure is logged and the rest of the app continues (only shielding is
+    /// unavailable). Loading the shielded seed triggers a biometric prompt, so this is
+    /// only attempted when no sidecar is already running.
     private func ensurePrivacyHelper(daemon: WalletNodeDaemon) async {
         guard privacyHelper == nil else {
             return
         }
-        // The sidecar's pool scan needs a full-node RPC (eth_getLogs over the pool's
-        // whole history); the daemon's Helios path can't serve that. Supply it via
-        // LOCAL_WALLET_PRIVACY_RPC_URL (kept out of source/config — set it in the Xcode
-        // scheme's environment). Without it, shielding is simply unavailable.
-        let rpcURL = (ProcessInfo.processInfo.environment["LOCAL_WALLET_PRIVACY_RPC_URL"] ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let rpcURL = privacyHelperRpcURL()
         guard !rpcURL.isEmpty else {
-            appendLog("privacy-helper: LOCAL_WALLET_PRIVACY_RPC_URL not set; shielding unavailable")
+            appendLog("privacy-helper: no execution RPC configured; shielding unavailable")
             return
         }
         do {
@@ -1769,8 +1786,50 @@ final class AppModel: ObservableObject {
             logContext: "chat-shield",
             signingReason: "Authorize shielding \(amountETH) ETH into Privacy Pool on \(activeChain.name)"
         )
+        // Return at submission so the UI shows "submitted" immediately and then transitions
+        // to "confirmed" via wallet-history reconciliation — same as transfers. Confirm and
+        // refresh the shielded balance in the background: the sidecar only sees the deposit
+        // once it's mined, so an immediate refresh would miss it.
         refreshShieldedBalance()
+        let userOpHash = result.userOpHash
+        Task { [weak self] in
+            guard let self else { return }
+            _ = await self.awaitShieldOutcome(userOpHash: userOpHash)
+            self.refreshShieldedBalance()
+        }
         return result
+    }
+
+    /// Bounded poll for a shield UserOp's confirmed outcome. Returns `(success, txHash)`
+    /// once known — via the reconciled receipt, or a terminal reverted/failed status — or
+    /// `nil` if it can't be determined within the window (caller keeps it "pending", never
+    /// a false revert). Kept separate from `waitForLocalReceipt`, which carries
+    /// session-key-revoke status text and loops unbounded.
+    private func awaitShieldOutcome(
+        userOpHash: String,
+        maxAttempts: Int = 30
+    ) async -> (success: Bool, txHash: String?)? {
+        for _ in 0..<maxAttempts {
+            if Task.isCancelled { return nil }
+            do {
+                let receipt = try await withWalletNodeClient(operation: "chat-shield receipt poll") { client in
+                    try await client.getUserOperationReceipt(userOpHash: userOpHash)
+                }
+                if let receipt {
+                    return (receipt.success, receipt.txHash)
+                }
+                let status = try await withWalletNodeClient(operation: "chat-shield status poll") { client in
+                    try await client.getUserOperationStatus(userOpHash: userOpHash)
+                }
+                if TerminalUserOperationStatus.historyStatus(from: status) != nil {
+                    return (false, nil) // terminal reverted/failed/dropped with no receipt
+                }
+            } catch {
+                // daemon momentarily unreachable — keep polling until the bound elapses
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+        return nil
     }
 
     func executeERC20Transfer(

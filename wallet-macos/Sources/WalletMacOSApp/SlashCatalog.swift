@@ -26,6 +26,14 @@ enum SlashCatalog {
             signature: "/swap <amount> <from_token> to <to_token>",
             scaffold: "/swap 100 USDC to ETH",
             firstPlaceholder: nil
+        ),
+        SlashCommand(
+            id: "shield",
+            displayName: "/shield",
+            summary: "Privately deposit ETH into the Privacy Pool (Sepolia)",
+            signature: "/shield <amount> ETH",
+            scaffold: "/shield <amount> ETH",
+            firstPlaceholder: "<amount>"
         )
     ]
 

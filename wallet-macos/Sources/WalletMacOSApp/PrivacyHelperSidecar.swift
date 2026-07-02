@@ -30,7 +30,7 @@ final class PrivacyHelperSidecar: @unchecked Sendable {
 
     /// Per-call socket timeout — a backstop above the sidecar's own ~10s internal
     /// timeouts (daemon RPC + ASP fetch). It must NEVER block a caller indefinitely.
-    private static let socketTimeoutSeconds = 15
+    private static let socketTimeoutSeconds = 30
 
     private init(pid: pid_t, aliveWriteFD: Int32, socketPath: String, token: String) {
         self.pid = pid
@@ -222,11 +222,19 @@ final class PrivacyHelperSidecar: @unchecked Sendable {
         return result
     }
 
-    func balanceHexWei() async throws -> String {
-        guard let value = try await rpc("balance") as? String else {
-            throw AppError.localDaemonLaunchFailed("privacy-helper balance returned a non-string result")
+    /// Returns the shielded ETH balance as `approved` (ASP-included, normally
+    /// withdrawable), `pending` (deposited, awaiting ASP inclusion), and `total`
+    /// (approved + pending) — all hex wei. On testnet the ASP publishes no real approved
+    /// set, so deposits stay pending and the UI surfaces `total`.
+    func shieldedBalance() async throws -> (approved: String, pending: String, total: String) {
+        guard let object = try await rpc("balance") as? [String: Any],
+              let approved = object["approved"] as? String,
+              let pending = object["pending"] as? String,
+              let total = object["total"] as? String
+        else {
+            throw AppError.localDaemonLaunchFailed("privacy-helper balance returned an invalid result")
         }
-        return value
+        return (approved, pending, total)
     }
 
     func prepareShield(amountWei: String) async throws -> (to: String, data: String, value: String) {

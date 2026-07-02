@@ -14,7 +14,11 @@ before(async () => {
     let d = ""; req.on("data", (c) => (d += c));
     req.on("end", () => {
       lastBody = JSON.parse(d);
-      const map: Record<string, unknown> = { eth_chainId: "0xaa36a7", eth_getCode: "0x1234" };
+      const map: Record<string, unknown> = {
+        eth_chainId: "0xaa36a7",
+        eth_getCode: "0x1234",
+        eth_getLogs: [{ address: "0xpool", data: "0x", topics: [], blockNumber: "0xaa8178" }],
+      };
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ jsonrpc: "2.0", id: lastBody.id, result: map[lastBody.method] }));
     });
@@ -32,6 +36,14 @@ test("getCode forwards [addr, latest]", async () => {
   const p = createDaemonProvider({ socketPath, token: "t" });
   assert.equal(await p.getCode("0xabc"), "0x1234");
   assert.deepEqual(lastBody.params, ["0xabc", "latest"]);
+});
+test("getLogs returns blockNumber as bigint (not a raw hex string)", async () => {
+  // The SDK calls toHex(log.blockNumber) expecting a number/bigint; a hex string would be
+  // double-encoded. blockNumber must come back as 0xaa8178 → 11174264n.
+  const p = createDaemonProvider({ socketPath, token: "t" });
+  const logs = (await p.getLogs({ address: "0xpool" } as any)) as any[];
+  assert.equal(typeof logs[0].blockNumber, "bigint");
+  assert.equal(logs[0].blockNumber, 11174264n);
 });
 test("parseUrl resolves port, path, and protocol", () => {
   const infura = parseUrl("https://sepolia.infura.io/v3/KEY");

@@ -57,14 +57,15 @@ struct OnboardingChainReadinessService {
         let networkSettings = networkSettingsStore.networkSettings
         let chain = networkSettings.activeChain
         let gasPolicy = networkSettings.resolvedDaemonGasPolicy
-        let keyRef = "bundler-eoa:default:\(chain.id):1"
         onEvent("launch: preparing wallet-node for \(chain.name) chainId=\(chain.id)")
-        let bundlerSecret = try BundlerKeyStore.shared.unlockForOnboardingDaemonLaunch(keyRef: keyRef)
-        onEvent("launch: unlocked bundler keyRef=\(keyRef)")
-        syncUnlockedRelayerAddress(keyRef: keyRef, secret: bundlerSecret.secret)
+        let bundlerSecrets = try BundlerKeyStore.shared.unlockAllForOnboardingDaemonLaunch(chainId: chain.id)
+        onEvent("launch: unlocked \(bundlerSecrets.count) bundler key(s) for chainId=\(chain.id)")
+        if let primary = bundlerSecrets.first {
+            syncUnlockedRelayerAddress(keyRef: primary.keyRef, secret: primary.secret)
+        }
 
         let daemon = try await WalletNodeDaemon.launch(
-            bundlerSecret: bundlerSecret,
+            bundlerSecrets: bundlerSecrets,
             chain: chain,
             gasPolicy: gasPolicy,
             heliosVerificationEnabled: networkSettings.isHeliosVerificationActive
@@ -133,17 +134,20 @@ struct OnboardingChainReadinessService {
     }
 
     private func syncUnlockedRelayerAddress(keyRef: String, secret: Data) {
+        guard let chainId = BundlerLaunchKeyPolicy.chainId(ofKeyRef: keyRef) else {
+            return
+        }
         do {
             let address = try RelayerAddressCachePolicy.address(fromSecret: secret)
-            onboardingSettingsStore.bundlerKeyRef = keyRef
+            onboardingSettingsStore.setBundlerKeyRef(keyRef, chainId: chainId)
             if RelayerAddressCachePolicy.shouldUpdate(
-                cached: onboardingSettingsStore.bundlerAddress,
+                cached: onboardingSettingsStore.bundlerAddress(chainId: chainId),
                 unlocked: address
             ) {
-                onboardingSettingsStore.bundlerAddress = address
+                onboardingSettingsStore.setBundlerAddress(address, chainId: chainId)
             }
         } catch {
-            onboardingSettingsStore.bundlerKeyRef = keyRef
+            onboardingSettingsStore.setBundlerKeyRef(keyRef, chainId: chainId)
         }
     }
 }

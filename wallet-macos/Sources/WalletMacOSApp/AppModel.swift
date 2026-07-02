@@ -215,7 +215,7 @@ final class AppModel: ObservableObject {
                         throw AppError.metadataKeyMismatch
                     }
 
-                    let coordinates = try keyStore.publicKeyCoordinates()
+                    let coordinates = try keyStore.createOrLoadPublicKeyCoordinates()
                     appendLog("bootstrap: public key x=\(coordinates.x.shortHex) y=\(coordinates.y.shortHex)")
 
                     appendLog("bootstrap: replacing stale metadata for the newly created key")
@@ -269,7 +269,7 @@ final class AppModel: ObservableObject {
                         : "bootstrap: no existing Secure Enclave key found; creating a new device-bound key"
                 )
 
-                let coordinates = try keyStore.publicKeyCoordinates()
+                let coordinates = try keyStore.createOrLoadPublicKeyCoordinates()
                 appendLog("bootstrap: public key x=\(coordinates.x.shortHex) y=\(coordinates.y.shortHex)")
 
                 let created = try createFreshWalletRecord(coordinates: coordinates, now: now)
@@ -333,13 +333,21 @@ final class AppModel: ObservableObject {
 
         appendSection("Reset Demo Wallet")
 
+        if let warning = SessionResetPolicy.unexpiredSessionWarning(
+            records: walletRecord?.sessionRecords ?? [],
+            now: Date()
+        ) {
+            appendLog("reset: warning — \(warning)")
+        }
+
         do {
-            try keyStore.deleteKey()
-            appendLog("reset: deleted Secure Enclave key for tag \(keyStore.keyTag)")
-            try BundlerKeyStore.shared.deleteAll()
-            appendLog("reset: deleted local relayer keys")
-            try metadataStore.clear()
-            appendLog("reset: cleared local wallet metadata")
+            try WalletResetCleanup.standard(
+                keyStore: keyStore,
+                metadataStore: metadataStore,
+                onboardingSettingsStore: onboardingSettingsStore
+            ).run { step in
+                appendLog("reset: cleared \(step)")
+            }
 
             walletRecord = nil
             accountInspection = nil
@@ -1072,15 +1080,16 @@ final class AppModel: ObservableObject {
         }
 
         localRelayerMessage = "Starting local wallet-node daemon..."
-        let keyRef = "bundler-eoa:default:\(activeChain.id):1"
         let chain = activeChain
         let gasPolicy = networkSettings.resolvedDaemonGasPolicy
         let heliosVerificationEnabled = networkSettings.isHeliosVerificationActive
         let launchTask = Task {
-            let bundlerSecret = try BundlerKeyStore.shared.unlockForDaemonLaunch(keyRef: keyRef)
-            syncUnlockedRelayerAddress(keyRef: keyRef, secret: bundlerSecret.secret)
+            let bundlerSecrets = try BundlerKeyStore.shared.unlockAllForDaemonLaunch(chainId: chain.id)
+            if let primary = bundlerSecrets.first {
+                syncUnlockedRelayerAddress(keyRef: primary.keyRef, secret: primary.secret)
+            }
             return try await WalletNodeDaemon.launch(
-                bundlerSecret: bundlerSecret,
+                bundlerSecrets: bundlerSecrets,
                 chain: chain,
                 gasPolicy: gasPolicy,
                 heliosVerificationEnabled: heliosVerificationEnabled
@@ -1114,17 +1123,21 @@ final class AppModel: ObservableObject {
     }
 
     private func syncUnlockedRelayerAddress(keyRef: String, secret: Data) {
+        guard let chainId = BundlerLaunchKeyPolicy.chainId(ofKeyRef: keyRef) else {
+            appendLog("relayer: could not sync cached relayer address - unrecognized keyRef \(keyRef)")
+            return
+        }
         do {
             let address = try RelayerAddressCachePolicy.address(fromSecret: secret)
-            onboardingSettingsStore.bundlerKeyRef = keyRef
+            onboardingSettingsStore.setBundlerKeyRef(keyRef, chainId: chainId)
             guard RelayerAddressCachePolicy.shouldUpdate(
-                cached: onboardingSettingsStore.bundlerAddress,
+                cached: onboardingSettingsStore.bundlerAddress(chainId: chainId),
                 unlocked: address
             ) else {
                 return
             }
 
-            onboardingSettingsStore.bundlerAddress = address
+            onboardingSettingsStore.setBundlerAddress(address, chainId: chainId)
             appendLog("relayer: synced cached relayer address \(address.shortAddress)")
         } catch {
             appendLog("relayer: could not sync cached relayer address - \(error.localizedDescription)")

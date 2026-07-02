@@ -138,7 +138,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
     }
 
     static func launch(
-        bundlerSecret: BundlerSecretRecord,
+        bundlerSecrets: [BundlerSecretRecord],
         chain: ChainConfiguration,
         gasPolicy: GasPolicy,
         heliosVerificationEnabled: Bool = true,
@@ -146,7 +146,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
     ) async throws -> WalletNodeDaemon {
         try await Task.detached(priority: .userInitiated) {
             try launchBlocking(
-                bundlerSecret: bundlerSecret,
+                bundlerSecrets: bundlerSecrets,
                 chain: chain,
                 gasPolicy: gasPolicy,
                 heliosVerificationEnabled: heliosVerificationEnabled,
@@ -156,12 +156,15 @@ final class WalletNodeDaemon: @unchecked Sendable {
     }
 
     private static func launchBlocking(
-        bundlerSecret: BundlerSecretRecord,
+        bundlerSecrets: [BundlerSecretRecord],
         chain: ChainConfiguration,
         gasPolicy: GasPolicy,
         heliosVerificationEnabled: Bool,
         environment: [String: String]
     ) throws -> WalletNodeDaemon {
+        guard !bundlerSecrets.isEmpty else {
+            throw AppError.localRelayerKeyMissing
+        }
         let execPath = try resolveExecutablePath(environment: environment)
         try writeDaemonConfig(
             chain: chain,
@@ -207,7 +210,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
             closeIfOpen(&readyPipe[1])
             closeIfOpen(&alivePipe[0])
             closeIfOpen(&secretPipe[0])
-            try writeSecretPayload(bundlerSecret, to: secretPipe[1])
+            try writeSecretPayload(bundlerSecrets, to: secretPipe[1])
             closeIfOpen(&secretPipe[1])
 
             let readyData = try readLineWithTimeout(fd: readyPipe[0], timeout: 8)
@@ -485,17 +488,20 @@ final class WalletNodeDaemon: @unchecked Sendable {
         }
     }
 
-    private static func writeSecretPayload(_ record: BundlerSecretRecord, to fd: Int32) throws {
+    static func secretPayloadData(_ records: [BundlerSecretRecord]) throws -> Data {
         let payload: [String: Any] = [
-            "keys": [
+            "keys": records.map { record in
                 [
                     "keyRef": record.keyRef,
                     "secret": "0x" + record.secret.lowercaseHexString,
-                ],
-            ],
+                ]
+            },
         ]
-        let data = try JSONSerialization.data(withJSONObject: payload)
-        try writeAll(data, to: fd)
+        return try JSONSerialization.data(withJSONObject: payload)
+    }
+
+    private static func writeSecretPayload(_ records: [BundlerSecretRecord], to fd: Int32) throws {
+        try writeAll(try secretPayloadData(records), to: fd)
     }
 
     private static func writeAll(_ data: Data, to fd: Int32) throws {

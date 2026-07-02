@@ -23,10 +23,8 @@ enum WalletMacOSApp {
 
     private static func resetDemoWalletAndExit() -> Never {
         do {
-            try KeyStore().deleteKey()
-            try BundlerKeyStore.shared.deleteAll()
-            try WalletMetadataStore().clear()
-            print("Deleted Local Wallet demo key, local relayer keys, and metadata.")
+            try WalletResetCleanup.standard().run()
+            print("Deleted Local Wallet demo key, local relayer keys, local session keys, and metadata.")
             exit(0)
         } catch {
             fputs("Failed to reset Local Wallet demo wallet: \(error.localizedDescription)\n", stderr)
@@ -1428,13 +1426,11 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
     }
 
     private func showExportedRelayerKey(_ privateKey: String) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(privateKey, forType: .string)
+        ConcealedPasteboard.copy(privateKey)
 
         let alert = NSAlert()
         alert.messageText = "Relayer private key copied"
-        alert.informativeText = privateKey
+        alert.informativeText = "The key is on the clipboard as concealed content and clears automatically in \(Int(ConcealedPasteboard.defaultClearDelay)) seconds. Paste it into its destination now."
         alert.addButton(withTitle: "Close")
         alert.alertStyle = .warning
         if let window = view.window {

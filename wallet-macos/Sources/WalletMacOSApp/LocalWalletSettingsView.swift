@@ -2254,8 +2254,11 @@ struct LocalWalletSettingsView: View {
             do {
                 let privateKey = try await onExportRelayerKey()
                 await MainActor.run {
-                    copyToPasteboard(privateKey)
-                    securityMessage = SettingsMessage(kind: .success, text: "Relayer private key copied to the clipboard.")
+                    ConcealedPasteboard.copy(privateKey)
+                    securityMessage = SettingsMessage(
+                        kind: .success,
+                        text: "Relayer private key copied to the clipboard as concealed content. It clears automatically in \(Int(ConcealedPasteboard.defaultClearDelay)) seconds."
+                    )
                     isExportingRelayer = false
                 }
             } catch {
@@ -2316,6 +2319,9 @@ struct LocalWalletSettingsView: View {
         }
     }
 
+    // For non-secret values only (addresses, reports); secrets go through
+    // ConcealedPasteboard so they are hidden from clipboard managers and
+    // cleared automatically.
     private func copyToPasteboard(_ value: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
@@ -2388,7 +2394,7 @@ private enum SettingsConfirmation: Identifiable, Equatable {
         case .revokeSessionKeys:
             return "This starts a passkey-authorized onchain revoke transaction. Stay on the Session Keys settings screen until the transaction finishes and the local session key state is cleared."
         case .resetWallet:
-            return "This deletes the Secure Enclave wallet key reference, local relayer keys, and wallet metadata. A new account will be created."
+            return "This deletes the Secure Enclave wallet key reference, local relayer keys, local session keys, and wallet metadata. If session keys are enabled, disable them first — an onchain session permission stays valid until it expires. A new account will be created."
         }
     }
 

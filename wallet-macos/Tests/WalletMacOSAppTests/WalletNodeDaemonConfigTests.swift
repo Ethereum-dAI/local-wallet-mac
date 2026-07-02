@@ -56,6 +56,18 @@ import Testing
     #expect(toml.contains(#"read_verification = "execution_rpc""#))
 }
 
+@Test func daemonConfigUsesExecutionRPCModeWhenConsensusIsEmpty() throws {
+    let chain = ChainConfiguration.ethereumSepolia.overridingNetworkURLs(
+        rpcURL: ChainConfiguration.ethereumSepolia.rpcURL,
+        archiveRPCURL: nil,
+        consensusRPCURL: nil
+    )
+    let toml = WalletNodeDaemon.daemonConfigTOML(chain: chain)
+
+    #expect(toml.contains(#"consensus_rpc = """#))
+    #expect(toml.contains(#"read_verification = "execution_rpc""#))
+}
+
 @Test func gasPolicyRejectsPriorityAboveMax() throws {
     #expect(throws: WalletNodeDaemon.GasPolicyError.self) {
         _ = try WalletNodeDaemon.GasPolicy.custom(

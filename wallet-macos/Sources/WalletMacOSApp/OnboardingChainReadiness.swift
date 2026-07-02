@@ -67,7 +67,7 @@ struct OnboardingChainReadinessService {
             bundlerSecret: bundlerSecret,
             chain: chain,
             gasPolicy: gasPolicy,
-            heliosVerificationEnabled: networkSettings.heliosVerificationEnabled
+            heliosVerificationEnabled: networkSettings.isHeliosVerificationActive
         )
         onEvent("launch: wallet-node started; polling network status")
         if let logURL = WalletNodeDaemon.managedLogFileURL() {

@@ -841,7 +841,7 @@ private final class ChatDashboardModel: ObservableObject {
             executionRPCURL: chain.rpcURL.absoluteString,
             configuredRPCURL: networkSettings.activeRPCURL,
             archiveNodeURL: chain.archiveRPCURL?.absoluteString ?? "Not set",
-            consensusRPCURL: chain.consensusRPCURL.absoluteString,
+            consensusRPCURL: chain.consensusRPCURL?.absoluteString ?? "Not set",
             maxFeePerGasCap: "\(gasPolicy.maxFeePerGasGwei) gwei",
             maxPriorityFeePerGasCap: "\(gasPolicy.maxPriorityFeePerGasGwei) gwei",
             entryPointAddress: chain.entryPoint,
@@ -2012,14 +2012,22 @@ private final class ChatDashboardModel: ObservableObject {
             from: walletModel.networkSettings,
             to: validated
         )
+        let monitorsHeliosCheckpoint = NetworkSettingsChangePolicy.requiresHeliosCheckpointResync(
+            from: walletModel.networkSettings,
+            to: validated
+        )
         try walletModel.updateNetworkSettings(validated)
         onboardingSettingsStore.rpcURL = validated.sepoliaRPCURL
         onboardingSettingsStore.archiveNodeURL = validated.sepoliaArchiveNodeURL
+        onboardingSettingsStore.consensusRPCURL = validated.sepoliaConsensusRPCURL
         refreshAccountIdentity()
         if !requiresRestart {
             return "Saved \(validated.activeNetworkName) network settings. No wallet-node restart was needed."
         }
-        let readVerification = validated.heliosVerificationEnabled ? "Helios read verification" : "execution RPC reads"
+        let readVerification = validated.isHeliosVerificationActive ? "Helios read verification" : "execution RPC reads"
+        if monitorsHeliosCheckpoint {
+            return "Saved \(validated.activeNetworkName) network settings. Helios checkpoint resync is running in the background."
+        }
         return "Saved \(validated.activeNetworkName) network settings. wallet-node will use \(readVerification), max \(validated.activeMaxFeePerGasGwei) gwei and priority \(validated.activeMaxPriorityFeePerGasGwei) gwei caps."
     }
 
@@ -2122,21 +2130,30 @@ private final class ChatDashboardModel: ObservableObject {
             ))
         }
 
-        let consensusStart = Date()
-        do {
-            let statusCode = try await Self.probeConsensusHealth(url: chain.consensusRPCURL)
+        if validated.isHeliosVerificationActive, let consensusURL = chain.consensusRPCURL {
+            let consensusStart = Date()
+            do {
+                let statusCode = try await Self.probeConsensusHealth(url: consensusURL)
+                checks.append(SettingsHealthCheck(
+                    title: "Consensus RPC",
+                    state: statusCode == 200 ? .healthy : .warning,
+                    detail: "Beacon health endpoint returned HTTP \(statusCode).",
+                    latencyMilliseconds: Self.latencyMilliseconds(since: consensusStart)
+                ))
+            } catch {
+                checks.append(SettingsHealthCheck(
+                    title: "Consensus RPC",
+                    state: .failed,
+                    detail: error.localizedDescription,
+                    latencyMilliseconds: Self.latencyMilliseconds(since: consensusStart)
+                ))
+            }
+        } else {
             checks.append(SettingsHealthCheck(
                 title: "Consensus RPC",
-                state: statusCode == 200 ? .healthy : .warning,
-                detail: "Beacon health endpoint returned HTTP \(statusCode).",
-                latencyMilliseconds: Self.latencyMilliseconds(since: consensusStart)
-            ))
-        } catch {
-            checks.append(SettingsHealthCheck(
-                title: "Consensus RPC",
-                state: .failed,
-                detail: error.localizedDescription,
-                latencyMilliseconds: Self.latencyMilliseconds(since: consensusStart)
+                state: .skipped,
+                detail: "No consensus endpoint configured; wallet-node uses execution RPC reads.",
+                latencyMilliseconds: nil
             ))
         }
 
@@ -2161,6 +2178,10 @@ private final class ChatDashboardModel: ObservableObject {
         }
 
         return SettingsDiagnosticsReport(generatedAt: Date(), checks: checks)
+    }
+
+    func monitorHeliosCheckpointFromSettings(_ settings: DemoNetworkSettings) async throws -> SettingsHeliosCheckpointResult {
+        try await walletModel.monitorHeliosCheckpointAfterNetworkSettingsChange(settings)
     }
 
     func refreshLocalRelayerFromSettings() {
@@ -3238,6 +3259,9 @@ struct LocalWalletChatDashboardView: View {
             },
             onRunDiagnostics: { settings in
                 await model.runSettingsDiagnostics(settings)
+            },
+            onMonitorHeliosCheckpoint: { settings in
+                try await model.monitorHeliosCheckpointFromSettings(settings)
             },
             onRefreshRelayer: {
                 model.refreshLocalRelayerFromSettings()

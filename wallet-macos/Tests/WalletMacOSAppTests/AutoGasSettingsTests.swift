@@ -15,11 +15,12 @@ private func freshStore() -> DemoSettingsStore {
     #expect(settings.heliosVerificationEnabled == true)
 }
 
-@Test func defaultSepoliaRPCsUseDrpcAndNimbus() {
+@Test func defaultSepoliaRPCUsesDrpcAndConsensusStartsEmpty() {
     let store = freshStore()
 
     #expect(store.networkSettings.sepoliaRPCURL == "https://sepolia.drpc.org")
-    #expect(store.networkSettings.sepoliaConsensusRPCURL == "http://unstable.sepolia.beacon-api.nimbus.team")
+    #expect(store.networkSettings.sepoliaConsensusRPCURL == "")
+    #expect(store.networkSettings.isHeliosVerificationActive == false)
 }
 
 @Test func previousSepoliaExecutionDefaultMigratesToDrpc() {
@@ -33,7 +34,7 @@ private func freshStore() -> DemoSettingsStore {
     #expect(store.networkSettings.sepoliaRPCURL == "https://sepolia.drpc.org")
 }
 
-@Test func previousSepoliaConsensusDefaultsMigrateToNimbus() {
+@Test func previousSepoliaConsensusDefaultsMigrateToEmpty() {
     for previousDefault in DemoNetworkSettings.previousDefaultSepoliaConsensusRPCURLs {
         let suite = UserDefaults(suiteName: "auto-gas-tests-\(UUID().uuidString)")!
         suite.set(
@@ -42,8 +43,19 @@ private func freshStore() -> DemoSettingsStore {
         )
         let store = DemoSettingsStore(defaults: suite)
 
-        #expect(store.networkSettings.sepoliaConsensusRPCURL == "http://unstable.sepolia.beacon-api.nimbus.team")
+        #expect(store.networkSettings.sepoliaConsensusRPCURL == "")
     }
+}
+
+@Test func previousMainnetConsensusDefaultMigratesToEmpty() {
+    let suite = UserDefaults(suiteName: "auto-gas-tests-\(UUID().uuidString)")!
+    suite.set(
+        DemoNetworkSettings.previousDefaultMainnetConsensusRPCURLs[0],
+        forKey: "com.localwallet.demo.mainnet-consensus-rpc-url"
+    )
+    let store = DemoSettingsStore(defaults: suite)
+
+    #expect(store.networkSettings.mainnetConsensusRPCURL == "")
 }
 
 @Test func customSepoliaRPCsArePreserved() {
@@ -57,6 +69,7 @@ private func freshStore() -> DemoSettingsStore {
 
     #expect(store.networkSettings.sepoliaRPCURL == "https://example.com/execution")
     #expect(store.networkSettings.sepoliaConsensusRPCURL == "https://example.com/beacon")
+    #expect(store.networkSettings.isHeliosVerificationActive)
 }
 
 @Test func persistedAutoGasOffOverridesDefault() {
@@ -142,6 +155,42 @@ private func freshStore() -> DemoSettingsStore {
     new.heliosVerificationEnabled = false
 
     #expect(NetworkSettingsChangePolicy.requiresWalletNodeRestart(from: old, to: new))
+}
+
+@Test func addingConsensusRPCRequiresHeliosCheckpointResync() {
+    var old = DemoNetworkSettings.defaults
+    old.sepoliaConsensusRPCURL = ""
+    var new = old
+    new.sepoliaConsensusRPCURL = "https://example.com/beacon"
+
+    #expect(NetworkSettingsChangePolicy.requiresHeliosCheckpointResync(from: old, to: new))
+}
+
+@Test func changingConsensusRPCRequiresHeliosCheckpointResync() {
+    var old = DemoNetworkSettings.defaults
+    old.sepoliaConsensusRPCURL = "https://example.com/beacon-a"
+    var new = old
+    new.sepoliaConsensusRPCURL = "https://example.com/beacon-b"
+
+    #expect(NetworkSettingsChangePolicy.requiresHeliosCheckpointResync(from: old, to: new))
+}
+
+@Test func clearingConsensusRPCDoesNotRequireHeliosCheckpointResync() {
+    var old = DemoNetworkSettings.defaults
+    old.sepoliaConsensusRPCURL = "https://example.com/beacon"
+    var new = old
+    new.sepoliaConsensusRPCURL = ""
+
+    #expect(NetworkSettingsChangePolicy.requiresHeliosCheckpointResync(from: old, to: new) == false)
+}
+
+@Test func changingExecutionRPCOnlyDoesNotRequireHeliosCheckpointResync() {
+    var old = DemoNetworkSettings.defaults
+    old.sepoliaConsensusRPCURL = "https://example.com/beacon"
+    var new = old
+    new.sepoliaRPCURL = "https://example.com/execution"
+
+    #expect(NetworkSettingsChangePolicy.requiresHeliosCheckpointResync(from: old, to: new) == false)
 }
 
 @Test func inactiveNetworkGasChangeDoesNotRequireWalletNodeRestart() {

@@ -332,9 +332,9 @@ final class WalletNodeDaemon: @unchecked Sendable {
         heliosVerificationEnabled: Bool = true
     ) -> String {
         let executionRPC = tomlEscaped(chain.rpcURL.absoluteString)
-        let consensusRPC = tomlEscaped(chain.consensusRPCURL.absoluteString)
+        let consensusRPC = tomlEscaped(chain.consensusRPCURL?.absoluteString ?? "")
         let entryPoint = tomlEscaped(chain.entryPoint)
-        let readVerification = heliosVerificationEnabled ? "helios" : "execution_rpc"
+        let readVerification = heliosVerificationEnabled && chain.consensusRPCURL != nil ? "helios" : "execution_rpc"
         return """
         [network]
         chain_id = \(chain.id)

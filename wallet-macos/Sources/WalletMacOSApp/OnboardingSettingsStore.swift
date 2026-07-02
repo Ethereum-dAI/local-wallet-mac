@@ -44,8 +44,7 @@ final class OnboardingSettingsStore {
 
     var consensusRPCURL: String {
         get {
-            defaults.string(forKey: Keys.consensusRPCURL)
-                ?? ChainConfiguration.ethereumSepolia.consensusRPCURL.absoluteString
+            defaults.string(forKey: Keys.consensusRPCURL) ?? ""
         }
         set {
             defaults.set(newValue, forKey: Keys.consensusRPCURL)

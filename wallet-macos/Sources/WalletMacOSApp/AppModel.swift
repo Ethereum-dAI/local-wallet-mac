@@ -461,7 +461,7 @@ final class AppModel: ObservableObject {
         appendSection("Update Network Settings")
         appendLog("network: active profile \(validated.activeNetworkName)")
         appendLog("network: execution RPC \(validated.activeRPCURL)")
-        appendLog("network: read verification \(validated.heliosVerificationEnabled ? "helios" : "execution_rpc")")
+        appendLog("network: read verification \(validated.isHeliosVerificationActive ? "helios" : "execution_rpc")")
         appendLog("network: gas caps max \(validated.activeMaxFeePerGasGwei) gwei, priority \(validated.activeMaxPriorityFeePerGasGwei) gwei")
         settingsStore.setNetworkSettings(validated)
         configuration = DemoAppConfiguration(networkSettings: validated)
@@ -634,8 +634,8 @@ final class AppModel: ObservableObject {
             "chainId=\(activeChain.id)",
             "executionRPC=\(activeChain.rpcURL.absoluteString)",
             "archiveRPC=\(activeChain.archiveRPCURL?.absoluteString ?? "Not set")",
-            "consensusRPC=\(activeChain.consensusRPCURL.absoluteString)",
-            "readVerification=\(networkSettings.heliosVerificationEnabled ? "helios" : "execution_rpc")",
+            "consensusRPC=\(activeChain.consensusRPCURL?.absoluteString ?? "Not set")",
+            "readVerification=\(networkSettings.isHeliosVerificationActive ? "helios" : "execution_rpc")",
             "entryPoint=\(activeChain.entryPoint)",
             "",
             "[wallet]",
@@ -792,6 +792,41 @@ final class AppModel: ObservableObject {
             : "Local relayer needs attention."
         appendLog("relayer: diagnostic status \(status.lifecycle) \(status.eoa.shortAddress)")
         return status
+    }
+
+    func monitorHeliosCheckpointAfterNetworkSettingsChange(
+        _ settings: DemoNetworkSettings,
+        timeout: TimeInterval = 120
+    ) async throws -> SettingsHeliosCheckpointResult {
+        let validated = try settings.validated()
+        guard validated.isHeliosVerificationActive else {
+            throw AppError.localDaemonLaunchFailed("Helios verification is not active for the selected network.")
+        }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastStatus: WalletNodeClient.NetworkStatus?
+        appendSection("Helios Checkpoint Resync")
+        appendLog("network: waiting for Helios checkpoint on \(validated.activeNetworkName)")
+
+        while true {
+            let status = try await withWalletNodeClient(operation: "helios checkpoint resync") { client in
+                try await client.networkStatus()
+            }
+            lastStatus = status
+            appendLog(
+                "network: helios status mode=\(status.readVerification.mode) checkpointLoaded=\(status.helios.checkpointLoaded) ready=\(status.helios.ready)"
+            )
+
+            if status.readVerification.mode == "helios", status.helios.checkpointLoaded {
+                return SettingsHeliosCheckpointResult(status: status)
+            }
+
+            guard Date() < deadline else {
+                let last = lastStatus.map { "\($0.status) on \($0.networkProfile)" } ?? "no status"
+                throw AppError.localDaemonLaunchFailed("Timed out waiting for Helios checkpoint; last status: \(last).")
+            }
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+        }
     }
 
     private func fetchLocalRelayerStatusWithBalanceRetry() async throws -> WalletNodeClient.RelayerStatus {
@@ -1040,7 +1075,7 @@ final class AppModel: ObservableObject {
         let keyRef = "bundler-eoa:default:\(activeChain.id):1"
         let chain = activeChain
         let gasPolicy = networkSettings.resolvedDaemonGasPolicy
-        let heliosVerificationEnabled = networkSettings.heliosVerificationEnabled
+        let heliosVerificationEnabled = networkSettings.isHeliosVerificationActive
         let launchTask = Task {
             let bundlerSecret = try BundlerKeyStore.shared.unlockForDaemonLaunch(keyRef: keyRef)
             syncUnlockedRelayerAddress(keyRef: keyRef, secret: bundlerSecret.secret)
@@ -2995,6 +3030,18 @@ enum NetworkSettingsChangePolicy {
             return true
         }
         return old.resolvedDaemonGasPolicy != new.resolvedDaemonGasPolicy
+    }
+
+    static func requiresHeliosCheckpointResync(
+        from old: DemoNetworkSettings,
+        to new: DemoNetworkSettings
+    ) -> Bool {
+        guard new.isHeliosVerificationActive else {
+            return false
+        }
+        return old.activeConsensusRPCURL != new.activeConsensusRPCURL
+            || old.isHeliosVerificationActive == false
+            || old.isTestnetModeEnabled != new.isTestnetModeEnabled
     }
 }
 

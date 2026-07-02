@@ -172,6 +172,10 @@ private final class OnboardingState: ObservableObject {
         return false
     }
 
+    var shouldSkipChainReadiness: Bool {
+        sepoliaConsensusRPCURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var chainReadinessIsRunning: Bool {
         switch chainReadinessState {
         case .preparing, .syncing:
@@ -621,7 +625,7 @@ struct LocalWalletOnboardingView: View {
         action: @escaping () -> Void
     ) -> some View {
         VStack(spacing: 18) {
-            OnboardingStepIndicator(current: state.step.rawValue + 1, total: OnboardingStep.allCases.count)
+            OnboardingStepIndicator(current: state.step.rawValue + 1, total: onboardingStepCount)
             Text(caption)
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(OnboardingPalette.secondaryText)
@@ -654,6 +658,10 @@ struct LocalWalletOnboardingView: View {
         case .failed:
             return "Download failed. Check your connection and retry."
         }
+    }
+
+    private var onboardingStepCount: Int {
+        state.shouldSkipChainReadiness ? OnboardingStep.allCases.count - 1 : OnboardingStep.allCases.count
     }
 
     private var modelButtonTitle: String {
@@ -711,7 +719,12 @@ struct LocalWalletOnboardingView: View {
 
     private func keysPrimaryAction() {
         if state.canComplete {
-            state.advance()
+            if state.shouldSkipChainReadiness {
+                state.complete()
+                onComplete()
+            } else {
+                state.advance()
+            }
         } else {
             state.provisionKeys()
         }
@@ -798,7 +811,7 @@ private struct NetworkStep: View {
         OnboardingTwoColumn(
             illustration: .network,
             headline: "Choose your nodes",
-            bodyText: "Configure Sepolia and Mainnet RPCs for reads, submission prep, and Helios verification. Sepolia is shown first; both profiles are stored locally."
+            bodyText: "Configure Sepolia and Mainnet RPCs for reads and submission prep. Add a consensus RPC only when you want Helios verification."
         ) {
             VStack(alignment: .leading, spacing: 18) {
                 OnboardingSegmentedControl(
@@ -817,7 +830,7 @@ private struct NetworkStep: View {
                 OnboardingGlassCard {
                     VStack(alignment: .leading, spacing: 10) {
                         InfoRow(icon: "network", title: "Execution RPC", detail: "Used for current EVM state, transaction preparation, submission, balances, and receipts.")
-                        InfoRow(icon: "checkmark.shield", title: "Consensus RPC", detail: "Used by Helios to verify Ethereum reads against the canonical beacon chain.")
+                        InfoRow(icon: "checkmark.shield", title: "Consensus RPC", detail: "Optional for Helios verified reads. Leave blank to skip sync and use execution RPC reads.")
                         InfoRow(icon: "clock.arrow.circlepath", title: "Archive node", detail: "Optional endpoint for historical reads and richer wallet timelines.")
                     }
                     .padding(16)
@@ -837,7 +850,7 @@ private struct NetworkStep: View {
             )
             OnboardingTextField(
                 label: "Consensus RPC URL",
-                placeholder: "Consensus RPC URL",
+                placeholder: ChainConfiguration.ethereumSepolia.consensusRPCURL?.absoluteString ?? "",
                 text: $state.sepoliaConsensusRPCURL
             )
             OnboardingTextField(
@@ -853,7 +866,7 @@ private struct NetworkStep: View {
             )
             OnboardingTextField(
                 label: "Consensus RPC URL",
-                placeholder: "Consensus RPC URL",
+                placeholder: ChainConfiguration.ethereum.consensusRPCURL?.absoluteString ?? "",
                 text: $state.mainnetConsensusRPCURL
             )
             OnboardingTextField(

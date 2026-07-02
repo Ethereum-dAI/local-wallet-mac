@@ -19,7 +19,7 @@ struct ChainConfiguration: Equatable {
     let isTestnet: Bool
     let rpcURL: URL
     let archiveRPCURL: URL?
-    let consensusRPCURL: URL
+    let consensusRPCURL: URL?
     let bundlerURL: URL?
     let entryPoint: String
     let kernel: KernelContractAddresses
@@ -90,7 +90,7 @@ struct ChainConfiguration: Equatable {
     func overridingNetworkURLs(
         rpcURL: URL,
         archiveRPCURL: URL?,
-        consensusRPCURL: URL
+        consensusRPCURL: URL?
     ) -> ChainConfiguration {
         ChainConfiguration(
             id: id,

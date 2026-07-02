@@ -48,6 +48,33 @@ struct SettingsDiagnosticsReport: Equatable {
     let checks: [SettingsHealthCheck]
 }
 
+struct SettingsHeliosCheckpointResult: Equatable {
+    let networkProfile: String
+    let checkpointLoaded: Bool
+    let checkpointAgeDays: Double?
+    let headNumber: UInt64?
+    let readsVerified: Bool
+
+    init(status: WalletNodeClient.NetworkStatus) {
+        self.networkProfile = status.networkProfile
+        self.checkpointLoaded = status.helios.checkpointLoaded
+        self.checkpointAgeDays = status.helios.checkpointAgeDays
+        self.headNumber = status.helios.head?.number
+        self.readsVerified = status.readVerification.verified
+    }
+
+    var successMessage: String {
+        var parts = ["Helios checkpoint loaded on \(networkProfile)."]
+        if let headNumber {
+            parts.append("Head #\(headNumber).")
+        } else if let checkpointAgeDays {
+            parts.append(String(format: "Checkpoint age %.2f days.", checkpointAgeDays))
+        }
+        parts.append(readsVerified ? "Verified reads are ready." : "Helios is still syncing in the background.")
+        return parts.joined(separator: " ")
+    }
+}
+
 struct LocalWalletSessionSettingsSnapshot: Equatable {
     let isEnabled: Bool
     let configuredPolicy: SessionPolicyConfig
@@ -240,6 +267,7 @@ struct LocalWalletSettingsView: View {
     let onSaveNetworkSettings: (DemoNetworkSettings) throws -> String
     let onTestNetworkSettings: (DemoNetworkSettings) async throws -> String
     let onRunDiagnostics: (DemoNetworkSettings) async -> SettingsDiagnosticsReport
+    let onMonitorHeliosCheckpoint: (DemoNetworkSettings) async throws -> SettingsHeliosCheckpointResult
     let onRefreshRelayer: () -> Void
     let onRotateRelayer: () async throws -> String
     let onExportRelayerKey: () async throws -> String
@@ -258,7 +286,12 @@ struct LocalWalletSettingsView: View {
     @State private var selectedTab: LocalWalletSettingsTab
     @State private var hardwareProfile: LocalHardwareProfile?
     @State private var networkDraft: DemoNetworkSettings
+    @State private var appliedNetworkSettings: DemoNetworkSettings
     @State private var networkMessage: SettingsMessage?
+    @State private var isMonitoringHeliosCheckpoint = false
+    @State private var heliosCheckpointProgressDetail = ""
+    @State private var heliosCheckpointMessage: SettingsMessage?
+    @State private var heliosCheckpointRunID: UUID?
     @State private var diagnosticsReport: SettingsDiagnosticsReport?
     @State private var diagnosticsMessage: SettingsMessage?
     @State private var dataMessage: SettingsMessage?
@@ -296,6 +329,7 @@ struct LocalWalletSettingsView: View {
         onSaveNetworkSettings: @escaping (DemoNetworkSettings) throws -> String,
         onTestNetworkSettings: @escaping (DemoNetworkSettings) async throws -> String,
         onRunDiagnostics: @escaping (DemoNetworkSettings) async -> SettingsDiagnosticsReport,
+        onMonitorHeliosCheckpoint: @escaping (DemoNetworkSettings) async throws -> SettingsHeliosCheckpointResult,
         onRefreshRelayer: @escaping () -> Void,
         onRotateRelayer: @escaping () async throws -> String,
         onExportRelayerKey: @escaping () async throws -> String,
@@ -323,6 +357,7 @@ struct LocalWalletSettingsView: View {
         self.onSaveNetworkSettings = onSaveNetworkSettings
         self.onTestNetworkSettings = onTestNetworkSettings
         self.onRunDiagnostics = onRunDiagnostics
+        self.onMonitorHeliosCheckpoint = onMonitorHeliosCheckpoint
         self.onRefreshRelayer = onRefreshRelayer
         self.onRotateRelayer = onRotateRelayer
         self.onExportRelayerKey = onExportRelayerKey
@@ -347,6 +382,7 @@ struct LocalWalletSettingsView: View {
         self._slippagePercentField = State(initialValue: Self.formatSlippagePercent(SwapSlippage.percent(fromBps: snapshot.swapSlippageBps)))
         self._contextWindowDraft = State(initialValue: snapshot.contextWindowTokens)
         self._selectedTab = State(initialValue: initialTab)
+        self._appliedNetworkSettings = State(initialValue: snapshot.networkSettings)
     }
 
     var body: some View {
@@ -840,9 +876,9 @@ struct LocalWalletSettingsView: View {
                     SettingsEditableField(
                         title: "Consensus RPC",
                         placeholder: networkDraft.isTestnetModeEnabled
-                            ? DemoNetworkSettings.defaults.sepoliaConsensusRPCURL
-                            : DemoNetworkSettings.defaults.mainnetConsensusRPCURL,
-                        detail: "Required for Helios verification. Leave blank to restore the default for the selected network.",
+                            ? ChainConfiguration.ethereumSepolia.consensusRPCURL?.absoluteString ?? ""
+                            : ChainConfiguration.ethereum.consensusRPCURL?.absoluteString ?? "",
+                        detail: "Optional for Helios verification. Leave blank to use execution RPC reads.",
                         text: activeConsensusRPCBinding
                     )
                     VStack(alignment: .leading, spacing: 8) {
@@ -851,7 +887,7 @@ struct LocalWalletSettingsView: View {
                                 .font(.system(size: 13, weight: .bold))
                         }
                         Text(
-                            networkDraft.heliosVerificationEnabled
+                            networkDraft.isHeliosVerificationActive
                                 ? "Read calls use Helios with the configured consensus RPC."
                                 : "Read calls use the execution RPC directly."
                         )
@@ -901,6 +937,14 @@ struct LocalWalletSettingsView: View {
                     if let networkMessage {
                         SettingsMessageBanner(message: networkMessage)
                     }
+                    if isMonitoringHeliosCheckpoint {
+                        SettingsTransactionProgressBanner(
+                            title: "Resyncing Helios checkpoint",
+                            detail: heliosCheckpointProgressDetail
+                        )
+                    } else if let heliosCheckpointMessage {
+                        SettingsMessageBanner(message: heliosCheckpointMessage)
+                    }
 
                     HStack(spacing: 10) {
                         Button {
@@ -947,7 +991,7 @@ struct LocalWalletSettingsView: View {
                     SettingsKeyValue(title: "Consensus RPC", value: snapshot.consensusRPCURL),
                     SettingsKeyValue(
                         title: "Read verification",
-                        value: snapshot.networkSettings.heliosVerificationEnabled ? "Helios" : "Execution RPC"
+                        value: snapshot.networkSettings.isHeliosVerificationActive ? "Helios" : "Execution RPC"
                     ),
                     SettingsKeyValue(title: "Max fee cap", value: snapshot.maxFeePerGasCap),
                     SettingsKeyValue(title: "Priority fee cap", value: snapshot.maxPriorityFeePerGasCap),
@@ -1046,11 +1090,56 @@ struct LocalWalletSettingsView: View {
 
     private func saveNetworkDraft() {
         do {
-            let message = try onSaveNetworkSettings(networkDraft)
-            networkDraft = try networkDraft.validated()
+            let validated = try networkDraft.validated()
+            let shouldMonitorHelios = NetworkSettingsChangePolicy.requiresHeliosCheckpointResync(
+                from: appliedNetworkSettings,
+                to: validated
+            )
+            let message = try onSaveNetworkSettings(validated)
+            networkDraft = validated
+            appliedNetworkSettings = validated
             networkMessage = SettingsMessage(kind: .success, text: message)
+            if shouldMonitorHelios {
+                startHeliosCheckpointMonitor(for: validated)
+            } else if !isMonitoringHeliosCheckpoint {
+                heliosCheckpointMessage = nil
+            }
         } catch {
             networkMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
+        }
+    }
+
+    private func startHeliosCheckpointMonitor(for settings: DemoNetworkSettings) {
+        let runID = UUID()
+        heliosCheckpointRunID = runID
+        isMonitoringHeliosCheckpoint = true
+        heliosCheckpointProgressDetail = "wallet-node is restarting with \(settings.activeNetworkName) consensus RPC and fetching a fresh finalized checkpoint."
+        heliosCheckpointMessage = nil
+
+        Task {
+            do {
+                let result = try await onMonitorHeliosCheckpoint(settings)
+                await MainActor.run {
+                    guard heliosCheckpointRunID == runID else {
+                        return
+                    }
+                    isMonitoringHeliosCheckpoint = false
+                    heliosCheckpointProgressDetail = ""
+                    heliosCheckpointMessage = SettingsMessage(kind: .success, text: result.successMessage)
+                }
+            } catch {
+                await MainActor.run {
+                    guard heliosCheckpointRunID == runID else {
+                        return
+                    }
+                    isMonitoringHeliosCheckpoint = false
+                    heliosCheckpointProgressDetail = ""
+                    heliosCheckpointMessage = SettingsMessage(
+                        kind: .error,
+                        text: "Helios checkpoint resync did not finish: \(error.localizedDescription)"
+                    )
+                }
+            }
         }
     }
 
@@ -1129,7 +1218,7 @@ struct LocalWalletSettingsView: View {
                     SettingsKeyValue(title: "Consensus RPC", value: snapshot.consensusRPCURL),
                     SettingsKeyValue(
                         title: "Read verification",
-                        value: snapshot.networkSettings.heliosVerificationEnabled ? "Helios" : "Execution RPC"
+                        value: snapshot.networkSettings.isHeliosVerificationActive ? "Helios" : "Execution RPC"
                     ),
                     SettingsKeyValue(title: "wallet-node", value: snapshot.walletNodeMode),
                     SettingsKeyValue(title: "Relayer message", value: snapshot.relayerMessage),

@@ -11,6 +11,12 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+  # TEMPORARY (remove before merge): lets this draft PR exercise the macOS job on
+  # the GitHub runner. workflow_dispatch only becomes available once the workflow
+  # file is on the default branch, so a PR trigger is the only way to test it
+  # pre-merge. Delete this `pull_request:` block once the run is confirmed green —
+  # per-PR macOS runs are intentionally NOT part of the cheap tier.
+  pull_request:
 
 jobs:
   macos:

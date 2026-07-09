@@ -14,10 +14,10 @@ rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-# Protocol crates (git deps pinned by rev — Phase 1 output)
-wallet-signature = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "ea28622aabcc4b0256d86fef8e0fee4d9cd37858" }
-wallet-kernel    = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "ea28622aabcc4b0256d86fef8e0fee4d9cd37858" }
-wallet-addresses = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "ea28622aabcc4b0256d86fef8e0fee4d9cd37858" }
+# Protocol crates (in-repo path deps — monorepo consolidation)
+wallet-signature = { path = "../local-wallet-protocol/crates/signature" }
+wallet-kernel    = { path = "../local-wallet-protocol/crates/kernel" }
+wallet-addresses = { path = "../local-wallet-protocol/crates/wallet-addresses" }
 
 # Copied verbatim from local-wallet-protocol monorepo [workspace.dependencies]
 alloy-primitives = { version = "1.5", features = ["serde"] }

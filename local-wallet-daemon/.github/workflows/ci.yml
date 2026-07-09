@@ -1,0 +1,20 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git credentials for Cargo
+        env:
+          LW_CI_REPO_READ_TOKEN: ${{ secrets.LW_CI_REPO_READ_TOKEN }}
+        run: |
+          test -n "$LW_CI_REPO_READ_TOKEN"
+          BASIC_AUTH=$(printf 'x-access-token:%s' "$LW_CI_REPO_READ_TOKEN" | base64 | tr -d '\n')
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $BASIC_AUTH"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo test --workspace

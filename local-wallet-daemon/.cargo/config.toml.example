@@ -1,0 +1,6 @@
+# Copy this file to .cargo/config.toml (gitignored) to use a local sibling
+# checkout of local-wallet-protocol for development.
+
+paths = [
+    "../local-wallet-protocol",  # relative to <daemon-root>/, resolves to the sibling checkout
+]

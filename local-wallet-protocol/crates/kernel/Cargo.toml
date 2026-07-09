@@ -1,0 +1,19 @@
+[package]
+name = "wallet-kernel"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Kernel smart-account helpers for WebAuthn validator setup, init calldata, and counterfactual address prediction."
+readme = "README.md"
+keywords = ["account-abstraction", "kernel", "webauthn", "ethereum", "create2"]
+categories = ["cryptography::cryptocurrencies"]
+
+[dependencies]
+alloy-primitives = { workspace = true }
+alloy-sol-types = { workspace = true }
+wallet-addresses = { path = "../wallet-addresses" }
+
+[dev-dependencies]
+hex = { workspace = true }
+hex-literal = { workspace = true }
+serde_json = { workspace = true }

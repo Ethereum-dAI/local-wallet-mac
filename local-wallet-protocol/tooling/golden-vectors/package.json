@@ -1,0 +1,18 @@
+{
+  "name": "session-key-golden-vectors",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "emit": "tsx emit.ts"
+  },
+  "dependencies": {
+    "@zerodev/permissions": "5.6.3",
+    "@zerodev/sdk": "5.5.10",
+    "@zerodev/ecdsa-validator": "^5.4.0",
+    "viem": "^2.21.0",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

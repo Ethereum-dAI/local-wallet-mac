@@ -1,0 +1,6 @@
+# Copy this file to .cargo/config.toml (gitignored) to use a local sibling
+# checkout of related repos for development.
+#
+# Protocol is a leaf SDK — it has no sibling crate deps. This file is empty
+# and exists only for layout consistency with the daemon and mac repos.
+paths = []

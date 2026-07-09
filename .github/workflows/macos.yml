@@ -1,0 +1,47 @@
+name: macOS
+
+# Expensive Swift/macOS suite. macOS runners cost ~10x Linux minutes and the
+# LLM-linked packages pull llama.cpp from Homebrew, so this does NOT run on
+# every push/PR (the cheap ubuntu Rust jobs in ci.yml cover those). It runs on
+# published releases, version tags, and on-demand via the Actions "Run workflow"
+# button.
+on:
+  release:
+    types: [published]
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-14   # Apple Silicon (arm64), matches aarch64-apple-darwin + the macOS 14 deployment target
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install build tools (cbindgen, xcodegen, llama.cpp+ggml)
+        run: brew install cbindgen xcodegen llama.cpp
+
+      - name: Build wallet-ffi + stage bridge lib/headers
+        run: ./scripts/build-ffi.sh
+
+      - name: Build daemon release binary (required by SpawnHelperTests)
+        working-directory: local-wallet-daemon
+        run: cargo build -p wallet-node --release
+
+      - name: Test swift-bridge (WalletSignature)
+        working-directory: swift-bridge
+        run: swift test
+
+      - name: Test local-llm (LocalLLM)
+        # Model-backed tests self-skip when the GGUF is absent (guarded on
+        # fileExists), so this runs without the multi-GB model download.
+        working-directory: local-llm
+        run: swift test
+
+      - name: Test wallet-macos (app, tool layer, SpawnHelper)
+        working-directory: wallet-macos
+        run: swift test

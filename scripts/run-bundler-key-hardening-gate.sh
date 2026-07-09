@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# After the multi-repo split (2026-05-11), daemon-side cargo invocations
-# resolve to the sibling local-wallet-daemon checkout. Override the default
-# location by setting LW_DAEMON_DIR=/path/to/local-wallet-daemon.
+# The daemon crates live in-repo at local-wallet-daemon/ (consolidated from
+# the former sibling checkout), so daemon-side cargo invocations resolve
+# there by default. Override the location by setting
+# LW_DAEMON_DIR=/path/to/local-wallet-daemon.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

@@ -1,14 +1,14 @@
 # Local Monorepo Setup
 
-This guide explains how to clone the three Local Wallet repositories and run the macOS app locally from Xcode.
+This guide explains how to clone the Local Wallet monorepo and run the macOS app locally from Xcode.
 
-The macOS app is developed as a local monorepo made of three sibling Git checkouts. The repositories stay separate in GitHub, but your local filesystem should keep them under the same parent directory so Rust path overrides, Xcode builds, and daemon discovery all resolve consistently.
+The macOS app, the protocol SDK, and the daemon all live in one repository, `local-wallet-mac`. The protocol crates live at `local-wallet-protocol/` and the daemon crates live at `local-wallet-daemon/`, both checked in as ordinary directories in this repo and consumed via relative `path` dependencies in Cargo.toml — no sibling checkouts and no separate clones are needed.
 
-## Repositories
+## Layout
 
-| Repository | Purpose |
+| Directory | Purpose |
 | --- | --- |
-| `local-wallet-mac` | macOS app, Xcode project, Swift packages, Rust FFI bridge, build scripts |
+| `local-wallet-mac` (repo root) | macOS app, Xcode project, Swift packages, Rust FFI bridge, build scripts |
 | `local-wallet-protocol` | Protocol SDK crates used by the FFI bridge |
 | `local-wallet-daemon` | `wallet-node` daemon binary and supporting daemon crates |
 
@@ -23,7 +23,7 @@ Install these before opening the app in Xcode:
 - Homebrew.
 - Rust 1.91 or newer, preferably installed with `rustup`. Latest stable Rust is recommended.
 - `cbindgen`; current known-good local version is 0.29.2.
-- Access to the three GitHub repositories.
+- Access to the `local-wallet-mac` GitHub repository.
 
 ```bash
 xcode-select --install
@@ -71,107 +71,46 @@ The packaged v0.1 alpha app is built for macOS 14+. For release packaging, do no
 
 ## Clone The Local Monorepo
 
-Create one parent directory and clone all three repositories inside it:
+Clone the one repository:
 
 ```bash
 mkdir -p ~/Developer/local-wallet
 cd ~/Developer/local-wallet
 
 git clone https://github.com/Ethereum-dAI/local-wallet-mac.git
-git clone https://github.com/Ethereum-dAI/local-wallet-protocol.git
-git clone https://github.com/Ethereum-dAI/local-wallet-daemon.git
 ```
 
-If GitHub rejects the clone because the repositories are private, authenticate first:
+If GitHub rejects the clone because the repository is private, authenticate first:
 
 ```bash
 gh auth login
 ```
 
-You can also use SSH remotes if your GitHub SSH key is configured:
+You can also use the SSH remote if your GitHub SSH key is configured:
 
 ```bash
 git clone git@github.com:Ethereum-dAI/local-wallet-mac.git
-git clone git@github.com:Ethereum-dAI/local-wallet-protocol.git
-git clone git@github.com:Ethereum-dAI/local-wallet-daemon.git
 ```
 
-The final layout must look like this:
+The protocol and daemon crates come along with this clone — they now live at `local-wallet-mac/local-wallet-protocol` and `local-wallet-mac/local-wallet-daemon`:
 
 ```text
 ~/Developer/local-wallet/
   local-wallet-mac/
-  local-wallet-protocol/
-  local-wallet-daemon/
+    local-wallet-protocol/
+    local-wallet-daemon/
 ```
 
-Do not nest `local-wallet-protocol` or `local-wallet-daemon` inside `local-wallet-mac`. The macOS repo expects them to be siblings.
-
-If you already cloned only `local-wallet-mac`, verify the parent directory before continuing:
+`cd` into the repo before continuing with the rest of this guide:
 
 ```bash
-cd ..
-pwd
-ls
-```
-
-You should see:
-
-```text
-local-wallet-mac  local-wallet-protocol  local-wallet-daemon
-```
-
-If `local-wallet-protocol` or `local-wallet-daemon` is missing, clone them as siblings and build the local artifacts:
-
-```bash
-git clone https://github.com/Ethereum-dAI/local-wallet-protocol.git
-git clone https://github.com/Ethereum-dAI/local-wallet-daemon.git
-
 cd local-wallet-mac
-cp rust-core/.cargo/config.toml.example rust-core/.cargo/config.toml
-./scripts/build-ffi.sh
-
-cd ../local-wallet-daemon
-cargo build -p wallet-node --release
-
-cd ../local-wallet-mac
-open LocalWallet.xcodeproj
 ```
-
-Then run the `LocalWalletApp` scheme again in Xcode.
 
 Quick verification:
 
 ```bash
-ls -l ../local-wallet-daemon/target/release/wallet-node
-cargo metadata --manifest-path rust-core/Cargo.toml --format-version 1 >/dev/null
-```
-
-If both commands pass, the "wallet-node binary was not found" onboarding error should be gone.
-
-## Enable Local Rust Path Overrides
-
-From the macOS repo:
-
-```bash
-cd ~/Developer/local-wallet/local-wallet-mac
-cp rust-core/.cargo/config.toml.example rust-core/.cargo/config.toml
-```
-
-The copied file is gitignored and points Cargo at the sibling protocol and daemon checkouts:
-
-```toml
-paths = [
-    "../../local-wallet-protocol",
-    "../../local-wallet-daemon",
-]
-```
-
-Those paths are resolved relative to `local-wallet-mac/rust-core/` (the parent of `.cargo/`), so the sibling layout above is required.
-
-You can verify that Cargo sees the workspace dependencies with:
-
-```bash
+ls -l local-wallet-daemon/target/release/wallet-node   # present only after you build the daemon below
 cargo metadata --manifest-path rust-core/Cargo.toml --format-version 1 >/dev/null
 ```
 
@@ -187,21 +126,21 @@ This script builds `wallet-ffi` for `aarch64-apple-darwin`, runs `cbindgen`, and
 
 ## Build The Daemon
 
-Build `wallet-node` from the sibling daemon repository:
+Build `wallet-node` from the in-repo daemon directory:
 
 ```bash
-cd ../local-wallet-daemon
+cd local-wallet-daemon
 cargo build -p wallet-node --release
-cd ../local-wallet-mac
+cd ..
 ```
 
 The checked-in Xcode scheme points at the release daemon by default:
 
 ```text
-../local-wallet-daemon/target/release/wallet-node
+local-wallet-daemon/target/release/wallet-node
 ```
 
-The app can also fall back to `../local-wallet-daemon/target/debug/wallet-node`, but release is the recommended local path because it matches the Xcode scheme and packaged app behavior.
+The app can also fall back to `local-wallet-daemon/target/debug/wallet-node`, but release is the recommended local path because it matches the Xcode scheme and packaged app behavior.
 
 If your daemon is somewhere else, set an absolute path before launching Xcode from the same shell:
 
@@ -264,25 +203,25 @@ Then rerun:
 ./scripts/build-ffi.sh
 ```
 
-### Cargo does not use local protocol or daemon crates
+### Cargo can't find the protocol or daemon crates
 
-Make sure the three repositories are siblings and that `rust-core/.cargo/config.toml` exists:
+`rust-core/Cargo.toml` depends on the protocol and daemon crates via in-repo relative `path` entries, not a sibling checkout or a Cargo path override. Verify the directories exist at the repo root and that Cargo can resolve them:
 
 ```bash
-ls ../local-wallet-protocol ../local-wallet-daemon
-cat rust-core/.cargo/config.toml
+ls local-wallet-protocol local-wallet-daemon
+cargo metadata --manifest-path rust-core/Cargo.toml --format-version 1 >/dev/null
 ```
 
-If the layout is wrong, move the repositories so they match the structure in this guide, or update the local `paths` entries to your actual sibling locations.
+If either directory is missing, restore it with `git checkout` or re-clone the repository — they're tracked as ordinary directories in `local-wallet-mac`, not separate checkouts.
 
 ### Xcode cannot find or start `wallet-node`
 
 Build the daemon first:
 
 ```bash
-cd ../local-wallet-daemon
+cd local-wallet-daemon
 cargo build -p wallet-node --release
-cd ../local-wallet-mac
+cd ..
 ```
 
 If you use a custom daemon location, launch Xcode with:

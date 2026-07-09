@@ -63,4 +63,3 @@ DerivedData/
 .env
 .env.*
 !.env.example
-rust-core/.cargo/config.toml

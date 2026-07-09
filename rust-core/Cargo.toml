@@ -8,13 +8,13 @@ rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-# Protocol crates (git deps, rev pinned from Phase 1)
-wallet-signature = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "ea28622aabcc4b0256d86fef8e0fee4d9cd37858" }
-wallet-kernel    = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "ea28622aabcc4b0256d86fef8e0fee4d9cd37858" }
-wallet-addresses = { git = "https://github.com/Ethereum-dAI/local-wallet-protocol.git", rev = "ea28622aabcc4b0256d86fef8e0fee4d9cd37858" }
+# Protocol crates (in-repo path deps, vendored monorepo checkout)
+wallet-signature = { path = "../local-wallet-protocol/crates/signature" }
+wallet-kernel    = { path = "../local-wallet-protocol/crates/kernel" }
+wallet-addresses = { path = "../local-wallet-protocol/crates/wallet-addresses" }
 
 # wallet-node-api from daemon (forces cbindgen materialization in build-ffi.sh).
-wallet-node-api  = { git = "https://github.com/Ethereum-dAI/local-wallet-daemon.git", rev = "4b97943e4455d1aad6095374ba00c3b9d9228dc7" }
+wallet-node-api  = { path = "../local-wallet-daemon/crates/wallet-node-api" }
 
 # Other deps used by wallet-ffi (subset of monorepo):
 alloy-primitives = { version = "1.5", features = ["serde"] }

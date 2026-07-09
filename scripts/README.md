@@ -30,11 +30,11 @@ Prerequisites:
 
 ### Kernel mainnet-fork fixture (moved)
 
-The Kernel/EntryPoint mainnet-fork check no longer lives here. After the multi-repo split it ships with the daemon, at `../local-wallet-daemon/scripts/run-kernel-mainnet-fork-check.sh`. Run it from that repo; see the daemon repo's docs for its `ETH_RPC_URL` / `WALLET_FORK_BLOCK_NUMBER` env contract.
+The Kernel/EntryPoint mainnet-fork check no longer lives here. After the multi-repo split it ships with the daemon, at `local-wallet-daemon/scripts/run-kernel-mainnet-fork-check.sh`. Run it from that repo; see the daemon repo's docs for its `ETH_RPC_URL` / `WALLET_FORK_BLOCK_NUMBER` env contract.
 
 ### `run-bundler-key-hardening-gate.sh`
 
-The automated gate for the bundler key hardening work. It runs the daemon-side Rust checks against the sibling `../local-wallet-daemon` checkout (format, workspace tests, clippy with `-D warnings`, a `wallet-node` release build, and the fd / Unix-transport / HTTP `--include-ignored` integration suites), then the Swift bridge and macOS app `swift test` suites, generates the Xcode project with `xcodegen` and builds the signed `LocalWalletApp` target, and finishes with a `git diff --check` whitespace check.
+The automated gate for the bundler key hardening work. It runs the daemon-side Rust checks against the sibling `local-wallet-daemon` checkout (format, workspace tests, clippy with `-D warnings`, a `wallet-node` release build, and the fd / Unix-transport / HTTP `--include-ignored` integration suites), then the Swift bridge and macOS app `swift test` suites, generates the Xcode project with `xcodegen` and builds the signed `LocalWalletApp` target, and finishes with a `git diff --check` whitespace check.
 
 ```bash
 ./scripts/run-bundler-key-hardening-gate.sh
@@ -51,7 +51,7 @@ LOCAL_WALLET_SEPOLIA_BUNDLER_URL=https://your-bundler.example \
 ./scripts/package-macos-demo.sh
 ```
 
-By default the script builds `wallet-node` from a sibling `../local-wallet-daemon` checkout, targets macOS 14.0, and does not embed the recommended model, so the v0.1 alpha zip stays smaller and onboarding installs the model during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` to embed the model, downloading it if it is not already present in `~/Library/Application Support/LocalWallet/Models/`. Override with `LOCAL_WALLET_ZIP_NAME`, `LOCAL_WALLET_DAEMON_REPO`, `LOCAL_WALLET_NODE_BIN`, `LOCAL_MODEL_PATH`, `LOCAL_LLAMA_PREFIX`, `LOCAL_LLAMA_LIB_DIR`, `LOCAL_WALLET_DEPLOYMENT_TARGET`, or `LOCAL_WALLET_MODEL_CACHE_DIR` as needed.
+By default the script builds `wallet-node` from a sibling `local-wallet-daemon` checkout, targets macOS 14.0, and does not embed the recommended model, so the v0.1 alpha zip stays smaller and onboarding installs the model during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` to embed the model, downloading it if it is not already present in `~/Library/Application Support/LocalWallet/Models/`. Override with `LOCAL_WALLET_ZIP_NAME`, `LOCAL_WALLET_DAEMON_REPO`, `LOCAL_WALLET_NODE_BIN`, `LOCAL_MODEL_PATH`, `LOCAL_LLAMA_PREFIX`, `LOCAL_LLAMA_LIB_DIR`, `LOCAL_WALLET_DEPLOYMENT_TARGET`, or `LOCAL_WALLET_MODEL_CACHE_DIR` as needed.
 
 For a macOS 14-compatible package, make sure any external llama.cpp/ggml dylibs were compiled with `CMAKE_OSX_DEPLOYMENT_TARGET=14.0` and `CMAKE_OSX_ARCHITECTURES=arm64`, then pass their install prefix:
 

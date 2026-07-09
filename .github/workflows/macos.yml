@@ -24,6 +24,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Select newest installed Xcode (packages require Swift 6+)
+        # The default Xcode on the runner image can be Swift 5.10, but the Swift
+        # packages declare swift-tools-version 6.0. Pick the highest-versioned
+        # Xcode installed on the runner (image-agnostic).
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          swift --version
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin

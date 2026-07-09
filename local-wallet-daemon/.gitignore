@@ -33,3 +33,7 @@ docs/
 .env
 .env.*
 !.env.example
+
+# Vendored monorepo: keep the daemon's published docs (masked by the ARCHITECTURE.md pattern above on case-insensitive FS)
+!documentation/
+!documentation/**

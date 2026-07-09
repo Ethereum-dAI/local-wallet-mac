@@ -253,15 +253,14 @@ final class WalletNodeDaemon: @unchecked Sendable {
     }
 
     private static func sourceRootWalletNodePath(profile: String) -> String {
-        // #filePath = <mac-repo>/wallet-macos/Sources/WalletMacOSApp/WalletNodeDaemon.swift
-        // Walk up 5 levels to reach the parent of all sibling repo checkouts,
-        // then descend into the sibling daemon repo's build output.
+        // #filePath = <repo-root>/wallet-macos/Sources/WalletMacOSApp/WalletNodeDaemon.swift
+        // Walk up 4 levels to reach the repo root, then descend into the
+        // in-repo daemon directory's build output.
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()  // .../WalletMacOSApp
             .deletingLastPathComponent()  // .../Sources
             .deletingLastPathComponent()  // .../wallet-macos
-            .deletingLastPathComponent()  // <mac-repo>
-            .deletingLastPathComponent()  // <parent dir holding sibling repos>
+            .deletingLastPathComponent()  // <repo-root>
             .appendingPathComponent("local-wallet-daemon/target/\(profile)/wallet-node")
             .path
     }

@@ -44,7 +44,7 @@ xcodegen generate
 - `wallet-macos/Sources/SpawnHelper` contains the Swift wrapper around that shim.
 - `wallet-macos/Tests/SpawnHelperTests` verifies daemon launch, ready-event delivery, and alive-pipe shutdown.
 - `swift-bridge` is the Swift package that calls the Rust FFI layer.
-- `rust-core/crates/ffi/` is the local wallet-ffi crate (C ABI bridge); protocol and daemon crates resolve from sibling repos.
+- `rust-core/crates/ffi/` is the local wallet-ffi crate (C ABI bridge); protocol and daemon crates resolve from `local-wallet-protocol/` and `local-wallet-daemon/` via in-repo `path` deps.
 
 ## App Module Map
 
@@ -139,11 +139,12 @@ xcodegen generate
 
 ## Daemon Spawn Test
 
-The daemon binary comes from the sibling `local-wallet-daemon` repo. Build it first:
+The daemon binary comes from the in-repo `local-wallet-daemon` directory. Build it first:
 
 ```bash
-cd ../local-wallet-daemon
+cd local-wallet-daemon
 cargo build -p wallet-node
+cd ..
 ```
 
 Then run the Swift spawn helper test from this repo:
@@ -169,7 +170,7 @@ For packaged demo builds, use the same variable when running the package script:
 LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..." ./scripts/package-macos-demo.sh
 ```
 
-The package script builds the sibling `wallet-node` daemon, embeds it at `Contents/Resources/bin/wallet-node`, copies llama.cpp/ggml dynamic libraries into `Contents/Frameworks`, verifies embedded Mach-O deployment targets, injects the URL into the built app's `Info.plist` when set, re-signs that copied app bundle, and checks that the final signature has the application identifier entitlement required by Secure Enclave. For testers outside your own Macs, use the Developer ID notarization path in `scripts/README.md` (`LOCAL_WALLET_NOTARIZE=1` plus a Developer ID Application identity and notarytool credentials) so Gatekeeper accepts the app without per-user Terminal re-signing. Removing quarantine from a trusted copy is less destructive than ad-hoc re-signing; ad-hoc re-signing breaks the entitlement identity needed for wallet creation.
+The package script builds the in-repo `wallet-node` daemon, embeds it at `Contents/Resources/bin/wallet-node`, copies llama.cpp/ggml dynamic libraries into `Contents/Frameworks`, verifies embedded Mach-O deployment targets, injects the URL into the built app's `Info.plist` when set, re-signs that copied app bundle, and checks that the final signature has the application identifier entitlement required by Secure Enclave. For testers outside your own Macs, use the Developer ID notarization path in `scripts/README.md` (`LOCAL_WALLET_NOTARIZE=1` plus a Developer ID Application identity and notarytool credentials) so Gatekeeper accepts the app without per-user Terminal re-signing. Removing quarantine from a trusted copy is less destructive than ad-hoc re-signing; ad-hoc re-signing breaks the entitlement identity needed for wallet creation.
 
 The v0.1 alpha zip targets macOS 14+ on Apple Silicon and does not embed the recommended GGUF model by default; onboarding installs the model during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` only for a large self-contained demo build. If the bundler URL variable is not set, the app still builds and the chat tool path can use local `wallet-node`; hosted composer submission is disabled. If Homebrew llama.cpp/ggml was built for a newer macOS, point `LOCAL_LLAMA_PREFIX` at a macOS 14-compatible local build before packaging.
 

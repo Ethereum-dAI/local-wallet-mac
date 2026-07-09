@@ -2,22 +2,22 @@
 
 Self-custodial Ethereum wallet for macOS with Secure Enclave key custody and ERC-4337 Kernel smart accounts.
 
-This is the macOS app repo. The current release line is **v0.1 alpha**: pre-1.0, under active development, not independently audited, and not production-ready custody software. It is open source (MIT/Apache-2.0) and paired with two sibling repositories:
+This is the macOS app repo. The current release line is **v0.1 alpha**: pre-1.0, under active development, not independently audited, and not production-ready custody software. It is open source (MIT/Apache-2.0) and contains two other components as in-repo directories:
 
-- **Protocol SDK** (`wallet-signature`, `wallet-kernel`, `wallet-addresses`): https://github.com/Ethereum-dAI/local-wallet-protocol
-- **Daemon** (`wallet-node` and supporting crates): https://github.com/Ethereum-dAI/local-wallet-daemon
+- **Protocol SDK** (`wallet-signature`, `wallet-kernel`, `wallet-addresses`): `local-wallet-protocol/`
+- **Daemon** (`wallet-node` and supporting crates): `local-wallet-daemon/`
 
 The mac app handles key custody (Secure Enclave + Keychain), session-key policy state, and local transaction construction. It delegates verified chain reads, ERC-4337 bundling, and receipt tracking to the daemon process. The FFI bridge in `rust-core/crates/ffi/` connects them in-process for deterministic crypto and Kernel permission operations.
 
 This is not the final product wallet UX. Treat it as an experimental working implementation and reference app for early testers.
 
-## Sibling Repos
+## Components
 
-| Repo | Purpose |
+| Directory | Purpose |
 |---|---|
-| `local-wallet-protocol` | `wallet-signature`, `wallet-kernel`, `wallet-addresses` — pre-1.0 (0.1.0) SDK crates, consumed via pinned git rev |
+| `local-wallet-protocol` | `wallet-signature`, `wallet-kernel`, `wallet-addresses` — pre-1.0 (0.1.0) SDK crates, consumed via in-repo `path` dependency |
 | `local-wallet-daemon` | `wallet-node`, `wallet-bundler`, `wallet-chain`, `wallet-node-api`, `wallet-node-store` — daemon binary and supporting libraries |
-| `local-wallet-mac` (this repo) | macOS app, `wallet-ffi`, `swift-bridge`, Xcode project, scripts |
+| (repo root) `local-wallet-mac` | macOS app, `wallet-ffi`, `swift-bridge`, Xcode project, scripts |
 
 ## Requirements
 
@@ -36,13 +36,12 @@ Additional requirements for local development:
 - Homebrew.
 - Rust via `rustup`, with the `aarch64-apple-darwin` target installed.
 - `cbindgen`, `xcodegen`, `llama.cpp`, and `ggml`.
-- Sibling checkouts of `local-wallet-protocol` and `local-wallet-daemon`.
 
 ## Repository Map
 
 | Path | Purpose |
 |---|---|
-| `rust-core/crates/ffi/` | Internal C ABI bridge (`wallet-ffi`). Protocol crates resolve from `local-wallet-protocol` via git dep. |
+| `rust-core/crates/ffi/` | Internal C ABI bridge (`wallet-ffi`). Protocol crates resolve from `local-wallet-protocol` via in-repo `path` dep. |
 | `swift-bridge/` | Swift package wrapping the FFI bridge. Generated artifacts are not committed. |
 | `wallet-macos/` | Signed macOS demo app and daemon spawn helper (`CSpawn`/`SpawnHelper`). |
 | `swift-probe/` | Minimal Swift probe for early integration checks. |
@@ -52,31 +51,14 @@ Additional requirements for local development:
 
 ## Quick Start
 
-You need all three repos checked out as siblings:
-
-```
-parent/
-  local-wallet-mac/      ← this repo
-  local-wallet-protocol/ ← SDK crates
-  local-wallet-daemon/   ← daemon binary
-```
-
-**Step 1: Clone siblings**
+Clone the single repo — `local-wallet-protocol/` and `local-wallet-daemon/` come along with it as in-repo directories:
 
 ```bash
-git clone https://github.com/Ethereum-dAI/local-wallet-protocol ../local-wallet-protocol
-git clone https://github.com/Ethereum-dAI/local-wallet-daemon ../local-wallet-daemon
+git clone https://github.com/Ethereum-dAI/local-wallet-mac.git
+cd local-wallet-mac
 ```
 
-**Step 2: Enable local path overrides for Rust**
-
-```bash
-cp rust-core/.cargo/config.toml.example rust-core/.cargo/config.toml
-```
-
-This redirects the git dependencies for `wallet-signature`, `wallet-kernel`, and `wallet-node-api` to your local checkouts.
-
-**Step 3: Build the FFI bridge**
+**Step 1: Build the FFI bridge**
 
 ```bash
 ./scripts/build-ffi.sh
@@ -84,13 +66,13 @@ This redirects the git dependencies for `wallet-signature`, `wallet-kernel`, and
 
 This compiles `wallet-ffi` for `aarch64-apple-darwin`, runs `cbindgen`, and stages the header and `.a` into `swift-bridge/`. The outputs are not committed to git.
 
-**Step 4: Build the daemon**
+**Step 2: Build the daemon**
 
 ```bash
-cd ../local-wallet-daemon && cargo build -p wallet-node --release
+cd local-wallet-daemon && cargo build -p wallet-node --release
 ```
 
-**Step 5: Open and run**
+**Step 3: Open and run**
 
 Open `LocalWallet.xcodeproj` in Xcode, select the `LocalWalletApp` scheme, choose your Apple development team, and build and run.
 
@@ -195,7 +177,7 @@ cargo run -p wallet-node -- --http 127.0.0.1:0 --print-ready --debug
 - `SECURITY.md` — security policy, supported scope, and vulnerability disclosure
 - `CONTRIBUTING.md` — contribution guidelines and crate stability tiers
 
-Daemon and protocol documentation live in their respective repos.
+Daemon and protocol documentation live in their respective directories (`local-wallet-daemon/`, `local-wallet-protocol/`).
 
 ## License
 

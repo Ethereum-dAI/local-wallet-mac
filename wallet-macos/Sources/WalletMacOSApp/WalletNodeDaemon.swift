@@ -249,7 +249,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
             return candidate
         }
 
-        throw AppError.localDaemonLaunchFailed("wallet-node binary was not found. Set WALLET_NODE_BIN (or LOCAL_WALLET_NODE_BIN) to an absolute path, or build wallet-node in a sibling local-wallet-daemon checkout.")
+        throw AppError.localDaemonLaunchFailed("wallet-node binary was not found. Set WALLET_NODE_BIN (or LOCAL_WALLET_NODE_BIN) to an absolute path, or build wallet-node in the in-repo local-wallet-daemon workspace.")
     }
 
     private static func sourceRootWalletNodePath(profile: String) -> String {

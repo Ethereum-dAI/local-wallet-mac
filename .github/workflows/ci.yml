@@ -1,0 +1,36 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local-wallet-protocol
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo test --workspace
+  daemon:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local-wallet-daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo test --workspace
+  ffi:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust-core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --check
+      - run: cargo clippy -p wallet-ffi -- -D warnings
+      - run: cargo test -p wallet-ffi

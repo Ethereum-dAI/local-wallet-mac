@@ -36,7 +36,7 @@ Because there's no pin to bump, a protocol or daemon change ships as soon as it 
 
 ### `local-wallet-mac` (app) — Swift + Rust FFI
 
-This repo has two CI workflows. `.github/workflows/ci.yml` (`protocol`, `daemon`, and `ffi` jobs, all on `ubuntu-latest`) runs on every push/PR and covers `fmt`/`clippy`/`test` for the Rust crates. `.github/workflows/macos.yml` runs the **full Swift suite** (`swift-bridge`, `local-llm`, `wallet-macos`) on `macos-14`, but only on **published releases, `v*` tags, and manual `workflow_dispatch`** — macOS runners cost ~10x, so it is intentionally kept off the per-commit path. That means the local sequence below (from `CONTRIBUTING.md`) is still the per-commit gate for Swift work. **`build-ffi.sh` is mandatory before any Swift build/test.**
+This repo has two CI workflows. `.github/workflows/ci.yml` (`protocol`, `daemon`, and `ffi` jobs, all on `ubuntu-latest`) runs on every push/PR and covers `fmt`/`clippy`/`test` for the Rust crates. `.github/workflows/macos.yml` runs the **full Swift suite** (`swift-bridge`, `local-llm`, `wallet-macos`) on `macos-15`, but only on **published releases, `v*` tags, and manual `workflow_dispatch`** — macOS runners cost ~10x, so it is intentionally kept off the per-commit path. That means the local sequence below (from `CONTRIBUTING.md`) is still the per-commit gate for Swift work. **`build-ffi.sh` is mandatory before any Swift build/test.**
 
 ```bash
 ./scripts/build-ffi.sh        # builds wallet-ffi for aarch64-apple-darwin, runs cbindgen,
@@ -78,7 +78,7 @@ cargo fmt --check && cargo clippy --workspace -- -D warnings
 
 - **Golden vectors:** `tooling/golden-vectors` is a TypeScript harness that drives the ZeroDev SDK to emit deterministic permission/session-key fixtures; the Rust suites assert **byte-for-byte parity** against them. Regenerate with `cd tooling/golden-vectors && npm install && npm run emit`, then copy `out/permission.json` into `crates/kernel/testdata/permission/` and `crates/signature/testdata/permission/`. Run this after changing any permission/session-key encoding.
 
-> CI for the two Rust components (`protocol`, `daemon` jobs in `.github/workflows/ci.yml`, plus the app's `ffi` job) runs on `ubuntu-latest` with `dtolnay/rust-toolchain@stable`. Since the protocol crates are an in-repo path dep, there's no private git dep and no credential/token to configure for CI or locally. The Swift/macOS suite runs in `.github/workflows/macos.yml` on `macos-14` (release/tag/manual only; installs `cbindgen`, `xcodegen`, `llama.cpp` via Homebrew, runs `build-ffi.sh`, builds the `wallet-node` release binary, then `swift test` per package). Toolchain baseline is **Rust 1.91+** (known-good 1.95); macOS 14+, Apple Silicon, Xcode 16, Swift 6.
+> CI for the two Rust components (`protocol`, `daemon` jobs in `.github/workflows/ci.yml`, plus the app's `ffi` job) runs on `ubuntu-latest` with `dtolnay/rust-toolchain@stable`. Since the protocol crates are an in-repo path dep, there's no private git dep and no credential/token to configure for CI or locally. The Swift/macOS suite runs in `.github/workflows/macos.yml` on `macos-15` (release/tag/manual only; installs `cbindgen`, `xcodegen`, `llama.cpp` via Homebrew, runs `build-ffi.sh`, builds the `wallet-node` release binary, then `swift test` per package). Toolchain baseline is **Rust 1.91+** (known-good 1.95); macOS 14+, Apple Silicon, Xcode 16, Swift 6.
 
 ## High-level architecture
 

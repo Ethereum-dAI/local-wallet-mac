@@ -39,9 +39,11 @@ jobs:
       - name: Build wallet-ffi + stage bridge lib/headers
         run: ./scripts/build-ffi.sh
 
-      - name: Build daemon release binary (required by SpawnHelperTests)
+      - name: Build daemon binary (required by SpawnHelperTests)
+        # SpawnHelperTests resolve local-wallet-daemon/target/debug/wallet-node
+        # by default (and XCTSkip when it's absent), so build the debug profile.
         working-directory: local-wallet-daemon
-        run: cargo build -p wallet-node --release
+        run: cargo build -p wallet-node
 
       - name: Test swift-bridge (WalletSignature)
         working-directory: swift-bridge

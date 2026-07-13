@@ -1,5 +1,14 @@
 name: CI
-on: [push, pull_request, workflow_dispatch]
+# push is scoped to main so PR branches don't double-run every job
+# (pull_request already covers them).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   protocol:
     runs-on: ubuntu-latest

@@ -58,8 +58,29 @@ pub async fn reconcile_once_with_submitter(
         let receipt = match chain.eth_get_transaction_receipt(tx_hash).await {
             Ok(receipt) => receipt,
             Err(_) => {
-                record_diagnostic(store, &tx, "receipt_lookup_failed").await?;
-                transitions += 1;
+                // The verified (Helios) read path can transiently fail — e.g. the target
+                // block sits outside the execution RPC's proof window, or reads are
+                // momentarily unsynced. When an execution-RPC submitter is available, use
+                // it as the source of truth before giving up: otherwise a UserOp that
+                // actually confirmed stays stuck 'submitted' and the app reports it as a
+                // (false) revert. With no fallback (or if it also errors) we record the
+                // lookup failure and retry on the next tick.
+                let fallback = match submitter {
+                    Some(_) => Some(fetch_submitter_receipt(submitter, tx_hash).await),
+                    None => None,
+                };
+                match fallback {
+                    Some(Ok(Some(receipt))) => {
+                        transitions += confirm_receipt(store, entry_point, &tx, receipt).await?;
+                    }
+                    // Execution RPC reached but the tx isn't mined yet: leave 'submitted'.
+                    Some(Ok(None)) => {}
+                    // No fallback available, or it also failed.
+                    _ => {
+                        record_diagnostic(store, &tx, "receipt_lookup_failed").await?;
+                        transitions += 1;
+                    }
+                }
                 continue;
             }
         };
@@ -2265,6 +2286,92 @@ mod tests {
             UserOpStatus::Included
         );
         assert!(store.receipt_get(user_op_hash).await.unwrap().is_some());
+
+        store.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn execution_rpc_receipt_fallback_confirms_when_verified_lookup_errors() {
+        // Regression: the verified (Helios) receipt lookup can *error* (proof window /
+        // transient outage), not just return None. Previously that recorded
+        // receipt_lookup_failed and left the op stuck 'submitted' — surfacing in the app
+        // as a false revert even though the tx confirmed. The execution-RPC submitter
+        // must be consulted on error too.
+        let store = store_handle().await;
+        let user_op_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let tx_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
+        store
+            .user_op_insert(pending_user_op(user_op_hash, UserOpStatus::Submitted))
+            .await
+            .unwrap();
+        store
+            .reserve_next_nonce(1, "0xbeef000000000000000000000000000000000000", 0)
+            .await
+            .unwrap();
+        store
+            .nonce_attach_tx_hash(1, "0xbeef000000000000000000000000000000000000", 0, tx_hash)
+            .await
+            .unwrap();
+        store
+            .nonce_set_status(
+                1,
+                "0xbeef000000000000000000000000000000000000",
+                0,
+                NonceStatus::Submitted,
+            )
+            .await
+            .unwrap();
+        store
+            .submitted_tx_insert(submitted_tx(
+                tx_hash,
+                user_op_hash,
+                SubmittedTxStatus::Submitted,
+            ))
+            .await
+            .unwrap();
+        let chain = MockChainAdapter::with_synced(true);
+        chain.inject_error(Box::new(|| {
+            wallet_chain::ChainError::RpcError(
+                "distance to target block exceeds proof window".into(),
+            )
+        }));
+        let submitter = MockSubmitter {
+            outcome: RawTransactionSubmitOutcome::AlreadyKnown,
+            receipt: Some(verified_receipt(tx_hash, user_op_hash, 1, true)),
+        };
+
+        let transitions =
+            reconcile_once_with_submitter(&store, &chain, ENTRY_POINT_V07, Some(&submitter))
+                .await
+                .unwrap();
+
+        assert_eq!(transitions, 1);
+        assert_eq!(
+            store
+                .submitted_tx_get(tx_hash)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            SubmittedTxStatus::Included
+        );
+        assert_eq!(
+            store
+                .user_op_get(user_op_hash)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            UserOpStatus::Included
+        );
+        // No false failure diagnostic recorded.
+        assert_eq!(
+            store
+                .diagnostic_get("user_operation", user_op_hash)
+                .await
+                .unwrap(),
+            None
+        );
 
         store.shutdown_and_wait().await.unwrap();
     }

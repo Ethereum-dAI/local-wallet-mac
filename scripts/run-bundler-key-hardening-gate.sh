@@ -1,32 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# After the multi-repo split (2026-05-11), daemon-side cargo invocations
-# resolve to the sibling local-wallet-daemon checkout. Override the default
-# location by setting LW_DAEMON_DIR=/path/to/local-wallet-daemon.
+# The daemon crates live in-repo at local-wallet-daemon/ (consolidated from
+# the former sibling checkout), so daemon-side cargo invocations resolve
+# there by default. Override the location by setting
+# LW_DAEMON_DIR=/path/to/local-wallet-daemon.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "=== Rust format ==="
-(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo fmt --check)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/local-wallet-daemon}" && cargo fmt --check)
 
 echo "=== Rust workspace tests ==="
-(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo test --workspace)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/local-wallet-daemon}" && cargo test --workspace)
 
 echo "=== Rust clippy ==="
-(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo clippy --workspace -- -D warnings)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/local-wallet-daemon}" && cargo clippy --workspace -- -D warnings)
 
 echo "=== wallet-node release build ==="
-(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo build -p wallet-node --release)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/local-wallet-daemon}" && cargo build -p wallet-node --release)
 
 echo "=== wallet-node fd integration ==="
-(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo test -p wallet-node --test integration_fd_e2e -- --include-ignored)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/local-wallet-daemon}" && cargo test -p wallet-node --test integration_fd_e2e -- --include-ignored)
 
 echo "=== wallet-node Unix transport integration ==="
-(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo test -p wallet-node --test integration_unix_e2e -- --include-ignored)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/local-wallet-daemon}" && cargo test -p wallet-node --test integration_unix_e2e -- --include-ignored)
 
 echo "=== wallet-node HTTP integration ==="
-(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/../local-wallet-daemon}" && cargo test -p wallet-node --test integration_e2e -- --include-ignored)
+(cd "${LW_DAEMON_DIR:-${ROOT_DIR}/local-wallet-daemon}" && cargo test -p wallet-node --test integration_e2e -- --include-ignored)
 
 echo "=== Swift bridge tests ==="
 (

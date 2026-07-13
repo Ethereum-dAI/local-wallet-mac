@@ -1,0 +1,60 @@
+name: macOS
+
+# Expensive Swift/macOS suite. macOS runners cost ~10x Linux minutes and the
+# LLM-linked packages pull llama.cpp from Homebrew, so this does NOT run on
+# every push/PR (the cheap ubuntu Rust jobs in ci.yml cover those). It runs on
+# published releases, version tags, and on-demand via the Actions "Run workflow"
+# button.
+on:
+  release:
+    types: [published]
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-15   # Apple Silicon (arm64); newer default Xcode/Swift (6.1+) than macos-14.
+    # NOTE: wallet-macos does not compile under Swift 6.0.3 (macos-14's newest Xcode) due to a
+    # pre-existing strict-concurrency error in ChatDashboardView.swift — tracked in issue #41.
+    # Using macos-15 (Swift 6.1+) is a stopgap until that source fix lands.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest installed Xcode (packages require Swift 6+)
+        # The default Xcode on the runner image can be Swift 5.10, but the Swift
+        # packages declare swift-tools-version 6.0. Pick the highest-versioned
+        # Xcode installed on the runner (image-agnostic).
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          swift --version
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install build tools (cbindgen, xcodegen, llama.cpp+ggml)
+        run: brew install cbindgen xcodegen llama.cpp
+
+      - name: Build wallet-ffi + stage bridge lib/headers
+        run: ./scripts/build-ffi.sh
+
+      - name: Build daemon binary (required by SpawnHelperTests)
+        # SpawnHelperTests resolve local-wallet-daemon/target/debug/wallet-node
+        # by default (and XCTSkip when it's absent), so build the debug profile.
+        working-directory: local-wallet-daemon
+        run: cargo build -p wallet-node
+
+      - name: Test swift-bridge (WalletSignature)
+        working-directory: swift-bridge
+        run: swift test
+
+      - name: Test local-llm (LocalLLM)
+        # Model-backed tests self-skip when the GGUF is absent (guarded on
+        # fileExists), so this runs without the multi-GB model download.
+        working-directory: local-llm
+        run: swift test
+
+      - name: Test wallet-macos (app, tool layer, SpawnHelper)
+        working-directory: wallet-macos
+        run: swift test

@@ -41,14 +41,14 @@ swift test
 It is built on top of:
 
 - `rust-core/crates/ffi` (local — internal C ABI bridge)
-- `wallet-signature` and `wallet-kernel` — protocol SDK crates that resolve via git dependency from [`local-wallet-protocol`](https://github.com/Ethereum-dAI/local-wallet-protocol)
-- `wallet-node-api` — version header only; resolves via git dependency from [`local-wallet-daemon`](https://github.com/Ethereum-dAI/local-wallet-daemon)
+- `wallet-signature` and `wallet-kernel` — protocol SDK crates that resolve via an in-repo relative `path` dependency from [`local-wallet-protocol`](../local-wallet-protocol)
+- `wallet-node-api` — version header only; resolves via an in-repo relative `path` dependency from [`local-wallet-daemon`](../local-wallet-daemon)
 
 It does not launch or manage the daemon directly. Daemon process spawning lives in `wallet-macos/Sources/Spawn` and `wallet-macos/Sources/SpawnHelper`.
 
 ## Local Development
 
-For monorepo-style local development, copy `rust-core/.cargo/config.toml.example` to `rust-core/.cargo/config.toml` and ensure `local-wallet-protocol` and `local-wallet-daemon` are checked out as siblings of this repo. The example config file contains Cargo `paths` overrides that redirect the git dependencies to your local sibling checkouts.
+`local-wallet-protocol` and `local-wallet-daemon` are ordinary directories in this repo (`../local-wallet-protocol` and `../local-wallet-daemon` from here), and `rust-core/Cargo.toml` already depends on them via committed relative `path` entries. There is no `.cargo/config.toml` override to install and no sibling checkout to clone — edits under either directory are picked up on the next build.
 
 ## Call Flow
 

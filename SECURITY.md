@@ -18,7 +18,7 @@ Out of scope for now:
 - unsupported forks or modified builds
 - hosted infrastructure that is not controlled by this project
 - issues caused by testnet RPC or bundler availability
-- `wallet-node` / `wallet-bundler` / `wallet-chain` daemon internals — self-relayed bundler EOA handling, JSON-RPC authentication, admin challenge flows, and transport binding live in the sibling [`local-wallet-daemon`](https://github.com/Ethereum-dAI/local-wallet-daemon) repo and are governed by that repo's `SECURITY.md`
+- `wallet-node` / `wallet-bundler` / `wallet-chain` daemon internals — self-relayed bundler EOA handling, JSON-RPC authentication, admin challenge flows, and transport binding live in the in-repo local-wallet-daemon workspace and are governed by that workspace's `SECURITY.md`
 
 ## Reporting
 

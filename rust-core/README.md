@@ -2,18 +2,18 @@
 
 `rust-core` is the Rust workspace for the macOS app's FFI layer.
 
-After the repository split, this workspace contains a single crate:
+This workspace contains a single crate:
 
 | Crate | Purpose |
 |---|---|
 | `wallet-ffi` | C ABI bridge consumed by `swift-bridge` and the macOS app. |
 
-The other crates that were previously here have moved to sibling repositories:
+The other crates it depends on live in sibling directories inside this same repo:
 
-- **`local-wallet-protocol`** — `wallet-signature`, `wallet-kernel`, `wallet-addresses`. Stable, semver-managed libraries. No networking, no secrets, no FFI.
-- **`local-wallet-daemon`** — `wallet-node`, `wallet-bundler`, `wallet-chain`, `wallet-node-api`, `wallet-node-store`. App-coupled daemon stack, pre-1.0.
+- **`local-wallet-protocol`** (`../local-wallet-protocol`) — `wallet-signature`, `wallet-kernel`, `wallet-addresses`. Stable, semver-managed libraries. No networking, no secrets, no FFI.
+- **`local-wallet-daemon`** (`../local-wallet-daemon`) — `wallet-node`, `wallet-bundler`, `wallet-chain`, `wallet-node-api`, `wallet-node-store`. App-coupled daemon stack, pre-1.0.
 
-`wallet-ffi` depends on `wallet-signature` and `wallet-kernel` from `local-wallet-protocol`, plus `wallet-node-api` from `local-wallet-daemon` (a build-materialization dep that `build-ffi.sh` uses to emit its cbindgen version header), all via git deps (with optional path overrides for local development). See `Cargo.toml` for the pinned revisions. Besides passkey UserOperation helpers, it exposes the Kernel session-permission helpers consumed by the macOS app for session-key enable, signing, estimation, and revoke flows.
+`wallet-ffi` depends on `wallet-signature` and `wallet-kernel` from `local-wallet-protocol`, plus `wallet-node-api` from `local-wallet-daemon` (a build-materialization dep that `build-ffi.sh` uses to emit its cbindgen version header), all via in-repo relative `path` dependencies committed in `Cargo.toml` — there is no git rev to pin and no override file to install. Besides passkey UserOperation helpers, it exposes the Kernel session-permission helpers consumed by the macOS app for session-key enable, signing, estimation, and revoke flows.
 
 ## Build And Test
 
@@ -39,23 +39,23 @@ That script builds `wallet-ffi` for `aarch64-apple-darwin`, runs `cbindgen`, and
 
 ## Mainnet-Fork Fixture
 
-The mainnet-fork Kernel fixture (`tests/mainnet_fork_kernel.rs`) now lives in `local-wallet-daemon`. Run it from that repo:
+The mainnet-fork Kernel fixture (`tests/mainnet_fork_kernel.rs`) lives in `local-wallet-daemon`. Run it from there:
 
 ```bash
-# From this repo's rust-core/, the sibling daemon checkout is two levels up.
+# From this repo's rust-core/, the daemon directory is one level up.
 ETH_RPC_URL=https://your-mainnet-rpc.example \
 WALLET_FORK_BLOCK_NUMBER=25001071 \
-../../local-wallet-daemon/scripts/run-kernel-mainnet-fork-check.sh
+../local-wallet-daemon/scripts/run-kernel-mainnet-fork-check.sh
 ```
 
-## Integration With Sibling Repos
+## Integration With The Protocol And Daemon Crates
 
 ```
 local-wallet-protocol          local-wallet-daemon
   wallet-signature  ──────────►  wallet-bundler
   wallet-kernel     ──────────►  wallet-node
                                  wallet-node-api
-                    ──────────►  wallet-ffi (this repo)
+                    ──────────►  wallet-ffi (this crate)
                                      │
                                      ▼ C ABI
                                  swift-bridge
@@ -64,7 +64,7 @@ local-wallet-protocol          local-wallet-daemon
                                  macOS app
 ```
 
-Path overrides in `rust-core/.cargo/config.toml` (not committed; copy the committed `.cargo/config.toml.example` template) let you point `wallet-ffi`'s git deps at local checkouts of `local-wallet-protocol` and `local-wallet-daemon` during development.
+`wallet-ffi` consumes `local-wallet-protocol` and `local-wallet-daemon` crates via in-repo relative `path` dependencies committed in `Cargo.toml` — no override file to copy, no sibling checkout to clone. Edits under `../local-wallet-protocol` or `../local-wallet-daemon` are picked up on the next build.
 
 ## Boundaries
 

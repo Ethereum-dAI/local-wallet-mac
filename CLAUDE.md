@@ -2,65 +2,41 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Scope:** This file lives in `local-wallet-mac` (the macOS app) but is written to guide work across the **three** repositories that make up Local Wallet. The daemon and protocol repos gitignore their own `CLAUDE.md`, so treat this as the shared entry point and read it from the app checkout when working in a sibling repo.
+> **Scope:** This file lives at the root of `local-wallet-mac`, the single repo that contains the macOS app, the protocol SDK, and the daemon. It is written to guide work across all **three** components. The daemon and protocol directories gitignore their own `CLAUDE.md`, so treat this as the shared entry point regardless of which component directory you're working in.
 
 ## What Local Wallet is
 
 A self-custodial, privacy-first Ethereum wallet for macOS (v0.1 **alpha**, pre-1.0, not audited). Key custody lives in the Secure Enclave + Keychain; chain reads are light-client-verified; ERC-4337 bundling runs **on-device**; and an on-device LLM turns natural language into reviewable transaction intents — no hosted backend on the core path.
 
-The product is split across three GitHub repos under the `Ethereum-dAI` org. The split is intentional and load-bearing — **put code in the right repo** (see [Repo boundaries](#repo-boundaries--where-code-goes)):
+The product is split into three components inside **one repo** under the `Ethereum-dAI` org. The split is intentional and load-bearing — **put code in the right component** (see [Repo boundaries](#repo-boundaries--where-code-goes)):
 
-| Repo (clone name) | Contains | Stability |
+| Component (directory) | Contains | Stability |
 |---|---|---|
-| **`local-wallet-mac`** (this repo) | macOS SwiftUI app, the `wallet-ffi` C-ABI bridge, Swift packages, on-device LLM, Xcode project, build/packaging scripts | pre-1.0 |
+| **`local-wallet-mac`** (repo root) | macOS SwiftUI app, the `wallet-ffi` C-ABI bridge, Swift packages, on-device LLM, Xcode project, build/packaging scripts | pre-1.0 |
 | **`local-wallet-protocol`** | Pure Rust SDK: `wallet-signature`, `wallet-kernel`, `wallet-addresses` — deterministic ZeroDev Kernel v3.3 / ERC-4337 encoding + signing. No FFI, no networking, no secrets. | **semver** |
 | **`local-wallet-daemon`** | `wallet-node` daemon + `wallet-bundler`, `wallet-chain`, `wallet-node-api`, `wallet-node-store` — self-relaying bundler, Helios reads, SQLite, JSON-RPC | pre-1.0 |
 
 The macOS app **spawns `wallet-node` as a child process** and talks to it over a local authenticated transport. Both the app's `wallet-ffi` and the daemon depend on the protocol crates, so the two sides agree on UserOp encoding **byte-for-byte**.
 
-## The local monorepo (sibling checkouts + the local↔remote dependency swap)
+## The local monorepo (one repo, in-repo path deps)
 
-The three repos stay separate on GitHub but must be cloned as **siblings under one parent** for local development — Rust path overrides, the Xcode daemon-binary path, and daemon spawn discovery all resolve relative to that layout.
+`local-wallet-protocol` and `local-wallet-daemon` used to be separate GitHub repos consumed as pinned git dependencies with a local path-override file. They have since been consolidated into this repo — there are no sibling checkouts to clone and no `.cargo/config.toml` override to set up.
 
 ```
-parent/
-  local-wallet-mac/        ← this repo (Xcode scheme points at ../local-wallet-daemon)
-  local-wallet-protocol/   ← wallet-signature / wallet-kernel / wallet-addresses
-  local-wallet-daemon/     ← wallet-node + supporting crates
+local-wallet-mac/            ← repo root (this file)
+  local-wallet-protocol/     ← wallet-signature / wallet-kernel / wallet-addresses
+  local-wallet-daemon/       ← wallet-node + supporting crates
 ```
 
-> Do **not** nest the protocol or daemon repos inside `local-wallet-mac`. The full first-clone walkthrough (prereqs, Xcode signing, model download) is in [`LOCAL_MONOREPO_SETUP.md`](LOCAL_MONOREPO_SETUP.md).
+`rust-core/Cargo.toml` (app) and `local-wallet-daemon/Cargo.toml` depend on the protocol crates via **in-repo relative `path` deps**, resolved from each manifest's own directory back up to `local-wallet-protocol/crates/*` at the repo root; the app's `wallet-node-api` dep points at `local-wallet-daemon/crates/wallet-node-api` the same way. There is no git rev to pin and no override to install: edits under `local-wallet-protocol/` or `local-wallet-daemon/` are picked up immediately by any consumer in the workspace, and `cargo metadata --manifest-path rust-core/Cargo.toml --format-version 1 >/dev/null` is enough to confirm Cargo resolves them. The full first-clone walkthrough (prereqs, Xcode signing, model download) is in [`LOCAL_MONOREPO_SETUP.md`](LOCAL_MONOREPO_SETUP.md).
 
-### Pinned git rev (remote) vs. path override (local) — the key mechanism
-
-This is the most important cross-repo concept. The protocol crates are consumed two different ways depending on whether you're building a release or doing live development:
-
-- **Remote (committed, reproducible):** `rust-core/Cargo.toml` (app) and `Cargo.toml` (daemon) depend on the protocol crates as a **git dependency pinned to an exact rev** (e.g. `wallet-signature = { git = "…/local-wallet-protocol.git", rev = "ea28622a…" }`). The app additionally pins `wallet-node-api` to a daemon rev — a version-header-only dep that forces cbindgen to materialize `wallet_node_api_version.h` during the FFI build. **These pinned revs are the release contract.**
-- **Local (gitignored, live):** copying the example Cargo config installs a **path override** that transparently redirects those git deps to your sibling working copies — it behaves like a symlink from the pinned remote rev to local source, so edits in `local-wallet-protocol` / `local-wallet-daemon` are picked up immediately without re-pinning:
-
-  ```bash
-  # in local-wallet-mac (overrides BOTH protocol and daemon):
-  cp rust-core/.cargo/config.toml.example rust-core/.cargo/config.toml   # paths = ["../../local-wallet-protocol", "../../local-wallet-daemon"]
-  # in local-wallet-daemon (overrides protocol only):
-  cp .cargo/config.toml.example .cargo/config.toml                       # paths = ["../local-wallet-protocol"]
-  ```
-
-  `.cargo/config.toml` is **gitignored in every repo — never commit it.** Paths are resolved from the directory containing `.cargo/` (so `../../` from `rust-core/`, `../` from the daemon root → the siblings). Verify Cargo sees the local crates with `cargo metadata --manifest-path rust-core/Cargo.toml --format-version 1 >/dev/null`.
-
-### Bumping the protocol pin (shipping a protocol/daemon change end-to-end)
-
-Because the path override masks the rev locally, a protocol change only ships once the pin is bumped in the consumers:
-
-1. Land the change in `local-wallet-protocol` (branch off fresh `main`, PR — see [etiquette](#conventions--etiquette)), get the merged commit SHA.
-2. Update `rev = "<new-sha>"` for **all three** protocol crates in **both** `local-wallet-mac/rust-core/Cargo.toml` and `local-wallet-daemon/Cargo.toml` (and the `wallet-node-api` rev in the app if a daemon API change is needed).
-3. Refresh each consumer's lockfile: `cargo update -p wallet-signature -p wallet-kernel -p wallet-addresses`.
-4. Verify in a build **with the path override disabled** (rename `.cargo/config.toml`) or rely on CI, since overrides hide the rev locally.
+Because there's no pin to bump, a protocol or daemon change ships as soon as it lands on `main` in this repo — no rev bump, no lockfile re-pin, no override toggling. Land the change (branch off fresh `main`, PR — see [etiquette](#conventions--etiquette)) and the app/daemon builds pick it up on the next build via the path dep.
 
 ## Common commands
 
 ### `local-wallet-mac` (app) — Swift + Rust FFI
 
-The app repo has **no CI**; the sequence below (from `CONTRIBUTING.md`) is the local gate. **`build-ffi.sh` is mandatory before any Swift build/test.**
+This repo has two CI workflows. `.github/workflows/ci.yml` (`protocol`, `daemon`, and `ffi` jobs, all on `ubuntu-latest`) runs on every push/PR and covers `fmt`/`clippy`/`test` for the Rust crates. `.github/workflows/macos.yml` runs the **full Swift suite** (`swift-bridge`, `local-llm`, `wallet-macos`) on `macos-15`, but only on **published releases, `v*` tags, and manual `workflow_dispatch`** — macOS runners cost ~10x, so it is intentionally kept off the per-commit path. That means the local sequence below (from `CONTRIBUTING.md`) is still the per-commit gate for Swift work. **`build-ffi.sh` is mandatory before any Swift build/test.**
 
 ```bash
 ./scripts/build-ffi.sh        # builds wallet-ffi for aarch64-apple-darwin, runs cbindgen,
@@ -81,7 +57,7 @@ xcodegen generate             # regenerate LocalWallet.xcodeproj after editing p
 ### `local-wallet-daemon` — Rust (CI: `fmt --check` → `clippy -- -D warnings` → `test --workspace`)
 
 ```bash
-cargo build -p wallet-node --release          # the app's Xcode scheme runs ../local-wallet-daemon/target/release/wallet-node
+cargo build -p wallet-node --release          # the app's Xcode scheme runs local-wallet-daemon/target/release/wallet-node
 cargo run -p wallet-node -- --http 127.0.0.1:0 --print-ready --debug   # local HTTP dev mode (prints bearer token + httpAddr)
 cargo test --workspace                        # default suite
 cargo test -p wallet-node -- --include-ignored   # host/socket integration tests (opt-in)
@@ -102,7 +78,7 @@ cargo fmt --check && cargo clippy --workspace -- -D warnings
 
 - **Golden vectors:** `tooling/golden-vectors` is a TypeScript harness that drives the ZeroDev SDK to emit deterministic permission/session-key fixtures; the Rust suites assert **byte-for-byte parity** against them. Regenerate with `cd tooling/golden-vectors && npm install && npm run emit`, then copy `out/permission.json` into `crates/kernel/testdata/permission/` and `crates/signature/testdata/permission/`. Run this after changing any permission/session-key encoding.
 
-> CI for the two Rust repos runs on `ubuntu-latest` with `dtolnay/rust-toolchain@stable`. The daemon's private protocol git deps need the `LW_CI_REPO_READ_TOKEN` secret (`CARGO_NET_GIT_FETCH_WITH_CLI=true`); locally your own git credentials cover it. Toolchain baseline is **Rust 1.91+** (known-good 1.95); macOS 14+, Apple Silicon, Xcode 16, Swift 6.
+> CI for the two Rust components (`protocol`, `daemon` jobs in `.github/workflows/ci.yml`, plus the app's `ffi` job) runs on `ubuntu-latest` with `dtolnay/rust-toolchain@stable`. Since the protocol crates are an in-repo path dep, there's no private git dep and no credential/token to configure for CI or locally. The Swift/macOS suite runs in `.github/workflows/macos.yml` on `macos-15` (release/tag/manual only; installs `cbindgen`, `xcodegen`, `llama.cpp` via Homebrew, runs `build-ffi.sh`, builds the `wallet-node` release binary, then `swift test` per package). Toolchain baseline is **Rust 1.91+** (known-good 1.95); macOS 14+, Apple Silicon, Xcode 16, Swift 6.
 
 ## High-level architecture
 
@@ -143,7 +119,7 @@ Send path order inside the daemon: parse → policy/allowlist/gas-cap → same-b
 
 - **Packages → products consumed by the `LocalWalletApp` target:** `swift-bridge` (`WalletSignature`, wrapping `wallet-ffi`) · `local-llm` (`LocalLLM`, vendored llama.cpp/ggml) · `wallet-macos` (`WalletMacOSApp` the SwiftUI app, `WalletToolLayer` tool-intent recognition, `SpawnHelper`/`CSpawn` the daemon launcher, `wallet-eval` benchmark CLI). The Xcode project is generated from `project.yml`.
 - **On-device LLM:** Gemma 4 E4B via llama.cpp/ggml (Metal, no network at inference), model at `~/Library/Application Support/LocalWallet/Models/`, chat history in `chat.sqlite`. `WalletToolLayer` turns natural language / `/transfer` / `/swap` into reviewable, Secure-Enclave-signed, daemon-submitted intents.
-- **Daemon spawn + lifecycle contract** (`WalletNodeDaemon.swift` + `Sources/Spawn`): the daemon is always launched `wallet-node --ready-fd 3 --alive-fd 4 --secret-fd 5` via `posix_spawn` over three inherited pipes (fd 3 = ready pipe the daemon writes the bearer token + socket path to; fd 4 = alive pipe whose EOF tells the daemon to exit; fd 5 = secret pipe the app writes the bundler-EOA secret to at startup). The daemon also self-exits when `getppid() == 1` (orphan backstop). **Do not change the fd contract without updating `Sources/Spawn` and `SpawnHelperTests`.** Daemon binary resolution order: `LOCAL_WALLET_NODE_BIN` → `WALLET_NODE_BIN` → bundled `bin/wallet-node` → bundled top-level `wallet-node`. The Xcode scheme sets both env vars to `$(SRCROOT)/../local-wallet-daemon/target/release/wallet-node`.
+- **Daemon spawn + lifecycle contract** (`WalletNodeDaemon.swift` + `Sources/Spawn`): the daemon is always launched `wallet-node --ready-fd 3 --alive-fd 4 --secret-fd 5` via `posix_spawn` over three inherited pipes (fd 3 = ready pipe the daemon writes the bearer token + socket path to; fd 4 = alive pipe whose EOF tells the daemon to exit; fd 5 = secret pipe the app writes the bundler-EOA secret to at startup). The daemon also self-exits when `getppid() == 1` (orphan backstop). **Do not change the fd contract without updating `Sources/Spawn` and `SpawnHelperTests`.** Daemon binary resolution order: `LOCAL_WALLET_NODE_BIN` → `WALLET_NODE_BIN` → bundled `bin/wallet-node` → bundled top-level `wallet-node`. The Xcode scheme sets both env vars to `$(SRCROOT)/local-wallet-daemon/target/release/wallet-node`.
 
 ## Repo boundaries — where code goes
 
@@ -165,4 +141,4 @@ Send path order inside the daemon: parse → policy/allowlist/gas-cap → same-b
 
 **Do NOT routine-bump the Helios pin** (`helios-ethereum`/`helios-core` in the daemon). Only bump for an explicit security/correctness/compat reason, and re-run the stateOverride smoke (`cargo test -p wallet-chain -- --include-ignored`) and the mainnet-fork fixture before merging.
 
-**Etiquette:** all three repos are dual-licensed **MIT OR Apache-2.0** (new crates inherit `license.workspace = true`). `cargo fmt --check` and `clippy -- -D warnings` are required for the Rust repos. Never commit to `main` in any repo — branch off fresh `main` and open a PR; for anything beyond a typo/small test/doc fix, open an issue first (especially changes to the policy/allowlist or signing surface). Protocol crates follow **semver**; breaking changes ship as a major version.
+**Etiquette:** all three components are dual-licensed **MIT OR Apache-2.0** (new crates inherit `license.workspace = true`). `cargo fmt --check` and `clippy -- -D warnings` are required for the Rust components. Never commit directly to `main` — branch off fresh `main` and open a PR; for anything beyond a typo/small test/doc fix, open an issue first (especially changes to the policy/allowlist or signing surface). Protocol crates follow **semver**; breaking changes ship as a major version.

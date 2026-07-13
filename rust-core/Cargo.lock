@@ -1840,7 +1840,6 @@ dependencies = [
 [[package]]
 name = "wallet-addresses"
 version = "0.1.0"
-source = "git+https://github.com/Ethereum-dAI/local-wallet-protocol.git?rev=ea28622aabcc4b0256d86fef8e0fee4d9cd37858#ea28622aabcc4b0256d86fef8e0fee4d9cd37858"
 dependencies = [
  "alloy-primitives",
 ]
@@ -1865,7 +1864,6 @@ dependencies = [
 [[package]]
 name = "wallet-kernel"
 version = "0.1.0"
-source = "git+https://github.com/Ethereum-dAI/local-wallet-protocol.git?rev=ea28622aabcc4b0256d86fef8e0fee4d9cd37858#ea28622aabcc4b0256d86fef8e0fee4d9cd37858"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -1875,7 +1873,6 @@ dependencies = [
 [[package]]
 name = "wallet-node-api"
 version = "0.1.0"
-source = "git+https://github.com/Ethereum-dAI/local-wallet-daemon.git?rev=4b97943e4455d1aad6095374ba00c3b9d9228dc7#4b97943e4455d1aad6095374ba00c3b9d9228dc7"
 dependencies = [
  "hex",
  "serde",
@@ -1886,7 +1883,6 @@ dependencies = [
 [[package]]
 name = "wallet-signature"
 version = "0.1.0"
-source = "git+https://github.com/Ethereum-dAI/local-wallet-protocol.git?rev=ea28622aabcc4b0256d86fef8e0fee4d9cd37858#ea28622aabcc4b0256d86fef8e0fee4d9cd37858"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",

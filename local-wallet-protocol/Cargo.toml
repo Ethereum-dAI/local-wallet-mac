@@ -1,0 +1,35 @@
+[workspace]
+members = [
+    "crates/signature",
+    "crates/kernel",
+    "crates/wallet-addresses",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+alloy-primitives = { version = "1.5", features = ["serde"] }
+alloy-sol-types  = "1.5"
+alloy            = "1.8"
+helios-ethereum = { git = "https://github.com/a16z/helios", rev = "204c998a927348e1c000a664f08d5b37b1b0d924" }
+helios-core     = { git = "https://github.com/a16z/helios", rev = "204c998a927348e1c000a664f08d5b37b1b0d924" }
+async-trait     = "0.1"
+sha2             = "0.10"
+p256             = { version = "0.13", features = ["ecdsa"] }
+hex-literal      = "0.4"
+tokio            = { version = "1", features = ["full"] }
+serde            = { version = "1", features = ["derive"] }
+serde_json       = "1"
+tracing          = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror        = "1"
+anyhow           = "1"
+rusqlite         = { version = "0.32", features = ["bundled"] }
+rusqlite_migration = "1"
+tracing-appender = "0.2"
+hex              = "0.4"
+zeroize          = "1"

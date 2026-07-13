@@ -6,14 +6,15 @@ pipes, so the app launches the daemon through `posix_spawn`.
 
 ## Integration Path
 
-1. Build the daemon from the sibling `local-wallet-daemon` repo:
+1. Build the daemon from the in-repo `local-wallet-daemon` directory:
 
    ```sh
-   cd ../local-wallet-daemon
+   cd local-wallet-daemon
    cargo build -p wallet-node
+   cd ..
    ```
 
-2. Run the Swift shim test from this repo:
+2. Run the Swift shim test from `wallet-macos`:
 
    ```sh
    cd wallet-macos
@@ -21,7 +22,8 @@ pipes, so the app launches the daemon through `posix_spawn`.
    ```
 
 The test resolves `../local-wallet-daemon/target/debug/wallet-node` relative to
-`wallet-macos/Package.swift`. Set `WALLET_NODE_BIN=/absolute/path/to/wallet-node`
+`wallet-macos/Package.swift` (i.e. `local-wallet-daemon/` at the repo root, one
+level up from `wallet-macos/`). Set `WALLET_NODE_BIN=/absolute/path/to/wallet-node`
 to test a non-default binary path.
 
 ## Design

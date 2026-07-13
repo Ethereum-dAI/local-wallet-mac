@@ -1,0 +1,39 @@
+# Rust build outputs
+/target
+
+# Local cargo config (machine-specific paths override)
+.cargo/config.toml
+
+# Local assistant / planning files
+.claude/
+.codex/
+.commandcode/
+CLAUDE.md
+TODO.md
+ARCHITECTURE.md
+OPEN-POINTS.md
+ASSUMPTIONS_ANALYSIS.md
+docs/
+
+# GitHub issue templates kept local-only
+.github/ISSUE_TEMPLATE/
+
+# macOS noise
+.DS_Store
+
+# Editor / shell noise
+.idea/
+.vscode/
+*.swp
+*.swo
+*.log
+*.bak
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Vendored monorepo: keep the daemon's published docs (masked by the ARCHITECTURE.md pattern above on case-insensitive FS)
+!documentation/
+!documentation/**

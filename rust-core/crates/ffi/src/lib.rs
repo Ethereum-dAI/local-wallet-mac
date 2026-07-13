@@ -6,10 +6,9 @@ use std::panic::catch_unwind;
 use wallet_kernel::{
     call_policy, ecdsa_signer_entry, enable_digest, encode_enable_data, encode_initialize_call,
     encode_permission_nonce_key, encode_selector_data_default_action, gas_policy,
-    grant_access_calldata, install_validations_calldata, invalidate_nonce_calldata,
-    permission_id, permission_validation_id, predict_kernel_account_address,
-    rate_limit_policy, timestamp_policy, uninstall_permission_calldata, AllowRule,
-    AllowedCall, Condition,
+    grant_access_calldata, install_validations_calldata, invalidate_nonce_calldata, permission_id,
+    permission_validation_id, predict_kernel_account_address, rate_limit_policy, timestamp_policy,
+    uninstall_permission_calldata, AllowRule, AllowedCall, Condition,
 };
 use wallet_signature::{
     abi_encode_dummy_signature as signature_abi_encode_dummy_signature,
@@ -1001,11 +1000,11 @@ pub unsafe extern "C" fn wallet_session_install_validations_calldata(
         {
             return WalletResult::InvalidInput as i32;
         }
-        let permission_id =
-            match <[u8; 4]>::try_from(std::slice::from_raw_parts(permission_id, 4)) {
-                Ok(value) => value,
-                Err(_) => return WalletResult::InvalidInput as i32,
-            };
+        let permission_id = match <[u8; 4]>::try_from(std::slice::from_raw_parts(permission_id, 4))
+        {
+            Ok(value) => value,
+            Err(_) => return WalletResult::InvalidInput as i32,
+        };
         let validation_data = if validation_data_len == 0 {
             &[]
         } else {
@@ -1047,17 +1046,21 @@ pub unsafe extern "C" fn wallet_session_grant_access_calldata(
         if permission_id.is_null() || selector.is_null() || out_ptr.is_null() || out_len.is_null() {
             return WalletResult::InvalidInput as i32;
         }
-        let permission_id =
-            match <[u8; 4]>::try_from(std::slice::from_raw_parts(permission_id, 4)) {
-                Ok(value) => value,
-                Err(_) => return WalletResult::InvalidInput as i32,
-            };
+        let permission_id = match <[u8; 4]>::try_from(std::slice::from_raw_parts(permission_id, 4))
+        {
+            Ok(value) => value,
+            Err(_) => return WalletResult::InvalidInput as i32,
+        };
         let selector = match <[u8; 4]>::try_from(std::slice::from_raw_parts(selector, 4)) {
             Ok(value) => value,
             Err(_) => return WalletResult::InvalidInput as i32,
         };
 
-        match write_heap_buffer(grant_access_calldata(permission_id, selector), out_ptr, out_len) {
+        match write_heap_buffer(
+            grant_access_calldata(permission_id, selector),
+            out_ptr,
+            out_len,
+        ) {
             Ok(()) => WalletResult::Ok as i32,
             Err(result) => result as i32,
         }

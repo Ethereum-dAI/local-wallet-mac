@@ -61,7 +61,7 @@ schemes:
     run:
       config: Debug
       environmentVariables:
-        LOCAL_WALLET_NODE_BIN: $(SRCROOT)/../local-wallet-daemon/target/release/wallet-node
-        WALLET_NODE_BIN: $(SRCROOT)/../local-wallet-daemon/target/release/wallet-node
+        LOCAL_WALLET_NODE_BIN: $(SRCROOT)/local-wallet-daemon/target/release/wallet-node
+        WALLET_NODE_BIN: $(SRCROOT)/local-wallet-daemon/target/release/wallet-node
     archive:
       config: Release

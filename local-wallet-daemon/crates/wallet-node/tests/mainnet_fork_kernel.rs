@@ -369,7 +369,44 @@ async fn pinned_kernel_factory_path_validates_on_mainnet_fork() {
         transfer_amount,
     );
     let transfer_hash = entry_point_user_op_hash(&client, &rpc_url, &transfer_op).await;
-    let signed_transfer = sign_user_op_for_test(transfer_op, transfer_hash, &signing_key, false).op;
+    // Sign with usePrecompiled=true so on-chain validation routes the passkey
+    // signature through the RIP-7212 / EIP-7951 P-256 precompile (0x100) instead of
+    // the Daimo verifier. This exercises the full handleOps path (validate + execute)
+    // through the precompile end to end (issue #42). The false/Daimo execution path
+    // remains covered by the 50-send flatness loop below.
+    let signed_transfer = sign_user_op_for_test(transfer_op, transfer_hash, &signing_key, true).op;
+    // Guard: the usePrecompiled flag must actually change the encoded signature,
+    // otherwise the "precompile path" would silently collapse to the Daimo path.
+    let daimo_signed_variant = sign_user_op_for_test(
+        realistic_transfer_user_op(
+            signed_sender,
+            U256::ZERO,
+            transfer_recipient,
+            transfer_amount,
+        ),
+        transfer_hash,
+        &signing_key,
+        false,
+    )
+    .op;
+    assert_ne!(
+        signed_transfer.signature, daimo_signed_variant.signature,
+        "usePrecompiled=true must produce a different encoded signature than the Daimo path"
+    );
+    // The Kernel WebAuthnValidator must accept the precompile-encoded signature
+    // (ERC-1271 magic value), proving it invokes 0x100 and the precompile verifies.
+    assert_eq!(
+        webauthn_is_valid_signature(
+            &client,
+            &rpc_url,
+            signed_sender,
+            transfer_hash,
+            signed_transfer.signature.clone()
+        )
+        .await,
+        [0x16, 0x26, 0xba, 0x7e],
+        "WebAuthnValidator must validate the usePrecompiled=true signature via RIP-7212"
+    );
     let transfer_validation = wallet_bundler::decode_validation_result(
         &eth_call_with_state_override(
             &client,

@@ -4,7 +4,7 @@ use wallet_chain::BlockTag;
 
 use crate::config::ReadVerificationMode;
 use crate::handlers::wallet::bundler_status::THRESHOLD_LOW;
-use crate::state::{DaemonState, StateOverrideSmokeStatus};
+use crate::state::{DaemonState, P256PrecompileStatus, StateOverrideSmokeStatus};
 
 pub(crate) const DEGRADED_REASON_HELIOS_LAGGING: &str = "helios_lagging";
 pub(crate) const DEGRADED_REASON_HELIOS_UNREACHABLE: &str = "helios_unreachable";
@@ -58,6 +58,7 @@ pub async fn handle(state: &DaemonState) -> Value {
         read_verification,
         helios: chain_health.helios,
         bundler: bundler_health,
+        p256_precompile: P256PrecompileStatusView::from_state(state),
         wallet: None,
     };
 
@@ -352,7 +353,34 @@ struct HealthResponse {
     read_verification: ReadVerificationStatus,
     helios: HeliosStatus,
     bundler: Value,
+    p256_precompile: P256PrecompileStatusView,
     wallet: Option<Value>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct P256PrecompileStatusView {
+    status: &'static str,
+    /// Effective decision the app should encode into the on-chain WebAuthn
+    /// signature: `true` routes verification through the RIP-7212 precompile.
+    use_precompiled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+impl P256PrecompileStatusView {
+    fn from_state(state: &DaemonState) -> Self {
+        let (status, reason) = match state.p256_precompile_status() {
+            P256PrecompileStatus::Pending => ("pending", None),
+            P256PrecompileStatus::Available => ("available", None),
+            P256PrecompileStatus::Unavailable(reason) => ("unavailable", Some(reason)),
+        };
+        Self {
+            status,
+            use_precompiled: state.effective_use_precompiled(),
+            reason,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -965,6 +993,39 @@ mod tests {
         assert_eq!(value["reason"], DEGRADED_REASON_BUNDLER_NEEDS_TOPUP);
         assert_eq!(value["bundler"]["ready"], false);
         assert_eq!(value["bundler"]["needsTopup"], true);
+    }
+
+    #[tokio::test]
+    async fn health_reports_p256_precompile_available_and_use_precompiled() {
+        let state = test_state(synced_chain(100, 105));
+        state.mark_p256_precompile_available();
+
+        let value = handle(&state).await;
+
+        assert_eq!(value["p256Precompile"]["status"], "available");
+        assert_eq!(value["p256Precompile"]["usePrecompiled"], true);
+    }
+
+    #[tokio::test]
+    async fn health_reports_p256_precompile_unavailable_falls_back_to_daimo() {
+        let state = test_state(synced_chain(100, 105));
+        state.mark_p256_precompile_unavailable("precompile_absent");
+
+        let value = handle(&state).await;
+
+        assert_eq!(value["p256Precompile"]["status"], "unavailable");
+        assert_eq!(value["p256Precompile"]["usePrecompiled"], false);
+        assert_eq!(value["p256Precompile"]["reason"], "precompile_absent");
+    }
+
+    #[tokio::test]
+    async fn health_reports_p256_precompile_pending_before_probe() {
+        let state = test_state(synced_chain(100, 105));
+
+        let value = handle(&state).await;
+
+        assert_eq!(value["p256Precompile"]["status"], "pending");
+        assert_eq!(value["p256Precompile"]["usePrecompiled"], false);
     }
 
     #[tokio::test]

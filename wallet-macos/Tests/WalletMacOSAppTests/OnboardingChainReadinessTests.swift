@@ -57,6 +57,61 @@ import Testing
     #expect(status.bundler?.reason == "bundler_eoa_missing")
 }
 
+@Test func networkStatusDecodesP256PrecompileAvailable() throws {
+    let status = try WalletNodeClient.NetworkStatus(json: [
+        "status": "bundler_ready",
+        "chainId": 1,
+        "networkProfile": "mainnet",
+        "helios": [
+            "ready": true,
+            "checkpointLoaded": true,
+        ],
+        "p256Precompile": [
+            "status": "available",
+            "usePrecompiled": true,
+        ],
+    ])
+
+    #expect(status.p256Precompile?.status == "available")
+    #expect(status.p256Precompile?.usePrecompiled == true)
+    #expect(status.p256Precompile?.reason == nil)
+}
+
+@Test func networkStatusDecodesP256PrecompileUnavailableWithReason() throws {
+    let status = try WalletNodeClient.NetworkStatus(json: [
+        "status": "bundler_ready",
+        "chainId": 1,
+        "networkProfile": "mainnet",
+        "helios": [
+            "ready": true,
+            "checkpointLoaded": true,
+        ],
+        "p256Precompile": [
+            "status": "unavailable",
+            "usePrecompiled": false,
+            "reason": "precompile_absent",
+        ],
+    ])
+
+    #expect(status.p256Precompile?.status == "unavailable")
+    #expect(status.p256Precompile?.usePrecompiled == false)
+    #expect(status.p256Precompile?.reason == "precompile_absent")
+}
+
+@Test func networkStatusTreatsMissingP256PrecompileAsNil() throws {
+    let status = try WalletNodeClient.NetworkStatus(json: [
+        "status": "bundler_ready",
+        "chainId": 1,
+        "networkProfile": "mainnet",
+        "helios": [
+            "ready": true,
+            "checkpointLoaded": true,
+        ],
+    ])
+
+    #expect(status.p256Precompile == nil)
+}
+
 @Test func networkStatusDecodesSyncingHealthShape() throws {
     let status = try WalletNodeClient.NetworkStatus(json: [
         "status": "syncing_consensus",

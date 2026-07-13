@@ -100,7 +100,7 @@ pub async fn handle(
         &op,
         block,
         runtime,
-        state.config.bundler.use_precompiled,
+        state.effective_use_precompiled(),
     )
     .await?;
 

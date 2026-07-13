@@ -347,7 +347,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
         [bundler]
         entry_points = ["\(entryPoint)"]
         submit_rpcs = ["\(executionRPC)"]
-        use_precompiled = false
+        use_precompiled = true
 
         [policy]
         max_user_ops_per_bundle = 1

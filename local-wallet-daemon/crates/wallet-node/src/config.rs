@@ -165,7 +165,10 @@ impl Default for BundlerConfig {
         Self {
             entry_points: vec![DEFAULT_ENTRY_POINT.to_owned()],
             submit_rpcs: vec![DEFAULT_EXECUTION_RPC.to_owned()],
-            use_precompiled: false,
+            // Auto: route passkey signatures through the RIP-7212 P-256 precompile
+            // (~3.4k gas vs ~330k for the Daimo verifier) whenever the on-chain probe
+            // confirms it is available. Set to `false` to force the Daimo verifier.
+            use_precompiled: true,
             beneficiary: None,
         }
     }
@@ -494,7 +497,9 @@ burst = 30
             config.bundler.submit_rpcs,
             vec!["https://ethereum-rpc.publicnode.com"]
         );
-        assert!(!config.bundler.use_precompiled);
+        // Default preference is "auto": prefer the P-256 precompile, gated at runtime
+        // by the on-chain availability probe.
+        assert!(config.bundler.use_precompiled);
         assert_eq!(config.bundler.beneficiary, None);
         assert_eq!(config.policy.max_user_ops_per_bundle, 1);
         assert_eq!(config.policy.max_call_gas_limit, "0x989680");

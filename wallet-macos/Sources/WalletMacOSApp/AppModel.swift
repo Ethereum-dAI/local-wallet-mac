@@ -1396,9 +1396,11 @@ final class AppModel: ObservableObject {
                 let draft = try await buildCurrentUserOperationDraft()
                 appendDraftLogSummary(draft, context: "build")
 
+                let usePrecompiled = await resolveUsePrecompiled(logContext: "build")
                 let enrichedDraft = try await enrichDraftWithLocalBundlerEstimation(
                     draft,
-                    logContext: "build"
+                    logContext: "build",
+                    usePrecompiled: usePrecompiled
                 )
                 builtUserOperationDraft = enrichedDraft
 
@@ -1475,6 +1477,7 @@ final class AppModel: ObservableObject {
             }
         }
 
+        let usePrecompiled = await resolveUsePrecompiled(logContext: "session-enable")
         let policy = settingsStore.sessionPolicy
         let assembly = try SessionEnableAssembler.assemble(
             policy: policy,
@@ -1492,7 +1495,8 @@ final class AppModel: ObservableObject {
             enableDigestSigner: { [self] digest in
                 try signSessionEnableDigest(
                     digest,
-                    reason: "Enable session keys for \(activeChain.name)"
+                    reason: "Enable session keys for \(activeChain.name)",
+                    usePrecompiled: usePrecompiled
                 )
             }
         )
@@ -1998,11 +2002,14 @@ final class AppModel: ObservableObject {
         }
         appendDraftLogSummary(draft, context: logContext)
 
+        let usePrecompiled = await resolveUsePrecompiled(logContext: logContext)
+
         let enrichedDraft: UserOperationDraft
         do {
             enrichedDraft = try await enrichDraftWithLocalBundlerEstimation(
                 draft,
                 logContext: logContext,
+                usePrecompiled: usePrecompiled,
                 sessionPlan: sessionPlan
             )
         } catch {
@@ -2034,7 +2041,7 @@ final class AppModel: ObservableObject {
                         userOpHash: userOpHash,
                         r: signature.r,
                         s: lowS,
-                        usePrecompiled: false
+                        usePrecompiled: usePrecompiled
                     )
                     appendLog("\(logContext): encoded Kernel/WebAuthn signature (\(encoded.count) bytes)")
                     return encoded
@@ -2270,7 +2277,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func signSessionEnableDigest(_ digest: Data, reason: String) throws -> Data {
+    private func signSessionEnableDigest(_ digest: Data, reason: String, usePrecompiled: Bool) throws -> Data {
         let preimage = try WalletSignature.computeSigningPreimage(userOpHash: digest)
         let signature = try keyStore.sign(preimage: preimage, reason: reason)
         var lowS = signature.s
@@ -2279,7 +2286,7 @@ final class AppModel: ObservableObject {
             userOpHash: digest,
             r: signature.r,
             s: lowS,
-            usePrecompiled: false
+            usePrecompiled: usePrecompiled
         )
     }
 
@@ -2336,9 +2343,34 @@ final class AppModel: ObservableObject {
         throw lastError ?? AppError.invalidCounterfactualAddress
     }
 
+    /// Resolve whether this chain's on-chain WebAuthn verification should route
+    /// through the RIP-7212 P-256 precompile. The daemon probes the precompile at
+    /// startup and reports the effective decision via health; if the status is
+    /// unavailable/pending or the query fails, we fall back to the Daimo verifier
+    /// (`false`) so a UserOp is never submitted with a signature the chain cannot
+    /// verify.
+    private func resolveUsePrecompiled(logContext: String) async -> Bool {
+        do {
+            let status = try await withWalletNodeClient(operation: "\(logContext) p256 precompile status") { client in
+                try await client.networkStatus()
+            }
+            let usePrecompiled = status.p256Precompile?.usePrecompiled ?? false
+            appendLog(
+                "\(logContext): p256 precompile status=\(status.p256Precompile?.status ?? "unknown") → usePrecompiled=\(usePrecompiled)"
+            )
+            return usePrecompiled
+        } catch {
+            appendLog(
+                "\(logContext): p256 precompile status unavailable (\(error.localizedDescription)); using Daimo verifier"
+            )
+            return false
+        }
+    }
+
     private func enrichDraftWithLocalBundlerEstimation(
         _ draft: UserOperationDraft,
         logContext: String,
+        usePrecompiled: Bool,
         sessionPlan: SessionUserOperationPlan? = nil
     ) async throws -> UserOperationDraft {
         appendLog("\(logContext): checking local wallet-node entry point support")
@@ -2353,11 +2385,11 @@ final class AppModel: ObservableObject {
                 mode: sessionPlan.signatureMode,
                 enableData: sessionPlan.record.installedOnChain ? Data() : sessionPlan.record.enableData,
                 selectorData: sessionPlan.record.installedOnChain ? Data() : sessionPlan.record.selectorData,
-                usePrecompiled: false
+                usePrecompiled: usePrecompiled
             )
             appendLog("\(logContext): generated session dummy signature for estimation (\(dummySignature.count) bytes)")
         } else {
-            dummySignature = try WalletSignature.abiEncodeDummySignature(usePrecompiled: false)
+            dummySignature = try WalletSignature.abiEncodeDummySignature(usePrecompiled: usePrecompiled)
             appendLog("\(logContext): generated dummy signature for estimation (\(dummySignature.count) bytes)")
         }
 

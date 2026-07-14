@@ -17,8 +17,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
 pub type RpcResult = Result<Value, String>;
-pub type BoxFuture = Pin<Box<dyn Future<Output = RpcResult> + Send>>;
-pub type Handler = Arc<dyn Fn(Value) -> BoxFuture + Send + Sync>;
+// Not `Send`: the RAILGUN provider (via `dyn RailgunSigner`) is not Send, so handler
+// futures aren't either. The server therefore handles connections sequentially on the
+// runtime's block_on task (never moved across threads) rather than spawning per-conn —
+// fine for a single-user sidecar, and requests are naturally serialized anyway.
+pub type BoxFuture = Pin<Box<dyn Future<Output = RpcResult>>>;
+pub type Handler = Arc<dyn Fn(Value) -> BoxFuture>;
 pub type Handlers = HashMap<String, Handler>;
 
 /// Pure bearer check — the unit-testable core of auth.
@@ -40,25 +44,26 @@ pub async fn serve_rpc(
         let _ = std::fs::create_dir_all(parent);
     }
     let listener = UnixListener::bind(socket_path)?;
+    // Non-Send by design (single-threaded server); shared only within this task.
+    #[allow(clippy::arc_with_non_send_sync)]
     let handlers = Arc::new(handlers);
     loop {
         let (stream, _) = listener.accept().await?;
         let token = token.clone();
         let handlers = handlers.clone();
-        tokio::spawn(async move {
-            let io = hyper_util::rt::TokioIo::new(stream);
-            let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
-                let token = token.clone();
-                let handlers = handlers.clone();
-                async move { Ok::<_, std::convert::Infallible>(handle(req, token, handlers).await) }
-            });
-            if let Err(e) = hyper::server::conn::http1::Builder::new()
-                .serve_connection(io, service)
-                .await
-            {
-                tracing::debug!("connection error: {e}");
-            }
+        let io = hyper_util::rt::TokioIo::new(stream);
+        let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
+            let token = token.clone();
+            let handlers = handlers.clone();
+            async move { Ok::<_, std::convert::Infallible>(handle(req, token, handlers).await) }
         });
+        // Handle this connection to completion before accepting the next (see BoxFuture note).
+        if let Err(e) = hyper::server::conn::http1::Builder::new()
+            .serve_connection(io, service)
+            .await
+        {
+            tracing::debug!("connection error: {e}");
+        }
     }
 }
 
@@ -178,14 +183,23 @@ mod tests {
     async fn server_rejects_without_token_and_serves_with_it() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("t.sock").to_string_lossy().to_string();
-        let mut handlers: Handlers = HashMap::new();
-        handlers.insert(
-            "echo".to_string(),
-            rpc_handler!(|p: Value| async move { Ok(p) }),
-        );
+        // Handlers are non-Send, so build them INSIDE the server thread (nothing non-Send
+        // crosses the boundary) and run the server on a current-thread runtime — exactly
+        // how the bins run it via block_on.
         let sock2 = sock.clone();
-        tokio::spawn(async move {
-            serve_rpc(&sock2, "tok".to_string(), handlers).await.unwrap();
+        std::thread::spawn(move || {
+            let mut handlers: Handlers = HashMap::new();
+            handlers.insert(
+                "echo".to_string(),
+                rpc_handler!(|p: Value| async move { Ok(p) }),
+            );
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                serve_rpc(&sock2, "tok".to_string(), handlers).await.unwrap();
+            });
         });
         // wait for bind
         for _ in 0..50 {

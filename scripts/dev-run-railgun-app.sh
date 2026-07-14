@@ -22,6 +22,9 @@
 #                                               #   (needs RPC_URL_SEPOLIA) — the automated
 #                                               #   on-chain proof of shield+unshield
 #   scripts/dev-run-railgun-app.sh --doctor     # diagnose a Secure Enclave / signing error
+#   scripts/dev-run-railgun-app.sh --regen      # force-regenerate the Xcode project
+#                                               #   (resets signing to project.yml — only
+#                                               #   when you really want a clean project)
 #
 #   DEVELOPMENT_TEAM=<team-id> scripts/dev-run-railgun-app.sh
 #                                               # bake YOUR signing team into the generated
@@ -37,13 +40,15 @@ OPEN=1
 XCODEBUILD=0
 E2E=0
 DOCTOR=0
+REGEN=0
 for arg in "$@"; do
   case "$arg" in
     --no-open) OPEN=0 ;;
     --xcodebuild) XCODEBUILD=1 ;;
     --e2e) E2E=1 ;;
     --doctor) DOCTOR=1 ;;
-    -h|--help) sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --regen) REGEN=1 ;;
+    -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -100,13 +105,23 @@ step "2/4  Building the wallet-node daemon (release)"
 step "3/4  Building the railgun sidecars (release: railgun-helper + railgun-broadcaster)"
 ( cd "$REPO_ROOT/local-wallet-railgun" && cargo build --release --bins )
 
-step "4/4  Regenerating LocalWallet.xcodeproj (xcodegen)"
-xcodegen generate
+# Regenerating the project RESETS signing (team + bundle id) back to project.yml, which
+# changes the Keychain/Secure-Enclave access group and ORPHANS an existing wallet's key
+# ("Secure Enclave key reference is missing"). So only generate when the project is missing
+# or --regen is passed — otherwise keep your existing project + whatever team you set in
+# Xcode's Signing UI.
+if [[ ! -e LocalWallet.xcodeproj || "$REGEN" == 1 ]]; then
+  step "4/4  Generating LocalWallet.xcodeproj (xcodegen)"
+  xcodegen generate
+  REGENERATED=1
+else
+  step "4/4  Keeping existing LocalWallet.xcodeproj (signing preserved; --regen to rebuild it)"
+  REGENERATED=0
+fi
 
-# The Secure Enclave keychain-access-group entitlement needs a REAL signing team; the
-# committed project.yml team may not be yours (and xcodegen just reset it). If you export
-# DEVELOPMENT_TEAM, bake it into the generated (gitignored) project so Run signs correctly.
-if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
+# On (re)generation only, bake in a signing override if provided; the SE access group needs
+# a REAL team you have an Xcode account for, and the committed one likely isn't yours.
+if [[ "$REGENERATED" == 1 && -n "${DEVELOPMENT_TEAM:-}" ]]; then
   step "Applying DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM to the generated project (local only)"
   find LocalWallet.xcodeproj -name project.pbxproj -exec \
     sed -i '' "s/DEVELOPMENT_TEAM = [A-Z0-9]*;/DEVELOPMENT_TEAM = ${DEVELOPMENT_TEAM};/g" {} +
@@ -116,13 +131,14 @@ if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
     find LocalWallet.xcodeproj -name project.pbxproj -exec \
       sed -i '' "s/PRODUCT_BUNDLE_IDENTIFIER = ai.ethereum.localwallet.demo;/PRODUCT_BUNDLE_IDENTIFIER = ${PRODUCT_BUNDLE_IDENTIFIER};/g" {} +
   fi
-else
+elif [[ "$REGENERATED" == 1 ]]; then
   committed_team="$(grep -E 'DEVELOPMENT_TEAM' project.yml | head -1 | sed 's/.*: *//')"
-  printf '\033[1;33mnote:\033[0m signing team is "%s" (from project.yml). If that is not YOUR\n' "$committed_team"
-  echo "      Apple Developer team, onboarding will fail with a Secure Enclave error"
-  echo "      (\"Generation failed\"). Fix: set your team in Xcode → LocalWalletApp → Signing"
-  echo "      & Capabilities, or re-run: DEVELOPMENT_TEAM=<your-team-id> $0"
-  echo "      Diagnose a built app with: $0 --doctor"
+  printf '\033[1;33mnote:\033[0m fresh project — signing team is "%s" (from project.yml). If that is\n' "$committed_team"
+  echo "      not YOUR Apple Developer team, onboarding fails with a Secure Enclave error."
+  echo "      Set your team ONCE in Xcode → LocalWalletApp → Signing & Capabilities (then just"
+  echo "      re-run this script WITHOUT --regen so it won't reset it), or re-run with"
+  echo "      DEVELOPMENT_TEAM=<your-team-id> --regen. Keep team + bundle id STABLE — changing"
+  echo "      either orphans the Secure Enclave key of an existing wallet. Diagnose: $0 --doctor"
 fi
 
 if [[ "$XCODEBUILD" == 1 ]]; then

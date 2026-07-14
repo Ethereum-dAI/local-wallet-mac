@@ -1685,6 +1685,10 @@ private final class ChatDashboardModel: ObservableObject {
                 return nil
             }
             return chatSigningPreview(for: walletModel.sessionSigningPreview(for: transactionIntent))
+        case .shield, .unshield:
+            // Shield goes through executeBatch (its own signing path); unshield is relayed
+            // by the sidecar's local broadcaster — neither uses the session/passkey preview.
+            return nil
         }
     }
 
@@ -2405,12 +2409,107 @@ private final class ChatDashboardModel: ObservableObject {
         return intent
     }
 
+    /// Resolve a client for the railgun-helper sidecar (the wallet's privacy entry point).
+    /// Configured via env for now (`LOCAL_WALLET_PRIVACY_SOCKET` / `_TOKEN`); the in-app
+    /// sidecar-spawn + live (non-fork) mode are the next integration step.
+    private func railgunHelperClient() throws -> RailgunHelperClient {
+        let env = ProcessInfo.processInfo.environment
+        guard let socket = env["LOCAL_WALLET_PRIVACY_SOCKET"],
+              let token = env["LOCAL_WALLET_PRIVACY_TOKEN"] else {
+            throw RailgunHelperClient.ClientError.connectFailed(
+                "privacy sidecar not configured — set LOCAL_WALLET_PRIVACY_SOCKET/LOCAL_WALLET_PRIVACY_TOKEN (run railgun-helper)"
+            )
+        }
+        return RailgunHelperClient(socketPath: socket, bearerToken: token)
+    }
+
+    /// `/shield <amount>` — deposit ETH into the RAILGUN pool. The sidecar builds the pool
+    /// deposit tx(s); the OWNER self-submits them as a Kernel `execute` UserOp (passkey).
+    private func executeShield(intent: ToolIntent) async throws {
+        guard let amount = intent.args["amount"] else { throw AppError.invalidAmount }
+        let amountWei = try EtherAmountParser.weiDecimalString(fromETHString: amount)
+        let client = try railgunHelperClient()
+        let txs = try await client.prepareShield(amountWei: amountWei)
+        let executions = try txs.map { try Self.kernelExecution(from: $0) }
+        _ = try await walletModel.executeBatch(
+            executions: executions,
+            logContext: "chat-shield",
+            signingReason: "Authorize shielding \(amount) ETH into the RAILGUN pool on \(walletModel.activeChain.name)"
+        )
+        appendRailgunResult(
+            "Shielded \(amount) ETH into the RAILGUN pool.",
+            detail: ["intent_id": intent.id.uuidString, "amount": amount],
+            for: intent
+        )
+    }
+
+    /// `/unshield <amount> to <addr>` — withdraw ETH from the pool to a recipient as native
+    /// ETH, relayed by the wallet's own local broadcaster (via the sidecar). Async: the
+    /// sidecar returns a jobId while it proves + relays; we poll to completion.
+    private func executeUnshield(intent: ToolIntent) async throws {
+        guard let amount = intent.args["amount"], let to = intent.args["to"] else {
+            throw AppError.invalidAmount
+        }
+        guard to.hasPrefix("0x"), to.count == 42 else {
+            throw RailgunHelperClient.ClientError.rpcError(
+                "unshield recipient must be a 0x address (ENS/contact resolution is not yet wired for unshield)"
+            )
+        }
+        let amountWei = try EtherAmountParser.weiDecimalString(fromETHString: amount)
+        let client = try railgunHelperClient()
+        let jobId = try await client.unshield(amountWei: amountWei, to: to)
+        let result = try await client.awaitUnshield(jobId: jobId, deadline: Date().addingTimeInterval(300))
+        appendRailgunResult(
+            "Unshielded \(amount) ETH to \(to.walletDisplayShortAddress) as native ETH.",
+            detail: [
+                "intent_id": intent.id.uuidString,
+                "forwardTxHash": result["forwardTxHash"]?.stringValue ?? "unknown",
+            ],
+            for: intent
+        )
+    }
+
+    private func appendRailgunResult(_ summary: String, detail: [String: String], for intent: ToolIntent) {
+        guard let conversationID = activeConversationIDIfPresent else { return }
+        var payload = detail
+        payload["status"] = "confirmed"
+        appendMessage(
+            ChatMessage(kind: .toolResponse, role: .tool, text: jsonString(payload), toolCallId: intent.id.uuidString),
+            to: conversationID
+        )
+        appendMessage(ChatMessage(kind: .assistantText, role: .assistant, text: summary), to: conversationID)
+    }
+
+    private static func kernelExecution(from tx: RailgunHelperClient.ShieldTx) throws -> KernelExecutionRequest {
+        KernelExecutionRequest(
+            target: tx.to,
+            value: try hexData(tx.value).leftPadded(to: 32),
+            callData: try hexData(tx.data)
+        )
+    }
+
+    private static func hexData(_ string: String) throws -> Data {
+        var hex = string.hasPrefix("0x") ? String(string.dropFirst(2)) : string
+        if hex.count % 2 != 0 { hex = "0" + hex }
+        var out = Data()
+        out.reserveCapacity(hex.count / 2)
+        var idx = hex.startIndex
+        while idx < hex.endIndex {
+            let next = hex.index(idx, offsetBy: 2)
+            guard let byte = UInt8(hex[idx..<next], radix: 16) else { throw AppError.invalidAmount }
+            out.append(byte)
+            idx = next
+        }
+        return out
+    }
+
     private func executeIfSupported(
         _ intent: ToolIntent,
         transferPreflightStatus: ChatTransferPreflightStatus? = nil,
         swapPreview: ChatSwapPreview? = nil
     ) {
-        guard intent.tool == .transfer || intent.tool == .swap else {
+        guard intent.tool == .transfer || intent.tool == .swap
+            || intent.tool == .shield || intent.tool == .unshield else {
             return
         }
         guard !executingIntentIDs.contains(intent.id) else {
@@ -2470,6 +2569,10 @@ private final class ChatDashboardModel: ObservableObject {
                         signingReason: "\(signingAction) on \(self.walletModel.activeChain.name)"
                     )
                     self.appendSwapExecutionResult(result, for: intent, request: request)
+                case .shield:
+                    try await self.executeShield(intent: intent)
+                case .unshield:
+                    try await self.executeUnshield(intent: intent)
                 }
             } catch {
                 self.appendExecutionError(error, for: intent)

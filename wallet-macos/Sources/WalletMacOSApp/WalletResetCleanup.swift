@@ -11,6 +11,9 @@ struct WalletResetCleanup {
     var deleteSessionKeys: () throws -> Void
     var clearRelayerAddressCache: () throws -> Void
     var clearMetadata: () throws -> Void
+    // The RAILGUN shielded seed + local-broadcaster key are another key class the app
+    // manages (railgun-secrets.json); a full reset must wipe them too.
+    var deleteRailgunSecrets: () throws -> Void
 
     static func standard(
         keyStore: KeyStore = KeyStore(),
@@ -27,7 +30,8 @@ struct WalletResetCleanup {
                     ChainConfiguration.ethereumSepolia.id,
                 ])
             },
-            clearMetadata: { try metadataStore.clear() }
+            clearMetadata: { try metadataStore.clear() },
+            deleteRailgunSecrets: { try RailgunSecretsStore.clear() }
         )
     }
 
@@ -40,6 +44,7 @@ struct WalletResetCleanup {
             ("session-keys", deleteSessionKeys),
             ("relayer-address-cache", clearRelayerAddressCache),
             ("metadata", clearMetadata),
+            ("railgun-secrets", deleteRailgunSecrets),
         ]
 
         var failures: [WalletResetCleanupError.StepFailure] = []

@@ -44,6 +44,14 @@ enum RailgunSecretsStore {
         return secrets
     }
 
+    /// Delete the persisted railgun secrets (part of a full wallet reset). No-op if absent.
+    static func clear(directory: URL? = nil) throws {
+        let fileURL = try secretsFileURL(directory: directory)
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            try FileManager.default.removeItem(at: fileURL)
+        }
+    }
+
     // MARK: internals
 
     private static func secretsFileURL(directory: URL?) throws -> URL {

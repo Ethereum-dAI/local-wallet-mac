@@ -585,6 +585,9 @@ private final class ChatDashboardModel: ObservableObject {
     private let onboardingSettingsStore: OnboardingSettingsStore
     private let walletModel: AppModel
     private var executingIntentIDs: Set<UUID> = []
+    /// The railgun-helper sidecar (spawned lazily on first /shield or /unshield, on the
+    /// app's active chain). Killed when this model is torn down (daemon deinit).
+    private var railgunDaemon: RailgunHelperDaemon?
     private var lastTokenBalanceKey: String?
     private var lastTokenBalanceAttemptKey: String?
     private var lastTokenBalanceAttemptAt: Date?
@@ -2412,15 +2415,24 @@ private final class ChatDashboardModel: ObservableObject {
     /// Resolve a client for the railgun-helper sidecar (the wallet's privacy entry point).
     /// Configured via env for now (`LOCAL_WALLET_PRIVACY_SOCKET` / `_TOKEN`); the in-app
     /// sidecar-spawn + live (non-fork) mode are the next integration step.
-    private func railgunHelperClient() throws -> RailgunHelperClient {
-        let env = ProcessInfo.processInfo.environment
-        guard let socket = env["LOCAL_WALLET_PRIVACY_SOCKET"],
-              let token = env["LOCAL_WALLET_PRIVACY_TOKEN"] else {
-            throw RailgunHelperClient.ClientError.connectFailed(
-                "privacy sidecar not configured — set LOCAL_WALLET_PRIVACY_SOCKET/LOCAL_WALLET_PRIVACY_TOKEN (run railgun-helper)"
-            )
+    private func railgunHelperClient() async throws -> RailgunHelperClient {
+        if let daemon = railgunDaemon {
+            return daemon.client
         }
-        return RailgunHelperClient(socketPath: socket, bearerToken: token)
+        // Env override points at a manually-run sidecar (e.g. an anvil fork); otherwise the
+        // app spawns + owns one on its active chain.
+        let env = ProcessInfo.processInfo.environment
+        if let socket = env["LOCAL_WALLET_PRIVACY_SOCKET"],
+           let token = env["LOCAL_WALLET_PRIVACY_TOKEN"] {
+            return RailgunHelperClient(socketPath: socket, bearerToken: token)
+        }
+        let secrets = try RailgunSecretsStore.loadOrCreate()
+        let daemon = try await RailgunHelperDaemon.launch(
+            rpcURL: walletModel.activeChain.rpcURL.absoluteString,
+            secrets: secrets
+        )
+        railgunDaemon = daemon
+        return daemon.client
     }
 
     /// `/shield <amount>` — deposit ETH into the RAILGUN pool. The sidecar builds the pool
@@ -2428,7 +2440,7 @@ private final class ChatDashboardModel: ObservableObject {
     private func executeShield(intent: ToolIntent) async throws {
         guard let amount = intent.args["amount"] else { throw AppError.invalidAmount }
         let amountWei = try EtherAmountParser.weiDecimalString(fromETHString: amount)
-        let client = try railgunHelperClient()
+        let client = try await railgunHelperClient()
         let txs = try await client.prepareShield(amountWei: amountWei)
         let executions = try txs.map { try Self.kernelExecution(from: $0) }
         _ = try await walletModel.executeBatch(
@@ -2456,7 +2468,7 @@ private final class ChatDashboardModel: ObservableObject {
             )
         }
         let amountWei = try EtherAmountParser.weiDecimalString(fromETHString: amount)
-        let client = try railgunHelperClient()
+        let client = try await railgunHelperClient()
         let jobId = try await client.unshield(amountWei: amountWei, to: to)
         let result = try await client.awaitUnshield(jobId: jobId, deadline: Date().addingTimeInterval(300))
         appendRailgunResult(

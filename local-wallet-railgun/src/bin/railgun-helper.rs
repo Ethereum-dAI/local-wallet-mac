@@ -93,9 +93,12 @@ async fn main() {
     let rpc_url = std::env::var("RAILGUN_RPC_URL")
         .or_else(|_| std::env::var("LOCAL_WALLET_PRIVACY_RPC_URL"))
         .expect("missing RAILGUN_RPC_URL / LOCAL_WALLET_PRIVACY_RPC_URL");
-    let fork_block: u64 = env("RAILGUN_FORK_BLOCK")
-        .parse()
-        .expect("RAILGUN_FORK_BLOCK");
+    // Only used under the `fork-sync` feature (caps Subsquid at the fork block). For the
+    // app / live use it is irrelevant, so default to 0 when unset.
+    let fork_block: u64 = std::env::var("RAILGUN_FORK_BLOCK")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let socket = env("RAILGUN_SOCKET");
     let token = env("RAILGUN_TOKEN");
     let bc_bin = env("RAILGUN_BROADCASTER_BIN");
@@ -256,6 +259,16 @@ async fn main() {
 
     // current_thread runtime + LocalSet so the non-Send proving tasks can spawn_local.
     let local = tokio::task::LocalSet::new();
+    // Orphan backstop: exit if our parent (the app) dies, so we don't linger holding the
+    // shielded seed. Our broadcaster child has the same backstop, so it follows us out.
+    local.spawn_local(async {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if unsafe { libc::getppid() } == 1 {
+                std::process::exit(0);
+            }
+        }
+    });
     local
         .run_until(async move { serve_rpc(&socket, token, handlers).await })
         .await

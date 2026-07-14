@@ -111,6 +111,8 @@ struct OnchainTransactionSummary: Codable, Equatable {
     enum Operation: String, Codable {
         case transfer
         case swap
+        case shield
+        case unshield
     }
 
     enum Status: String, Codable {
@@ -565,6 +567,12 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var kernelTokenBalances: [ChatTokenBalance] = []
     @Published private(set) var bundlerTokenBalances: [ChatTokenBalance] = []
     @Published private(set) var isRefreshingTokenBalances = false
+    // Shielded (RAILGUN) balance, split by pool status. `confirmed` = cleared and spendable;
+    // `pending` = deposited but not yet included by the pool's approval set.
+    @Published private(set) var shieldedConfirmed: String?
+    @Published private(set) var shieldedPending: String?
+    @Published private(set) var isRefreshingShieldedBalance = false
+    @Published private(set) var shieldedBalanceError: String?
     @Published private(set) var tokenBalanceMessage: String? = nil
     @Published private var transferPreflightStatuses: [UUID: ChatTransferPreflightStatus] = [:]
     @Published private var swapPreflightStatuses: [UUID: ChatSwapPreflightStatus] = [:]
@@ -1213,6 +1221,10 @@ private final class ChatDashboardModel: ObservableObject {
             return .transfer
         case .swap:
             return .swap
+        case .shield:
+            return .shield
+        case .unshield:
+            return .unshield
         case nil:
             return .unknown
         }
@@ -2435,6 +2447,26 @@ private final class ChatDashboardModel: ObservableObject {
         return daemon.client
     }
 
+    /// Fetch the shielded (RAILGUN) balance from the sidecar and publish it split into
+    /// confirmed (cleared/spendable) vs pending (deposited, awaiting pool inclusion).
+    func refreshShieldedBalance() {
+        guard !isRefreshingShieldedBalance else { return }
+        isRefreshingShieldedBalance = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isRefreshingShieldedBalance = false }
+            do {
+                let client = try await self.railgunHelperClient()
+                let split = try await client.balance()
+                self.shieldedConfirmed = WeiFormatter.ethDisplayString(fromHexWei: split.valid)
+                self.shieldedPending = WeiFormatter.ethDisplayString(fromHexWei: split.pending)
+                self.shieldedBalanceError = nil
+            } catch {
+                self.shieldedBalanceError = error.localizedDescription
+            }
+        }
+    }
+
     /// `/shield <amount>` — deposit ETH into the RAILGUN pool. The sidecar builds the pool
     /// deposit tx(s); the OWNER self-submits them as a Kernel `execute` UserOp (passkey).
     private func executeShield(intent: ToolIntent) async throws {
@@ -2443,16 +2475,13 @@ private final class ChatDashboardModel: ObservableObject {
         let client = try await railgunHelperClient()
         let txs = try await client.prepareShield(amountWei: amountWei)
         let executions = try txs.map { try Self.kernelExecution(from: $0) }
-        _ = try await walletModel.executeBatch(
+        let result = try await walletModel.executeBatch(
             executions: executions,
             logContext: "chat-shield",
             signingReason: "Authorize shielding \(amount) ETH into the RAILGUN pool on \(walletModel.activeChain.name)"
         )
-        appendRailgunResult(
-            "Shielded \(amount) ETH into the RAILGUN pool.",
-            detail: ["intent_id": intent.id.uuidString, "amount": amount],
-            for: intent
-        )
+        appendShieldExecutionResult(result, amount: amount, for: intent)
+        refreshShieldedBalance()
     }
 
     /// `/unshield <amount> to <addr>` — withdraw ETH from the pool to a recipient as native
@@ -2471,25 +2500,109 @@ private final class ChatDashboardModel: ObservableObject {
         let client = try await railgunHelperClient()
         let jobId = try await client.unshield(amountWei: amountWei, to: to)
         let result = try await client.awaitUnshield(jobId: jobId, deadline: Date().addingTimeInterval(300))
-        appendRailgunResult(
-            "Unshielded \(amount) ETH to \(to.walletDisplayShortAddress) as native ETH.",
-            detail: [
-                "intent_id": intent.id.uuidString,
-                "forwardTxHash": result["forwardTxHash"]?.stringValue ?? "unknown",
-            ],
-            for: intent
-        )
+        appendUnshieldExecutionResult(result, amount: amount, to: to, for: intent)
+        refreshShieldedBalance()
     }
 
-    private func appendRailgunResult(_ summary: String, detail: [String: String], for intent: ToolIntent) {
+    /// Rich on-chain feedback for `/shield`, mirroring transfer: a tool-response message +
+    /// an on-chain transaction card (which also refreshes the wallet history panel).
+    private func appendShieldExecutionResult(
+        _ result: AppModel.UserOperationSendResult,
+        amount: String,
+        for intent: ToolIntent
+    ) {
         guard let conversationID = activeConversationIDIfPresent else { return }
-        var payload = detail
-        payload["status"] = "confirmed"
+        var payload: [String: Any] = [
+            "status": "submitted",
+            "intent_id": intent.id.uuidString,
+            "user_op_hash": result.userOpHash,
+            "signed_by": result.signedBySession ? "session_key" : "passkey",
+            "operation": "shield",
+        ]
+        if let tx = result.transactionHash { payload["transaction_hash"] = tx }
+        if let success = result.success { payload["success"] = success }
         appendMessage(
             ChatMessage(kind: .toolResponse, role: .tool, text: jsonString(payload), toolCallId: intent.id.uuidString),
             to: conversationID
         )
-        appendMessage(ChatMessage(kind: .assistantText, role: .assistant, text: summary), to: conversationID)
+
+        let status: OnchainTransactionSummary.Status =
+            result.success == true ? .included
+            : result.success == false ? .reverted
+            : result.transactionHash != nil ? .submitted : .pending
+        let summary = OnchainTransactionSummary(
+            chainName: walletModel.activeChain.name,
+            chainID: walletModel.activeChain.id,
+            amount: amount,
+            token: "ETH",
+            recipient: "RAILGUN shielded pool",
+            recipientName: nil,
+            resolvedRecipient: nil,
+            resolutionChainName: nil,
+            resolutionChainID: nil,
+            ccipReadUsed: nil,
+            operation: .shield,
+            signingMode: result.signedBySession ? "session" : "passkey",
+            amountOut: nil,
+            minimumReceived: nil,
+            route: nil,
+            userOpHash: result.userOpHash,
+            transactionHash: result.transactionHash,
+            status: status,
+            createdAt: Date()
+        )
+        appendMessage(.onchainTransaction(summary), to: conversationID)
+        reloadWalletHistory()
+    }
+
+    /// Rich on-chain feedback for `/unshield`. The proved tx is relayed by the local
+    /// broadcaster (not a Kernel UserOp), so the identifying hash is the forward tx.
+    private func appendUnshieldExecutionResult(
+        _ result: JSONValue,
+        amount: String,
+        to: String,
+        for intent: ToolIntent
+    ) {
+        guard let conversationID = activeConversationIDIfPresent else { return }
+        let forwardTx = result["forwardTxHash"]?.stringValue
+        let deliveredHex = result["amountWei"]?.stringValue
+        var payload: [String: Any] = [
+            "status": "confirmed",
+            "intent_id": intent.id.uuidString,
+            "operation": "unshield",
+            "recipient": to,
+        ]
+        if let forwardTx { payload["forward_tx_hash"] = forwardTx }
+        if let u = result["unshieldTxHash"]?.stringValue { payload["unshield_tx_hash"] = u }
+        if let u = result["unwrapTxHash"]?.stringValue { payload["unwrap_tx_hash"] = u }
+        appendMessage(
+            ChatMessage(kind: .toolResponse, role: .tool, text: jsonString(payload), toolCallId: intent.id.uuidString),
+            to: conversationID
+        )
+
+        let summary = OnchainTransactionSummary(
+            chainName: walletModel.activeChain.name,
+            chainID: walletModel.activeChain.id,
+            amount: amount,
+            token: "ETH",
+            recipient: to,
+            recipientName: nil,
+            resolvedRecipient: nil,
+            resolutionChainName: nil,
+            resolutionChainID: nil,
+            ccipReadUsed: nil,
+            operation: .unshield,
+            signingMode: "local-broadcaster",
+            amountOut: deliveredHex,
+            minimumReceived: nil,
+            route: nil,
+            userOpHash: forwardTx ?? "unshield",
+            transactionHash: forwardTx,
+            status: forwardTx != nil ? .included : .pending,
+            createdAt: Date()
+        )
+        appendMessage(.onchainTransaction(summary), to: conversationID)
+        reloadWalletHistory()
     }
 
     private static func kernelExecution(from tx: RailgunHelperClient.ShieldTx) throws -> KernelExecutionRequest {
@@ -3490,11 +3603,49 @@ struct LocalWalletChatDashboardView: View {
                     )
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
+                shieldedBalanceRow
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .padding(.top, 10)
         .padding(.bottom, 8)
         .animation(.easeInOut(duration: 0.18), value: isAccountHeaderExpanded)
+    }
+
+    /// Shielded (RAILGUN) balance row: confirmed = cleared/spendable, pending = deposited
+    /// but awaiting the pool's approval set. Refreshed after shield/unshield or manually.
+    private var shieldedBalanceRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "lock.shield.fill")
+                .foregroundStyle(.secondary)
+            Text("Shielded (RAILGUN)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            if let confirmed = model.shieldedConfirmed {
+                Text("Confirmed \(confirmed) · Pending \(model.shieldedPending ?? "0 ETH")")
+                    .font(.caption.monospacedDigit())
+                    .help("Confirmed = cleared and spendable. Pending = deposited but not yet included by the pool's approval set.")
+            } else if model.shieldedBalanceError != nil {
+                Text("unavailable")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .help(model.shieldedBalanceError ?? "")
+            } else {
+                Text("—")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button {
+                model.refreshShieldedBalance()
+            } label: {
+                Image(systemName: model.isRefreshingShieldedBalance ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
+            }
+            .buttonStyle(.plain)
+            .disabled(model.isRefreshingShieldedBalance)
+            .help("Refresh shielded balance")
+        }
+        .padding(.top, 2)
     }
 
     private func explorerAddressURL(_ address: String) -> URL? {
@@ -5081,6 +5232,10 @@ private extension WalletTransactionRecord {
             return "Batch"
         case .deploy:
             return "Deploy account"
+        case .shield:
+            return "Shield"
+        case .unshield:
+            return "Unshield"
         case .unknown:
             return "Transaction"
         }
@@ -5152,6 +5307,10 @@ private extension WalletTransactionRecord {
             return "square.stack.3d.up.fill"
         case .deploy:
             return "shippingbox.fill"
+        case .shield:
+            return "lock.shield.fill"
+        case .unshield:
+            return "lock.open.fill"
         case .unknown:
             return "questionmark.circle.fill"
         }

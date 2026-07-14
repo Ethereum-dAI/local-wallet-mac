@@ -158,7 +158,11 @@ struct RailgunHelperClient: Sendable {
             var off = 0
             while off < buf.count {
                 let n = write(fd, buf.baseAddress!.advanced(by: off), buf.count - off)
-                if n <= 0 { throw ClientError.ioFailed("write: errno \(errno)") }
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw ClientError.ioFailed("write: errno \(errno)")
+                }
+                if n == 0 { throw ClientError.ioFailed("write returned 0") }
                 off += n
             }
         }
@@ -167,7 +171,10 @@ struct RailgunHelperClient: Sendable {
         var chunk = [UInt8](repeating: 0, count: 8192)
         while true {
             let n = read(fd, &chunk, chunk.count)
-            if n < 0 { throw ClientError.ioFailed("read: errno \(errno)") }
+            if n < 0 {
+                if errno == EINTR { continue }
+                throw ClientError.ioFailed("read: errno \(errno)")
+            }
             if n == 0 { break }
             response.append(chunk, count: n)
         }

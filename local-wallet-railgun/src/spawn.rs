@@ -69,8 +69,13 @@ pub fn spawn_child_with_fd5(mut cmd: Command, secret: &[u8]) -> io::Result<Child
         return Err(io::Error::last_os_error());
     }
     let (read_fd, write_fd) = (fds[0], fds[1]);
-    set_cloexec(read_fd)?;
-    set_cloexec(write_fd)?;
+    if let Err(e) = set_cloexec(read_fd).and_then(|_| set_cloexec(write_fd)) {
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+        return Err(e);
+    }
 
     // In the child, just before exec: put the read end on fd 5. dup2 clears CLOEXEC on the
     // new fd — EXCEPT when read_fd already IS 5 (then dup2 is a no-op and CLOEXEC stays set,

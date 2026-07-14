@@ -229,11 +229,20 @@ async fn main() {
                         .get("jobId")
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| "missing jobId".to_string())?;
-                    jobs.lock()
-                        .await
+                    let mut map = jobs.lock().await;
+                    let status = map
                         .get(id)
                         .cloned()
-                        .ok_or_else(|| format!("unknown jobId: {id}"))
+                        .ok_or_else(|| format!("unknown jobId: {id}"))?;
+                    // Evict terminal jobs once observed so the map doesn't grow unbounded.
+                    let terminal = matches!(
+                        status.get("status").and_then(|s| s.as_str()),
+                        Some("done") | Some("error")
+                    );
+                    if terminal {
+                        map.remove(id);
+                    }
+                    Ok(status)
                 }
             }),
         );

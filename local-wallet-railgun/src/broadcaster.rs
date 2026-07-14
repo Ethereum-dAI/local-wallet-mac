@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, U256};
 use alloy::providers::{DynProvider, Provider};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
@@ -82,6 +82,11 @@ fn looks_like_railgun_call(allowed: &[Address], tx: &TxData) -> Result<(), Strin
     }
     if tx.data.len() < 4 {
         return Err("refusing to relay: tx has no function selector (not a contract call)".into());
+    }
+    // Unshield txs carry no ETH value; refuse a value-bearing tx so the funded EOA can't be
+    // coerced into moving its own ETH to a RAILGUN contract.
+    if tx.value != U256::ZERO {
+        return Err("refusing to relay: unshield tx must have zero value".into());
     }
     Ok(())
 }
@@ -267,5 +272,15 @@ mod tests {
     fn empty_allowlist_permits_any_target_but_still_needs_selector() {
         assert!(looks_like_railgun_call(&[], &tx_to(Address::ZERO, &bytes!("aabbccdd"))).is_ok());
         assert!(looks_like_railgun_call(&[], &tx_to(Address::ZERO, &[])).is_err());
+    }
+
+    #[test]
+    fn guard_rejects_value_bearing_tx() {
+        let railgun = address!("0xeCFCf3b4eC647c4Ca6D49108b311b7a7C9543fea");
+        let mut tx = tx_to(railgun, &bytes!("aabbccdd"));
+        tx.value = U256::from(1);
+        assert!(looks_like_railgun_call(&[railgun], &tx)
+            .unwrap_err()
+            .contains("zero value"));
     }
 }

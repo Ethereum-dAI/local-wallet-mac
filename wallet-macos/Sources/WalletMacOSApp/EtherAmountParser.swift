@@ -15,7 +15,8 @@ enum EtherAmountParser {
         guard parts.count <= 2 else { throw AppError.invalidAmount }
         let wholePart = String(parts[0])
         let fractionalPart = parts.count == 2 ? String(parts[1]) : ""
-        guard wholePart.allSatisfy(\.isNumber), fractionalPart.allSatisfy(\.isNumber) else {
+        let isAsciiDigit: (Character) -> Bool = { $0.isASCII && $0.isNumber }
+        guard wholePart.allSatisfy(isAsciiDigit), fractionalPart.allSatisfy(isAsciiDigit) else {
             throw AppError.invalidAmount
         }
         if fractionalPart.count > 18 {

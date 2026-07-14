@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use eip_1193_provider::tx_data::TxData;
+use railgun::chain_config::ChainConfig;
 use railgun_helper::broadcaster::LocalBroadcaster;
 use railgun_helper::rpc::{serve_rpc, Handlers};
 use railgun_helper::rpc_handler;
@@ -30,8 +31,11 @@ async fn main() {
     let socket = env("RAILGUN_BROADCASTER_SOCKET");
     let token = env("RAILGUN_BROADCASTER_TOKEN");
 
+    // Restrict the funded EOA to submitting only to this chain's RAILGUN contracts.
+    let chain = ChainConfig::sepolia();
+    let allowed_targets = vec![chain.relay_adapt_contract, chain.railgun_smart_wallet];
     let broadcaster = Arc::new(
-        LocalBroadcaster::new(&rpc_url, &key)
+        LocalBroadcaster::new(&rpc_url, &key, allowed_targets)
             .await
             .expect("build broadcaster"),
     );

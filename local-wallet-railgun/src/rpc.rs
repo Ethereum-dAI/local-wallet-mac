@@ -25,11 +25,16 @@ pub type BoxFuture = Pin<Box<dyn Future<Output = RpcResult>>>;
 pub type Handler = Arc<dyn Fn(Value) -> BoxFuture>;
 pub type Handlers = HashMap<String, Handler>;
 
-/// Pure bearer check — the unit-testable core of auth.
+/// Pure bearer check — the unit-testable core of auth. Constant-time in the token bytes
+/// (matches the wallet-node daemon's `subtle::ConstantTimeEq` convention) so a timing
+/// side-channel can't reveal the token, even though the local socket makes that remote.
 pub fn check_auth(auth_header: Option<&str>, token: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    let expected = format!("Bearer {token}");
     match auth_header {
-        Some(h) => h == format!("Bearer {token}"),
-        None => false,
+        // Length is not secret; compare bytes in constant time only when lengths match.
+        Some(h) if h.len() == expected.len() => h.as_bytes().ct_eq(expected.as_bytes()).into(),
+        _ => false,
     }
 }
 
@@ -44,6 +49,13 @@ pub async fn serve_rpc(
         let _ = std::fs::create_dir_all(parent);
     }
     let listener = UnixListener::bind(socket_path)?;
+    // Owner-only socket: defense-in-depth beyond the bearer token, especially on the app
+    // path where the socket lives in Application Support rather than a private tempdir.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+    }
     // Non-Send by design (single-threaded server); shared only within this task.
     #[allow(clippy::arc_with_non_send_sync)]
     let handlers = Arc::new(handlers);

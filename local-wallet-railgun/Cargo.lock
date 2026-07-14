@@ -4447,6 +4447,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "subtle",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

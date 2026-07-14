@@ -5,6 +5,8 @@
 //! The entropy never touches argv/env-on-disk in the app path; it arrives on fd-5.
 //! In the e2e/standalone path it comes from an env var for convenience (testnet only).
 
+use std::fmt;
+
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -19,7 +21,7 @@ pub enum SecretError {
 }
 
 /// How the sidecar reaches the Ethereum provider.
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Deserialize, Clone, PartialEq)]
 pub struct ProviderConn {
     /// Direct HTTP(S) RPC URL (fork / standalone path).
     #[serde(default)]
@@ -32,7 +34,19 @@ pub struct ProviderConn {
     pub token: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+// Manual Debug: NEVER print the daemon token. A derived Debug would leak it via any
+// stray `{:?}` / panic formatting.
+impl fmt::Debug for ProviderConn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderConn")
+            .field("url", &self.url)
+            .field("socket_path", &self.socket_path)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Deserialize, Clone, PartialEq)]
 pub struct SecretPayload {
     #[serde(rename = "entropyHex")]
     pub entropy_hex: String,
@@ -41,6 +55,20 @@ pub struct SecretPayload {
     /// Bearer token the app uses to authenticate to THIS sidecar's socket.
     pub token: String,
     pub provider: ProviderConn,
+}
+
+// Manual Debug: the master entropy (the shielded-account seed) and the bearer token are
+// the two secrets here — NEVER format them, even in a panic/log. This struct is the fd-5
+// contract, so a derived Debug would be a standing footgun.
+impl fmt::Debug for SecretPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretPayload")
+            .field("entropy_hex", &"<redacted>")
+            .field("sidecar_socket_path", &self.sidecar_socket_path)
+            .field("token", &"<redacted>")
+            .field("provider", &self.provider)
+            .finish()
+    }
 }
 
 /// Normalize a hex entropy string to exactly 32 bytes, erroring on bad length/chars.
@@ -119,5 +147,19 @@ mod tests {
             parse_secret_payload(b"not json"),
             Err(SecretError::Json(_))
         ));
+    }
+
+    #[test]
+    fn debug_never_leaks_entropy_or_token() {
+        let p = parse_secret_payload(valid_json().as_bytes()).unwrap();
+        let dbg = format!("{p:?}");
+        assert!(
+            !dbg.contains("0102030405"),
+            "entropy leaked in Debug: {dbg}"
+        );
+        assert!(!dbg.contains("sekret"), "token leaked in Debug: {dbg}");
+        assert!(dbg.contains("<redacted>"));
+        // Non-secret fields still visible for diagnostics.
+        assert!(dbg.contains("/tmp/railgun.sock"));
     }
 }

@@ -3300,6 +3300,9 @@ struct LocalWalletChatDashboardView: View {
     @State private var sessionPopoverMessage: String?
     @State private var isAtBottomOfChat = true
     @State private var isAccountHeaderExpanded = true
+    // Privacy on → show the RAILGUN pieces (local broadcaster card + shielded balances).
+    // Off → hide them and the wallet reads as a plain account. Persisted across launches.
+    @AppStorage("localwallet.privacyEnabled") private var privacyEnabled = true
     @State private var selectedSection: DashboardSection = .chat
     @State private var settingsInitialTab: LocalWalletSettingsTab = .info
     @State private var historyFilter: WalletHistoryFilter = .all
@@ -3655,6 +3658,41 @@ struct LocalWalletChatDashboardView: View {
         .padding(.top, 10)
     }
 
+    /// Toggles the RAILGUN surface (local broadcaster card + shielded balances) on/off.
+    private var privacyToggle: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.18)) { privacyEnabled.toggle() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: privacyEnabled ? "lock.shield.fill" : "lock.open")
+                    .font(.system(size: 12, weight: .black))
+                Text("Privacy")
+                    .font(.system(size: 12, weight: .heavy))
+                Text(privacyEnabled ? "On" : "Off")
+                    .font(.system(size: 10, weight: .black))
+                    .foregroundStyle(privacyEnabled ? Color.white.opacity(0.85) : ChatPalette.mutedText)
+                    .padding(.horizontal, 6)
+                    .frame(height: 16)
+                    .background(Capsule().fill(privacyEnabled ? Color.white.opacity(0.18) : ChatPalette.buttonCircle))
+            }
+            .foregroundStyle(privacyEnabled ? Color.white : ChatPalette.secondaryText)
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(privacyEnabled ? ChatPalette.accent : ChatPalette.panel.opacity(0.75))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(privacyEnabled ? ChatPalette.accent : ChatPalette.border.opacity(0.75), lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .help(privacyEnabled
+            ? "Privacy on — RAILGUN shielding is available. Click to hide it."
+            : "Privacy off — RAILGUN broadcaster and shielded balances are hidden. Click to show.")
+    }
+
     private var accountHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -3668,6 +3706,8 @@ struct LocalWalletChatDashboardView: View {
                     }
                 )
                 .frame(maxWidth: .infinity)
+
+                privacyToggle
 
                 Button {
                     model.refreshOnchainAccountStatus()
@@ -3694,7 +3734,7 @@ struct LocalWalletChatDashboardView: View {
                 .help("Refresh balances")
             }
             if isAccountHeaderExpanded {
-                VStack(spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
                     // The Kernel account is where funds are received, so its address stays
                     // front and centre.
                     AddressPill(
@@ -3708,6 +3748,7 @@ struct LocalWalletChatDashboardView: View {
                         onRefreshTokenBalances: { model.refreshTokenBalances(force: true) },
                         explorerURL: explorerAddressURL(model.accountIdentity.kernelAddress)
                     )
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                     // Bundler + broadcaster are gas-paying helper EOAs: lead with a Fund
                     // action, not the address.
                     FundableAccountCard(
@@ -3732,38 +3773,46 @@ struct LocalWalletChatDashboardView: View {
                             )
                         }
                     )
-                    FundableAccountCard(
-                        icon: "arrowshape.turn.up.right.fill",
-                        title: "Local broadcaster",
-                        subtitle: "Relays your unshields (unwrap + forward)",
-                        address: model.broadcasterAddress ?? "Not started",
-                        balance: model.broadcasterBalance ?? "—",
-                        state: model.broadcasterState ?? "Not checked",
-                        isFunding: model.fundingHelperAddress == model.broadcasterAddress,
-                        fundError: model.helperFundErrorAddress == model.broadcasterAddress ? model.helperFundError : nil,
-                        tokenBalances: [],
-                        isRefreshingTokenBalances: false,
-                        onRefreshTokenBalances: {},
-                        explorerURL: explorerAddressURL(model.broadcasterAddress ?? ""),
-                        onFund: { amount in
-                            guard let address = model.broadcasterAddress else { return }
-                            model.fundHelper(
-                                address: address,
-                                amountETH: amount,
-                                label: "broadcaster",
-                                isBroadcaster: true
-                            )
-                        }
-                    )
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    if privacyEnabled {
+                        FundableAccountCard(
+                            icon: "arrowshape.turn.up.right.fill",
+                            title: "Local broadcaster",
+                            subtitle: "Relays your unshields (unwrap + forward)",
+                            address: model.broadcasterAddress ?? "Not started",
+                            balance: model.broadcasterBalance ?? "—",
+                            state: model.broadcasterState ?? "Not checked",
+                            isFunding: model.fundingHelperAddress == model.broadcasterAddress,
+                            fundError: model.helperFundErrorAddress == model.broadcasterAddress ? model.helperFundError : nil,
+                            tokenBalances: [],
+                            isRefreshingTokenBalances: false,
+                            onRefreshTokenBalances: {},
+                            explorerURL: explorerAddressURL(model.broadcasterAddress ?? ""),
+                            onFund: { amount in
+                                guard let address = model.broadcasterAddress else { return }
+                                model.fundHelper(
+                                    address: address,
+                                    amountETH: amount,
+                                    label: "broadcaster",
+                                    isBroadcaster: true
+                                )
+                            }
+                        )
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    }
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
-                shieldedBalanceRow
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                if privacyEnabled {
+                    shieldedBalanceRow
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
             }
         }
         .padding(.top, 10)
         .padding(.bottom, 8)
         .animation(.easeInOut(duration: 0.18), value: isAccountHeaderExpanded)
+        .animation(.easeInOut(duration: 0.18), value: privacyEnabled)
     }
 
     /// Shielded (RAILGUN) balance row: confirmed = cleared/spendable, pending = deposited
@@ -4948,12 +4997,12 @@ private struct FundableAccountCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .top, spacing: 11) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 9) {
                 Image(systemName: icon)
-                    .font(.system(size: 14, weight: .black))
+                    .font(.system(size: 13, weight: .black))
                     .foregroundStyle(ChatPalette.accent)
-                    .frame(width: 34, height: 34)
+                    .frame(width: 30, height: 30)
                     .background(Circle().fill(ChatPalette.buttonCircle))
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -4961,61 +5010,63 @@ private struct FundableAccountCard: View {
                         .font(.system(size: 10, weight: .black))
                         .foregroundStyle(ChatPalette.mutedText)
                         .textCase(.uppercase)
+                        .lineLimit(1)
                     Text(balance)
-                        .font(.system(size: 20, weight: .heavy, design: .rounded))
+                        .font(.system(size: 18, weight: .heavy, design: .rounded))
                         .foregroundStyle(ChatPalette.primaryText)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.6)
+                        .minimumScaleFactor(0.5)
                 }
 
-                Spacer(minLength: 0)
+                Spacer(minLength: 4)
 
-                stateBadge
+                trailingIcons
             }
 
-            HStack(spacing: 8) {
-                fundControl
+            stateBadge
 
-                Spacer(minLength: 8)
-
-                iconButton(systemName: copied ? "checkmark" : "doc.on.doc",
-                           tint: copied ? ChatPalette.success : ChatPalette.secondaryText,
-                           help: copied ? "Copied" : "Copy address to fund externally",
-                           disabled: !hasAddress) {
-                    copy(address)
-                }
-
-                if tokenBalances.isEmpty == false || isRefreshingTokenBalances {
-                    tokenListButton
-                }
-
-                if let explorerURL {
-                    Link(destination: explorerURL) {
-                        iconLabel(systemName: "safari", tint: ChatPalette.secondaryText)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Open in explorer")
-                }
-            }
+            fundControl
 
             if let fundError {
                 Text(fundError)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(ChatPalette.warning)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                Text("\(subtitle). Send from your Kernel account (passkey), or copy the address to fund it externally.")
-                    .font(.system(size: 11, weight: .medium))
+                Text("Send from your Kernel account (passkey), or copy the address to fund externally.")
+                    .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(ChatPalette.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(12)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(ChatPalette.panel)
                 .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(ChatPalette.border, lineWidth: 1))
         )
+    }
+
+    private var trailingIcons: some View {
+        HStack(spacing: 5) {
+            iconButton(systemName: copied ? "checkmark" : "doc.on.doc",
+                       tint: copied ? ChatPalette.success : ChatPalette.secondaryText,
+                       help: copied ? "Copied" : "Copy address to fund externally",
+                       disabled: !hasAddress) {
+                copy(address)
+            }
+            if tokenBalances.isEmpty == false || isRefreshingTokenBalances {
+                tokenListButton
+            }
+            if let explorerURL {
+                Link(destination: explorerURL) {
+                    iconLabel(systemName: "safari", tint: ChatPalette.secondaryText)
+                }
+                .buttonStyle(.plain)
+                .help("Open in explorer")
+            }
+        }
     }
 
     private var stateBadge: some View {
@@ -5039,24 +5090,24 @@ private struct FundableAccountCard: View {
     }
 
     private var fundControl: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 6) {
+        HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Text("Fund")
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(ChatPalette.mutedText)
                 TextField("0.02", text: $fundAmount)
                     .textFieldStyle(.plain)
                     .multilineTextAlignment(.trailing)
-                    .font(.system(size: 14, weight: .heavy, design: .monospaced))
+                    .font(.system(size: 13, weight: .heavy, design: .monospaced))
                     .foregroundStyle(ChatPalette.primaryText)
-                    .frame(width: 48)
+                    .frame(maxWidth: .infinity)
                     .disabled(isFunding)
                 Text("ETH")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(ChatPalette.mutedText)
             }
-            .padding(.horizontal, 12)
-            .frame(height: 34)
+            .padding(.horizontal, 10)
+            .frame(height: 32)
             .background(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(ChatPalette.input)
@@ -5066,26 +5117,27 @@ private struct FundableAccountCard: View {
             Button {
                 onFund(fundAmount)
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     if isFunding {
                         ProgressView().controlSize(.small)
                     }
                     Text(isFunding ? "Sending" : "Send")
-                        .font(.system(size: 13, weight: .heavy))
+                        .font(.system(size: 12, weight: .heavy))
                     if !isFunding {
                         Image(systemName: "arrow.right")
-                            .font(.system(size: 11, weight: .black))
+                            .font(.system(size: 10, weight: .black))
                     }
                 }
                 .foregroundStyle(hasAddress ? Color.white : ChatPalette.mutedText)
-                .padding(.horizontal, 14)
-                .frame(height: 34)
+                .padding(.horizontal, 11)
+                .frame(height: 32)
                 .background(
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .fill(hasAddress ? ChatPalette.accent : ChatPalette.buttonCircle)
                 )
             }
             .buttonStyle(.plain)
+            .fixedSize()
             .disabled(!hasAddress || isFunding)
             .help(hasAddress ? "Send ETH from your Kernel account for gas" : "Address not available yet")
         }
@@ -5097,7 +5149,7 @@ private struct FundableAccountCard: View {
             isTokenListPresented.toggle()
         } label: {
             if isRefreshingTokenBalances {
-                ProgressView().controlSize(.small).frame(width: 28, height: 28)
+                ProgressView().controlSize(.small).frame(width: 26, height: 26)
                     .background(Circle().fill(ChatPalette.buttonCircle))
             } else {
                 iconLabel(systemName: "list.bullet.rectangle.portrait", tint: ChatPalette.secondaryText)
@@ -5134,9 +5186,9 @@ private struct FundableAccountCard: View {
 
     private func iconLabel(systemName: String, tint: Color) -> some View {
         Image(systemName: systemName)
-            .font(.system(size: 12, weight: .black))
+            .font(.system(size: 11, weight: .black))
             .foregroundStyle(tint)
-            .frame(width: 28, height: 28)
+            .frame(width: 26, height: 26)
             .background(Circle().fill(ChatPalette.buttonCircle))
     }
 

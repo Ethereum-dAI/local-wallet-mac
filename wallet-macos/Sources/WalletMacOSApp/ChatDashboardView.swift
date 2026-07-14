@@ -578,6 +578,11 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var broadcasterAddress: String?
     @Published private(set) var broadcasterBalance: String?
     @Published private(set) var broadcasterState: String?
+    // Which helper EOA (bundler / broadcaster) is mid gas-funding, so its card shows a
+    // spinner and disables its Send button; nil when idle. Plus the last funding error.
+    @Published private(set) var fundingHelperAddress: String?
+    @Published private(set) var helperFundError: String?
+    @Published private(set) var helperFundErrorAddress: String?
     @Published private(set) var tokenBalanceMessage: String? = nil
     @Published private var transferPreflightStatuses: [UUID: ChatTransferPreflightStatus] = [:]
     @Published private var swapPreflightStatuses: [UUID: ChatSwapPreflightStatus] = [:]
@@ -2482,6 +2487,102 @@ private final class ChatDashboardModel: ObservableObject {
         }
     }
 
+    /// Top up a helper EOA (bundler or local broadcaster) with native ETH so it can pay gas.
+    /// The ETH comes from the Kernel account as a passkey-signed UserOp — the same primitive
+    /// as a chat transfer. For the bundler this only works once it already has enough gas to
+    /// relay one op; when it's empty, its card's copy-address button is the external fallback.
+    func fundHelper(address: String, amountETH: String, label: String, isBroadcaster: Bool) {
+        guard fundingHelperAddress == nil else { return }
+        let amount = amountETH.trimmingCharacters(in: .whitespaces)
+        guard address.hasPrefix("0x"), address.count == 42 else {
+            setHelperFundError("\(label) has no address to fund yet.", address: address)
+            return
+        }
+        guard let value = Double(amount), value > 0 else {
+            setHelperFundError("Enter an amount greater than 0 to fund \(label).", address: address)
+            return
+        }
+        fundingHelperAddress = address
+        helperFundError = nil
+        helperFundErrorAddress = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.fundingHelperAddress = nil }
+            do {
+                let result = try await self.walletModel.executeNativeTransfer(
+                    recipient: address,
+                    amountETH: amount,
+                    logContext: "fund-helper",
+                    signingReason: "Authorize \(amount) ETH to the \(label) for gas on \(self.walletModel.activeChain.name)"
+                )
+                self.appendHelperFundingResult(result, amount: amount, address: address, label: label)
+                // Reflect the new gas balance on the card.
+                self.refreshAccountIdentity()
+                if isBroadcaster {
+                    self.refreshShieldedBalance()
+                } else {
+                    self.refreshTokenBalances(force: true)
+                }
+            } catch {
+                self.setHelperFundError("Funding the \(label) failed: \(error.localizedDescription)", address: address)
+                self.appendFundingError(error, label: label)
+            }
+        }
+    }
+
+    private func setHelperFundError(_ message: String, address: String) {
+        helperFundError = message
+        helperFundErrorAddress = address
+    }
+
+    private func appendHelperFundingResult(
+        _ result: AppModel.UserOperationSendResult,
+        amount: String,
+        address: String,
+        label: String
+    ) {
+        guard let conversationID = activeConversationIDIfPresent else { return }
+        let status: OnchainTransactionSummary.Status =
+            result.success == true ? .included
+            : result.success == false ? .reverted
+            : result.transactionHash != nil ? .submitted : .pending
+        let summary = OnchainTransactionSummary(
+            chainName: walletModel.activeChain.name,
+            chainID: walletModel.activeChain.id,
+            amount: amount,
+            token: "ETH",
+            recipient: address,
+            recipientName: "\(label) (gas)",
+            resolvedRecipient: nil,
+            resolutionChainName: nil,
+            resolutionChainID: nil,
+            ccipReadUsed: nil,
+            operation: .transfer,
+            signingMode: result.signedBySession ? "session" : "passkey",
+            amountOut: nil,
+            minimumReceived: nil,
+            route: nil,
+            userOpHash: result.userOpHash,
+            transactionHash: result.transactionHash,
+            status: status,
+            createdAt: Date()
+        )
+        appendMessage(.onchainTransaction(summary), to: conversationID)
+        reloadWalletHistory()
+    }
+
+    private func appendFundingError(_ error: Error, label: String) {
+        guard let conversationID = activeConversationIDIfPresent else { return }
+        appendMessage(
+            ChatMessage(
+                kind: .assistantError,
+                role: .assistant,
+                text: "Funding the \(label) failed: \(error.localizedDescription)"
+            ),
+            to: conversationID
+        )
+    }
+
     /// `/shield <amount>` — deposit ETH into the RAILGUN pool. The sidecar builds the pool
     /// deposit tx(s); the OWNER self-submits them as a Kernel `execute` UserOp (passkey).
     private func executeShield(intent: ToolIntent) async throws {
@@ -3593,7 +3694,9 @@ struct LocalWalletChatDashboardView: View {
                 .help("Refresh balances")
             }
             if isAccountHeaderExpanded {
-                HStack(spacing: 12) {
+                VStack(spacing: 12) {
+                    // The Kernel account is where funds are received, so its address stays
+                    // front and centre.
                     AddressPill(
                         icon: "lock.shield.fill",
                         title: "Kernel smart account",
@@ -3605,27 +3708,52 @@ struct LocalWalletChatDashboardView: View {
                         onRefreshTokenBalances: { model.refreshTokenBalances(force: true) },
                         explorerURL: explorerAddressURL(model.accountIdentity.kernelAddress)
                     )
-                    AddressPill(
+                    // Bundler + broadcaster are gas-paying helper EOAs: lead with a Fund
+                    // action, not the address.
+                    FundableAccountCard(
                         icon: "key.fill",
-                        title: "Bundler address",
+                        title: "Bundler",
+                        subtitle: "Relays your account's transactions",
                         address: model.accountIdentity.bundlerAddress,
                         balance: model.accountIdentity.bundlerBalance,
                         state: model.accountIdentity.bundlerState,
+                        isFunding: model.fundingHelperAddress == model.accountIdentity.bundlerAddress,
+                        fundError: model.helperFundErrorAddress == model.accountIdentity.bundlerAddress ? model.helperFundError : nil,
                         tokenBalances: model.bundlerTokenBalances,
                         isRefreshingTokenBalances: model.isRefreshingTokenBalances,
                         onRefreshTokenBalances: { model.refreshTokenBalances(force: true) },
-                        explorerURL: explorerAddressURL(model.accountIdentity.bundlerAddress)
+                        explorerURL: explorerAddressURL(model.accountIdentity.bundlerAddress),
+                        onFund: { amount in
+                            model.fundHelper(
+                                address: model.accountIdentity.bundlerAddress,
+                                amountETH: amount,
+                                label: "bundler",
+                                isBroadcaster: false
+                            )
+                        }
                     )
-                    AddressPill(
+                    FundableAccountCard(
                         icon: "arrowshape.turn.up.right.fill",
                         title: "Local broadcaster",
+                        subtitle: "Relays your unshields (unwrap + forward)",
                         address: model.broadcasterAddress ?? "Not started",
                         balance: model.broadcasterBalance ?? "—",
                         state: model.broadcasterState ?? "Not checked",
+                        isFunding: model.fundingHelperAddress == model.broadcasterAddress,
+                        fundError: model.helperFundErrorAddress == model.broadcasterAddress ? model.helperFundError : nil,
                         tokenBalances: [],
                         isRefreshingTokenBalances: false,
                         onRefreshTokenBalances: {},
-                        explorerURL: explorerAddressURL(model.broadcasterAddress ?? "")
+                        explorerURL: explorerAddressURL(model.broadcasterAddress ?? ""),
+                        onFund: { amount in
+                            guard let address = model.broadcasterAddress else { return }
+                            model.fundHelper(
+                                address: address,
+                                amountETH: amount,
+                                label: "broadcaster",
+                                isBroadcaster: true
+                            )
+                        }
                     )
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
@@ -4787,6 +4915,236 @@ private struct AddressPill: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
             copied = false
         }
+    }
+}
+
+/// Account card for a gas-paying helper EOA (bundler / local broadcaster). Unlike
+/// `AddressPill`, it leads with the gas balance and a **Fund** action — the raw address is
+/// demoted to a copy button (the external-funding fallback the bundler needs when empty).
+/// "Send" moves ETH from the Kernel account as a passkey UserOp; see `fundHelper`.
+private struct FundableAccountCard: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let address: String
+    let balance: String
+    let state: String
+    let isFunding: Bool
+    let fundError: String?
+    let tokenBalances: [ChatTokenBalance]
+    let isRefreshingTokenBalances: Bool
+    let onRefreshTokenBalances: () -> Void
+    let explorerURL: URL?
+    let onFund: (String) -> Void
+
+    @State private var fundAmount = "0.02"
+    @State private var copied = false
+    @State private var isTokenListPresented = false
+
+    private var hasAddress: Bool { address.hasPrefix("0x") && address.count == 42 }
+    private var needsFunding: Bool {
+        let s = state.lowercased()
+        return s.contains("need") || s.contains("top")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 11) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .black))
+                    .foregroundStyle(ChatPalette.accent)
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(ChatPalette.buttonCircle))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 10, weight: .black))
+                        .foregroundStyle(ChatPalette.mutedText)
+                        .textCase(.uppercase)
+                    Text(balance)
+                        .font(.system(size: 20, weight: .heavy, design: .rounded))
+                        .foregroundStyle(ChatPalette.primaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                }
+
+                Spacer(minLength: 0)
+
+                stateBadge
+            }
+
+            HStack(spacing: 8) {
+                fundControl
+
+                Spacer(minLength: 8)
+
+                iconButton(systemName: copied ? "checkmark" : "doc.on.doc",
+                           tint: copied ? ChatPalette.success : ChatPalette.secondaryText,
+                           help: copied ? "Copied" : "Copy address to fund externally",
+                           disabled: !hasAddress) {
+                    copy(address)
+                }
+
+                if tokenBalances.isEmpty == false || isRefreshingTokenBalances {
+                    tokenListButton
+                }
+
+                if let explorerURL {
+                    Link(destination: explorerURL) {
+                        iconLabel(systemName: "safari", tint: ChatPalette.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open in explorer")
+                }
+            }
+
+            if let fundError {
+                Text(fundError)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(ChatPalette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("\(subtitle). Send from your Kernel account (passkey), or copy the address to fund it externally.")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(ChatPalette.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(ChatPalette.panel)
+                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(ChatPalette.border, lineWidth: 1))
+        )
+    }
+
+    private var stateBadge: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(needsFunding ? ChatPalette.warning : ChatPalette.success)
+                .frame(width: 6, height: 6)
+            Text(state)
+                .font(.system(size: 10, weight: .black))
+                .foregroundStyle(needsFunding ? ChatPalette.warning : ChatPalette.success)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 20)
+        .background(
+            Capsule().fill((needsFunding ? ChatPalette.warning : ChatPalette.success).opacity(0.14))
+        )
+        .overlay(
+            Capsule().stroke((needsFunding ? ChatPalette.warning : ChatPalette.success).opacity(0.35), lineWidth: 1)
+        )
+    }
+
+    private var fundControl: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Text("Fund")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(ChatPalette.mutedText)
+                TextField("0.02", text: $fundAmount)
+                    .textFieldStyle(.plain)
+                    .multilineTextAlignment(.trailing)
+                    .font(.system(size: 14, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(ChatPalette.primaryText)
+                    .frame(width: 48)
+                    .disabled(isFunding)
+                Text("ETH")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(ChatPalette.mutedText)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(ChatPalette.input)
+                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(ChatPalette.border, lineWidth: 1))
+            )
+
+            Button {
+                onFund(fundAmount)
+            } label: {
+                HStack(spacing: 6) {
+                    if isFunding {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text(isFunding ? "Sending" : "Send")
+                        .font(.system(size: 13, weight: .heavy))
+                    if !isFunding {
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 11, weight: .black))
+                    }
+                }
+                .foregroundStyle(hasAddress ? Color.white : ChatPalette.mutedText)
+                .padding(.horizontal, 14)
+                .frame(height: 34)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(hasAddress ? ChatPalette.accent : ChatPalette.buttonCircle)
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(!hasAddress || isFunding)
+            .help(hasAddress ? "Send ETH from your Kernel account for gas" : "Address not available yet")
+        }
+    }
+
+    private var tokenListButton: some View {
+        Button {
+            if tokenBalances.isEmpty { onRefreshTokenBalances() }
+            isTokenListPresented.toggle()
+        } label: {
+            if isRefreshingTokenBalances {
+                ProgressView().controlSize(.small).frame(width: 28, height: 28)
+                    .background(Circle().fill(ChatPalette.buttonCircle))
+            } else {
+                iconLabel(systemName: "list.bullet.rectangle.portrait", tint: ChatPalette.secondaryText)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(!hasAddress)
+        .help("Show token balances")
+        .popover(isPresented: $isTokenListPresented, arrowEdge: .bottom) {
+            TokenBalancePopover(
+                title: title,
+                address: address,
+                balances: tokenBalances,
+                isRefreshing: isRefreshingTokenBalances,
+                onRefresh: onRefreshTokenBalances
+            )
+        }
+    }
+
+    private func iconButton(
+        systemName: String,
+        tint: Color,
+        help: String,
+        disabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            iconLabel(systemName: systemName, tint: tint)
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(help)
+    }
+
+    private func iconLabel(systemName: String, tint: Color) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 12, weight: .black))
+            .foregroundStyle(tint)
+            .frame(width: 28, height: 28)
+            .background(Circle().fill(ChatPalette.buttonCircle))
+    }
+
+    private func copy(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        withAnimation(.easeInOut(duration: 0.12)) { copied = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { copied = false }
     }
 }
 

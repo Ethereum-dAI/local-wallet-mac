@@ -3626,6 +3626,10 @@ struct LocalWalletChatDashboardView: View {
                 Text("Confirmed \(confirmed) · Pending \(model.shieldedPending ?? "0 ETH")")
                     .font(.caption.monospacedDigit())
                     .help("Confirmed = cleared and spendable. Pending = deposited but not yet included by the pool's approval set.")
+            } else if model.isRefreshingShieldedBalance {
+                Text("Loading… (syncing the pool)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else if model.shieldedBalanceError != nil {
                 Text("unavailable")
                     .font(.caption)
@@ -3646,6 +3650,13 @@ struct LocalWalletChatDashboardView: View {
             .help("Refresh shielded balance")
         }
         .padding(.top, 2)
+        .task {
+            // Auto-load once when the account header first shows this row, so the balance
+            // is visible without hunting for the refresh button. (Starts the sidecar.)
+            if model.shieldedConfirmed == nil && model.shieldedBalanceError == nil {
+                model.refreshShieldedBalance()
+            }
+        }
     }
 
     private func explorerAddressURL(_ address: String) -> URL? {

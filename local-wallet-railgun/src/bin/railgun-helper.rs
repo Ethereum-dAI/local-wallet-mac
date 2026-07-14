@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy::primitives::Address;
+use alloy::providers::Provider;
 use railgun::chain_config::ChainConfig;
 use railgun_helper::pool::RailgunHelper;
 use railgun_helper::provider::connect_provider;
@@ -136,6 +137,8 @@ async fn main() {
     let provider = connect_provider(&rpc_url, None)
         .await
         .expect("connect provider");
+    // Keep a provider handle for reading the broadcaster EOA's gas balance (broadcasterStatus).
+    let balance_provider = provider.clone();
     let helper = RailgunHelper::new(chain, provider, fork_block, signer)
         .await
         .expect("build railgun helper");
@@ -147,6 +150,28 @@ async fn main() {
     let job_seq = Arc::new(AtomicU64::new(1));
 
     let mut handlers: Handlers = HashMap::new();
+
+    {
+        // broadcasterStatus: the local broadcaster's EOA + its gas balance, so the app can
+        // show it (like the bundler) and prompt to top it up when it can't pay unshield gas.
+        let bp = balance_provider.clone();
+        handlers.insert(
+            "broadcasterStatus".to_string(),
+            rpc_handler!(move |_p: Value| {
+                let bp = bp.clone();
+                async move {
+                    let bal = bp
+                        .get_balance(broadcaster_addr)
+                        .await
+                        .map_err(|e| format!("broadcaster balance: {e}"))?;
+                    Ok(json!({
+                        "address": format!("{broadcaster_addr:?}"),
+                        "balanceWei": format!("0x{bal:x}"),
+                    }))
+                }
+            }),
+        );
+    }
 
     {
         let h = helper.clone();

@@ -573,6 +573,11 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var shieldedPending: String?
     @Published private(set) var isRefreshingShieldedBalance = false
     @Published private(set) var shieldedBalanceError: String?
+    // The local broadcaster EOA (relays unshields) + its gas balance/state, shown like the
+    // bundler so the user knows to top it up (it pays gas for unshield/unwrap/forward).
+    @Published private(set) var broadcasterAddress: String?
+    @Published private(set) var broadcasterBalance: String?
+    @Published private(set) var broadcasterState: String?
     @Published private(set) var tokenBalanceMessage: String? = nil
     @Published private var transferPreflightStatuses: [UUID: ChatTransferPreflightStatus] = [:]
     @Published private var swapPreflightStatuses: [UUID: ChatSwapPreflightStatus] = [:]
@@ -2461,6 +2466,16 @@ private final class ChatDashboardModel: ObservableObject {
                 self.shieldedConfirmed = WeiFormatter.ethDisplayString(fromHexWei: split.valid)
                 self.shieldedPending = WeiFormatter.ethDisplayString(fromHexWei: split.pending)
                 self.shieldedBalanceError = nil
+                // Also refresh the local broadcaster's address + gas balance.
+                if let status = try? await client.broadcasterStatus() {
+                    self.broadcasterAddress = status.address
+                    self.broadcasterBalance = WeiFormatter.ethDisplayString(fromHexWei: status.balanceWei)
+                    let hex = status.balanceWei.hasPrefix("0x")
+                        ? String(status.balanceWei.dropFirst(2)) : status.balanceWei
+                    // < 0.005 ETH (5e15 wei) can't reliably cover unshield gas → prompt top-up.
+                    let needsFunding = (UInt64(hex, radix: 16) ?? .max) < 5_000_000_000_000_000
+                    self.broadcasterState = needsFunding ? "Needs funding" : "Ready"
+                }
             } catch {
                 self.shieldedBalanceError = error.localizedDescription
             }
@@ -3600,6 +3615,17 @@ struct LocalWalletChatDashboardView: View {
                         isRefreshingTokenBalances: model.isRefreshingTokenBalances,
                         onRefreshTokenBalances: { model.refreshTokenBalances(force: true) },
                         explorerURL: explorerAddressURL(model.accountIdentity.bundlerAddress)
+                    )
+                    AddressPill(
+                        icon: "arrowshape.turn.up.right.fill",
+                        title: "Local broadcaster",
+                        address: model.broadcasterAddress ?? "Not started",
+                        balance: model.broadcasterBalance ?? "—",
+                        state: model.broadcasterState ?? "Not checked",
+                        tokenBalances: [],
+                        isRefreshingTokenBalances: false,
+                        onRefreshTokenBalances: {},
+                        explorerURL: explorerAddressURL(model.broadcasterAddress ?? "")
                     )
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))

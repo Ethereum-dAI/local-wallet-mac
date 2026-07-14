@@ -54,8 +54,18 @@ struct RailgunHelperClient: Sendable {
         let error: String?
     }
 
+    struct BroadcasterStatus: Decodable, Equatable {
+        let address: String
+        let balanceWei: String
+    }
+
     func balance() async throws -> BalanceSplit {
         try decode(try await call(method: "balance", params: .null))
+    }
+
+    /// The local broadcaster EOA + its gas balance (so the app can show a funding prompt).
+    func broadcasterStatus() async throws -> BroadcasterStatus {
+        try decode(try await call(method: "broadcasterStatus", params: .null))
     }
 
     func prepareShield(amountWei: String) async throws -> [ShieldTx] {

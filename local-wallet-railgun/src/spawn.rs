@@ -14,13 +14,24 @@ use std::process::{Child, Command};
 
 const SECRET_FD: libc::c_int = 5;
 
-/// Read fd 5 to EOF and close it. Returns `None` if fd 5 is not a valid/open fd
-/// (standalone/dev) or is empty. Uses raw `libc` I/O deliberately — wrapping fd 5 in a
-/// `File`/`OwnedFd` trips Rust's I/O-safety close-tracking and aborts the process.
+/// Env flag the spawner sets so the child KNOWS fd 5 carries its secret. Without it we must
+/// NOT touch fd 5: under `#[tokio::main]` the runtime is created before `main` runs and may
+/// have taken fd 5 for its own kqueue/wakeup, so probing+closing it would clobber tokio
+/// (EBADF). Only children spawned via [`spawn_child_with_fd5`] get this flag.
+pub const FD5_ENV_FLAG: &str = "RAILGUN_FD5";
+
+/// Read fd 5 to EOF and close it. Returns `None` unless the spawner set `RAILGUN_FD5=1`
+/// (i.e. this process was launched via [`spawn_child_with_fd5`]); standalone/dev processes
+/// fall back to env. Uses raw `libc` I/O deliberately — wrapping fd 5 in a `File`/`OwnedFd`
+/// trips Rust's I/O-safety close-tracking and aborts the process.
 pub fn read_fd5() -> Option<Vec<u8>> {
+    // Only read fd 5 when the spawner explicitly delivered a secret there.
+    if std::env::var_os(FD5_ENV_FLAG).is_none() {
+        return None;
+    }
     // Probe: fd 5 must be a valid fd.
     if unsafe { libc::fcntl(SECRET_FD, libc::F_GETFD) } < 0 {
-        return None; // EBADF — no fd 5 (standalone)
+        return None; // EBADF — no fd 5
     }
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
@@ -64,6 +75,8 @@ fn set_cloexec(fd: libc::c_int) -> io::Result<()> {
 /// writes the secret and closes its write end, so the child sees EOF after the payload.
 /// (macOS has no `pipe2`, hence the explicit fcntl CLOEXEC dance.)
 pub fn spawn_child_with_fd5(mut cmd: Command, secret: &[u8]) -> io::Result<Child> {
+    // Tell the child that fd 5 carries its secret (see read_fd5 / FD5_ENV_FLAG).
+    cmd.env(FD5_ENV_FLAG, "1");
     let mut fds = [0 as libc::c_int; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());

@@ -92,6 +92,9 @@ final class RailgunHelperDaemon: @unchecked Sendable {
             "RAILGUN_BROADCASTER_BIN": broadcasterBin,
             "RAILGUN_BROADCASTER_SOCKET": bcSocket,
             "RAILGUN_BROADCASTER_TOKEN": bcToken,
+            // Tell the helper its secret arrives on fd 5 (we deliver it there below). Without
+            // this flag the helper won't read fd 5 (see read_fd5 / FD5_ENV_FLAG).
+            "RAILGUN_FD5": "1",
             "RUST_LOG": environment["RUST_LOG"] ?? "railgun_helper=info,railgun=warn",
         ]
         let restore = setEnvironment(childEnv)

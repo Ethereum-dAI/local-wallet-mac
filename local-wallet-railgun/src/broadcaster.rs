@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::Address;
 use alloy::providers::{DynProvider, Provider};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
@@ -217,7 +217,7 @@ impl LocalBroadcaster {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{address, bytes};
+    use alloy::primitives::{address, bytes, U256};
 
     // anvil test key #1 (well-known; testnet only).
     const KEY: &str = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";

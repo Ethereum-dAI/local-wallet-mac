@@ -77,6 +77,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // The wallet UI is designed dark-only (hardcoded dark ChatPalette/SettingsPalette
+        // backgrounds), but many text elements use system-semantic colors. Pin the whole
+        // app to dark so those don't render dark-on-dark for users whose macOS is in Light
+        // mode (otherwise intent-card text + balances become unreadable).
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+
         let model = AppModel()
         self.model = model
 

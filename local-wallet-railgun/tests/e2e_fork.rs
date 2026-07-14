@@ -57,7 +57,11 @@ fn anvil_url() -> String {
 async fn wait_for_rpc(url: &str, secs: u64) {
     let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
-        if let Ok(p) = ProviderBuilder::new().network::<Ethereum>().connect(url).await {
+        if let Ok(p) = ProviderBuilder::new()
+            .network::<Ethereum>()
+            .connect(url)
+            .await
+        {
             if p.get_chain_id().await.is_ok() {
                 return;
             }
@@ -73,7 +77,10 @@ async fn wait_for_socket(path: &str, secs: u64) {
         if tokio::net::UnixStream::connect(path).await.is_ok() {
             return;
         }
-        assert!(Instant::now() < deadline, "socket {path} not ready after {secs}s");
+        assert!(
+            Instant::now() < deadline,
+            "socket {path} not ready after {secs}s"
+        );
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 }
@@ -92,9 +99,12 @@ async fn shield_then_unshield_via_local_broadcaster() {
     let _anvil = Killer(
         Command::new("anvil")
             .args([
-                "--fork-url", &rpc,
-                "--fork-block-number", &FORK_BLOCK.to_string(),
-                "--port", &ANVIL_PORT.to_string(),
+                "--fork-url",
+                &rpc,
+                "--fork-block-number",
+                &FORK_BLOCK.to_string(),
+                "--port",
+                &ANVIL_PORT.to_string(),
                 "--silent",
             ])
             .env("FOUNDRY_DISABLE_NIGHTLY_WARNING", "1")
@@ -131,7 +141,9 @@ async fn shield_then_unshield_via_local_broadcaster() {
     wait_for_socket(&helper_sock, 180).await;
 
     // broadcaster reports its own EOA address.
-    let bc_addr = rpc::call(&bc_sock, btok, "address", json!(null)).await.unwrap();
+    let bc_addr = rpc::call(&bc_sock, btok, "address", json!(null))
+        .await
+        .unwrap();
     assert_eq!(
         bc_addr["address"].as_str().unwrap().to_lowercase(),
         format!("{BROADCASTER_ADDR:?}").to_lowercase()
@@ -148,9 +160,14 @@ async fn shield_then_unshield_via_local_broadcaster() {
         .erased();
 
     // 4. SHIELD: helper builds tx(s), owner self-submits each.
-    let shield_txs = rpc::call(&helper_sock, htok, "prepareShield", json!({"amountWei": SHIELD_WEI.to_string()}))
-        .await
-        .expect("prepareShield");
+    let shield_txs = rpc::call(
+        &helper_sock,
+        htok,
+        "prepareShield",
+        json!({"amountWei": SHIELD_WEI.to_string()}),
+    )
+    .await
+    .expect("prepareShield");
     let txs: Vec<TxData> = serde_json::from_value(shield_txs).expect("shield tx list");
     assert!(!txs.is_empty(), "expected >=1 shield tx");
     for tx in txs {
@@ -161,15 +178,28 @@ async fn shield_then_unshield_via_local_broadcaster() {
             .get_receipt()
             .await
             .expect("shield receipt");
-        assert!(receipt.status(), "shield tx must succeed: {:?}", receipt.transaction_hash);
-        eprintln!("[e2e] shield tx {:?} in block {:?}", receipt.transaction_hash, receipt.block_number);
+        assert!(
+            receipt.status(),
+            "shield tx must succeed: {:?}",
+            receipt.transaction_hash
+        );
+        eprintln!(
+            "[e2e] shield tx {:?} in block {:?}",
+            receipt.transaction_hash, receipt.block_number
+        );
     }
 
     // 5. balance reflects the shielded deposit.
-    let bal = rpc::call(&helper_sock, htok, "balance", json!(null)).await.expect("balance");
-    let total = u128::from_str_radix(bal["total"].as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
+    let bal = rpc::call(&helper_sock, htok, "balance", json!(null))
+        .await
+        .expect("balance");
+    let total =
+        u128::from_str_radix(bal["total"].as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
     eprintln!("[e2e] shielded balance total = {total} wei ({bal})");
-    assert!(total >= SHIELD_WEI * 99 / 100, "shielded balance {total} too low");
+    assert!(
+        total >= SHIELD_WEI * 99 / 100,
+        "shielded balance {total} too low"
+    );
 
     let weth = WETH::new(WETH, &owner_provider);
     let before = weth.balanceOf(RECIPIENT).call().await.unwrap();
@@ -188,19 +218,33 @@ async fn shield_then_unshield_via_local_broadcaster() {
     let proved_tx: TxData = serde_json::from_value(proved).expect("proved tx");
 
     // 7. RELAY via the LOCAL BROADCASTER process (its own EOA submits).
-    let relay = rpc::call(&bc_sock, btok, "relay", serde_json::to_value(&proved_tx).unwrap())
-        .await
-        .expect("relay");
+    let relay = rpc::call(
+        &bc_sock,
+        btok,
+        "relay",
+        serde_json::to_value(&proved_tx).unwrap(),
+    )
+    .await
+    .expect("relay");
     eprintln!("[e2e] relay receipt = {relay}");
-    assert!(relay["status"].as_bool().unwrap(), "unshield relay must succeed");
+    assert!(
+        relay["status"].as_bool().unwrap(),
+        "unshield relay must succeed"
+    );
     let unshield_hash = relay["txHash"].as_str().unwrap().to_string();
 
     // 8. Assertions: recipient received WETH, and the LOCAL BROADCASTER submitted it.
     let after = weth.balanceOf(RECIPIENT).call().await.unwrap();
     eprintln!("[e2e] recipient WETH: {before} -> {after}");
     assert!(after > U256::ZERO, "recipient must receive unshielded WETH");
-    assert!(after <= U256::from(UNSHIELD_WEI), "cannot exceed unshield amount");
-    assert!(after >= U256::from(UNSHIELD_WEI * 95 / 100), "received {after} < ~95% of {UNSHIELD_WEI}");
+    assert!(
+        after <= U256::from(UNSHIELD_WEI),
+        "cannot exceed unshield amount"
+    );
+    assert!(
+        after >= U256::from(UNSHIELD_WEI * 95 / 100),
+        "received {after} < ~95% of {UNSHIELD_WEI}"
+    );
 
     let tx = owner_provider
         .get_transaction_by_hash(unshield_hash.parse().unwrap())
@@ -213,5 +257,7 @@ async fn shield_then_unshield_via_local_broadcaster() {
         "unshield MUST be submitted by the local broadcaster EOA, not the owner"
     );
 
-    eprintln!("[e2e] PASS: shield + unshield confirmed on-chain; broadcaster relayed the unshield.");
+    eprintln!(
+        "[e2e] PASS: shield + unshield confirmed on-chain; broadcaster relayed the unshield."
+    );
 }

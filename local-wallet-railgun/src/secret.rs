@@ -95,7 +95,10 @@ mod tests {
     #[test]
     fn rejects_short_entropy() {
         let j = r#"{"entropyHex":"0x01","sidecarSocketPath":"/s","token":"t","provider":{}}"#;
-        assert_eq!(parse_secret_payload(j.as_bytes()), Err(SecretError::EntropyLength(2)));
+        assert_eq!(
+            parse_secret_payload(j.as_bytes()),
+            Err(SecretError::EntropyLength(2))
+        );
     }
 
     #[test]
@@ -104,11 +107,17 @@ mod tests {
         let j = format!(
             r#"{{"entropyHex":"{bad}","sidecarSocketPath":"/s","token":"t","provider":{{}}}}"#
         );
-        assert_eq!(parse_secret_payload(j.as_bytes()), Err(SecretError::EntropyHex));
+        assert_eq!(
+            parse_secret_payload(j.as_bytes()),
+            Err(SecretError::EntropyHex)
+        );
     }
 
     #[test]
     fn rejects_malformed_json() {
-        assert!(matches!(parse_secret_payload(b"not json"), Err(SecretError::Json(_))));
+        assert!(matches!(
+            parse_secret_payload(b"not json"),
+            Err(SecretError::Json(_))
+        ));
     }
 }

@@ -23,7 +23,9 @@ fn env(key: &str) -> String {
 /// Parse a wei amount given as a JSON decimal string or number.
 fn parse_amount(v: &Value) -> Result<u128, String> {
     match v {
-        Value::String(s) => s.parse::<u128>().map_err(|e| format!("bad amount {s}: {e}")),
+        Value::String(s) => s
+            .parse::<u128>()
+            .map_err(|e| format!("bad amount {s}: {e}")),
         Value::Number(n) => n
             .as_u64()
             .map(u128::from)
@@ -49,13 +51,17 @@ async fn main() {
         .or_else(|_| std::env::var("LOCAL_WALLET_PRIVACY_RPC_URL"))
         .expect("missing RAILGUN_RPC_URL / LOCAL_WALLET_PRIVACY_RPC_URL");
     let entropy = env("RAILGUN_ENTROPY_HEX");
-    let fork_block: u64 = env("RAILGUN_FORK_BLOCK").parse().expect("RAILGUN_FORK_BLOCK");
+    let fork_block: u64 = env("RAILGUN_FORK_BLOCK")
+        .parse()
+        .expect("RAILGUN_FORK_BLOCK");
     let socket = env("RAILGUN_SOCKET");
     let token = env("RAILGUN_TOKEN");
 
     let chain = ChainConfig::sepolia();
     let signer = keys::derive_railgun_signer(&entropy, chain.id).expect("derive signer");
-    let provider = connect_provider(&rpc_url, None).await.expect("connect provider");
+    let provider = connect_provider(&rpc_url, None)
+        .await
+        .expect("connect provider");
     let helper = RailgunHelper::new(chain, provider, fork_block, signer)
         .await
         .expect("build railgun helper");

@@ -77,6 +77,9 @@ mod tests {
     #[test]
     fn address_is_derived_from_key() {
         let signer: PrivateKeySigner = KEY.parse().unwrap();
-        assert_eq!(format!("{:?}", signer.address()).to_lowercase(), ADDR.to_lowercase());
+        assert_eq!(
+            format!("{:?}", signer.address()).to_lowercase(),
+            ADDR.to_lowercase()
+        );
     }
 }

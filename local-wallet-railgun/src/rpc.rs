@@ -82,18 +82,28 @@ async fn handle(
     }
     let body = match req.collect().await {
         Ok(b) => b.to_bytes(),
-        Err(_) => return json_resp(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"read error"}})),
+        Err(_) => {
+            return json_resp(
+                json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"read error"}}),
+            )
+        }
     };
     let reqv: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return json_resp(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":e.to_string()}})),
+        Err(e) => {
+            return json_resp(
+                json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":e.to_string()}}),
+            )
+        }
     };
     let id = reqv.get("id").cloned().unwrap_or(Value::Null);
     let method = reqv.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = reqv.get("params").cloned().unwrap_or(Value::Null);
 
     match handlers.get(method) {
-        None => json_resp(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":format!("unknown method: {method}")}})),
+        None => json_resp(
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":format!("unknown method: {method}")}}),
+        ),
         Some(h) => match h(params).await {
             Ok(result) => json_resp(json!({"jsonrpc":"2.0","id":id,"result":result})),
             Err(e) => {
@@ -144,22 +154,37 @@ pub async fn call(
         "POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    stream.write_all(req.as_bytes()).await.map_err(|e| e.to_string())?;
+    stream
+        .write_all(req.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
     stream.flush().await.map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await.map_err(|e| e.to_string())?;
+    stream
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let text = String::from_utf8_lossy(&buf);
     let (head, payload) = text
         .split_once("\r\n\r\n")
         .ok_or_else(|| format!("malformed HTTP response: {text}"))?;
-    let status_ok = head.lines().next().map(|l| l.contains(" 200")).unwrap_or(false);
+    let status_ok = head
+        .lines()
+        .next()
+        .map(|l| l.contains(" 200"))
+        .unwrap_or(false);
     if !status_ok {
         return Err(format!("HTTP error: {}", head.lines().next().unwrap_or("")));
     }
-    let v: Value = serde_json::from_str(payload.trim()).map_err(|e| format!("bad JSON body: {e}: {payload}"))?;
+    let v: Value = serde_json::from_str(payload.trim())
+        .map_err(|e| format!("bad JSON body: {e}: {payload}"))?;
     if let Some(err) = v.get("error") {
-        return Err(err.get("message").and_then(|m| m.as_str()).unwrap_or("rpc error").to_string());
+        return Err(err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("rpc error")
+            .to_string());
     }
     Ok(v.get("result").cloned().unwrap_or(Value::Null))
 }
@@ -198,7 +223,9 @@ mod tests {
                 .build()
                 .unwrap();
             rt.block_on(async move {
-                serve_rpc(&sock2, "tok".to_string(), handlers).await.unwrap();
+                serve_rpc(&sock2, "tok".to_string(), handlers)
+                    .await
+                    .unwrap();
             });
         });
         // wait for bind

@@ -12,9 +12,9 @@
 
 use std::sync::Arc;
 
+use railgun::account::signer::PrivateKeySigner;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use railgun::account::signer::PrivateKeySigner;
 
 use crate::secret::{parse_entropy_32, SecretError};
 
@@ -30,7 +30,11 @@ pub fn derive_railgun_signer(
     let seed = parse_entropy_32(entropy_hex)?;
     let mut rng = ChaCha20Rng::from_seed(seed);
     // Order matters: spending key first, then viewing key.
-    Ok(PrivateKeySigner::new_evm(rng.random(), rng.random(), chain_id))
+    Ok(PrivateKeySigner::new_evm(
+        rng.random(),
+        rng.random(),
+        chain_id,
+    ))
 }
 
 #[cfg(test)]
@@ -49,12 +53,20 @@ mod tests {
 
     #[test]
     fn derivation_is_deterministic() {
-        assert_eq!(addr_str(E1), addr_str(E1), "same entropy → same shielded address");
+        assert_eq!(
+            addr_str(E1),
+            addr_str(E1),
+            "same entropy → same shielded address"
+        );
     }
 
     #[test]
     fn different_entropy_yields_different_address() {
-        assert_ne!(addr_str(E1), addr_str(E2), "different entropy → different address");
+        assert_ne!(
+            addr_str(E1),
+            addr_str(E2),
+            "different entropy → different address"
+        );
     }
 
     #[test]

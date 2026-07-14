@@ -2515,13 +2515,21 @@ private final class ChatDashboardModel: ObservableObject {
                     logContext: "fund-helper",
                     signingReason: "Authorize \(amount) ETH to the \(label) for gas on \(self.walletModel.activeChain.name)"
                 )
-                self.appendHelperFundingResult(result, amount: amount, address: address, label: label)
-                // Reflect the new gas balance on the card.
-                self.refreshAccountIdentity()
+                // Hold the funding lock until this op is actually mined. Two reasons:
+                // (1) balances only reflect it once it lands; (2) the shared lock stops a
+                // second helper-funding op building on a nonce this one hasn't consumed yet —
+                // that op would otherwise fail estimation with AA25 (invalid account nonce).
+                let receipt = await self.walletModel.awaitUserOperationInclusion(
+                    userOpHash: result.userOpHash,
+                    logContext: "fund-helper"
+                )
+                self.appendHelperFundingResult(result, receipt: receipt, amount: amount, address: address, label: label)
+                // Reflect the new gas balance on the card. refreshOnchainAccountStatus re-reads
+                // chain state (kernel + bundler balances, relayer status) — a plain
+                // refreshAccountIdentity only re-maps the stale cache.
+                self.refreshOnchainAccountStatus()
                 if isBroadcaster {
                     self.refreshShieldedBalance()
-                } else {
-                    self.refreshTokenBalances(force: true)
                 }
             } catch {
                 self.setHelperFundError("Funding the \(label) failed: \(error.localizedDescription)", address: address)
@@ -2537,15 +2545,20 @@ private final class ChatDashboardModel: ObservableObject {
 
     private func appendHelperFundingResult(
         _ result: AppModel.UserOperationSendResult,
+        receipt: WalletNodeClient.UserOperationReceipt?,
         amount: String,
         address: String,
         label: String
     ) {
         guard let conversationID = activeConversationIDIfPresent else { return }
-        let status: OnchainTransactionSummary.Status =
-            result.success == true ? .included
-            : result.success == false ? .reverted
-            : result.transactionHash != nil ? .submitted : .pending
+        let status: OnchainTransactionSummary.Status
+        if let receipt {
+            status = receipt.success ? .included : .reverted
+        } else if result.transactionHash != nil {
+            status = .submitted
+        } else {
+            status = .pending
+        }
         let summary = OnchainTransactionSummary(
             chainName: walletModel.activeChain.name,
             chainID: walletModel.activeChain.id,
@@ -2563,7 +2576,7 @@ private final class ChatDashboardModel: ObservableObject {
             minimumReceived: nil,
             route: nil,
             userOpHash: result.userOpHash,
-            transactionHash: result.transactionHash,
+            transactionHash: receipt?.txHash ?? result.transactionHash,
             status: status,
             createdAt: Date()
         )

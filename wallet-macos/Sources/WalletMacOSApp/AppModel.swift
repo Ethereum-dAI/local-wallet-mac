@@ -2497,6 +2497,17 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Poll the local wallet-node until the given UserOp is included on-chain (or the poll
+    /// window elapses). Callers that must reflect post-inclusion state — a fresh balance, or
+    /// a follow-up op whose nonce depends on this one having landed — should await this before
+    /// proceeding. Returns the receipt if one arrived, else nil (still pending / timed out).
+    func awaitUserOperationInclusion(
+        userOpHash: String,
+        logContext: String
+    ) async -> WalletNodeClient.UserOperationReceipt? {
+        (try? await pollForLocalReceipt(userOpHash: userOpHash, logContext: logContext)) ?? nil
+    }
+
     func loadWalletHistoryRecords(limit: Int = 200) -> [WalletTransactionRecord] {
         do {
             return try walletHistoryStore.loadRecords(

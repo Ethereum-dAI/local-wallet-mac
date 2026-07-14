@@ -41,6 +41,13 @@ import Testing
     #expect(intent.args == ["amount": "0.01", "token": "ETH"])
 }
 
+@Test func parsesShieldWithExplicitToken() throws {
+    let intent = try SlashCommandParser().parse("/shield 0.001 ETH")
+    #expect(intent.tool == .shield)
+    #expect(intent.source == .slash)
+    #expect(intent.args == ["amount": "0.001", "token": "ETH"])
+}
+
 @Test func parsesShieldKeyValue() throws {
     let intent = try SlashCommandParser().parse("/shield amount=0.02 token=ETH")
     #expect(intent.tool == .shield)

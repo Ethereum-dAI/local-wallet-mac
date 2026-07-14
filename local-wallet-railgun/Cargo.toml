@@ -8,6 +8,14 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[features]
+default = []
+# Cap Subsquid sync at a specific block so it matches an anvil fork (Subsquid indexes
+# LIVE Sepolia; without the cap it returns commitments past the fork head that the fork
+# contract doesn't have). Enables railgun's `testing` feature, which exposes
+# SubsquidSyncer::with_latest_block. Used by the fork e2e; off for live deployments.
+fork-sync = ["railgun/testing"]
+
 [lib]
 name = "railgun_helper"
 path = "src/lib.rs"
@@ -23,6 +31,9 @@ path = "src/bin/railgun-broadcaster.rs"
 [dependencies]
 # Kohaku RAILGUN Rust SDK. NEVER enable the `js` feature (drags wasm-bindgen).
 railgun = { git = "https://github.com/ethereum/kohaku.git", rev = "877026e1775a333c556c6fea54dc270009aac978", default-features = false }
+# TxData ({to,data,value}) crosses the RPC boundary; name it directly. `alloy` feature
+# gives the `From<TxData> for TransactionRequest` conversion. `js` stays off.
+eip-1193-provider = { git = "https://github.com/ethereum/kohaku.git", rev = "877026e1775a333c556c6fea54dc270009aac978", default-features = false, features = ["alloy"] }
 
 alloy = { version = "1.8", features = [
     "std", "providers", "network", "signer-local", "contract",

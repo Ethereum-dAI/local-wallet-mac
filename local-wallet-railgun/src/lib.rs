@@ -7,6 +7,10 @@
 //! - `railgun-helper`      — sidecar: `balance` / `prepareShield` / `prepareUnshield`.
 //! - `railgun-broadcaster` — local broadcaster: `relay` / `address` (its own EOA).
 
+pub mod keys;
+pub mod rpc;
+pub mod secret;
+
 // Build-gate smoke: confirm the pinned Kohaku API surface resolves.
 #[doc(hidden)]
 pub fn _kohaku_api_smoke() -> u64 {

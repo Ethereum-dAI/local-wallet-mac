@@ -3312,7 +3312,9 @@ struct LocalWalletChatDashboardView: View {
     @State private var isSessionActionInProgress = false
     @State private var sessionPopoverMessage: String?
     @State private var isAtBottomOfChat = true
-    @State private var isAccountHeaderExpanded = true
+    // Account cards start hidden; clicking the chain bar reveals them. Persisted so the
+    // choice sticks across launches.
+    @AppStorage("localwallet.accountHeaderExpanded") private var isAccountHeaderExpanded = false
     // Privacy on → show the RAILGUN pieces (local broadcaster card + shielded balances).
     // Off → hide them and the wallet reads as a plain account. Persisted across launches.
     @AppStorage("localwallet.privacyEnabled") private var privacyEnabled = true
@@ -4781,20 +4783,11 @@ private struct ChainStatusStrip: View {
                     .frame(height: 22)
                     .background(Capsule().fill((identity.isTestnet ? ChatPalette.warning : ChatPalette.success).opacity(0.12)))
 
-                if !isExpanded {
-                    compactAccountSummary(
-                        title: "Kernel",
-                        address: identity.kernelAddress,
-                        balance: identity.kernelBalance
-                    )
-                    compactAccountSummary(
-                        title: "Bundler",
-                        address: identity.bundlerAddress,
-                        balance: identity.bundlerBalance
-                    )
-                }
-
                 Spacer(minLength: 0)
+
+                Text(isExpanded ? "Hide accounts" : "Show accounts")
+                    .font(.system(size: 11, weight: .heavy))
+                    .foregroundStyle(ChatPalette.mutedText)
 
                 Image(systemName: "chevron.down")
                     .font(.system(size: 11, weight: .black))
@@ -4816,30 +4809,6 @@ private struct ChainStatusStrip: View {
         )
     }
 
-    private func compactAccountSummary(title: String, address: String, balance: String) -> some View {
-        HStack(spacing: 5) {
-            Text(title)
-                .font(.system(size: 11, weight: .black))
-                .foregroundStyle(ChatPalette.mutedText)
-            Text(shortAddress(address))
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundStyle(ChatPalette.secondaryText)
-            Text(balance)
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(ChatPalette.secondaryText)
-        }
-        .lineLimit(1)
-        .padding(.horizontal, 8)
-        .frame(height: 22)
-        .background(Capsule().fill(ChatPalette.buttonCircle.opacity(0.6)))
-    }
-
-    private func shortAddress(_ value: String) -> String {
-        guard value.hasPrefix("0x"), value.count > 14 else {
-            return value
-        }
-        return "\(value.prefix(6))...\(value.suffix(4))"
-    }
 }
 
 private struct AddressPill: View {

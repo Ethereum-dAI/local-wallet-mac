@@ -16,6 +16,7 @@
 
 use std::time::Duration;
 
+use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, U256};
 use alloy::providers::{DynProvider, Provider};
 use alloy::rpc::types::TransactionRequest;
@@ -44,6 +45,8 @@ pub struct RelayReceipt {
     pub tx_hash: String,
     #[serde(rename = "blockNumber")]
     pub block_number: Option<u64>,
+    #[serde(rename = "gasUsed")]
+    pub gas_used: u64,
     pub status: bool,
 }
 
@@ -147,6 +150,7 @@ impl LocalBroadcaster {
         Ok(RelayReceipt {
             tx_hash: format!("{:#x}", receipt.transaction_hash),
             block_number: receipt.block_number,
+            gas_used: receipt.gas_used,
             status: receipt.status(),
         })
     }
@@ -212,14 +216,27 @@ impl LocalBroadcaster {
             ));
         }
 
+        // Send the unwrap with an explicit, generous gas limit instead of relying on
+        // eth_estimateGas. On live Sepolia the estimate races the unshield's state
+        // settlement across load-balanced RPC nodes: the estimating node may not yet see the
+        // WETH credited by the just-mined unshield, so it returns a too-low limit and the tx
+        // runs out of gas at inclusion (where the state IS settled) — mining with status 0
+        // while an eth_call at head succeeds. WETH9.withdraw is a bounded ~30k-gas op; unused
+        // gas is refunded, so a fixed 120k ceiling is safe and immune to the race.
+        const UNWRAP_GAS_LIMIT: u64 = 120_000;
         let unwrap = self
-            .send_and_await(weth.withdraw(unwrap_amount).into_transaction_request())
+            .send_and_await(
+                weth.withdraw(unwrap_amount)
+                    .into_transaction_request()
+                    .with_gas_limit(UNWRAP_GAS_LIMIT),
+            )
             .await?;
         if !unwrap.status {
-            // Mined-and-reverted: replay as eth_call to extract the revert reason, and report
-            // the balances so a recurrence is diagnosable rather than opaque.
-            let reason = match weth.withdraw(unwrap_amount).call().await {
-                Ok(_) => "replayed call did not revert (possible reorg/race)".to_string(),
+            // Mined-and-reverted: replay as an eth_call FROM the broadcaster (matching the real
+            // tx's msg.sender) to extract the revert reason, and report gas + balances so a
+            // recurrence is diagnosable rather than opaque. gasUsed == the limit ⇒ still OOG.
+            let reason = match weth.withdraw(unwrap_amount).from(self.address).call().await {
+                Ok(_) => "replayed call from broadcaster did not revert".to_string(),
                 Err(e) => e.to_string(),
             };
             let native = self
@@ -229,8 +246,9 @@ impl LocalBroadcaster {
                 .unwrap_or(U256::ZERO);
             return Err(format!(
                 "WETH.withdraw (unwrap) reverted: {reason} \
-                 (wad {unwrap_amount}, received {received}, live WETH {live_weth}, native {native}, tx {})",
-                unwrap.tx_hash
+                 (wad {unwrap_amount}, received {received}, live WETH {live_weth}, native {native}, \
+                 gasUsed {}/{UNWRAP_GAS_LIMIT}, tx {})",
+                unwrap.gas_used, unwrap.tx_hash
             ));
         }
 

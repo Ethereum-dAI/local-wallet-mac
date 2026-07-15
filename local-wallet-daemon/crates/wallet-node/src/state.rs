@@ -26,6 +26,7 @@ pub struct DaemonState {
     pub admin_challenges: Arc<crate::admin_challenge::AdminChallengeStore>,
     pub relayer_lifecycle_locks: Arc<crate::relayer_lifecycle::RelayerLifecycleLocks>,
     state_override_smoke: Arc<RwLock<StateOverrideSmokeStatus>>,
+    p256_precompile: Arc<RwLock<P256PrecompileStatus>>,
     pub transport: TransportInfo,
     #[cfg(test)]
     pub(crate) health_uses_chain: bool,
@@ -66,6 +67,7 @@ impl DaemonState {
                 crate::relayer_lifecycle::RelayerLifecycleLocks::default(),
             ),
             state_override_smoke: Arc::new(RwLock::new(StateOverrideSmokeStatus::Pending)),
+            p256_precompile: Arc::new(RwLock::new(P256PrecompileStatus::Pending)),
             transport: init.transport,
             #[cfg(test)]
             health_uses_chain: init.health_uses_chain,
@@ -105,6 +107,7 @@ impl DaemonState {
                 crate::relayer_lifecycle::RelayerLifecycleLocks::default(),
             ),
             state_override_smoke: Arc::new(RwLock::new(StateOverrideSmokeStatus::Pending)),
+            p256_precompile: Arc::new(RwLock::new(P256PrecompileStatus::Pending)),
             transport: TransportInfo::http(),
             health_uses_chain: true,
         }
@@ -132,6 +135,39 @@ impl DaemonState {
             .expect("state override smoke status lock is not poisoned") =
             StateOverrideSmokeStatus::Failed(reason.into());
     }
+
+    pub(crate) fn p256_precompile_status(&self) -> P256PrecompileStatus {
+        self.p256_precompile
+            .read()
+            .expect("p256 precompile status lock is not poisoned")
+            .clone()
+    }
+
+    pub(crate) fn mark_p256_precompile_available(&self) {
+        *self
+            .p256_precompile
+            .write()
+            .expect("p256 precompile status lock is not poisoned") =
+            P256PrecompileStatus::Available;
+    }
+
+    pub(crate) fn mark_p256_precompile_unavailable(&self, reason: impl Into<String>) {
+        *self
+            .p256_precompile
+            .write()
+            .expect("p256 precompile status lock is not poisoned") =
+            P256PrecompileStatus::Unavailable(reason.into());
+    }
+
+    /// Effective `use_precompiled` for signing/estimation on this chain: the
+    /// configured preference gated by a positive on-chain probe. See
+    /// [`resolve_use_precompiled`].
+    pub(crate) fn effective_use_precompiled(&self) -> bool {
+        resolve_use_precompiled(
+            self.config.bundler.use_precompiled,
+            &self.p256_precompile_status(),
+        )
+    }
 }
 
 impl std::fmt::Debug for DaemonState {
@@ -151,6 +187,7 @@ impl std::fmt::Debug for DaemonState {
             .field("admin_challenges", &"<AdminChallengeStore>")
             .field("relayer_lifecycle_locks", &"<RelayerLifecycleLocks>")
             .field("state_override_smoke", &self.state_override_smoke_status())
+            .field("p256_precompile", &self.p256_precompile_status())
             .field("transport", &self.transport)
             .field("health_uses_chain", &{
                 #[cfg(test)]
@@ -171,6 +208,57 @@ pub(crate) enum StateOverrideSmokeStatus {
     Pending,
     Passed,
     Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum P256PrecompileStatus {
+    Pending,
+    Available,
+    Unavailable(String),
+}
+
+/// Whether a submitted UserOp should route its passkey signature through the
+/// RIP-7212 P-256 precompile (`use_precompiled = true`).
+///
+/// The config field is a preference / kill-switch: `true` means "auto — use the
+/// precompile when the on-chain probe confirms it"; `false` forces the Daimo
+/// verifier regardless. The probe must have positively confirmed availability;
+/// `Pending`/`Unavailable` both fall back to Daimo so a UserOp is never submitted
+/// with a signature the chain cannot verify.
+pub(crate) fn resolve_use_precompiled(
+    config_preference: bool,
+    status: &P256PrecompileStatus,
+) -> bool {
+    config_preference && matches!(status, P256PrecompileStatus::Available)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_use_precompiled, P256PrecompileStatus};
+
+    #[test]
+    fn auto_preference_uses_precompile_only_when_available() {
+        assert!(resolve_use_precompiled(
+            true,
+            &P256PrecompileStatus::Available
+        ));
+        assert!(!resolve_use_precompiled(
+            true,
+            &P256PrecompileStatus::Pending
+        ));
+        assert!(!resolve_use_precompiled(
+            true,
+            &P256PrecompileStatus::Unavailable("absent".into())
+        ));
+    }
+
+    #[test]
+    fn disabled_preference_is_a_kill_switch() {
+        assert!(!resolve_use_precompiled(
+            false,
+            &P256PrecompileStatus::Available
+        ));
+    }
 }
 
 pub struct DaemonStateInit {

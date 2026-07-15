@@ -16,6 +16,7 @@ use crate::state::DaemonState;
 
 const TENTATIVE_RECEIPT_AFTER: Duration = Duration::from_secs(60);
 const STATE_OVERRIDE_SMOKE_MAX_ATTEMPTS: usize = 3;
+const P256_PROBE_MAX_ATTEMPTS: usize = 3;
 
 pub(crate) fn spawn_receipt_watcher(
     state: Arc<DaemonState>,
@@ -92,7 +93,7 @@ async fn run_state_override_smoke_with<F, Fut>(
                             return;
                         }
                         Err(err) => {
-                            let delay = state_override_smoke_retry_delay(interval, attempt);
+                            let delay = exponential_retry_delay(interval, attempt);
                             tracing::warn!(
                                 error = %err,
                                 attempt,
@@ -112,9 +113,99 @@ async fn run_state_override_smoke_with<F, Fut>(
     }
 }
 
-fn state_override_smoke_retry_delay(interval: Duration, failed_attempt: usize) -> Duration {
+fn exponential_retry_delay(interval: Duration, failed_attempt: usize) -> Duration {
     let multiplier = 1_u32.checked_shl((failed_attempt - 1) as u32).unwrap_or(1);
     interval.saturating_mul(multiplier)
+}
+
+pub(crate) fn spawn_p256_probe(
+    state: Arc<DaemonState>,
+    shutdown_rx: watch::Receiver<bool>,
+    interval: Duration,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        run_p256_probe(state, shutdown_rx, interval).await;
+    })
+}
+
+async fn run_p256_probe(
+    state: Arc<DaemonState>,
+    shutdown_rx: watch::Receiver<bool>,
+    interval: Duration,
+) {
+    let chain = state.chain.clone();
+    run_p256_probe_with(state, shutdown_rx, interval, move || {
+        let chain = chain.clone();
+        async move { wallet_chain::probe_p256_precompile(chain.as_ref()).await }
+    })
+    .await;
+}
+
+async fn run_p256_probe_with<F, Fut>(
+    state: Arc<DaemonState>,
+    mut shutdown_rx: watch::Receiver<bool>,
+    interval: Duration,
+    mut probe: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<bool, wallet_chain::ChainError>>,
+{
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    tracing::debug!("p256 precompile probe stopping");
+                    return;
+                }
+            }
+            _ = ticker.tick() => {
+                if !state.chain.is_synced().await {
+                    continue;
+                }
+                for attempt in 1..=P256_PROBE_MAX_ATTEMPTS {
+                    match probe().await {
+                        Ok(true) => {
+                            state.mark_p256_precompile_available();
+                            tracing::info!("p256 precompile available; routing passkey signatures through RIP-7212");
+                            return;
+                        }
+                        Ok(false) => {
+                            state.mark_p256_precompile_unavailable("precompile_absent");
+                            tracing::info!("p256 precompile unavailable; using Daimo verifier");
+                            return;
+                        }
+                        Err(err) if attempt == P256_PROBE_MAX_ATTEMPTS => {
+                            state.mark_p256_precompile_unavailable(err.to_string());
+                            tracing::warn!(
+                                error = %err,
+                                attempt,
+                                max_attempts = P256_PROBE_MAX_ATTEMPTS,
+                                "p256 precompile probe failed; using Daimo verifier"
+                            );
+                            return;
+                        }
+                        Err(err) => {
+                            let delay = exponential_retry_delay(interval, attempt);
+                            tracing::warn!(
+                                error = %err,
+                                attempt,
+                                max_attempts = P256_PROBE_MAX_ATTEMPTS,
+                                retry_after_ms = delay.as_millis(),
+                                "p256 precompile probe attempt failed"
+                            );
+                            if sleep_or_shutdown(&mut shutdown_rx, delay).await {
+                                tracing::debug!("p256 precompile probe stopping");
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn sleep_or_shutdown(shutdown_rx: &mut watch::Receiver<bool>, delay: Duration) -> bool {
@@ -563,7 +654,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use crate::state::{DaemonState, StateOverrideSmokeStatus};
+    use crate::state::{DaemonState, P256PrecompileStatus, StateOverrideSmokeStatus};
     use alloy_primitives::B256;
     use tracing_subscriber::layer::SubscriberExt;
     use wallet_chain::{BlockHeader, BlockTag, ChainError, MockChainAdapter};
@@ -929,6 +1020,124 @@ mod tests {
             state.state_override_smoke_status(),
             StateOverrideSmokeStatus::Passed
         );
+    }
+
+    #[tokio::test]
+    async fn p256_probe_marks_available_when_precompile_present() {
+        let state = Arc::new(DaemonState::for_tests(Arc::new(
+            MockChainAdapter::with_synced(true),
+        )));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        super::run_p256_probe_with(
+            state.clone(),
+            shutdown_rx,
+            Duration::from_millis(1),
+            move || async move { Ok(true) },
+        )
+        .await;
+
+        assert_eq!(
+            state.p256_precompile_status(),
+            P256PrecompileStatus::Available
+        );
+    }
+
+    #[tokio::test]
+    async fn p256_probe_marks_unavailable_without_retry_when_absent() {
+        let state = Arc::new(DaemonState::for_tests(Arc::new(
+            MockChainAdapter::with_synced(true),
+        )));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_probe = attempts.clone();
+
+        super::run_p256_probe_with(
+            state.clone(),
+            shutdown_rx,
+            Duration::from_millis(1),
+            move || {
+                let attempts = attempts_for_probe.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok(false)
+                }
+            },
+        )
+        .await;
+
+        // A definitive "absent" answer must not consume the retry budget.
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            state.p256_precompile_status(),
+            P256PrecompileStatus::Unavailable(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn p256_probe_retries_transient_failure_before_available() {
+        let state = Arc::new(DaemonState::for_tests(Arc::new(
+            MockChainAdapter::with_synced(true),
+        )));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_probe = attempts.clone();
+
+        super::run_p256_probe_with(
+            state.clone(),
+            shutdown_rx,
+            Duration::from_millis(1),
+            move || {
+                let attempts = attempts_for_probe.clone();
+                async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(ChainError::RpcError("transient".to_string()))
+                    } else {
+                        Ok(true)
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            state.p256_precompile_status(),
+            P256PrecompileStatus::Available
+        );
+    }
+
+    #[tokio::test]
+    async fn p256_probe_records_unavailable_after_retry_budget() {
+        let state = Arc::new(DaemonState::for_tests(Arc::new(
+            MockChainAdapter::with_synced(true),
+        )));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_probe = attempts.clone();
+
+        super::run_p256_probe_with(
+            state.clone(),
+            shutdown_rx,
+            Duration::from_millis(1),
+            move || {
+                let attempts = attempts_for_probe.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err(ChainError::RpcError("persistent".to_string()))
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            super::P256_PROBE_MAX_ATTEMPTS
+        );
+        assert!(matches!(
+            state.p256_precompile_status(),
+            P256PrecompileStatus::Unavailable(_)
+        ));
     }
 
     #[tokio::test]

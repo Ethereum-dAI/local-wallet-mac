@@ -124,6 +124,14 @@ struct WalletNodeClient {
             let eoa: String?
         }
 
+        struct P256Precompile: Equatable {
+            let status: String
+            /// Effective decision the app must encode into on-chain WebAuthn
+            /// signatures: `true` routes verification through the RIP-7212 precompile.
+            let usePrecompiled: Bool
+            let reason: String?
+        }
+
         let status: String
         let reason: String?
         let chainId: UInt64
@@ -131,6 +139,7 @@ struct WalletNodeClient {
         let readVerification: ReadVerification
         let helios: Helios
         let bundler: Bundler?
+        let p256Precompile: P256Precompile?
     }
 
     struct UserOperationGasEstimate: Equatable {
@@ -979,7 +988,10 @@ extension WalletNodeClient.NetworkStatus {
                 ReadVerification(json: $0)
             } ?? ReadVerification(mode: "helios", verified: true),
             helios: try Helios(json: heliosJSON),
-            bundler: (json["bundler"] as? [String: Any]).flatMap { Bundler(json: $0) }
+            bundler: (json["bundler"] as? [String: Any]).flatMap { Bundler(json: $0) },
+            p256Precompile: (json["p256Precompile"] as? [String: Any]).flatMap {
+                P256Precompile(json: $0)
+            }
         )
     }
 
@@ -1061,6 +1073,21 @@ extension WalletNodeClient.NetworkStatus.BlockHead {
             return UInt64(value)
         }
         return nil
+    }
+}
+
+extension WalletNodeClient.NetworkStatus.P256Precompile {
+    init?(json: [String: Any]) {
+        guard let status = json["status"] as? String,
+              let usePrecompiled = json["usePrecompiled"] as? Bool
+        else {
+            return nil
+        }
+        self.init(
+            status: status,
+            usePrecompiled: usePrecompiled,
+            reason: json["reason"] as? String
+        )
     }
 }
 

@@ -219,6 +219,8 @@ async fn main() -> ExitCode {
         shutdown_rx.clone(),
         Duration::from_secs(1),
     );
+    let mut p256_probe_task =
+        watcher::spawn_p256_probe(state.clone(), shutdown_rx.clone(), Duration::from_secs(1));
     let mut receipt_watcher_task =
         watcher::spawn_receipt_watcher(state.clone(), shutdown_rx.clone(), Duration::from_secs(6));
     let handler = Handler {
@@ -345,6 +347,17 @@ async fn main() -> ExitCode {
         Err(_) => {
             state_override_smoke_task.abort();
             tracing::warn!("stateOverride smoke task did not stop within 1 second");
+        }
+    }
+
+    match tokio::time::timeout(Duration::from_secs(1), &mut p256_probe_task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, "p256 precompile probe task failed to join");
+        }
+        Err(_) => {
+            p256_probe_task.abort();
+            tracing::warn!("p256 precompile probe task did not stop within 1 second");
         }
     }
 

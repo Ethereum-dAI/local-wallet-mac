@@ -2626,6 +2626,12 @@ private final class ChatDashboardModel: ObservableObject {
             )
         }
         let amountWei = try EtherAmountParser.weiDecimalString(fromETHString: amount)
+        // Unshield is relayed by the sidecar's local broadcaster and never crosses the Secure
+        // Enclave, so — unlike shield/transfer — it wouldn't prompt on its own. Require an
+        // explicit device-owner (biometric) authorization before moving funds out of the pool.
+        try await walletModel.authorizeDeviceOwner(
+            reason: "Authorize unshielding \(amount) ETH from the RAILGUN pool to \(to) on \(walletModel.activeChain.name)"
+        )
         let client = try await railgunHelperClient()
         let jobId = try await client.unshield(amountWei: amountWei, to: to)
         let result = try await client.awaitUnshield(jobId: jobId, deadline: Date().addingTimeInterval(300))

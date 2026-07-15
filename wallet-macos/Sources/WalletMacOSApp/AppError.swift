@@ -25,6 +25,7 @@ enum AppError: LocalizedError {
     case sessionKeysNotEnabled
     case userOperationTerminal(String)
     case userOperationReceiptReverted(String)
+    case userAuthorizationCancelled
 
     var errorDescription: String? {
         switch self {
@@ -76,6 +77,8 @@ enum AppError: LocalizedError {
             return message
         case .userOperationReceiptReverted(let reason):
             return reason
+        case .userAuthorizationCancelled:
+            return "Local authorization was cancelled or failed, so the action was not performed."
         }
     }
 }

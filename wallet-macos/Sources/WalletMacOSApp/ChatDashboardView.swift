@@ -2487,6 +2487,24 @@ private final class ChatDashboardModel: ObservableObject {
         }
     }
 
+    /// After a shield/unshield, the RAILGUN pool (Subsquid index + note scan) lags the chain,
+    /// so a single immediate `refreshShieldedBalance()` reads stale totals. Poll for a bounded
+    /// window, refreshing each pass, until the confirmed/pending split changes from what it was
+    /// when the operation completed (or the window elapses).
+    func refreshShieldedBalanceUntilSettled(attempts: Int = 12, interval: TimeInterval = 3) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let baseline = [self.shieldedConfirmed, self.shieldedPending]
+            for _ in 0..<max(1, attempts) {
+                self.refreshShieldedBalance()
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                if [self.shieldedConfirmed, self.shieldedPending] != baseline {
+                    return
+                }
+            }
+        }
+    }
+
     /// Top up a helper EOA (bundler or local broadcaster) with native ETH so it can pay gas.
     /// The ETH comes from the Kernel account as a passkey-signed UserOp — the same primitive
     /// as a chat transfer. For the bundler this only works once it already has enough gas to
@@ -2610,7 +2628,7 @@ private final class ChatDashboardModel: ObservableObject {
             signingReason: "Authorize shielding \(amount) ETH into the RAILGUN pool on \(walletModel.activeChain.name)"
         )
         appendShieldExecutionResult(result, amount: amount, for: intent)
-        refreshShieldedBalance()
+        refreshShieldedBalanceUntilSettled()
     }
 
     /// `/unshield <amount> to <addr>` — withdraw ETH from the pool to a recipient as native
@@ -2634,9 +2652,20 @@ private final class ChatDashboardModel: ObservableObject {
         )
         let client = try await railgunHelperClient()
         let jobId = try await client.unshield(amountWei: amountWei, to: to)
-        let result = try await client.awaitUnshield(jobId: jobId, deadline: Date().addingTimeInterval(300))
-        appendUnshieldExecutionResult(result, amount: amount, to: to, for: intent)
-        refreshShieldedBalance()
+        // The sidecar accepted the job and is proving + relaying (tens of seconds). Show an
+        // immediate "submitted" card now; unshield is broadcaster-relayed (not a daemon
+        // UserOp), so nothing reconciles it for us — we drive the submitted → confirmed
+        // transition by hand once the relay lands, mirroring the shield flow.
+        let cardID = "unshield:\(jobId)"
+        appendUnshieldSubmittedCard(id: cardID, amount: amount, to: to, for: intent)
+        do {
+            let result = try await client.awaitUnshield(jobId: jobId, deadline: Date().addingTimeInterval(300))
+            confirmUnshieldCard(id: cardID, result: result, amount: amount, to: to)
+            refreshShieldedBalanceUntilSettled()
+        } catch {
+            markUnshieldCardReverted(id: cardID, amount: amount, to: to)
+            throw error
+        }
     }
 
     /// Rich on-chain feedback for `/shield`, mirroring transfer: a tool-response message +
@@ -2690,32 +2719,18 @@ private final class ChatDashboardModel: ObservableObject {
         reloadWalletHistory()
     }
 
-    /// Rich on-chain feedback for `/unshield`. The proved tx is relayed by the local
-    /// broadcaster (not a Kernel UserOp), so the identifying hash is the forward tx.
-    private func appendUnshieldExecutionResult(
-        _ result: JSONValue,
+    /// Build an unshield transaction card. `id` is a stable synthetic key (unshield isn't a
+    /// daemon UserOp, so it has no real userOpHash) used to find and update the card in place.
+    private func unshieldCardSummary(
+        id: String,
         amount: String,
         to: String,
-        for intent: ToolIntent
-    ) {
-        guard let conversationID = activeConversationIDIfPresent else { return }
-        let forwardTx = result["forwardTxHash"]?.stringValue
-        let deliveredHex = result["amountWei"]?.stringValue
-        var payload: [String: Any] = [
-            "status": "confirmed",
-            "intent_id": intent.id.uuidString,
-            "operation": "unshield",
-            "recipient": to,
-        ]
-        if let forwardTx { payload["forward_tx_hash"] = forwardTx }
-        if let u = result["unshieldTxHash"]?.stringValue { payload["unshield_tx_hash"] = u }
-        if let u = result["unwrapTxHash"]?.stringValue { payload["unwrap_tx_hash"] = u }
-        appendMessage(
-            ChatMessage(kind: .toolResponse, role: .tool, text: jsonString(payload), toolCallId: intent.id.uuidString),
-            to: conversationID
-        )
-
-        let summary = OnchainTransactionSummary(
+        status: OnchainTransactionSummary.Status,
+        forwardTx: String?,
+        deliveredHex: String?,
+        createdAt: Date
+    ) -> OnchainTransactionSummary {
+        OnchainTransactionSummary(
             chainName: walletModel.activeChain.name,
             chainID: walletModel.activeChain.id,
             amount: amount,
@@ -2731,12 +2746,78 @@ private final class ChatDashboardModel: ObservableObject {
             amountOut: deliveredHex,
             minimumReceived: nil,
             route: nil,
-            userOpHash: forwardTx ?? "unshield",
+            userOpHash: id,
             transactionHash: forwardTx,
-            status: forwardTx != nil ? .included : .pending,
-            createdAt: Date()
+            status: status,
+            createdAt: createdAt
+        )
+    }
+
+    /// `/unshield` accepted: emit the tool response and a "submitted" card immediately, before
+    /// proving + relay finish (mirrors how `/shield` shows a submitted card up front).
+    private func appendUnshieldSubmittedCard(id: String, amount: String, to: String, for intent: ToolIntent) {
+        guard let conversationID = activeConversationIDIfPresent else { return }
+        let payload: [String: Any] = [
+            "status": "submitted",
+            "intent_id": intent.id.uuidString,
+            "operation": "unshield",
+            "recipient": to,
+        ]
+        appendMessage(
+            ChatMessage(kind: .toolResponse, role: .tool, text: jsonString(payload), toolCallId: intent.id.uuidString),
+            to: conversationID
+        )
+        let summary = unshieldCardSummary(
+            id: id, amount: amount, to: to, status: .submitted,
+            forwardTx: nil, deliveredHex: nil, createdAt: Date()
         )
         appendMessage(.onchainTransaction(summary), to: conversationID)
+        reloadWalletHistory()
+    }
+
+    /// Relay landed: flip the submitted card to "included" with the delivered amount + forward
+    /// tx hash (the proved tx is broadcaster-relayed, so the identifying hash is the forward tx).
+    private func confirmUnshieldCard(id: String, result: JSONValue, amount: String, to: String) {
+        let forwardTx = result["forwardTxHash"]?.stringValue
+        let deliveredHex = result["amountWei"]?.stringValue
+        updateOnchainCard(userOpHash: id) { [self] old in
+            unshieldCardSummary(
+                id: id, amount: amount, to: to,
+                status: forwardTx != nil ? .included : .pending,
+                forwardTx: forwardTx, deliveredHex: deliveredHex, createdAt: old.createdAt
+            )
+        }
+    }
+
+    /// Relay failed: flip the submitted card to "reverted" so it doesn't linger as submitted.
+    /// The thrown error still surfaces its own message via the caller's error handler.
+    private func markUnshieldCardReverted(id: String, amount: String, to: String) {
+        updateOnchainCard(userOpHash: id) { [self] old in
+            unshieldCardSummary(
+                id: id, amount: amount, to: to, status: .reverted,
+                forwardTx: nil, deliveredHex: nil, createdAt: old.createdAt
+            )
+        }
+    }
+
+    /// Update an on-chain transaction card in place by its `userOpHash`, rewriting the most
+    /// recent matching message. Used for cards the daemon doesn't reconcile (unshield).
+    private func updateOnchainCard(
+        userOpHash: String,
+        _ transform: (OnchainTransactionSummary) -> OnchainTransactionSummary
+    ) {
+        guard let conversationID = activeConversationIDIfPresent,
+              let cIndex = conversations.firstIndex(where: { $0.id == conversationID })
+        else { return }
+        guard let mIndex = conversations[cIndex].messages.lastIndex(where: {
+            $0.kind == .onchainTransaction
+                && OnchainTransactionSummary.decode(from: $0)?.userOpHash == userOpHash
+        }),
+            let summary = OnchainTransactionSummary.decode(from: conversations[cIndex].messages[mIndex])
+        else { return }
+        conversations[cIndex].messages[mIndex].text = ChatMessage.onchainTransaction(transform(summary)).text
+        conversations[cIndex].updatedAt = Date()
+        try? chatStore.updateMessage(conversations[cIndex].messages[mIndex], in: conversationID)
         reloadWalletHistory()
     }
 

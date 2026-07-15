@@ -191,17 +191,56 @@ impl LocalBroadcaster {
             return Err("unshield delivered no WETH to the broadcaster".into());
         }
 
-        // 2) unwrap WETH -> native ETH in the broadcaster's account
-        let unwrap = self
-            .send_and_await(weth.withdraw(received).into_transaction_request())
-            .await?;
-        if !unwrap.status {
-            return Err("WETH.withdraw (unwrap) reverted".into());
+        // 2) unwrap WETH -> native ETH in the broadcaster's account.
+        //
+        // `received` is a balance *delta* across the unshield tx. WETH9.withdraw(wad) reverts
+        // on-chain whenever `balanceOf(sender) < wad`, so if the `after` read raced ahead of
+        // the live ledger (lagging/load-balanced RPC), or a reorg dropped the unshield, `wad`
+        // could exceed what the broadcaster actually holds and the unwrap mines-and-reverts.
+        // Re-read the live WETH balance immediately before withdrawing and never try to unwrap
+        // more than we hold — the unwrap then cannot revert for a balance reason, and if it
+        // still does we surface the real reason instead of a bare "reverted".
+        let live_weth = weth
+            .balanceOf(self.address)
+            .call()
+            .await
+            .map_err(|e| format!("weth balanceOf(pre-unwrap): {e}"))?;
+        let unwrap_amount = received.min(live_weth);
+        if unwrap_amount.is_zero() {
+            return Err(format!(
+                "broadcaster holds no withdrawable WETH (received delta {received}, live balance {live_weth})"
+            ));
         }
 
-        // 3) forward native ETH to the final recipient
+        let unwrap = self
+            .send_and_await(weth.withdraw(unwrap_amount).into_transaction_request())
+            .await?;
+        if !unwrap.status {
+            // Mined-and-reverted: replay as eth_call to extract the revert reason, and report
+            // the balances so a recurrence is diagnosable rather than opaque.
+            let reason = match weth.withdraw(unwrap_amount).call().await {
+                Ok(_) => "replayed call did not revert (possible reorg/race)".to_string(),
+                Err(e) => e.to_string(),
+            };
+            let native = self
+                .provider
+                .get_balance(self.address)
+                .await
+                .unwrap_or(U256::ZERO);
+            return Err(format!(
+                "WETH.withdraw (unwrap) reverted: {reason} \
+                 (wad {unwrap_amount}, received {received}, live WETH {live_weth}, native {native}, tx {})",
+                unwrap.tx_hash
+            ));
+        }
+
+        // 3) forward native ETH to the final recipient (exactly what we unwrapped).
         let forward = self
-            .send_and_await(TransactionRequest::default().to(recipient).value(received))
+            .send_and_await(
+                TransactionRequest::default()
+                    .to(recipient)
+                    .value(unwrap_amount),
+            )
             .await?;
         if !forward.status {
             return Err("forward of native ETH reverted".into());
@@ -211,7 +250,7 @@ impl LocalBroadcaster {
             unshield_tx_hash: unshield.tx_hash,
             unwrap_tx_hash: unwrap.tx_hash,
             forward_tx_hash: forward.tx_hash,
-            amount_wei: format!("0x{received:x}"),
+            amount_wei: format!("0x{unwrap_amount:x}"),
             recipient: format!("{recipient:?}"),
             block_number: forward.block_number,
             status: true,

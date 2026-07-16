@@ -36,6 +36,18 @@ fn env(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| panic!("missing env {key}"))
 }
 
+/// How long a finished (or abandoned-pending) unshield job lingers before the TTL sweep
+/// drops it. Far longer than proving (tens of seconds) + the client's poll deadline, so it
+/// never evicts a job a caller still cares about — it only bounds the map against jobs that
+/// are never polled to a terminal read.
+const JOB_TTL: Duration = Duration::from_secs(600);
+
+/// Drop job entries whose last update is older than `JOB_TTL`. Cheap linear sweep — the map
+/// holds at most a handful of in-flight jobs for this single-user sidecar.
+fn prune_jobs(map: &mut HashMap<String, (Instant, Value)>, now: Instant) {
+    map.retain(|_, (updated, _)| now.duration_since(*updated) < JOB_TTL);
+}
+
 fn parse_amount(v: &Value) -> Result<u128, String> {
     match v {
         Value::String(s) => s
@@ -145,8 +157,11 @@ async fn main() {
     #[allow(clippy::arc_with_non_send_sync)]
     let helper = Arc::new(Mutex::new(helper));
 
-    // Async unshield jobs: jobId -> status Value.
-    let jobs: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Async unshield jobs: jobId -> (last-updated, status Value). A terminal job is dropped
+    // as soon as a client reads it (below), which keeps the map empty on the normal
+    // polled-to-completion path; the TTL sweep in `prune_jobs` is the backstop that bounds
+    // the map even for jobs a client never polls to a terminal read (crash / navigation).
+    let jobs: Arc<Mutex<HashMap<String, (Instant, Value)>>> = Arc::new(Mutex::new(HashMap::new()));
     let job_seq = Arc::new(AtomicU64::new(1));
 
     let mut handlers: Handlers = HashMap::new();
@@ -213,9 +228,14 @@ async fn main() {
                     let amount = parse_amount(p.get("amountWei").unwrap_or(&Value::Null))?;
                     let recipient = parse_addr(p.get("to").unwrap_or(&Value::Null))?;
                     let job_id = format!("job-{}", seq.fetch_add(1, Ordering::SeqCst));
-                    jobs.lock()
-                        .await
-                        .insert(job_id.clone(), json!({"status":"pending"}));
+                    {
+                        let mut map = jobs.lock().await;
+                        prune_jobs(&mut map, Instant::now());
+                        map.insert(
+                            job_id.clone(),
+                            (Instant::now(), json!({"status":"pending"})),
+                        );
+                    }
 
                     let jid = job_id.clone();
                     // Proving is non-Send (RAILGUN provider) → spawn_local on this thread.
@@ -238,7 +258,7 @@ async fn main() {
                             Ok(receipt) => json!({"status":"done","result":receipt}),
                             Err(e) => json!({"status":"error","error":e}),
                         };
-                        jobs.lock().await.insert(jid, status);
+                        jobs.lock().await.insert(jid, (Instant::now(), status));
                     });
 
                     Ok(json!({ "jobId": job_id }))
@@ -258,11 +278,14 @@ async fn main() {
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| "missing jobId".to_string())?;
                     let mut map = jobs.lock().await;
+                    prune_jobs(&mut map, Instant::now());
                     let status = map
                         .get(id)
-                        .cloned()
+                        .map(|(_, v)| v.clone())
                         .ok_or_else(|| format!("unknown jobId: {id}"))?;
-                    // Evict terminal jobs once observed so the map doesn't grow unbounded.
+                    // Evict terminal jobs once observed so the common (polled-to-completion)
+                    // path keeps the map tiny; the TTL sweep above backstops jobs that are
+                    // never polled to a terminal read.
                     let terminal = matches!(
                         status.get("status").and_then(|s| s.as_str()),
                         Some("done") | Some("error")
@@ -298,4 +321,38 @@ async fn main() {
         .run_until(async move { serve_rpc(&socket, token, handlers).await })
         .await
         .expect("serve");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn prune_drops_only_expired_jobs() {
+        // Simulate ages via Instant arithmetic (no real waiting): the "old" entry is stamped
+        // at t0, the "fresh" one JOB_TTL later; sweeping just past t0+JOB_TTL expires only old.
+        let mut map: HashMap<String, (Instant, Value)> = HashMap::new();
+        let t0 = Instant::now();
+        map.insert("old".to_string(), (t0, json!({"status": "done"})));
+        map.insert(
+            "fresh".to_string(),
+            (t0 + JOB_TTL, json!({"status": "pending"})),
+        );
+
+        prune_jobs(&mut map, t0 + JOB_TTL + Duration::from_secs(1));
+
+        assert!(!map.contains_key("old"), "expired job must be pruned");
+        assert!(map.contains_key("fresh"), "in-TTL job must be retained");
+    }
+
+    #[test]
+    fn prune_is_a_noop_when_nothing_is_expired() {
+        let mut map: HashMap<String, (Instant, Value)> = HashMap::new();
+        let now = Instant::now();
+        map.insert("a".to_string(), (now, json!({"status": "pending"})));
+        map.insert("b".to_string(), (now, json!({"status": "done"})));
+        prune_jobs(&mut map, now);
+        assert_eq!(map.len(), 2);
+    }
 }

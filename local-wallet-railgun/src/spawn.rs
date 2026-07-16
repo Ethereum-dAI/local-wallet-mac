@@ -26,9 +26,7 @@ pub const FD5_ENV_FLAG: &str = "RAILGUN_FD5";
 /// trips Rust's I/O-safety close-tracking and aborts the process.
 pub fn read_fd5() -> Option<Vec<u8>> {
     // Only read fd 5 when the spawner explicitly delivered a secret there.
-    if std::env::var_os(FD5_ENV_FLAG).is_none() {
-        return None;
-    }
+    std::env::var_os(FD5_ENV_FLAG)?;
     // Probe: fd 5 must be a valid fd.
     if unsafe { libc::fcntl(SECRET_FD, libc::F_GETFD) } < 0 {
         return None; // EBADF — no fd 5

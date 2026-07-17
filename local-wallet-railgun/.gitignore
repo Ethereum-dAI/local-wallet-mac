@@ -1,0 +1,29 @@
+# Rust build outputs
+/target
+
+# Local cargo config (machine-specific paths override)
+.cargo/config.toml
+
+# Local assistant / planning files
+.claude/
+.codex/
+CLAUDE.md
+TODO.md
+
+# macOS noise
+.DS_Store
+
+# Editor / shell noise
+.idea/
+.vscode/
+*.swp
+*.swo
+*.log
+*.bak
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# NOTE: docs/ is intentionally tracked in this repo (design specs live there).

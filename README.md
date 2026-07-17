@@ -152,7 +152,7 @@ The crate is one library plus two bins:
 
 **The local-broadcaster model (and its tradeoff).** RAILGUN's classic privacy relies on a *shared* broadcaster network (Waku) so the submitter is an unrelated third party. This wallet deliberately runs its **own** broadcaster instead — self-sufficiency over maximal anonymity, mirroring how the daemon already self-relays ERC-4337 UserOps through its on-device bundler EOA. Stated plainly, a per-wallet broadcaster is an **anonymity-set-of-one**: its EOA submits only your unshields and is funded by you, so it is linkable to you. The property kept is separation of keys — the broadcaster EOA is distinct from your Kernel/main account and from the RAILGUN account (three distinct keys: RAILGUN spend+view · shield submitter · broadcaster).
 
-Unshield delivers **native ETH** to the recipient (the broadcaster unshields WETH to itself, unwraps, and forwards), minus RAILGUN's 0.25% unshield fee.
+Unshield delivers **native ETH** to the recipient (the broadcaster unshields WETH to itself, unwraps, and forwards), minus RAILGUN's unshield fee.
 
 **From the app:** `/shield 0.01` and `/unshield 0.01 to 0x…` are available as slash commands (with autocomplete) and as LLM-callable tools in the chat layer via `WalletToolLayer`. Shield builds a Kernel `execute` UserOp signed with the Secure Enclave passkey; unshield requires device-owner authentication, then calls the sidecar's async job and shows a submitted→confirmed card while polling the shielded balance until it settles. The account UI surfaces the shielded (confirmed/pending) balance and the local broadcaster's address + gas balance, with a privacy on/off toggle; a wallet reset also wipes the RAILGUN secrets.
 

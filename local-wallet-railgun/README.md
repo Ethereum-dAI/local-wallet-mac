@@ -84,7 +84,8 @@ cargo clippy --lib --bins
 Shields native ETH then runs the **async** unshield on an **anvil fork of Sepolia**, with
 the unshield relayed by the local broadcaster. It spawns **only the helper** via fd-5 (the
 helper brings up the broadcaster), and asserts the recipient's **native-ETH** delta
-(~amount − 0.25% fee), with the forward tx submitted by the broadcaster EOA. Needs `foundry`
+(the sent amount minus RAILGUN's unshield fee), with the forward tx submitted by the
+broadcaster EOA. Needs `foundry`
 (anvil) and outbound network (RAILGUN Subsquid indexer + a one-time Groth16
 circuit-artifact download). It has a hard overall wall-clock cap + per-operation timeouts so
 it can never hang, and strips the broadcaster's EIP-7702 delegation on the fork
@@ -102,7 +103,7 @@ bins at a real RPC with a funded broadcaster EOA, but the fork is the default ch
 - **Unshield delivers native ETH.** The Kohaku crate's unshield only delivers the wrapped
   base token (WETH), so the broadcaster unshields WETH to *itself*, `WETH.withdraw()`s
   (unwrap), and forwards **native ETH** to the recipient (`relayUnshieldNative`) — minus
-  RAILGUN's 0.25% unshield fee.
+  RAILGUN's unshield fee.
 - **POI is OFF on the fork** (`.with_poi()` not called). POI validity comes from the live
   `ppoi.fdi.network` aggregator, which validates against real chain state — a note freshly
   shielded on a local fork can never become POI-`Valid`. Without POI a note is spendable

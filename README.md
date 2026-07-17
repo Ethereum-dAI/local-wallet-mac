@@ -2,10 +2,11 @@
 
 Self-custodial Ethereum wallet for macOS with Secure Enclave key custody and ERC-4337 Kernel smart accounts.
 
-This is the macOS app repo. The current release line is **v0.1 alpha**: pre-1.0, under active development, not independently audited, and not production-ready custody software. It is open source (MIT/Apache-2.0) and contains two other components as in-repo directories:
+This is the macOS app repo. The current release line is **v0.1 alpha**: pre-1.0, under active development, not independently audited, and not production-ready custody software. It is open source (MIT/Apache-2.0) and contains three other components as in-repo directories:
 
 - **Protocol SDK** (`wallet-signature`, `wallet-kernel`, `wallet-addresses`): `local-wallet-protocol/`
 - **Daemon** (`wallet-node` and supporting crates): `local-wallet-daemon/`
+- **Privacy sidecar** (`railgun-helper`, `railgun-broadcaster`): `local-wallet-railgun/` — experimental RAILGUN shield/unshield, **testnet only**
 
 The mac app handles key custody (Secure Enclave + Keychain), session-key policy state, and local transaction construction. It delegates verified chain reads, ERC-4337 bundling, and receipt tracking to the daemon process. The FFI bridge in `rust-core/crates/ffi/` connects them in-process for deterministic crypto and Kernel permission operations.
 
@@ -17,6 +18,7 @@ This is not the final product wallet UX. Treat it as an experimental working imp
 |---|---|
 | `local-wallet-protocol` | `wallet-signature`, `wallet-kernel`, `wallet-addresses` — pre-1.0 (0.1.0) SDK crates, consumed via in-repo `path` dependency |
 | `local-wallet-daemon` | `wallet-node`, `wallet-bundler`, `wallet-chain`, `wallet-node-api`, `wallet-node-store` — daemon binary and supporting libraries |
+| `local-wallet-railgun` | `railgun-helper` sidecar + `railgun-broadcaster` local broadcaster — experimental RAILGUN shield/unshield, **Sepolia testnet only, unaudited** |
 | (repo root) `local-wallet-mac` | macOS app, `wallet-ffi`, `swift-bridge`, Xcode project, scripts |
 
 ## Requirements
@@ -94,6 +96,8 @@ Swift app → WalletNodeClient → wallet-node (Unix socket or loopback HTTP)
 ```
 Covers: Helios-verified chain reads, ERC-4337 gas estimation and submission, bundler EOA admin, audit/repair, lifecycle. The daemon authenticates with a per-process bearer token written to fd-3 at ready time.
 
+**P-256 signature verification routing (RIP-7212).** Kernel passkey signatures verify on-chain through one of two paths: the **RIP-7212 / EIP-7951 precompile** at `0x100` (~3.4k gas) or the **Daimo P256 verifier** contract (~330k gas). At startup the daemon *probes* `0x100` with a known-valid vector and caches the result; the effective path is exposed in the `p256Precompile` health field and threaded into all signing and gas-estimation sites so the estimate and the on-chain signature agree. The `[bundler] use_precompiled` config is `true` = auto (use the precompile when the probe confirms it; the default) or `false` = hard kill-switch forcing Daimo. It **fails closed**: any probe result other than a confirmed "available" falls back to the Daimo verifier, so a chain lacking the precompile never silently reverts validation.
+
 ## macOS Demo App
 
 The current demo exercises two complementary layers — wallet plumbing and a local LLM chat layer.
@@ -137,6 +141,29 @@ The package script builds and embeds `wallet-node`, copies the llama.cpp/ggml dy
 
 The v0.1 alpha zip targets macOS 14+ on Apple Silicon and does not embed the recommended GGUF model by default; onboarding downloads/installs it during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` only when you explicitly want a large self-contained demo build. If your installed Homebrew llama.cpp/ggml dylibs target a newer macOS, build a local macOS 14-compatible prefix and pass it with `LOCAL_LLAMA_PREFIX`.
 
+## Privacy (RAILGUN) — experimental, testnet only
+
+`local-wallet-railgun/` adds **RAILGUN shield + unshield** to Local Wallet, wrapping Kohaku's RAILGUN Rust SDK. It is **alpha, unaudited, and Sepolia testnet only — no mainnet funds.** The remaining in-app integration (a live, app-spawned sidecar and ENS/contact resolution for unshield recipients) is still landing; today the app resolves the sidecar via `LOCAL_WALLET_PRIVACY_SOCKET` / `LOCAL_WALLET_PRIVACY_TOKEN` and unshield recipients must be `0x` addresses.
+
+The crate is one library plus two bins:
+
+- **`railgun-helper`** — the sidecar. Serves `balance` / `prepareShield` / `prepareUnshield` over a bearer-authenticated Unix-socket JSON-RPC API. Derives the shielded account from entropy, syncs (Subsquid + RPC), builds shield txs, and **proves** unshield txs (Groth16). Unshield proving runs as an **async job** — `unshield {amountWei, to}` returns a `jobId` immediately and the proving + relay run in the background, polled via `unshieldStatus {jobId}`.
+- **`railgun-broadcaster`** — the **local broadcaster**. Owns its **own EOA** and submits the proved unshield on-chain. The helper spawns and owns it over the same **fd-5 secret-spawn contract** the daemon uses (secrets travel on fd 5, never argv/env), so the app talks to a single socket.
+
+**The local-broadcaster model (and its tradeoff).** RAILGUN's classic privacy relies on a *shared* broadcaster network (Waku) so the submitter is an unrelated third party. This wallet deliberately runs its **own** broadcaster instead — self-sufficiency over maximal anonymity, mirroring how the daemon already self-relays ERC-4337 UserOps through its on-device bundler EOA. Stated plainly, a per-wallet broadcaster is an **anonymity-set-of-one**: its EOA submits only your unshields and is funded by you, so it is linkable to you. The property kept is separation of keys — the broadcaster EOA is distinct from your Kernel/main account and from the RAILGUN account (three distinct keys: RAILGUN spend+view · shield submitter · broadcaster).
+
+Unshield delivers **native ETH** to the recipient (the broadcaster unshields WETH to itself, unwraps, and forwards), minus RAILGUN's 0.25% unshield fee.
+
+**From the app:** `/shield 0.01` and `/unshield 0.01 to 0x…` are available as slash commands (and are LLM-callable tools) in the chat layer via `WalletToolLayer`. Shield builds a Kernel `execute` UserOp signed with the Secure Enclave passkey; unshield calls the sidecar and polls the async job.
+
+The end-to-end acceptance check shields native ETH then unshields it on an **anvil fork of Sepolia**, relayed by the local broadcaster, asserting both txs confirm on-chain (from `local-wallet-railgun/`):
+
+```bash
+RPC_URL_SEPOLIA="https://sepolia.infura.io/v3/<key>" ./scripts/e2e-fork.sh
+```
+
+See [`local-wallet-railgun/README.md`](local-wallet-railgun/README.md) for the design spec, POI/fork caveats, and the full env-config surface.
+
 ## Common Commands
 
 Build FFI artifacts:
@@ -171,6 +198,7 @@ cargo run -p wallet-node -- --http 127.0.0.1:0 --print-ready --debug
 - `swift-bridge/README.md` — Swift FFI wrapper and local dev setup
 - `wallet-macos/README.md` — macOS demo app and signing
 - `wallet-macos/Sources/Spawn/README.md` — daemon spawn shim and fd contract
+- `local-wallet-railgun/README.md` — experimental RAILGUN privacy sidecar (shield/unshield, local broadcaster)
 - `rust-core/crates/ffi/README.md` — internal C ABI bridge
 - `scripts/README.md` — build and packaging scripts
 - `tools/keychain-spike/README.md` — Keychain entitlement spike

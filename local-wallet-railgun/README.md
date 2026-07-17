@@ -52,17 +52,23 @@ Three distinct keys: RAILGUN account (spend+view) · shield submitter (owner) ·
 
 ## From the macOS app
 
-`/shield 0.01` and `/unshield 0.01 to 0x…` are available as slash commands (and are
-LLM-callable tools) in the chat layer via `WalletToolLayer`; `key=value` forms are also
-parsed. Shield builds a Kernel `execute` UserOp signed with the Secure Enclave passkey
-(`prepareShield` → `executeBatch`); unshield calls the sidecar's async `unshield` and polls
-`unshieldStatus`, relayed by the local broadcaster. `RailgunHelperClient` is the typed
-Unix-socket JSON-RPC client (mirrors the `wallet-node` transport).
+`/shield 0.01` and `/unshield 0.01 to 0x…` are available as slash commands (with
+autocomplete) and as LLM-callable tools in the chat layer via `WalletToolLayer`;
+`key=value` forms are also parsed. Shield builds a Kernel `execute` UserOp signed with the
+Secure Enclave passkey (`prepareShield` → `executeBatch`); unshield requires device-owner
+authentication, then calls the sidecar's async `unshield` and polls `unshieldStatus`,
+relayed by the local broadcaster, showing a submitted→confirmed card while it refreshes the
+shielded balance until it settles. `RailgunHelperClient` is the typed Unix-socket JSON-RPC
+client (mirrors the `wallet-node` transport).
 
-**Remaining integration** (not yet wired): a live, app-spawned sidecar (a
-`RailgunHelperDaemon` mirroring `WalletNodeDaemon`) and non-fork sidecar mode; today the app
-resolves the sidecar via `LOCAL_WALLET_PRIVACY_SOCKET` / `LOCAL_WALLET_PRIVACY_TOKEN`, and
-unshield recipients must be `0x` addresses (ENS/contact resolution pending).
+The app **spawns and owns the sidecar itself** — `RailgunHelperDaemon` mirrors
+`WalletNodeDaemon`'s fd-3 ready / fd-4 alive / fd-5 secret contract (readiness detected by
+polling the socket, since the helper doesn't emit an fd-3 token) and points it at the app's
+active-chain RPC. Setting `LOCAL_WALLET_PRIVACY_SOCKET` / `LOCAL_WALLET_PRIVACY_TOKEN`
+instead attaches to a manually-run sidecar (e.g. an anvil fork). The one piece still
+pending is **ENS/contact resolution for unshield recipients** — they must currently be `0x`
+addresses (the `unshield` tool schema tells the LLM to ask for a `0x` address if given an
+ENS/contact name).
 
 ## Build & test
 

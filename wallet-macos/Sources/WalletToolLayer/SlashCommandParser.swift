@@ -18,9 +18,58 @@ public struct SlashCommandParser: Sendable {
             return try parseTransfer(rest: rest)
         case "swap":
             return try parseSwap(rest: rest)
+        case "shield":
+            return try parseShield(rest: rest)
+        case "unshield":
+            return try parseUnshield(rest: rest)
         default:
             throw SlashParseError.unknownCommand("/" + name)
         }
+    }
+
+    /// `/shield 0.01` or `/shield 0.01 ETH` or `/shield amount=0.01 token=ETH`.
+    private func parseShield(rest: String) throws -> ToolIntent {
+        if rest.contains("=") {
+            let args = try parseKeyValueArgs(rest, allowedKeys: ["amount", "token"])
+            try require(args, key: "amount")
+            var withDefaults = args
+            if withDefaults["token"] == nil { withDefaults["token"] = "ETH" }
+            return ToolIntent(tool: .shield, args: withDefaults, source: .slash)
+        }
+        let tokens = rest.split(separator: " ").map(String.init)
+        guard let amount = tokens.first, !amount.isEmpty else {
+            throw SlashParseError.missingRequiredArgument("amount")
+        }
+        let token = tokens.count > 1 ? tokens[1] : "ETH"
+        return ToolIntent(tool: .shield, args: ["amount": amount, "token": token], source: .slash)
+    }
+
+    /// `/unshield 0.01 to 0x…` or `/unshield amount=0.01 to=0x… token=ETH`.
+    private func parseUnshield(rest: String) throws -> ToolIntent {
+        if rest.contains("=") {
+            let args = try parseKeyValueArgs(rest, allowedKeys: ["amount", "to", "token"])
+            try require(args, key: "amount")
+            try require(args, key: "to")
+            var withDefaults = args
+            if withDefaults["token"] == nil { withDefaults["token"] = "ETH" }
+            return ToolIntent(tool: .unshield, args: withDefaults, source: .slash)
+        }
+        guard let toRange = rest.range(of: " to ") else {
+            throw SlashParseError.missingRequiredArgument("to")
+        }
+        let left = rest[..<toRange.lowerBound].trimmingCharacters(in: .whitespaces)
+        let right = rest[toRange.upperBound...].trimmingCharacters(in: .whitespaces)
+        guard !right.isEmpty else { throw SlashParseError.missingRequiredArgument("to") }
+        let leftTokens = left.split(separator: " ").map(String.init)
+        guard let amount = leftTokens.first, !amount.isEmpty else {
+            throw SlashParseError.missingRequiredArgument("amount")
+        }
+        let token = leftTokens.count > 1 ? leftTokens[1] : "ETH"
+        return ToolIntent(
+            tool: .unshield,
+            args: ["amount": amount, "token": token, "to": right],
+            source: .slash
+        )
     }
 
     private func parseTransfer(rest: String) throws -> ToolIntent {

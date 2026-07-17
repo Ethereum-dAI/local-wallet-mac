@@ -71,6 +71,41 @@ impl fmt::Debug for SecretPayload {
     }
 }
 
+/// fd-5 secret for `railgun-helper`: the RAILGUN entropy (its shielded-account seed) and
+/// the broadcaster EOA key it will hand to the broadcaster it spawns. Secrets only —
+/// non-secret config (rpc url, sockets, tokens, fork block) travels via env/args.
+#[derive(Deserialize, Clone, PartialEq)]
+pub struct HelperFd5 {
+    #[serde(rename = "entropyHex")]
+    pub entropy_hex: String,
+    #[serde(rename = "broadcasterKeyHex")]
+    pub broadcaster_key_hex: String,
+}
+
+impl fmt::Debug for HelperFd5 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HelperFd5")
+            .field("entropy_hex", &"<redacted>")
+            .field("broadcaster_key_hex", &"<redacted>")
+            .finish()
+    }
+}
+
+/// fd-5 secret for `railgun-broadcaster`: its own EOA private key.
+#[derive(Deserialize, Clone, PartialEq)]
+pub struct BroadcasterFd5 {
+    #[serde(rename = "keyHex")]
+    pub key_hex: String,
+}
+
+impl fmt::Debug for BroadcasterFd5 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BroadcasterFd5")
+            .field("key_hex", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Normalize a hex entropy string to exactly 32 bytes, erroring on bad length/chars.
 pub fn parse_entropy_32(entropy_hex: &str) -> Result<[u8; 32], SecretError> {
     let clean = entropy_hex.strip_prefix("0x").unwrap_or(entropy_hex);

@@ -1196,14 +1196,26 @@ final class AppModel: ObservableObject {
     }
 
     private func authorizeLocalRelayerAdminAction(summary: String) async throws {
+        try await authorizeDeviceOwner(reason: summary, fallbackError: AppError.localRelayerKeyMissing)
+    }
+
+    /// Prompt for local device-owner authentication (Touch ID, else password) and throw if
+    /// the user cancels or it fails. Use this to gate sensitive actions that do NOT otherwise
+    /// cross the Secure Enclave — RAILGUN unshield is relayed by the sidecar's broadcaster and
+    /// bundler-EOA admin actions touch only Keychain, so neither prompts on its own the way a
+    /// passkey-signed UserOp (transfer/shield) does. This restores the user-presence gate.
+    func authorizeDeviceOwner(
+        reason: String,
+        fallbackError: Error = AppError.userAuthorizationCancelled
+    ) async throws {
         let context = LAContext()
-        context.localizedReason = summary
-        try await withCheckedThrowingContinuation { continuation in
-            context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: summary) { success, error in
+        context.localizedReason = reason
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, error in
                 if success {
                     continuation.resume()
                 } else {
-                    continuation.resume(throwing: error ?? AppError.localRelayerKeyMissing)
+                    continuation.resume(throwing: error ?? fallbackError)
                 }
             }
         }
@@ -2495,6 +2507,17 @@ final class AppModel: ObservableObject {
             attempt += 1
             try await Task.sleep(nanoseconds: 2_000_000_000)
         }
+    }
+
+    /// Poll the local wallet-node until the given UserOp is included on-chain (or the poll
+    /// window elapses). Callers that must reflect post-inclusion state — a fresh balance, or
+    /// a follow-up op whose nonce depends on this one having landed — should await this before
+    /// proceeding. Returns the receipt if one arrived, else nil (still pending / timed out).
+    func awaitUserOperationInclusion(
+        userOpHash: String,
+        logContext: String
+    ) async -> WalletNodeClient.UserOperationReceipt? {
+        (try? await pollForLocalReceipt(userOpHash: userOpHash, logContext: logContext)) ?? nil
     }
 
     func loadWalletHistoryRecords(limit: Int = 200) -> [WalletTransactionRecord] {

@@ -3,6 +3,9 @@ import Foundation
 public struct ToolIntent: Codable, Equatable, Identifiable, Sendable {
     public enum Tool: String, Codable, Sendable {
         case transfer, swap
+        // RAILGUN privacy pool (via the railgun-helper sidecar):
+        case shield   // deposit ETH into the shielded pool (public tx)
+        case unshield // withdraw from the shielded pool to a recipient as native ETH
     }
 
     public enum Source: String, Codable, Sendable {

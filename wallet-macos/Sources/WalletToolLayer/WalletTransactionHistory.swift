@@ -7,6 +7,8 @@ public enum WalletTransactionOperation: String, Codable, Equatable, Sendable, Ca
     case approval
     case batch
     case deploy
+    case shield
+    case unshield
     case unknown
 }
 

@@ -41,14 +41,14 @@ pub fn split_balance(entries: &[BalanceEntry], asset: AssetId) -> BalanceSplit {
     let mut pending: u128 = 0;
     for e in entries.iter().filter(|e| e.asset == asset) {
         match e.poi_status {
-            None | Some(PoiStatus::Valid) => valid += e.amount,
-            Some(_) => pending += e.amount,
+            None | Some(PoiStatus::Valid) => valid = valid.saturating_add(e.amount),
+            Some(_) => pending = pending.saturating_add(e.amount),
         }
     }
     BalanceSplit {
         valid: hexwei(valid),
         pending: hexwei(pending),
-        total: hexwei(valid + pending),
+        total: hexwei(valid.saturating_add(pending)),
     }
 }
 

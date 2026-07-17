@@ -111,6 +111,8 @@ struct OnchainTransactionSummary: Codable, Equatable {
     enum Operation: String, Codable {
         case transfer
         case swap
+        case shield
+        case unshield
     }
 
     enum Status: String, Codable {
@@ -565,6 +567,22 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var kernelTokenBalances: [ChatTokenBalance] = []
     @Published private(set) var bundlerTokenBalances: [ChatTokenBalance] = []
     @Published private(set) var isRefreshingTokenBalances = false
+    // Shielded (RAILGUN) balance, split by pool status. `confirmed` = cleared and spendable;
+    // `pending` = deposited but not yet included by the pool's approval set.
+    @Published private(set) var shieldedConfirmed: String?
+    @Published private(set) var shieldedPending: String?
+    @Published private(set) var isRefreshingShieldedBalance = false
+    @Published private(set) var shieldedBalanceError: String?
+    // The local broadcaster EOA (relays unshields) + its gas balance/state, shown like the
+    // bundler so the user knows to top it up (it pays gas for unshield/unwrap/forward).
+    @Published private(set) var broadcasterAddress: String?
+    @Published private(set) var broadcasterBalance: String?
+    @Published private(set) var broadcasterState: String?
+    // Which helper EOA (bundler / broadcaster) is mid gas-funding, so its card shows a
+    // spinner and disables its Send button; nil when idle. Plus the last funding error.
+    @Published private(set) var fundingHelperAddress: String?
+    @Published private(set) var helperFundError: String?
+    @Published private(set) var helperFundErrorAddress: String?
     @Published private(set) var tokenBalanceMessage: String? = nil
     @Published private var transferPreflightStatuses: [UUID: ChatTransferPreflightStatus] = [:]
     @Published private var swapPreflightStatuses: [UUID: ChatSwapPreflightStatus] = [:]
@@ -585,6 +603,9 @@ private final class ChatDashboardModel: ObservableObject {
     private let onboardingSettingsStore: OnboardingSettingsStore
     private let walletModel: AppModel
     private var executingIntentIDs: Set<UUID> = []
+    /// The railgun-helper sidecar (spawned lazily on first /shield or /unshield, on the
+    /// app's active chain). Killed when this model is torn down (daemon deinit).
+    private var railgunDaemon: RailgunHelperDaemon?
     private var lastTokenBalanceKey: String?
     private var lastTokenBalanceAttemptKey: String?
     private var lastTokenBalanceAttemptAt: Date?
@@ -1210,6 +1231,10 @@ private final class ChatDashboardModel: ObservableObject {
             return .transfer
         case .swap:
             return .swap
+        case .shield:
+            return .shield
+        case .unshield:
+            return .unshield
         case nil:
             return .unknown
         }
@@ -1685,6 +1710,10 @@ private final class ChatDashboardModel: ObservableObject {
                 return nil
             }
             return chatSigningPreview(for: walletModel.sessionSigningPreview(for: transactionIntent))
+        case .shield, .unshield:
+            // Shield goes through executeBatch (its own signing path); unshield is relayed
+            // by the sidecar's local broadcaster — neither uses the session/passkey preview.
+            return nil
         }
     }
 
@@ -2405,12 +2434,423 @@ private final class ChatDashboardModel: ObservableObject {
         return intent
     }
 
+    /// Resolve a client for the railgun-helper sidecar (the wallet's privacy entry point).
+    /// Configured via env for now (`LOCAL_WALLET_PRIVACY_SOCKET` / `_TOKEN`); the in-app
+    /// sidecar-spawn + live (non-fork) mode are the next integration step.
+    private func railgunHelperClient() async throws -> RailgunHelperClient {
+        if let daemon = railgunDaemon {
+            return daemon.client
+        }
+        // Env override points at a manually-run sidecar (e.g. an anvil fork); otherwise the
+        // app spawns + owns one on its active chain.
+        let env = ProcessInfo.processInfo.environment
+        if let socket = env["LOCAL_WALLET_PRIVACY_SOCKET"],
+           let token = env["LOCAL_WALLET_PRIVACY_TOKEN"] {
+            return RailgunHelperClient(socketPath: socket, bearerToken: token)
+        }
+        let secrets = try RailgunSecretsStore.loadOrCreate()
+        let daemon = try await RailgunHelperDaemon.launch(
+            rpcURL: walletModel.activeChain.rpcURL.absoluteString,
+            secrets: secrets
+        )
+        railgunDaemon = daemon
+        return daemon.client
+    }
+
+    /// Fetch the shielded (RAILGUN) balance from the sidecar and publish it split into
+    /// confirmed (cleared/spendable) vs pending (deposited, awaiting pool inclusion).
+    func refreshShieldedBalance() {
+        guard !isRefreshingShieldedBalance else { return }
+        isRefreshingShieldedBalance = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isRefreshingShieldedBalance = false }
+            do {
+                let client = try await self.railgunHelperClient()
+                let split = try await client.balance()
+                self.shieldedConfirmed = WeiFormatter.ethDisplayString(fromHexWei: split.valid)
+                self.shieldedPending = WeiFormatter.ethDisplayString(fromHexWei: split.pending)
+                self.shieldedBalanceError = nil
+                // Also refresh the local broadcaster's address + gas balance.
+                if let status = try? await client.broadcasterStatus() {
+                    self.broadcasterAddress = status.address
+                    self.broadcasterBalance = WeiFormatter.ethDisplayString(fromHexWei: status.balanceWei)
+                    let hex = status.balanceWei.hasPrefix("0x")
+                        ? String(status.balanceWei.dropFirst(2)) : status.balanceWei
+                    // < 0.005 ETH (5e15 wei) can't reliably cover unshield gas → prompt top-up.
+                    let needsFunding = (UInt64(hex, radix: 16) ?? .max) < 5_000_000_000_000_000
+                    self.broadcasterState = needsFunding ? "Needs funding" : "Ready"
+                }
+            } catch {
+                self.shieldedBalanceError = error.localizedDescription
+            }
+        }
+    }
+
+    /// After a shield/unshield, the RAILGUN pool (Subsquid index + note scan) lags the chain,
+    /// so a single immediate `refreshShieldedBalance()` reads stale totals. Poll for a bounded
+    /// window, refreshing each pass, until the confirmed/pending split changes from what it was
+    /// when the operation completed (or the window elapses).
+    func refreshShieldedBalanceUntilSettled(attempts: Int = 12, interval: TimeInterval = 3) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let baseline = [self.shieldedConfirmed, self.shieldedPending]
+            for _ in 0..<max(1, attempts) {
+                self.refreshShieldedBalance()
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                if [self.shieldedConfirmed, self.shieldedPending] != baseline {
+                    return
+                }
+            }
+        }
+    }
+
+    /// Top up a helper EOA (bundler or local broadcaster) with native ETH so it can pay gas.
+    /// The ETH comes from the Kernel account as a passkey-signed UserOp — the same primitive
+    /// as a chat transfer. For the bundler this only works once it already has enough gas to
+    /// relay one op; when it's empty, its card's copy-address button is the external fallback.
+    func fundHelper(address: String, amountETH: String, label: String, isBroadcaster: Bool) {
+        guard fundingHelperAddress == nil else { return }
+        let amount = amountETH.trimmingCharacters(in: .whitespaces)
+        guard address.hasPrefix("0x"), address.count == 42 else {
+            setHelperFundError("\(label) has no address to fund yet.", address: address)
+            return
+        }
+        guard let value = Double(amount), value > 0 else {
+            setHelperFundError("Enter an amount greater than 0 to fund \(label).", address: address)
+            return
+        }
+        fundingHelperAddress = address
+        helperFundError = nil
+        helperFundErrorAddress = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.fundingHelperAddress = nil }
+            do {
+                let result = try await self.walletModel.executeNativeTransfer(
+                    recipient: address,
+                    amountETH: amount,
+                    logContext: "fund-helper",
+                    signingReason: "Authorize \(amount) ETH to the \(label) for gas on \(self.walletModel.activeChain.name)"
+                )
+                // Hold the funding lock until this op is actually mined. Two reasons:
+                // (1) balances only reflect it once it lands; (2) the shared lock stops a
+                // second helper-funding op building on a nonce this one hasn't consumed yet —
+                // that op would otherwise fail estimation with AA25 (invalid account nonce).
+                let receipt = await self.walletModel.awaitUserOperationInclusion(
+                    userOpHash: result.userOpHash,
+                    logContext: "fund-helper"
+                )
+                self.appendHelperFundingResult(result, receipt: receipt, amount: amount, address: address, label: label)
+                // Reflect the new gas balance on the card. refreshOnchainAccountStatus re-reads
+                // chain state (kernel + bundler balances, relayer status) — a plain
+                // refreshAccountIdentity only re-maps the stale cache.
+                self.refreshOnchainAccountStatus()
+                if isBroadcaster {
+                    self.refreshShieldedBalance()
+                }
+            } catch {
+                self.setHelperFundError("Funding the \(label) failed: \(error.localizedDescription)", address: address)
+                self.appendFundingError(error, label: label)
+            }
+        }
+    }
+
+    private func setHelperFundError(_ message: String, address: String) {
+        helperFundError = message
+        helperFundErrorAddress = address
+    }
+
+    private func appendHelperFundingResult(
+        _ result: AppModel.UserOperationSendResult,
+        receipt: WalletNodeClient.UserOperationReceipt?,
+        amount: String,
+        address: String,
+        label: String
+    ) {
+        guard let conversationID = activeConversationIDIfPresent else { return }
+        let status: OnchainTransactionSummary.Status
+        if let receipt {
+            status = receipt.success ? .included : .reverted
+        } else if result.transactionHash != nil {
+            status = .submitted
+        } else {
+            status = .pending
+        }
+        let summary = OnchainTransactionSummary(
+            chainName: walletModel.activeChain.name,
+            chainID: walletModel.activeChain.id,
+            amount: amount,
+            token: "ETH",
+            recipient: address,
+            recipientName: "\(label) (gas)",
+            resolvedRecipient: nil,
+            resolutionChainName: nil,
+            resolutionChainID: nil,
+            ccipReadUsed: nil,
+            operation: .transfer,
+            signingMode: result.signedBySession ? "session" : "passkey",
+            amountOut: nil,
+            minimumReceived: nil,
+            route: nil,
+            userOpHash: result.userOpHash,
+            transactionHash: receipt?.txHash ?? result.transactionHash,
+            status: status,
+            createdAt: Date()
+        )
+        appendMessage(.onchainTransaction(summary), to: conversationID)
+        reloadWalletHistory()
+    }
+
+    private func appendFundingError(_ error: Error, label: String) {
+        guard let conversationID = activeConversationIDIfPresent else { return }
+        appendMessage(
+            ChatMessage(
+                kind: .assistantError,
+                role: .assistant,
+                text: "Funding the \(label) failed: \(error.localizedDescription)"
+            ),
+            to: conversationID
+        )
+    }
+
+    /// `/shield <amount>` — deposit ETH into the RAILGUN pool. The sidecar builds the pool
+    /// deposit tx(s); the OWNER self-submits them as a Kernel `execute` UserOp (passkey).
+    private func executeShield(intent: ToolIntent) async throws {
+        guard let amount = intent.args["amount"] else { throw AppError.invalidAmount }
+        let amountWei = try EtherAmountParser.weiDecimalString(fromETHString: amount)
+        let client = try await railgunHelperClient()
+        let txs = try await client.prepareShield(amountWei: amountWei)
+        let executions = try txs.map { try Self.kernelExecution(from: $0) }
+        let result = try await walletModel.executeBatch(
+            executions: executions,
+            logContext: "chat-shield",
+            signingReason: "Authorize shielding \(amount) ETH into the RAILGUN pool on \(walletModel.activeChain.name)"
+        )
+        appendShieldExecutionResult(result, amount: amount, for: intent)
+        refreshShieldedBalanceUntilSettled()
+    }
+
+    /// `/unshield <amount> to <addr>` — withdraw ETH from the pool to a recipient as native
+    /// ETH, relayed by the wallet's own local broadcaster (via the sidecar). Async: the
+    /// sidecar returns a jobId while it proves + relays; we poll to completion.
+    private func executeUnshield(intent: ToolIntent) async throws {
+        guard let amount = intent.args["amount"], let to = intent.args["to"] else {
+            throw AppError.invalidAmount
+        }
+        guard to.hasPrefix("0x"), to.count == 42 else {
+            throw RailgunHelperClient.ClientError.rpcError(
+                "unshield recipient must be a 0x address (ENS/contact resolution is not yet wired for unshield)"
+            )
+        }
+        let amountWei = try EtherAmountParser.weiDecimalString(fromETHString: amount)
+        // Unshield is relayed by the sidecar's local broadcaster and never crosses the Secure
+        // Enclave, so — unlike shield/transfer — it wouldn't prompt on its own. Require an
+        // explicit device-owner (biometric) authorization before moving funds out of the pool.
+        try await walletModel.authorizeDeviceOwner(
+            reason: "Authorize unshielding \(amount) ETH from the RAILGUN pool to \(to) on \(walletModel.activeChain.name)"
+        )
+        let client = try await railgunHelperClient()
+        let jobId = try await client.unshield(amountWei: amountWei, to: to)
+        // The sidecar accepted the job and is proving + relaying (tens of seconds). Show an
+        // immediate "submitted" card now; unshield is broadcaster-relayed (not a daemon
+        // UserOp), so nothing reconciles it for us — we drive the submitted → confirmed
+        // transition by hand once the relay lands, mirroring the shield flow.
+        let cardID = "unshield:\(jobId)"
+        appendUnshieldSubmittedCard(id: cardID, amount: amount, to: to, for: intent)
+        do {
+            let result = try await client.awaitUnshield(jobId: jobId, deadline: Date().addingTimeInterval(300))
+            confirmUnshieldCard(id: cardID, result: result, amount: amount, to: to)
+            refreshShieldedBalanceUntilSettled()
+        } catch {
+            markUnshieldCardReverted(id: cardID, amount: amount, to: to)
+            throw error
+        }
+    }
+
+    /// Rich on-chain feedback for `/shield`, mirroring transfer: a tool-response message +
+    /// an on-chain transaction card (which also refreshes the wallet history panel).
+    private func appendShieldExecutionResult(
+        _ result: AppModel.UserOperationSendResult,
+        amount: String,
+        for intent: ToolIntent
+    ) {
+        guard let conversationID = activeConversationIDIfPresent else { return }
+        var payload: [String: Any] = [
+            "status": "submitted",
+            "intent_id": intent.id.uuidString,
+            "user_op_hash": result.userOpHash,
+            "signed_by": result.signedBySession ? "session_key" : "passkey",
+            "operation": "shield",
+        ]
+        if let tx = result.transactionHash { payload["transaction_hash"] = tx }
+        if let success = result.success { payload["success"] = success }
+        appendMessage(
+            ChatMessage(kind: .toolResponse, role: .tool, text: jsonString(payload), toolCallId: intent.id.uuidString),
+            to: conversationID
+        )
+
+        let status: OnchainTransactionSummary.Status =
+            result.success == true ? .included
+            : result.success == false ? .reverted
+            : result.transactionHash != nil ? .submitted : .pending
+        let summary = OnchainTransactionSummary(
+            chainName: walletModel.activeChain.name,
+            chainID: walletModel.activeChain.id,
+            amount: amount,
+            token: "ETH",
+            recipient: "RAILGUN shielded pool",
+            recipientName: nil,
+            resolvedRecipient: nil,
+            resolutionChainName: nil,
+            resolutionChainID: nil,
+            ccipReadUsed: nil,
+            operation: .shield,
+            signingMode: result.signedBySession ? "session" : "passkey",
+            amountOut: nil,
+            minimumReceived: nil,
+            route: nil,
+            userOpHash: result.userOpHash,
+            transactionHash: result.transactionHash,
+            status: status,
+            createdAt: Date()
+        )
+        appendMessage(.onchainTransaction(summary), to: conversationID)
+        reloadWalletHistory()
+    }
+
+    /// Build an unshield transaction card. `id` is a stable synthetic key (unshield isn't a
+    /// daemon UserOp, so it has no real userOpHash) used to find and update the card in place.
+    private func unshieldCardSummary(
+        id: String,
+        amount: String,
+        to: String,
+        status: OnchainTransactionSummary.Status,
+        forwardTx: String?,
+        deliveredHex: String?,
+        createdAt: Date
+    ) -> OnchainTransactionSummary {
+        OnchainTransactionSummary(
+            chainName: walletModel.activeChain.name,
+            chainID: walletModel.activeChain.id,
+            amount: amount,
+            token: "ETH",
+            recipient: to,
+            recipientName: nil,
+            resolvedRecipient: nil,
+            resolutionChainName: nil,
+            resolutionChainID: nil,
+            ccipReadUsed: nil,
+            operation: .unshield,
+            signingMode: "local-broadcaster",
+            amountOut: deliveredHex,
+            minimumReceived: nil,
+            route: nil,
+            userOpHash: id,
+            transactionHash: forwardTx,
+            status: status,
+            createdAt: createdAt
+        )
+    }
+
+    /// `/unshield` accepted: emit the tool response and a "submitted" card immediately, before
+    /// proving + relay finish (mirrors how `/shield` shows a submitted card up front).
+    private func appendUnshieldSubmittedCard(id: String, amount: String, to: String, for intent: ToolIntent) {
+        guard let conversationID = activeConversationIDIfPresent else { return }
+        let payload: [String: Any] = [
+            "status": "submitted",
+            "intent_id": intent.id.uuidString,
+            "operation": "unshield",
+            "recipient": to,
+        ]
+        appendMessage(
+            ChatMessage(kind: .toolResponse, role: .tool, text: jsonString(payload), toolCallId: intent.id.uuidString),
+            to: conversationID
+        )
+        let summary = unshieldCardSummary(
+            id: id, amount: amount, to: to, status: .submitted,
+            forwardTx: nil, deliveredHex: nil, createdAt: Date()
+        )
+        appendMessage(.onchainTransaction(summary), to: conversationID)
+        reloadWalletHistory()
+    }
+
+    /// Relay landed: flip the submitted card to "included" with the delivered amount + forward
+    /// tx hash (the proved tx is broadcaster-relayed, so the identifying hash is the forward tx).
+    private func confirmUnshieldCard(id: String, result: JSONValue, amount: String, to: String) {
+        let forwardTx = result["forwardTxHash"]?.stringValue
+        let deliveredHex = result["amountWei"]?.stringValue
+        updateOnchainCard(userOpHash: id) { [self] old in
+            unshieldCardSummary(
+                id: id, amount: amount, to: to,
+                status: forwardTx != nil ? .included : .pending,
+                forwardTx: forwardTx, deliveredHex: deliveredHex, createdAt: old.createdAt
+            )
+        }
+    }
+
+    /// Relay failed: flip the submitted card to "reverted" so it doesn't linger as submitted.
+    /// The thrown error still surfaces its own message via the caller's error handler.
+    private func markUnshieldCardReverted(id: String, amount: String, to: String) {
+        updateOnchainCard(userOpHash: id) { [self] old in
+            unshieldCardSummary(
+                id: id, amount: amount, to: to, status: .reverted,
+                forwardTx: nil, deliveredHex: nil, createdAt: old.createdAt
+            )
+        }
+    }
+
+    /// Update an on-chain transaction card in place by its `userOpHash`, rewriting the most
+    /// recent matching message. Used for cards the daemon doesn't reconcile (unshield).
+    private func updateOnchainCard(
+        userOpHash: String,
+        _ transform: (OnchainTransactionSummary) -> OnchainTransactionSummary
+    ) {
+        guard let conversationID = activeConversationIDIfPresent,
+              let cIndex = conversations.firstIndex(where: { $0.id == conversationID })
+        else { return }
+        guard let mIndex = conversations[cIndex].messages.lastIndex(where: {
+            $0.kind == .onchainTransaction
+                && OnchainTransactionSummary.decode(from: $0)?.userOpHash == userOpHash
+        }),
+            let summary = OnchainTransactionSummary.decode(from: conversations[cIndex].messages[mIndex])
+        else { return }
+        conversations[cIndex].messages[mIndex].text = ChatMessage.onchainTransaction(transform(summary)).text
+        conversations[cIndex].updatedAt = Date()
+        try? chatStore.updateMessage(conversations[cIndex].messages[mIndex], in: conversationID)
+        reloadWalletHistory()
+    }
+
+    private static func kernelExecution(from tx: RailgunHelperClient.ShieldTx) throws -> KernelExecutionRequest {
+        KernelExecutionRequest(
+            target: tx.to,
+            value: try hexData(tx.value).leftPadded(to: 32),
+            callData: try hexData(tx.data)
+        )
+    }
+
+    private static func hexData(_ string: String) throws -> Data {
+        var hex = string.hasPrefix("0x") ? String(string.dropFirst(2)) : string
+        if hex.count % 2 != 0 { hex = "0" + hex }
+        var out = Data()
+        out.reserveCapacity(hex.count / 2)
+        var idx = hex.startIndex
+        while idx < hex.endIndex {
+            let next = hex.index(idx, offsetBy: 2)
+            guard let byte = UInt8(hex[idx..<next], radix: 16) else { throw AppError.invalidAmount }
+            out.append(byte)
+            idx = next
+        }
+        return out
+    }
+
     private func executeIfSupported(
         _ intent: ToolIntent,
         transferPreflightStatus: ChatTransferPreflightStatus? = nil,
         swapPreview: ChatSwapPreview? = nil
     ) {
-        guard intent.tool == .transfer || intent.tool == .swap else {
+        guard intent.tool == .transfer || intent.tool == .swap
+            || intent.tool == .shield || intent.tool == .unshield else {
             return
         }
         guard !executingIntentIDs.contains(intent.id) else {
@@ -2470,6 +2910,10 @@ private final class ChatDashboardModel: ObservableObject {
                         signingReason: "\(signingAction) on \(self.walletModel.activeChain.name)"
                     )
                     self.appendSwapExecutionResult(result, for: intent, request: request)
+                case .shield:
+                    try await self.executeShield(intent: intent)
+                case .unshield:
+                    try await self.executeUnshield(intent: intent)
                 }
             } catch {
                 self.appendExecutionError(error, for: intent)
@@ -2955,7 +3399,12 @@ struct LocalWalletChatDashboardView: View {
     @State private var isSessionActionInProgress = false
     @State private var sessionPopoverMessage: String?
     @State private var isAtBottomOfChat = true
-    @State private var isAccountHeaderExpanded = true
+    // Account cards start hidden; clicking the chain bar reveals them. Persisted so the
+    // choice sticks across launches.
+    @AppStorage("localwallet.accountHeaderExpanded") private var isAccountHeaderExpanded = false
+    // Privacy on → show the RAILGUN pieces (local broadcaster card + shielded balances).
+    // Off → hide them and the wallet reads as a plain account. Persisted across launches.
+    @AppStorage("localwallet.privacyEnabled") private var privacyEnabled = true
     @State private var selectedSection: DashboardSection = .chat
     @State private var settingsInitialTab: LocalWalletSettingsTab = .info
     @State private var historyFilter: WalletHistoryFilter = .all
@@ -3311,6 +3760,41 @@ struct LocalWalletChatDashboardView: View {
         .padding(.top, 10)
     }
 
+    /// Toggles the RAILGUN surface (local broadcaster card + shielded balances) on/off.
+    private var privacyToggle: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.18)) { privacyEnabled.toggle() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: privacyEnabled ? "lock.shield.fill" : "lock.open")
+                    .font(.system(size: 12, weight: .black))
+                Text("Privacy")
+                    .font(.system(size: 12, weight: .heavy))
+                Text(privacyEnabled ? "On" : "Off")
+                    .font(.system(size: 10, weight: .black))
+                    .foregroundStyle(privacyEnabled ? Color.white.opacity(0.85) : ChatPalette.mutedText)
+                    .padding(.horizontal, 6)
+                    .frame(height: 16)
+                    .background(Capsule().fill(privacyEnabled ? Color.white.opacity(0.18) : ChatPalette.buttonCircle))
+            }
+            .foregroundStyle(privacyEnabled ? Color.white : ChatPalette.secondaryText)
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(privacyEnabled ? ChatPalette.accent : ChatPalette.panel.opacity(0.75))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(privacyEnabled ? ChatPalette.accent : ChatPalette.border.opacity(0.75), lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .help(privacyEnabled
+            ? "Privacy on — RAILGUN shielding is available. Click to hide it."
+            : "Privacy off — RAILGUN broadcaster and shielded balances are hidden. Click to show.")
+    }
+
     private var accountHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -3324,6 +3808,8 @@ struct LocalWalletChatDashboardView: View {
                     }
                 )
                 .frame(maxWidth: .infinity)
+
+                privacyToggle
 
                 Button {
                     model.refreshOnchainAccountStatus()
@@ -3350,7 +3836,9 @@ struct LocalWalletChatDashboardView: View {
                 .help("Refresh balances")
             }
             if isAccountHeaderExpanded {
-                HStack(spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    // The Kernel account is where funds are received, so its address stays
+                    // front and centre.
                     AddressPill(
                         icon: "lock.shield.fill",
                         title: "Kernel smart account",
@@ -3362,24 +3850,118 @@ struct LocalWalletChatDashboardView: View {
                         onRefreshTokenBalances: { model.refreshTokenBalances(force: true) },
                         explorerURL: explorerAddressURL(model.accountIdentity.kernelAddress)
                     )
-                    AddressPill(
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    // Bundler + broadcaster are gas-paying helper EOAs: lead with a Fund
+                    // action, not the address.
+                    FundableAccountCard(
                         icon: "key.fill",
-                        title: "Bundler address",
+                        title: "Bundler",
+                        subtitle: "Relays your account's transactions",
                         address: model.accountIdentity.bundlerAddress,
                         balance: model.accountIdentity.bundlerBalance,
                         state: model.accountIdentity.bundlerState,
+                        isFunding: model.fundingHelperAddress == model.accountIdentity.bundlerAddress,
+                        fundError: model.helperFundErrorAddress == model.accountIdentity.bundlerAddress ? model.helperFundError : nil,
                         tokenBalances: model.bundlerTokenBalances,
                         isRefreshingTokenBalances: model.isRefreshingTokenBalances,
                         onRefreshTokenBalances: { model.refreshTokenBalances(force: true) },
-                        explorerURL: explorerAddressURL(model.accountIdentity.bundlerAddress)
+                        explorerURL: explorerAddressURL(model.accountIdentity.bundlerAddress),
+                        onFund: { amount in
+                            model.fundHelper(
+                                address: model.accountIdentity.bundlerAddress,
+                                amountETH: amount,
+                                label: "bundler",
+                                isBroadcaster: false
+                            )
+                        }
                     )
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    if privacyEnabled {
+                        FundableAccountCard(
+                            icon: "arrowshape.turn.up.right.fill",
+                            title: "Local broadcaster",
+                            subtitle: "Relays your unshields (unwrap + forward)",
+                            address: model.broadcasterAddress ?? "Not started",
+                            balance: model.broadcasterBalance ?? "—",
+                            state: model.broadcasterState ?? "Not checked",
+                            isFunding: model.fundingHelperAddress == model.broadcasterAddress,
+                            fundError: model.helperFundErrorAddress == model.broadcasterAddress ? model.helperFundError : nil,
+                            tokenBalances: [],
+                            isRefreshingTokenBalances: false,
+                            onRefreshTokenBalances: {},
+                            explorerURL: explorerAddressURL(model.broadcasterAddress ?? ""),
+                            onFund: { amount in
+                                guard let address = model.broadcasterAddress else { return }
+                                model.fundHelper(
+                                    address: address,
+                                    amountETH: amount,
+                                    label: "broadcaster",
+                                    isBroadcaster: true
+                                )
+                            }
+                        )
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    }
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
+                if privacyEnabled {
+                    shieldedBalanceRow
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
             }
         }
         .padding(.top, 10)
         .padding(.bottom, 8)
         .animation(.easeInOut(duration: 0.18), value: isAccountHeaderExpanded)
+        .animation(.easeInOut(duration: 0.18), value: privacyEnabled)
+    }
+
+    /// Shielded (RAILGUN) balance row: confirmed = cleared/spendable, pending = deposited
+    /// but awaiting the pool's approval set. Refreshed after shield/unshield or manually.
+    private var shieldedBalanceRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "lock.shield.fill")
+                .foregroundStyle(.secondary)
+            Text("Shielded (RAILGUN)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            if let confirmed = model.shieldedConfirmed {
+                Text("Confirmed \(confirmed) · Pending \(model.shieldedPending ?? "0 ETH")")
+                    .font(.caption.monospacedDigit())
+                    .help("Confirmed = cleared and spendable. Pending = deposited but not yet included by the pool's approval set.")
+            } else if model.isRefreshingShieldedBalance {
+                Text("Loading… (syncing the pool)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if model.shieldedBalanceError != nil {
+                Text("unavailable")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .help(model.shieldedBalanceError ?? "")
+            } else {
+                Text("—")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button {
+                model.refreshShieldedBalance()
+            } label: {
+                Image(systemName: model.isRefreshingShieldedBalance ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
+            }
+            .buttonStyle(.plain)
+            .disabled(model.isRefreshingShieldedBalance)
+            .help("Refresh shielded balance")
+        }
+        .padding(.top, 2)
+        .task {
+            // Auto-load once when the account header first shows this row, so the balance
+            // is visible without hunting for the refresh button. (Starts the sidecar.)
+            if model.shieldedConfirmed == nil && model.shieldedBalanceError == nil {
+                model.refreshShieldedBalance()
+            }
+        }
     }
 
     private func explorerAddressURL(_ address: String) -> URL? {
@@ -4288,20 +4870,11 @@ private struct ChainStatusStrip: View {
                     .frame(height: 22)
                     .background(Capsule().fill((identity.isTestnet ? ChatPalette.warning : ChatPalette.success).opacity(0.12)))
 
-                if !isExpanded {
-                    compactAccountSummary(
-                        title: "Kernel",
-                        address: identity.kernelAddress,
-                        balance: identity.kernelBalance
-                    )
-                    compactAccountSummary(
-                        title: "Bundler",
-                        address: identity.bundlerAddress,
-                        balance: identity.bundlerBalance
-                    )
-                }
-
                 Spacer(minLength: 0)
+
+                Text(isExpanded ? "Hide accounts" : "Show accounts")
+                    .font(.system(size: 11, weight: .heavy))
+                    .foregroundStyle(ChatPalette.mutedText)
 
                 Image(systemName: "chevron.down")
                     .font(.system(size: 11, weight: .black))
@@ -4323,30 +4896,6 @@ private struct ChainStatusStrip: View {
         )
     }
 
-    private func compactAccountSummary(title: String, address: String, balance: String) -> some View {
-        HStack(spacing: 5) {
-            Text(title)
-                .font(.system(size: 11, weight: .black))
-                .foregroundStyle(ChatPalette.mutedText)
-            Text(shortAddress(address))
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundStyle(ChatPalette.secondaryText)
-            Text(balance)
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(ChatPalette.secondaryText)
-        }
-        .lineLimit(1)
-        .padding(.horizontal, 8)
-        .frame(height: 22)
-        .background(Capsule().fill(ChatPalette.buttonCircle.opacity(0.6)))
-    }
-
-    private func shortAddress(_ value: String) -> String {
-        guard value.hasPrefix("0x"), value.count > 14 else {
-            return value
-        }
-        return "\(value.prefix(6))...\(value.suffix(4))"
-    }
 }
 
 private struct AddressPill: View {
@@ -4484,6 +5033,239 @@ private struct AddressPill: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
             copied = false
         }
+    }
+}
+
+/// Account card for a gas-paying helper EOA (bundler / local broadcaster). Unlike
+/// `AddressPill`, it leads with the gas balance and a **Fund** action — the raw address is
+/// demoted to a copy button (the external-funding fallback the bundler needs when empty).
+/// "Send" moves ETH from the Kernel account as a passkey UserOp; see `fundHelper`.
+private struct FundableAccountCard: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let address: String
+    let balance: String
+    let state: String
+    let isFunding: Bool
+    let fundError: String?
+    let tokenBalances: [ChatTokenBalance]
+    let isRefreshingTokenBalances: Bool
+    let onRefreshTokenBalances: () -> Void
+    let explorerURL: URL?
+    let onFund: (String) -> Void
+
+    @State private var fundAmount = "0.02"
+    @State private var copied = false
+    @State private var isTokenListPresented = false
+
+    private var hasAddress: Bool { address.hasPrefix("0x") && address.count == 42 }
+    private var needsFunding: Bool {
+        let s = state.lowercased()
+        return s.contains("need") || s.contains("top")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .black))
+                    .foregroundStyle(ChatPalette.accent)
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(ChatPalette.buttonCircle))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 10, weight: .black))
+                        .foregroundStyle(ChatPalette.mutedText)
+                        .textCase(.uppercase)
+                        .lineLimit(1)
+                    Text(balance)
+                        .font(.system(size: 18, weight: .heavy, design: .rounded))
+                        .foregroundStyle(ChatPalette.primaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
+                }
+
+                Spacer(minLength: 4)
+
+                trailingIcons
+            }
+
+            stateBadge
+
+            fundControl
+
+            if let fundError {
+                Text(fundError)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(ChatPalette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Send from your Kernel account (passkey), or copy the address to fund externally.")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(ChatPalette.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(ChatPalette.panel)
+                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(ChatPalette.border, lineWidth: 1))
+        )
+    }
+
+    private var trailingIcons: some View {
+        HStack(spacing: 5) {
+            iconButton(systemName: copied ? "checkmark" : "doc.on.doc",
+                       tint: copied ? ChatPalette.success : ChatPalette.secondaryText,
+                       help: copied ? "Copied" : "Copy address to fund externally",
+                       disabled: !hasAddress) {
+                copy(address)
+            }
+            if tokenBalances.isEmpty == false || isRefreshingTokenBalances {
+                tokenListButton
+            }
+            if let explorerURL {
+                Link(destination: explorerURL) {
+                    iconLabel(systemName: "safari", tint: ChatPalette.secondaryText)
+                }
+                .buttonStyle(.plain)
+                .help("Open in explorer")
+            }
+        }
+    }
+
+    private var stateBadge: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(needsFunding ? ChatPalette.warning : ChatPalette.success)
+                .frame(width: 6, height: 6)
+            Text(state)
+                .font(.system(size: 10, weight: .black))
+                .foregroundStyle(needsFunding ? ChatPalette.warning : ChatPalette.success)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 20)
+        .background(
+            Capsule().fill((needsFunding ? ChatPalette.warning : ChatPalette.success).opacity(0.14))
+        )
+        .overlay(
+            Capsule().stroke((needsFunding ? ChatPalette.warning : ChatPalette.success).opacity(0.35), lineWidth: 1)
+        )
+    }
+
+    private var fundControl: some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 4) {
+                Text("Fund")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(ChatPalette.mutedText)
+                TextField("0.02", text: $fundAmount)
+                    .textFieldStyle(.plain)
+                    .multilineTextAlignment(.trailing)
+                    .font(.system(size: 13, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(ChatPalette.primaryText)
+                    .frame(maxWidth: .infinity)
+                    .disabled(isFunding)
+                Text("ETH")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(ChatPalette.mutedText)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(ChatPalette.input)
+                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(ChatPalette.border, lineWidth: 1))
+            )
+
+            Button {
+                onFund(fundAmount)
+            } label: {
+                HStack(spacing: 5) {
+                    if isFunding {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text(isFunding ? "Sending" : "Send")
+                        .font(.system(size: 12, weight: .heavy))
+                    if !isFunding {
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 10, weight: .black))
+                    }
+                }
+                .foregroundStyle(hasAddress ? Color.white : ChatPalette.mutedText)
+                .padding(.horizontal, 11)
+                .frame(height: 32)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(hasAddress ? ChatPalette.accent : ChatPalette.buttonCircle)
+                )
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .disabled(!hasAddress || isFunding)
+            .help(hasAddress ? "Send ETH from your Kernel account for gas" : "Address not available yet")
+        }
+    }
+
+    private var tokenListButton: some View {
+        Button {
+            if tokenBalances.isEmpty { onRefreshTokenBalances() }
+            isTokenListPresented.toggle()
+        } label: {
+            if isRefreshingTokenBalances {
+                ProgressView().controlSize(.small).frame(width: 26, height: 26)
+                    .background(Circle().fill(ChatPalette.buttonCircle))
+            } else {
+                iconLabel(systemName: "list.bullet.rectangle.portrait", tint: ChatPalette.secondaryText)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(!hasAddress)
+        .help("Show token balances")
+        .popover(isPresented: $isTokenListPresented, arrowEdge: .bottom) {
+            TokenBalancePopover(
+                title: title,
+                address: address,
+                balances: tokenBalances,
+                isRefreshing: isRefreshingTokenBalances,
+                onRefresh: onRefreshTokenBalances
+            )
+        }
+    }
+
+    private func iconButton(
+        systemName: String,
+        tint: Color,
+        help: String,
+        disabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            iconLabel(systemName: systemName, tint: tint)
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(help)
+    }
+
+    private func iconLabel(systemName: String, tint: Color) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 11, weight: .black))
+            .foregroundStyle(tint)
+            .frame(width: 26, height: 26)
+            .background(Circle().fill(ChatPalette.buttonCircle))
+    }
+
+    private func copy(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        withAnimation(.easeInOut(duration: 0.12)) { copied = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { copied = false }
     }
 }
 
@@ -4966,6 +5748,10 @@ private extension WalletTransactionRecord {
             return "Batch"
         case .deploy:
             return "Deploy account"
+        case .shield:
+            return "Shield"
+        case .unshield:
+            return "Unshield"
         case .unknown:
             return "Transaction"
         }
@@ -5037,6 +5823,10 @@ private extension WalletTransactionRecord {
             return "square.stack.3d.up.fill"
         case .deploy:
             return "shippingbox.fill"
+        case .shield:
+            return "lock.shield.fill"
+        case .unshield:
+            return "lock.open.fill"
         case .unknown:
             return "questionmark.circle.fill"
         }

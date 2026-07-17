@@ -15,6 +15,7 @@ pub mod pool;
 pub mod provider;
 pub mod rpc;
 pub mod secret;
+pub mod spawn;
 
 // Build-gate smoke: confirm the pinned Kohaku API surface resolves.
 #[doc(hidden)]

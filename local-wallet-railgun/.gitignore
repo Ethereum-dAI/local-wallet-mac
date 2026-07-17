@@ -26,4 +26,6 @@ TODO.md
 .env.*
 !.env.example
 
-# NOTE: docs/ is intentionally tracked in this repo (design specs live there).
+# Local design/planning notes — kept out of the repo (local-only working docs).
+docs/
+NOTES.md

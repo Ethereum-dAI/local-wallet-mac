@@ -60,6 +60,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.9"
 rand_chacha = "0.9"
 
+# BIP-39 mnemonic/seed + standard secp256k1 BIP-32 (broadcaster EOA). The RAILGUN
+# account uses a CUSTOM HMAC-SHA512 walk (see derivation.rs), hence hmac/sha2 too.
+bip39 = "2"
+bip32 = "0.5"
+hmac = "0.12"
+sha2 = "0.10"
+
 [dev-dependencies]
 tempfile = "3"
 serial_test = "3"

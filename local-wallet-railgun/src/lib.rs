@@ -8,6 +8,7 @@
 //! - `railgun-broadcaster` — local broadcaster: `relay` / `address` (its own EOA).
 
 pub mod broadcaster;
+pub mod derivation;
 pub mod keys;
 // NOTE: module is `pool`, not `railgun` — a module named `railgun` would shadow the
 // extern `railgun` crate in path resolution and break every `railgun::…` import.

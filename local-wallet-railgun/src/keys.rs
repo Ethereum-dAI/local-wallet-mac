@@ -78,4 +78,41 @@ mod tests {
     fn different_entropy_yields_different_address() {
         assert_ne!(addr(E1), addr(E2));
     }
+
+    /// Frozen regression vector for `derive_railgun_signer`'s address for `E1` @ chain 11155111.
+    /// If `derive_railgun_signer`'s body is ever reverted to the old ChaCha20-CSPRNG scheme
+    /// (which never calls `entropy_to_mnemonic`), this address will change and the test below
+    /// will fail.
+    const E1_SEPOLIA_ADDRESS: &str = "0zk1qyhp25ulukkge548f770q889vygfxvhrce3ve02f9ffnpg2n4cr7zunpd9kx0h6c5ulxljytkqzlx66e69axgr5gj4dl8h29fwwyvhw4fte6mpd0cj3vugswtef";
+
+    // Exercises `derive_railgun_signer` itself (not just the `derivation` primitives): computes
+    // the expected address by independently walking the same entropy -> mnemonic -> seed ->
+    // spend/view node -> signer pipeline that `derive_railgun_signer` uses internally, then
+    // asserts the two agree. Also pins the result as a hardcoded constant so a silent revert to
+    // the old ChaCha20 body (which would produce a different address) fails this test outright.
+    #[test]
+    fn derive_railgun_signer_matches_independently_derived_address() {
+        let chain_id = 11155111u64;
+        let entropy = crate::secret::parse_entropy_32(E1).unwrap();
+
+        let mnemonic = crate::derivation::entropy_to_mnemonic(&entropy).unwrap();
+        let seed = crate::derivation::mnemonic_to_seed(&mnemonic).unwrap();
+        let spend =
+            crate::derivation::railgun_node_key(&seed, &crate::derivation::RAILGUN_SPENDING_PATH);
+        let view =
+            crate::derivation::railgun_node_key(&seed, &crate::derivation::RAILGUN_VIEWING_PATH);
+        let spending = SpendingKey::from_hex(&hex::encode(spend)).unwrap();
+        let viewing = ViewingKey::from_hex(&hex::encode(view)).unwrap();
+        let expected = PrivateKeySigner::new_evm(spending, viewing, chain_id)
+            .address()
+            .to_string();
+
+        let actual = derive_railgun_signer(E1, chain_id)
+            .unwrap()
+            .address()
+            .to_string();
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual, E1_SEPOLIA_ADDRESS);
+    }
 }

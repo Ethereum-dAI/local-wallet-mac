@@ -34,6 +34,19 @@ pub fn derive_railgun_signer(
     Ok(PrivateKeySigner::new_evm(spending, viewing, chain_id))
 }
 
+/// Derive the local broadcaster EOA private key (0x-hex) from the same 32-byte entropy,
+/// at standard Ethereum path m/44'/60'/0'/0/0. Distinct from the RAILGUN account.
+pub fn derive_broadcaster_key(entropy_hex: &str) -> Result<String, SecretError> {
+    let entropy = parse_entropy_32(entropy_hex)?;
+    let mnemonic = derivation::entropy_to_mnemonic(&entropy)
+        .map_err(|e| SecretError::Derivation(e.to_string()))?;
+    let seed = derivation::mnemonic_to_seed(&mnemonic)
+        .map_err(|e| SecretError::Derivation(e.to_string()))?;
+    let key = derivation::broadcaster_secp256k1_from_seed(&seed)
+        .map_err(|e| SecretError::Derivation(e.to_string()))?;
+    Ok(format!("0x{}", hex::encode(key)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +127,28 @@ mod tests {
 
         assert_eq!(actual, expected);
         assert_eq!(actual, E1_SEPOLIA_ADDRESS);
+    }
+
+    #[test]
+    fn broadcaster_key_matches_hardhat_when_derived_from_matching_entropy() {
+        // 12-word hardhat = 16-byte entropy; derive_broadcaster_key takes 32-byte entropy,
+        // so test the shared seed-based core directly for the published address, and assert
+        // derive_broadcaster_key returns a well-formed 0x-key for the 32-byte runtime path.
+        use crate::derivation::{broadcaster_secp256k1_from_seed, mnemonic_to_seed};
+        let seed = mnemonic_to_seed(HARDHAT).unwrap();
+        let key = broadcaster_secp256k1_from_seed(&seed).unwrap();
+        let signer: alloy::signers::local::PrivateKeySigner =
+            format!("0x{}", hex::encode(key)).parse().unwrap();
+        // `{:?}` on alloy's `Address` renders plain lowercase hex; `{}` (Display) renders
+        // the EIP-55 checksummed form, which is what the published hardhat vector uses.
+        assert_eq!(
+            format!("{}", signer.address()),
+            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+        );
+
+        // Runtime path (32-byte entropy) returns a valid, parseable key.
+        let k = derive_broadcaster_key(E1).unwrap();
+        assert!(k.starts_with("0x") && k.len() == 66);
+        let _: alloy::signers::local::PrivateKeySigner = k.parse().unwrap();
     }
 }

@@ -18,6 +18,8 @@ pub enum SecretError {
     EntropyLength(usize),
     #[error("entropyHex is not valid hex")]
     EntropyHex,
+    #[error("key derivation failed: {0}")]
+    Derivation(String),
 }
 
 /// How the sidecar reaches the Ethereum provider.

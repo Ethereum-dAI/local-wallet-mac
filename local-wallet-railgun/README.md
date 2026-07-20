@@ -114,8 +114,10 @@ bins at a real RPC with a funded broadcaster EOA, but the fork is the default ch
 - Kohaku `railgun` dep is pinned to rev `877026e…`; the `js` feature is never enabled.
 - **Config:** secrets arrive over the fd-5 spawn contract (see above); the remaining knobs
   are env for now (`RAILGUN_RPC_URL`, `RAILGUN_SOCKET`, `RAILGUN_TOKEN`,
-  `RAILGUN_BROADCASTER_BIN` / `_SOCKET` / `_TOKEN`, …). Env-provided secrets
-  (`RAILGUN_ENTROPY_HEX`, `RAILGUN_BROADCASTER_KEY`) remain a standalone/dev fallback.
+  `RAILGUN_BROADCASTER_BIN` / `_SOCKET` / `_TOKEN`, …). The env-provided secret
+  (`RAILGUN_ENTROPY_HEX`) remains a standalone/dev fallback; the broadcaster key is
+  derived from it (m/44'/60'/0'/0/0), so `RAILGUN_BROADCASTER_KEY` is no longer read
+  by the helper.
 
 ## License
 

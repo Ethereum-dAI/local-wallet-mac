@@ -50,6 +50,14 @@ property kept: the broadcaster EOA is **separate** from your Kernel/main account
 the RAILGUN account, so the unshield is not submitted by the shielding account itself.
 Three distinct keys: RAILGUN account (spend+view) · shield submitter (owner) · broadcaster.
 
+> **Single-root coupling (security note).** The RAILGUN shielded account and the local
+> broadcaster EOA are **derived from the same BIP-39 mnemonic** (entropy root) — the account
+> at `m/44'/1984'/…` / `m/420'/1984'/…`, the broadcaster at `m/44'/60'/0'/0/0`. This is
+> deliberate (one recoverable root, standard derivation) and the two keys are cryptographically
+> distinct, but it is a change from the previous model of two independent random keys: **a leak
+> of the mnemonic/entropy root now compromises both** the shielded funds and the broadcaster
+> EOA. (The Kernel/passkey account is unaffected — it is not derived from this mnemonic.)
+
 ## From the macOS app
 
 `/shield 0.01` and `/unshield 0.01 to 0x…` are available as slash commands (with

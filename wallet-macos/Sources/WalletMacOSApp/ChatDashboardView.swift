@@ -2656,7 +2656,11 @@ private final class ChatDashboardModel: ObservableObject {
         // immediate "submitted" card now; unshield is broadcaster-relayed (not a daemon
         // UserOp), so nothing reconciles it for us — we drive the submitted → confirmed
         // transition by hand once the relay lands, mirroring the shield flow.
-        let cardID = "unshield:\(jobId)"
+        // Key the card by the per-command intent id, NOT the sidecar jobId: job_seq resets to
+        // 1 on every helper launch, so "unshield:job-1" collides across sessions and (via the
+        // history store's UNIQUE(chain_id, user_op_hash) upsert) makes a new unshield inherit a
+        // previous one's stale transactionHash. intent.id is globally unique per command.
+        let cardID = "unshield:\(intent.id.uuidString)"
         appendUnshieldSubmittedCard(id: cardID, amount: amount, to: to, for: intent)
         do {
             let result = try await client.awaitUnshield(jobId: jobId, deadline: Date().addingTimeInterval(300))

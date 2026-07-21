@@ -25,8 +25,6 @@ use serde_json::json;
 
 // Well-known anvil dev keys (testnet only).
 const OWNER_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-const BROADCASTER_KEY: &str = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
-const BROADCASTER_ADDR: Address = address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
 // A fresh recipient EOA, distinct from owner/broadcaster; starts with 0 ETH on the fork.
 const RECIPIENT: Address = address!("0x1111111111111111111111111111111111111111");
 
@@ -112,6 +110,16 @@ async fn run_e2e() {
     let htok = "helper-token";
     let btok = "bc-token";
 
+    // The broadcaster EOA is now DERIVED from the entropy (m/44'/60'/0'/0/0) inside the
+    // helper. Derive the same address here so we can fund it and assert against it.
+    let broadcaster_addr: Address = {
+        let key =
+            railgun_helper::keys::derive_broadcaster_key(entropy).expect("derive broadcaster key");
+        let signer: alloy::signers::local::PrivateKeySigner =
+            key.parse().expect("parse broadcaster key");
+        signer.address()
+    };
+
     // 1. anvil fork of Sepolia.
     let _anvil = Killer(
         Command::new("anvil")
@@ -139,13 +147,13 @@ async fn run_e2e() {
         .await
         .unwrap();
     let _: serde_json::Value = admin
-        .raw_request("anvil_setCode".into(), (BROADCASTER_ADDR, "0x"))
+        .raw_request("anvil_setCode".into(), (broadcaster_addr, "0x"))
         .await
         .expect("anvil_setCode");
     let _: serde_json::Value = admin
         .raw_request(
             "anvil_setBalance".into(),
-            (BROADCASTER_ADDR, "0x8AC7230489E80000"),
+            (broadcaster_addr, "0x8AC7230489E80000"),
         ) // 10 ETH
         .await
         .expect("anvil_setBalance");
@@ -163,8 +171,7 @@ async fn run_e2e() {
         )
         .env("RAILGUN_BROADCASTER_SOCKET", &bc_sock)
         .env("RAILGUN_BROADCASTER_TOKEN", btok);
-    let helper_secret =
-        json!({ "entropyHex": entropy, "broadcasterKeyHex": BROADCASTER_KEY }).to_string();
+    let helper_secret = json!({ "entropyHex": entropy }).to_string();
     let _helper = ChildGuard(
         spawn_child_with_fd5(cmd, helper_secret.as_bytes()).expect("spawn railgun-helper via fd-5"),
     );
@@ -181,7 +188,7 @@ async fn run_e2e() {
     .unwrap();
     assert_eq!(
         bc_addr["address"].as_str().unwrap().to_lowercase(),
-        format!("{BROADCASTER_ADDR:?}").to_lowercase(),
+        format!("{broadcaster_addr:?}").to_lowercase(),
         "helper-owned broadcaster EOA mismatch"
     );
 
@@ -325,7 +332,7 @@ async fn run_e2e() {
     .expect("forward tx present");
     assert_eq!(
         tx.inner.signer(),
-        BROADCASTER_ADDR,
+        broadcaster_addr,
         "native ETH forward MUST come from the local broadcaster EOA"
     );
 

@@ -158,8 +158,9 @@ async fn run_e2e() {
         .await
         .expect("anvil_setBalance");
 
-    // 2. Spawn ONLY the helper (via fd-5: entropy + broadcaster key). The helper spawns and
-    //    owns the broadcaster itself. This dogfoods the fd-5 spawn contract for the helper.
+    // 2. Spawn ONLY the helper (via fd-5: entropy only; the broadcaster key is derived
+    //    in-process). The helper spawns and owns the broadcaster itself. This dogfoods
+    //    the fd-5 spawn contract for the helper.
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_railgun-helper"));
     cmd.env("RAILGUN_RPC_URL", anvil_url())
         .env("RAILGUN_FORK_BLOCK", FORK_BLOCK.to_string())

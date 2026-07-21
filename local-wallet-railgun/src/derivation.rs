@@ -60,6 +60,10 @@ fn master(seed: &[u8]) -> Node {
 /// Hardened child: preImage = 0x00 || parent.key(32) || (index + 0x8000_0000) as BE u32;
 /// I = HMAC-SHA512(key=parent.chain_code, msg=preImage). Hardened-only (matches engine).
 fn ckd_hardened(parent: &Node, index: u32) -> Node {
+    debug_assert!(
+        index < 0x8000_0000,
+        "railgun HD paths are hardened-only; index must be an unhardened component"
+    );
     let hardened = index.wrapping_add(0x8000_0000);
     let mut pre = Vec::with_capacity(37);
     pre.push(0x00);

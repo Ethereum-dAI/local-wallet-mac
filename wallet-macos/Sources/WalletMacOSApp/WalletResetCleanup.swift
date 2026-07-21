@@ -11,8 +11,9 @@ struct WalletResetCleanup {
     var deleteSessionKeys: () throws -> Void
     var clearRelayerAddressCache: () throws -> Void
     var clearMetadata: () throws -> Void
-    // The RAILGUN shielded seed + local-broadcaster key are another key class the app
-    // manages (railgun-secrets.json); a full reset must wipe them too.
+    // The RAILGUN entropy is another key class the app manages (stored in the Keychain;
+    // the local-broadcaster key is derived from it, not stored separately). A full reset
+    // must wipe it too.
     var deleteRailgunSecrets: () throws -> Void
 
     static func standard(

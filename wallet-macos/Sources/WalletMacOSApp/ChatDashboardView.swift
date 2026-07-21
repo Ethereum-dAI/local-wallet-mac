@@ -606,6 +606,11 @@ private final class ChatDashboardModel: ObservableObject {
     /// The railgun-helper sidecar (spawned lazily on first /shield or /unshield, on the
     /// app's active chain). Killed when this model is torn down (daemon deinit).
     private var railgunDaemon: RailgunHelperDaemon?
+    // The active-chain RPC the cached `railgunDaemon` was launched with. If the active RPC
+    // changes (e.g. the user switches providers), the spawned helper + its broadcaster child
+    // are still bound to the old RPC, so we must tear them down and re-spawn — see
+    // `railgunHelperClient()`.
+    private var railgunDaemonRPC: String?
     private var lastTokenBalanceKey: String?
     private var lastTokenBalanceAttemptKey: String?
     private var lastTokenBalanceAttemptAt: Date?
@@ -2438,9 +2443,6 @@ private final class ChatDashboardModel: ObservableObject {
     /// Configured via env for now (`LOCAL_WALLET_PRIVACY_SOCKET` / `_TOKEN`); the in-app
     /// sidecar-spawn + live (non-fork) mode are the next integration step.
     private func railgunHelperClient() async throws -> RailgunHelperClient {
-        if let daemon = railgunDaemon {
-            return daemon.client
-        }
         // Env override points at a manually-run sidecar (e.g. an anvil fork); otherwise the
         // app spawns + owns one on its active chain.
         let env = ProcessInfo.processInfo.environment
@@ -2448,12 +2450,24 @@ private final class ChatDashboardModel: ObservableObject {
            let token = env["LOCAL_WALLET_PRIVACY_TOKEN"] {
             return RailgunHelperClient(socketPath: socket, bearerToken: token)
         }
+        let currentRPC = walletModel.activeChain.rpcURL.absoluteString
+        // Reuse the spawned sidecar only if it was launched on the CURRENT active-chain RPC.
+        // If the RPC changed under it (e.g. the user switched providers to escape rate limits),
+        // the helper AND the broadcaster it owns are still bound to the old RPC — tear them
+        // down (deinit SIGTERMs the helper; the broadcaster follows via its orphan backstop)
+        // and re-spawn on the new RPC.
+        if let daemon = railgunDaemon, railgunDaemonRPC == currentRPC {
+            return daemon.client
+        }
+        railgunDaemon = nil
+        railgunDaemonRPC = nil
         let secrets = try RailgunSecretsStore.loadOrCreate()
         let daemon = try await RailgunHelperDaemon.launch(
-            rpcURL: walletModel.activeChain.rpcURL.absoluteString,
+            rpcURL: currentRPC,
             secrets: secrets
         )
         railgunDaemon = daemon
+        railgunDaemonRPC = currentRPC
         return daemon.client
     }
 
@@ -2656,7 +2670,11 @@ private final class ChatDashboardModel: ObservableObject {
         // immediate "submitted" card now; unshield is broadcaster-relayed (not a daemon
         // UserOp), so nothing reconciles it for us — we drive the submitted → confirmed
         // transition by hand once the relay lands, mirroring the shield flow.
-        let cardID = "unshield:\(jobId)"
+        // Key the card by the per-command intent id, NOT the sidecar jobId: job_seq resets to
+        // 1 on every helper launch, so "unshield:job-1" collides across sessions and (via the
+        // history store's UNIQUE(chain_id, user_op_hash) upsert) makes a new unshield inherit a
+        // previous one's stale transactionHash. intent.id is globally unique per command.
+        let cardID = "unshield:\(intent.id.uuidString)"
         appendUnshieldSubmittedCard(id: cardID, amount: amount, to: to, for: intent)
         do {
             let result = try await client.awaitUnshield(jobId: jobId, deadline: Date().addingTimeInterval(300))

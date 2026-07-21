@@ -11,8 +11,9 @@
 //!   relay run in the background (proving exceeds any sane RPC timeout).
 //! - `unshieldStatus {jobId}` → `{status: pending|done|error, result?|error?}`.
 //!
-//! Secrets (RAILGUN entropy + broadcaster key) arrive on **fd 5** (`HelperFd5`); env is a
-//! standalone/dev fallback only. Non-secret config is via env.
+//! The secret (RAILGUN entropy) arrives on **fd 5** (`HelperFd5`); env is a standalone/dev
+//! fallback only. The broadcaster EOA key is derived from that same entropy root, never
+//! carried separately. Non-secret config is via env.
 
 use std::collections::HashMap;
 use std::process::Command;
@@ -68,19 +69,16 @@ fn parse_addr(v: &Value) -> Result<Address, String> {
         .map_err(|e| format!("bad address: {e}"))
 }
 
-/// Secrets: fd-5 `HelperFd5` if provided, else env (standalone/dev).
-fn load_secrets() -> (String, String) {
+/// Secret: fd-5 `HelperFd5` (entropy only) if provided, else env (standalone/dev).
+fn load_secrets() -> String {
     match read_fd5() {
         Some(bytes) => {
             let s: HelperFd5 = serde_json::from_slice(&bytes).expect("invalid fd-5 helper secret");
-            (s.entropy_hex, s.broadcaster_key_hex)
+            s.entropy_hex
         }
-        None => (
-            std::env::var("RAILGUN_ENTROPY_HEX")
-                .expect("no fd-5 secret and no RAILGUN_ENTROPY_HEX"),
-            std::env::var("RAILGUN_BROADCASTER_KEY")
-                .expect("no fd-5 secret and no RAILGUN_BROADCASTER_KEY"),
-        ),
+        None => {
+            std::env::var("RAILGUN_ENTROPY_HEX").expect("no fd-5 secret and no RAILGUN_ENTROPY_HEX")
+        }
     }
 }
 
@@ -117,7 +115,9 @@ async fn main() {
     let bc_bin = env("RAILGUN_BROADCASTER_BIN");
     let bc_socket = env("RAILGUN_BROADCASTER_SOCKET");
     let bc_token = env("RAILGUN_BROADCASTER_TOKEN");
-    let (entropy, bc_key) = load_secrets();
+    let entropy = load_secrets();
+    // Derive the broadcaster EOA key from the same root (m/44'/60'/0'/0/0).
+    let bc_key = keys::derive_broadcaster_key(&entropy).expect("derive broadcaster key");
 
     let chain = ChainConfig::sepolia();
 

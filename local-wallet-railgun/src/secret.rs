@@ -18,6 +18,8 @@ pub enum SecretError {
     EntropyLength(usize),
     #[error("entropyHex is not valid hex")]
     EntropyHex,
+    #[error("key derivation failed: {0}")]
+    Derivation(String),
 }
 
 /// How the sidecar reaches the Ethereum provider.
@@ -71,22 +73,18 @@ impl fmt::Debug for SecretPayload {
     }
 }
 
-/// fd-5 secret for `railgun-helper`: the RAILGUN entropy (its shielded-account seed) and
-/// the broadcaster EOA key it will hand to the broadcaster it spawns. Secrets only —
-/// non-secret config (rpc url, sockets, tokens, fork block) travels via env/args.
+/// fd-5 secret for `railgun-helper`: the RAILGUN entropy only (its shielded-account seed).
+/// The helper derives BOTH the RAILGUN account and the broadcaster EOA from this one root.
 #[derive(Deserialize, Clone, PartialEq)]
 pub struct HelperFd5 {
     #[serde(rename = "entropyHex")]
     pub entropy_hex: String,
-    #[serde(rename = "broadcasterKeyHex")]
-    pub broadcaster_key_hex: String,
 }
 
 impl fmt::Debug for HelperFd5 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HelperFd5")
             .field("entropy_hex", &"<redacted>")
-            .field("broadcaster_key_hex", &"<redacted>")
             .finish()
     }
 }
@@ -182,6 +180,17 @@ mod tests {
             parse_secret_payload(b"not json"),
             Err(SecretError::Json(_))
         ));
+    }
+
+    #[test]
+    fn helper_fd5_parses_single_entropy_field() {
+        let j = r#"{"entropyHex":"0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"}"#;
+        let s: HelperFd5 = serde_json::from_slice(j.as_bytes()).unwrap();
+        assert_eq!(s.entropy_hex.len(), 66);
+        assert!(
+            !format!("{s:?}").contains("0102030405"),
+            "entropy leaked in Debug"
+        );
     }
 
     #[test]

@@ -1,102 +1,125 @@
 import Foundation
+import LocalAuthentication
 import Security
 
-/// The two secrets the railgun-helper sidecar needs, delivered over fd-5:
-/// - `entropyHex`: 32-byte seed for the RAILGUN shielded account (deterministic → recovers
-///   the same shielded balance across launches).
-/// - `broadcasterKeyHex`: 32-byte EOA private key for the local broadcaster.
+/// The single secret the railgun-helper needs, delivered over fd-5: the 32-byte entropy that
+/// seeds the RAILGUN account. The broadcaster EOA is derived from it in the helper, so it is
+/// no longer stored or transmitted separately.
 struct RailgunSecrets: Equatable {
     let entropyHex: String
-    let broadcasterKeyHex: String
 }
 
-/// Persists the railgun secrets on disk (Application Support, mode 0600), generating them
-/// once on first use.
-///
-/// TESTNET ONLY. This deliberately mirrors the v1 Privacy-Pools decision to defer
-/// biometric/Keychain custody of the shielded seed: a 0600 file is enough for a testnet
-/// demo, and Keychain (`.biometryCurrentSet`, device-only) custody is the hardening
-/// follow-up — same posture the design doc records for the shielded seed.
+/// Stores the RAILGUN entropy in the Keychain, biometric-gated (`.biometryCurrentSet`,
+/// device-only), generating it once on first use. Replaces the prior plaintext-JSON store;
+/// a legacy `railgun-secrets.json` is deleted on first use.
 enum RailgunSecretsStore {
+    private static let service = "com.localwallet.railgun-seed.app"
+    private static let account = "railgun-seed:v1"
+
     enum StoreError: LocalizedError {
         case entropy(String)
-        case io(String)
+        case keychain(OSStatus)
         var errorDescription: String? {
             switch self {
             case .entropy(let m): return "railgun secrets: \(m)"
-            case .io(let m): return "railgun secrets: \(m)"
+            case .keychain(let s): return "railgun secrets: keychain error \(s)"
             }
         }
     }
 
-    static func loadOrCreate(
-        directory: URL? = nil
-    ) throws -> RailgunSecrets {
-        let fileURL = try secretsFileURL(directory: directory)
-        if let existing = try? load(from: fileURL) {
-            return existing
+    static func loadOrCreate(directory: URL? = nil) throws -> RailgunSecrets {
+        deleteLegacyFile(directory: directory)
+        if let hex = try readEntropyHex() {
+            return RailgunSecrets(entropyHex: hex)
         }
-        let secrets = RailgunSecrets(
-            entropyHex: try randomHex32(),
-            broadcasterKeyHex: try randomHex32()
-        )
-        try save(secrets, to: fileURL)
-        return secrets
+        let hex = try makeEntropyHex()
+        try addEntropyHex(hex)
+        return RailgunSecrets(entropyHex: hex)
     }
 
-    /// Delete the persisted railgun secrets (part of a full wallet reset). No-op if absent.
     static func clear(directory: URL? = nil) throws {
-        let fileURL = try secretsFileURL(directory: directory)
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            try FileManager.default.removeItem(at: fileURL)
+        deleteLegacyFile(directory: directory)
+        let status = SecItemDelete(baseQuery() as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw StoreError.keychain(status)
         }
     }
 
     // MARK: internals
 
-    private static func secretsFileURL(directory: URL?) throws -> URL {
-        let base: URL
-        if let directory {
-            base = directory
-        } else {
-            let support = try FileManager.default.url(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            )
-            base = support.appendingPathComponent("LocalWallet", isDirectory: true)
-        }
-        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        return base.appendingPathComponent("railgun-secrets.json", isDirectory: false)
-    }
-
-    private static func load(from url: URL) throws -> RailgunSecrets {
-        let data = try Data(contentsOf: url)
-        let obj = try JSONSerialization.jsonObject(with: data) as? [String: String]
-        guard let entropy = obj?["entropyHex"], let key = obj?["broadcasterKeyHex"] else {
-            throw StoreError.io("malformed secrets file")
-        }
-        return RailgunSecrets(entropyHex: entropy, broadcasterKeyHex: key)
-    }
-
-    private static func save(_ secrets: RailgunSecrets, to url: URL) throws {
-        let data = try JSONSerialization.data(
-            withJSONObject: [
-                "entropyHex": secrets.entropyHex,
-                "broadcasterKeyHex": secrets.broadcasterKeyHex,
-            ],
-            options: [.sortedKeys]
-        )
-        try data.write(to: url, options: [.atomic])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-    }
-
-    private static func randomHex32() throws -> String {
+    static func makeEntropyHex() throws -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
         guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
             throw StoreError.entropy("SecRandomCopyBytes failed")
         }
         return "0x" + bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func baseQuery() -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+    }
+
+    private static func addEntropyHex(_ hex: String) throws {
+        var accessError: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(
+            nil,
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            [.biometryCurrentSet],
+            &accessError
+        ) else {
+            throw accessError!.takeRetainedValue() as Error
+        }
+        var query = baseQuery()
+        query[kSecValueData as String] = Data(hex.utf8)
+        query[kSecAttrAccessControl as String] = access
+        let status = SecItemAdd(query as CFDictionary, nil)
+        guard status == errSecSuccess else { throw StoreError.keychain(status) }
+    }
+
+    private static func readEntropyHex() throws -> String? {
+        // Attribute-only presence check first (never prompts).
+        var presence = baseQuery()
+        presence[kSecMatchLimit as String] = kSecMatchLimitOne
+        let hasItem = SecItemCopyMatching(presence as CFDictionary, nil)
+        if hasItem == errSecItemNotFound { return nil }
+        guard hasItem == errSecSuccess else { throw StoreError.keychain(hasItem) }
+
+        // Biometric-gated read, with the shared reuse-window so one unlock covers a burst.
+        let context = LAContext()
+        context.localizedReason = "Unlock your RAILGUN privacy account"
+        context.touchIDAuthenticationAllowableReuseDuration =
+            BundlerSecretPromptReusePolicy.authenticationReuseDuration
+
+        var query = baseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecUseAuthenticationContext as String] = context
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data,
+              let hex = String(data: data, encoding: .utf8) else {
+            throw StoreError.keychain(status)
+        }
+        return hex
+    }
+
+    static func deleteLegacyFile(directory: URL? = nil) {
+        let base: URL
+        if let directory {
+            base = directory
+        } else {
+            guard let support = try? FileManager.default.url(
+                for: .applicationSupportDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: false
+            ) else { return }
+            base = support.appendingPathComponent("LocalWallet", isDirectory: true)
+        }
+        let legacy = base.appendingPathComponent("railgun-secrets.json", isDirectory: false)
+        try? FileManager.default.removeItem(at: legacy)
     }
 }

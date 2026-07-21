@@ -5,8 +5,10 @@ import XCTest
 // the biometric ACL, so these never prompt and run in CI. The full biometric read round-trip
 // is verified manually on a Touch-ID-capable device.
 final class RailgunKeychainStoreTests: XCTestCase {
+    private static let testService = "com.localwallet.railgun-seed.test"
+
     override func tearDown() {
-        try? RailgunSecretsStore.clear()
+        try? RailgunSecretsStore.clear(service: Self.testService)
         super.tearDown()
     }
 
@@ -18,8 +20,8 @@ final class RailgunKeychainStoreTests: XCTestCase {
     }
 
     func testClearIsIdempotentWhenAbsent() throws {
-        try RailgunSecretsStore.clear()
-        try RailgunSecretsStore.clear() // must not throw when nothing is stored
+        try RailgunSecretsStore.clear(service: Self.testService)
+        try RailgunSecretsStore.clear(service: Self.testService) // must not throw when nothing is stored
     }
 
     func testLegacyPlaintextFileIsDeleted() throws {

@@ -13,8 +13,8 @@ struct RailgunSecrets: Equatable {
 /// device-only), generating it once on first use. Replaces the prior plaintext-JSON store;
 /// a legacy `railgun-secrets.json` is deleted on first use.
 enum RailgunSecretsStore {
-    private static let service = "com.localwallet.railgun-seed.app"
-    private static let account = "railgun-seed:v1"
+    static let defaultService = "com.localwallet.railgun-seed.app"
+    static let defaultAccount = "railgun-seed:v1"
 
     enum StoreError: LocalizedError {
         case entropy(String)
@@ -27,19 +27,27 @@ enum RailgunSecretsStore {
         }
     }
 
-    static func loadOrCreate(directory: URL? = nil) throws -> RailgunSecrets {
+    static func loadOrCreate(
+        directory: URL? = nil,
+        service: String = defaultService,
+        account: String = defaultAccount
+    ) throws -> RailgunSecrets {
         deleteLegacyFile(directory: directory)
-        if let hex = try readEntropyHex() {
+        if let hex = try readEntropyHex(service: service, account: account) {
             return RailgunSecrets(entropyHex: hex)
         }
         let hex = try makeEntropyHex()
-        try addEntropyHex(hex)
+        try addEntropyHex(hex, service: service, account: account)
         return RailgunSecrets(entropyHex: hex)
     }
 
-    static func clear(directory: URL? = nil) throws {
+    static func clear(
+        directory: URL? = nil,
+        service: String = defaultService,
+        account: String = defaultAccount
+    ) throws {
         deleteLegacyFile(directory: directory)
-        let status = SecItemDelete(baseQuery() as CFDictionary)
+        let status = SecItemDelete(baseQuery(service: service, account: account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw StoreError.keychain(status)
         }
@@ -55,7 +63,10 @@ enum RailgunSecretsStore {
         return "0x" + bytes.map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func baseQuery() -> [String: Any] {
+    private static func baseQuery(
+        service: String = defaultService,
+        account: String = defaultAccount
+    ) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -63,7 +74,11 @@ enum RailgunSecretsStore {
         ]
     }
 
-    private static func addEntropyHex(_ hex: String) throws {
+    private static func addEntropyHex(
+        _ hex: String,
+        service: String = defaultService,
+        account: String = defaultAccount
+    ) throws {
         var accessError: Unmanaged<CFError>?
         guard let access = SecAccessControlCreateWithFlags(
             nil,
@@ -73,16 +88,19 @@ enum RailgunSecretsStore {
         ) else {
             throw accessError!.takeRetainedValue() as Error
         }
-        var query = baseQuery()
+        var query = baseQuery(service: service, account: account)
         query[kSecValueData as String] = Data(hex.utf8)
         query[kSecAttrAccessControl as String] = access
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess else { throw StoreError.keychain(status) }
     }
 
-    private static func readEntropyHex() throws -> String? {
+    private static func readEntropyHex(
+        service: String = defaultService,
+        account: String = defaultAccount
+    ) throws -> String? {
         // Attribute-only presence check first (never prompts).
-        var presence = baseQuery()
+        var presence = baseQuery(service: service, account: account)
         presence[kSecMatchLimit as String] = kSecMatchLimitOne
         let hasItem = SecItemCopyMatching(presence as CFDictionary, nil)
         if hasItem == errSecItemNotFound { return nil }
@@ -94,7 +112,7 @@ enum RailgunSecretsStore {
         context.touchIDAuthenticationAllowableReuseDuration =
             BundlerSecretPromptReusePolicy.authenticationReuseDuration
 
-        var query = baseQuery()
+        var query = baseQuery(service: service, account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         query[kSecUseAuthenticationContext as String] = context

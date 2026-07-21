@@ -121,11 +121,10 @@ final class RailgunHelperDaemon: @unchecked Sendable {
         close(secretPipe[0])
         close(readyPipe[0]) // helper doesn't emit an fd-3 token; we poll the socket instead
 
-        // Deliver the fd-5 secret (HelperFd5), then close so the child reads EOF.
+        // Deliver the fd-5 secret (HelperFd5 = entropy only), then close so the child reads EOF.
         let secretJSON = try JSONSerialization.data(
             withJSONObject: [
                 "entropyHex": secrets.entropyHex,
-                "broadcasterKeyHex": secrets.broadcasterKeyHex,
             ],
             options: [.sortedKeys]
         )

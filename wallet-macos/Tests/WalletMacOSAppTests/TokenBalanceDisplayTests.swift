@@ -55,6 +55,17 @@ import Testing
     #expect(display == "1 USDC")
 }
 
+@Test func emptyCallResultFormatsAsZeroNotUnavailable() throws {
+    // eth_call against a token with no contract on this chain returns `0x`. That is a
+    // successful read of "no balance" and must show 0 — only a *failed* read is Unavailable.
+    let display = try TokenBalanceDisplay.displayString(
+        balanceHex: "0x",
+        decimals: 18,
+        symbol: "DAI"
+    )
+    #expect(display == "0 DAI")
+}
+
 @Test func malformedHexThrowsRatherThanReportingZero() {
     // A read that cannot be parsed must surface as unavailable, never as a 0 balance.
     #expect(throws: (any Error).self) {

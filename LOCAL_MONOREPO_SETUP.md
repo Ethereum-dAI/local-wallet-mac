@@ -176,7 +176,7 @@ Local Xcode development does not require the GGUF model to be embedded in the ap
 
 If the model is already present there, the app will reuse it. Packaged demo builds may embed the model, but normal Xcode development should treat the model as a local runtime asset installed during setup.
 
-The recommended Gemma 4 E4B Q4_K_M GGUF is a 5.34 GB download and local setup is blocked on Macs with less than 16 GB RAM.
+The recommended Gemma 4 E4B Q4_0 GGUF is a 4.59 GB download and local setup is blocked on Macs with less than 16 GB RAM. It is installed as `gemma-4-E4B-it-Q4_0.gguf`, which is the path every bench/test default expects. If you onboarded before the Q4_K_M pin broke, the app will download the Q4_0 file rather than reuse the old `gemma-4-E4B-it-Q4_K_M.gguf`; delete the stale file to reclaim the disk.
 
 ## Optional Hosted Bundler Endpoint
 

@@ -11,7 +11,7 @@ struct EvalOptions {
 
 func defaultModelPath() -> String {
     let home = NSHomeDirectory()
-    return "\(home)/Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_K_M.gguf"
+    return "\(home)/Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf"
 }
 
 func parseEvalOptions(_ args: [String]) -> EvalOptions {

@@ -1777,7 +1777,7 @@ private struct ModelInstallStatusCard: View {
                             Text("Downloading Gemma 4 E4B")
                                 .font(.system(size: 16, weight: .bold))
                                 .foregroundStyle(OnboardingPalette.primaryText)
-                            Text("This is a 5.34 GB model file, so it can take some minutes.")
+                            Text("This is a \(LocalAIModel.recommended.size) model file, so it can take some minutes.")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(OnboardingPalette.secondaryText)
                         }

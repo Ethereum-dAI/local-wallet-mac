@@ -13,7 +13,7 @@ import Testing
 
 @Test func gemmaSmokeTestWhenModelExists() async throws {
     let modelURL = URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_K_M.gguf")
+        .appendingPathComponent("Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf")
 
     guard FileManager.default.fileExists(atPath: modelURL.path) else {
         return

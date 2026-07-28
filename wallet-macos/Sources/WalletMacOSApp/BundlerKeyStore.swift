@@ -11,6 +11,15 @@ struct BundlerSecretRecord: Sendable {
 struct BundlerKeyStore {
     static let shared = BundlerKeyStore()
 
+    // `.userPresence` (biometry *or* the login password), not `.biometryCurrentSet`.
+    // `.biometryCurrentSet` binds the item to the exact biometric set enrolled when it was
+    // written and offers no fallback, so re-enrolling a fingerprint, running without Touch ID,
+    // or one failed prompt made the relayer key permanently unreadable — onboarding
+    // dead-ended on errSecAuthFailed. This also matches the policy on the Secure Enclave
+    // wallet key (KeyStore.KeyAccessPolicy.standardWallet); the relayer key should not be
+    // protected more strictly than the key that actually controls the funds.
+    static let secretAccessFlags: SecAccessControlCreateFlags = [.userPresence]
+
     private let service = "com.localwallet.bundler-eoa.app"
 
     func hasKey(forKeyRef keyRef: String) throws -> Bool {
@@ -128,7 +137,7 @@ struct BundlerKeyStore {
         guard let accessControl = SecAccessControlCreateWithFlags(
             nil,
             kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            [.biometryCurrentSet],
+            Self.secretAccessFlags,
             &accessError
         ) else {
             throw accessError!.takeRetainedValue() as Error
@@ -206,10 +215,24 @@ struct BundlerKeyStore {
     }
 
     private func mapSecurityStatus(_ status: OSStatus) -> Error {
-        if status == errSecMissingEntitlement {
+        Self.describeSecurityStatus(status)
+    }
+
+    // Security.framework failures used to pass straight through as NSError, so the UI showed
+    // a bare "OSStatus error -25293" with no hint about which operation failed or how to
+    // recover. Name the operation and the way out for the statuses a user can actually hit;
+    // anything unrecognized keeps its OSStatus so it stays diagnosable.
+    static func describeSecurityStatus(_ status: OSStatus) -> Error {
+        switch status {
+        case errSecMissingEntitlement:
             return AppError.missingEntitlement
+        case errSecUserCanceled:
+            return AppError.userAuthorizationCancelled
+        case errSecAuthFailed:
+            return AppError.localRelayerKeyAuthorizationFailed
+        default:
+            return NSError(domain: NSOSStatusErrorDomain, code: Int(status))
         }
-        return NSError(domain: NSOSStatusErrorDomain, code: Int(status))
     }
 }
 

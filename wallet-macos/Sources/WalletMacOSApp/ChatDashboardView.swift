@@ -1172,12 +1172,11 @@ private final class ChatDashboardModel: ObservableObject {
                 } else {
                     continue
                 }
-                let balanceData = (try? Data(hexString: balanceHex)) ?? Data()
                 balances.append(ChatTokenBalance(
                     token: token,
                     rawBalanceHex: balanceHex,
-                    displayBalance: TokenAmountFormatter.displayString(
-                        rawUnits: balanceData,
+                    displayBalance: try TokenBalanceDisplay.displayString(
+                        balanceHex: balanceHex,
                         decimals: token.decimals,
                         symbol: token.symbol
                     )

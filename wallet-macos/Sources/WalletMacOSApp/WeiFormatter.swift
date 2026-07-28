@@ -62,6 +62,24 @@ enum WeiFormatter {
     }
 }
 
+// Formats a balance straight from a JSON-RPC hex *quantity*.
+//
+// `eth_getBalance` returns a minimally-encoded quantity, so an odd nibble count is normal
+// (0.1 ETH is `0x16345785d8a0000`). `Data(hexString:)` parses fixed-width byte strings and
+// rejects odd-length input, so quantities must go through `Data.quantityString`. Throwing
+// here is deliberate: a balance that cannot be parsed has to surface as unavailable, never
+// as a `0` that looks like the funds are gone.
+enum TokenBalanceDisplay {
+    static func displayString(balanceHex: String, decimals: Int, symbol: String) throws -> String {
+        let rawUnits = try Data.quantityString(balanceHex)
+        return TokenAmountFormatter.displayString(
+            rawUnits: rawUnits,
+            decimals: decimals,
+            symbol: symbol
+        )
+    }
+}
+
 enum TokenAmountFormatter {
     static func displayString(rawUnits: Data, decimals: Int, symbol: String) -> String {
         let trimmed = rawUnits.drop { $0 == 0 }

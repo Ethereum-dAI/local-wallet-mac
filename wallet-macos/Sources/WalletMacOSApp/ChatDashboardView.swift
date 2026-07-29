@@ -594,7 +594,6 @@ private final class ChatDashboardModel: ObservableObject {
     private var walletModelCancellable: AnyCancellable?
     private var gasPollTask: Task<Void, Never>?
     private var reconcilerTask: Task<Void, Never>?
-    private var balancePollTask: Task<Void, Never>?
     private var sessionActivityEventMonitor: Any?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private let inferenceService: EmbeddedLlamaInferenceService
@@ -688,9 +687,6 @@ private final class ChatDashboardModel: ObservableObject {
         reconcilerTask = Task {
             await gasModel.runUserOperationReconciler()
         }
-        balancePollTask = Task {
-            await gasModel.runAccountBalanceUpdates()
-        }
         backfillWalletHistoryFromChat()
         reloadWalletHistory()
         refreshTokenBalancesIfNeeded()
@@ -699,7 +695,6 @@ private final class ChatDashboardModel: ObservableObject {
     deinit {
         gasPollTask?.cancel()
         reconcilerTask?.cancel()
-        balancePollTask?.cancel()
     }
 
     var activeConversation: ChatConversation? {
@@ -772,6 +767,13 @@ private final class ChatDashboardModel: ObservableObject {
 
     func refreshGasPricesNow() {
         Task { await walletModel.refreshLiveGasPrices() }
+    }
+
+    /// Quiet balance re-read for a user action that reveals the balance. Subject to the same
+    /// coalescing floor as the other event-driven triggers, so repeatedly toggling the cards
+    /// doesn't repeatedly hit the chain.
+    func refreshAccountBalanceOnDemand() {
+        Task { await walletModel.refreshAccountBalanceQuietly(logContext: "balance-reveal") }
     }
 
     func startSessionActivityTracking() {
@@ -3830,6 +3832,12 @@ struct LocalWalletChatDashboardView: View {
                     onToggle: {
                         withAnimation(.easeInOut(duration: 0.18)) {
                             isAccountHeaderExpanded.toggle()
+                        }
+                        // Opening the cards is the clearest signal that the user wants to see a
+                        // current balance, and it's the only place the balance is actually shown.
+                        // Collapsing them is not, so this is deliberately one-directional.
+                        if isAccountHeaderExpanded {
+                            model.refreshAccountBalanceOnDemand()
                         }
                     }
                 )

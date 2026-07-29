@@ -97,14 +97,22 @@ final class AppModel: ObservableObject {
         walletNodeClient != nil || WalletNodeClient.Configuration.fromEnvironment() == nil
     }
 
-    var canChangeNetworkSettings: Bool {
-        NetworkSettingsGate.allowed(
+    /// No wallet operation is in flight, so it is safe to start one that needs the daemon
+    /// connection and writes `accountInspection`/`walletRecord`. Single source of truth for that
+    /// five-flag condition — it was open-coded in three places plus `WalletIdleGate`, so a sixth
+    /// in-flight flag would have had to be added to each of them.
+    var isWalletIdle: Bool {
+        WalletIdleGate.allowed(
             isBootstrapping: isBootstrapping,
             isRunningDemo: isRunningDemo,
             isRefreshingBalance: isRefreshingBalance,
             isBuildingUserOperation: isBuildingUserOperation,
             isSendingUserOperation: isSendingUserOperation
         )
+    }
+
+    var canChangeNetworkSettings: Bool {
+        isWalletIdle
     }
 
     private let keyStore: KeyStore
@@ -120,6 +128,11 @@ final class AppModel: ObservableObject {
     private var pendingSessionInstallByUserOpHash: [String: SessionRecord] = [:]
     private var pendingSessionRevokeByUserOpHash: [String: SessionRecord] = [:]
     private var reconcilerTask: Task<Void, Never>?
+    /// Last event-driven balance read, for the coalescing floor in `refreshAccountBalanceQuietly`.
+    private var lastBackgroundBalanceReadAt: Date?
+    /// True once a balance read has failed and the failure has been logged; cleared on the next
+    /// success so a fresh run of failures logs again exactly once.
+    private var suppressedBalanceReadFailure = false
     private let userOperationBuilder: UserOperationBuilder
     private let walletHistoryStore: WalletTransactionHistoryStore
     private static let startupInspectionRetryDelays: [UInt64] = [
@@ -133,10 +146,10 @@ final class AppModel: ObservableObject {
         2_000_000_000,
     ]
     private static let walletNodeLaunchFailureCooldownSeconds: TimeInterval = 4
-    /// How often the dashboard re-reads the Kernel account's native balance. Matched to the
-    /// gas-price poll: ETH that arrives after launch has to show up without a relaunch (#52),
-    /// but this is a chain read per tick, so it stays coarse.
-    private static let accountBalancePollInterval: UInt64 = 30_000_000_000
+    /// Floor between event-driven balance reads. Activation is the most frequent trigger and a
+    /// cmd-tab away and straight back shouldn't cost a chain read, so coalesce anything closer
+    /// together than this. Mirrors `sessionUserActivityPersistenceMinInterval`'s rate-limiting.
+    private static let backgroundBalanceReadMinInterval: TimeInterval = 5
     private static let sessionUserActivityPersistenceMinInterval: TimeInterval = 15
     private static let relayerBalanceRetryDelays: [UInt64] = [
         400_000_000,
@@ -330,7 +343,7 @@ final class AppModel: ObservableObject {
     }
 
     func resetDemoWallet() {
-        guard !isBootstrapping, !isRunningDemo, !isRefreshingBalance, !isBuildingUserOperation, !isSendingUserOperation else {
+        guard isWalletIdle else {
             appendLog("reset: ignored because another wallet operation is still running")
             return
         }
@@ -402,7 +415,7 @@ final class AppModel: ObservableObject {
     }
 
     func refreshBalance() {
-        guard !isBootstrapping, !isRunningDemo, !isRefreshingBalance, !isBuildingUserOperation, !isSendingUserOperation else {
+        guard isWalletIdle else {
             appendLog("refresh-balance: ignored because another wallet operation is still running")
             return
         }
@@ -536,8 +549,9 @@ final class AppModel: ObservableObject {
 
     func handleAppBecameActive(now: Date = Date()) {
         expireExpiredSessionIfNeeded(now: now, logContext: "session-resume")
-        // Coming back to the app is the moment a user is most likely to be checking whether a
-        // deposit landed, so don't make them wait out the poll interval.
+        // Returning to the app is the trigger that covers an externally-funded deposit: the user
+        // left, funded the account from a faucet or another wallet, and came back to check. With
+        // no poll, this is the only trigger that catches money the app didn't move itself.
         Task { await refreshAccountBalanceQuietly(logContext: "balance-resume") }
     }
 
@@ -2327,24 +2341,37 @@ final class AppModel: ObservableObject {
         let inspection = try await withWalletNodeClient(operation: "\(logContext) account inspection") { client in
             try await client.inspectAccount(address: address)
         }
-        accountInspection = inspection
+        // Both writes are gated on an actual change. `accountInspection` and `walletRecord` are
+        // `@Published`, so an unconditional assignment invalidates every observing view — the
+        // whole chat transcript included — and the record rewrite also costs a metadata-store
+        // write. Harmless when this only ran on explicit user action; not harmless once app
+        // activation and receipts call it.
+        if inspection != accountInspection {
+            accountInspection = inspection
+        }
 
-        let refreshed = WalletRecord(
-            walletId: record.walletId,
-            keyTag: record.keyTag,
-            pubkeyX: record.pubkeyX,
-            pubkeyY: record.pubkeyY,
-            chainId: activeChain.id,
-            kernelAccountAddress: record.kernelAccountAddress,
-            authenticatorIdHash: record.authenticatorIdHash,
-            kernelSalt: record.kernelSalt,
-            sessionRecords: record.sessionRecords,
-            isDeployed: inspection.isDeployed,
-            createdAt: record.createdAt,
-            updatedAt: Date()
-        )
-        try metadataStore.save(refreshed)
-        walletRecord = refreshed
+        // `isDeployed` and `chainId` are the only fields this read contributes. `bootstrap()`
+        // already syncs `chainId` (and runs on every chain switch), so comparing it here is
+        // belt-and-braces rather than load-bearing — but it keeps the guard total, so this can't
+        // silently start dropping a field the read is responsible for.
+        if inspection.isDeployed != record.isDeployed || activeChain.id != record.chainId {
+            let refreshed = WalletRecord(
+                walletId: record.walletId,
+                keyTag: record.keyTag,
+                pubkeyX: record.pubkeyX,
+                pubkeyY: record.pubkeyY,
+                chainId: activeChain.id,
+                kernelAccountAddress: record.kernelAccountAddress,
+                authenticatorIdHash: record.authenticatorIdHash,
+                kernelSalt: record.kernelSalt,
+                sessionRecords: record.sessionRecords,
+                isDeployed: inspection.isDeployed,
+                createdAt: record.createdAt,
+                updatedAt: Date()
+            )
+            try metadataStore.save(refreshed)
+            walletRecord = refreshed
+        }
 
         if verbose {
             appendLog(
@@ -2355,37 +2382,49 @@ final class AppModel: ObservableObject {
         return inspection
     }
 
-    /// Best-effort re-read of the Kernel account's balance, for background triggers (poll, app
-    /// activation, a receipt landing). Unlike `refreshBalance()` it publishes no status text and
-    /// swallows failures: a transient RPC hiccup should leave the last known balance on screen,
-    /// not an error banner, and the next trigger retries.
-    func refreshAccountBalanceQuietly(logContext: String) async {
+    /// Best-effort re-read of the Kernel account's balance for the event-driven refresh triggers
+    /// (app activation, a receipt landing, the account cards being opened). Unlike
+    /// `refreshBalance()` it publishes no status text and swallows failures: a transient RPC
+    /// hiccup should leave the last known balance on screen, not an error banner, and the next
+    /// trigger retries.
+    ///
+    /// Deliberately not a timer. The balance updates on something the user did — returning to the
+    /// app, confirming a transaction, opening the account cards, hitting Refresh — so the app
+    /// never reads the chain on its own schedule. The known gap: ETH arriving from someone else
+    /// while the app stays focused is not picked up until one of those happens.
+    func refreshAccountBalanceQuietly(logContext: String, now: Date = Date()) async {
         guard walletRecord?.kernelAccountAddress != nil else { return }
         // Another operation already owns the daemon connection and will refresh the inspection
         // itself; skipping avoids a redundant chain read and a racing `accountInspection` write.
-        guard !isBootstrapping, !isRunningDemo, !isRefreshingBalance,
-              !isBuildingUserOperation, !isSendingUserOperation else { return }
+        guard isWalletIdle else { return }
+        guard BackgroundBalanceReadGate.allowed(
+            now: now,
+            lastReadAt: lastBackgroundBalanceReadAt,
+            minInterval: Self.backgroundBalanceReadMinInterval
+        ) else { return }
+        // Stamped BEFORE the await, so this is also the in-flight guard: two triggers firing
+        // together (a receipt landing just as the app is activated) would otherwise issue
+        // overlapping reads that can land out of order, leaving the older value published.
+        lastBackgroundBalanceReadAt = now
 
-        let previous = accountInspection?.balanceDisplay
+        let previousWeiHex = accountInspection?.balanceWeiHex
         do {
             let inspection = try await refreshAccountInspection(logContext: logContext, verbose: false)
-            if inspection.balanceDisplay != previous {
+            // Compare raw wei, not `balanceDisplay`: a change below display precision is still a
+            // change, and this log line is meant to record that the balance actually moved.
+            if inspection.balanceWeiHex != previousWeiHex {
                 appendLog("\(logContext): balance now \(inspection.balanceDisplay)")
             }
+            suppressedBalanceReadFailure = false
         } catch {
-            // Intentionally quiet — see the doc comment.
-        }
-    }
-
-    /// Keeps the account card's balance live. Without this the balance was read once during
-    /// `bootstrap()` and then frozen until the user sent something or hit Refresh, so ETH that
-    /// arrived after launch made the app look like it had lost the deposit (#52).
-    func runAccountBalanceUpdates() async {
-        while !Task.isCancelled {
-            // Sleep first: `bootstrap()` has already done the initial read.
-            try? await Task.sleep(nanoseconds: Self.accountBalancePollInterval)
-            guard !Task.isCancelled else { return }
-            await refreshAccountBalanceQuietly(logContext: "balance-poll")
+            // No error banner (see the doc comment), but a persistently failing read shouldn't be
+            // invisible either. Log the first failure after a run of successes only: repeated
+            // activations would otherwise repeat an identical line, and the relaunch path inside
+            // `withWalletNodeClient` already logs its own attempt.
+            if !suppressedBalanceReadFailure {
+                suppressedBalanceReadFailure = true
+                appendLog("\(logContext): balance read failed, will retry — \(error.localizedDescription)")
+            }
         }
     }
 
@@ -2668,6 +2707,9 @@ final class AppModel: ObservableObject {
             let pending = candidates.filter {
                 ReconcilerEligibility.shouldPoll($0, now: now)
             }
+            // Deliberately no balance refresh on this exit, unlike the one below: reaching here
+            // means nothing was pending to begin with, so no receipt landed and the balance can't
+            // have moved on our account.
             guard ReconcilerLoopStep.shouldContinue(pendingCount: pending.count) else {
                 return
             }
@@ -3119,7 +3161,10 @@ private struct WalletNodeLaunchFailure {
     let retryAfter: Date
 }
 
-enum NetworkSettingsGate {
+/// "No wallet operation is in flight." Named for the condition rather than one caller: it gates
+/// network-settings changes, wallet reset, the manual balance refresh, and the event-driven
+/// balance reads, all of which need the daemon connection to be free.
+enum WalletIdleGate {
     static func allowed(
         isBootstrapping: Bool,
         isRunningDemo: Bool,
@@ -3132,6 +3177,15 @@ enum NetworkSettingsGate {
             && !isRefreshingBalance
             && !isBuildingUserOperation
             && !isSendingUserOperation
+    }
+}
+
+/// Coalescing floor for the event-driven balance reads. Pure so the boundary is testable without
+/// an `AppModel`; `nil` means nothing has been read yet, which always allows.
+enum BackgroundBalanceReadGate {
+    static func allowed(now: Date, lastReadAt: Date?, minInterval: TimeInterval) -> Bool {
+        guard let lastReadAt else { return true }
+        return now.timeIntervalSince(lastReadAt) >= minInterval
     }
 }
 

@@ -1163,21 +1163,24 @@ private final class ChatDashboardModel: ObservableObject {
             do {
                 let balanceHex: String
                 if token.isNative {
-                    balanceHex = try await walletModel.ethBalance(address: address)
+                    balanceHex = try await withBalanceReadRetry {
+                        try await walletModel.ethBalance(address: address)
+                    }
                 } else if let tokenAddress = token.contractAddress {
-                    balanceHex = try await walletModel.erc20Balance(
-                        tokenAddress: tokenAddress,
-                        ownerAddress: address
-                    )
+                    balanceHex = try await withBalanceReadRetry {
+                        try await walletModel.erc20Balance(
+                            tokenAddress: tokenAddress,
+                            ownerAddress: address
+                        )
+                    }
                 } else {
                     continue
                 }
-                let balanceData = (try? Data(hexString: balanceHex)) ?? Data()
                 balances.append(ChatTokenBalance(
                     token: token,
                     rawBalanceHex: balanceHex,
-                    displayBalance: TokenAmountFormatter.displayString(
-                        rawUnits: balanceData,
+                    displayBalance: try TokenBalanceDisplay.displayString(
+                        balanceHex: balanceHex,
                         decimals: token.decimals,
                         symbol: token.symbol
                     )

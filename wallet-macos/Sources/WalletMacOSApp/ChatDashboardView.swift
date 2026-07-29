@@ -3373,33 +3373,25 @@ private struct ChatBottomTracker: ViewModifier {
     @Binding var isAtBottom: Bool
 
     func body(content: Content) -> some View {
-        if #available(macOS 15.0, *) {
-            content.onScrollGeometryChange(for: Bool.self) { geometry in
-                // `contentInsets` is deliberately ignored: the fully general maximum offset is
-                // `contentSize.height + contentInsets.bottom - containerSize.height`, but this
-                // scroll view has no `.contentMargins`/`.safeAreaInset` and its 28pt padding
-                // lives inside the content, so the two agree today and the 80pt threshold
-                // absorbs the difference. Adding content margins later would make the flag
-                // sticky-false — fold `contentInsets.bottom` in here if that happens.
-                ChatScrollAnchor.isNearBottom(
-                    contentOffsetY: geometry.contentOffset.y,
-                    contentHeight: geometry.contentSize.height,
-                    containerHeight: geometry.containerSize.height
-                )
-            } action: { _, nearBottom in
-                // Kept even though `onScrollGeometryChange` only fires on change: `isAtBottom` is
-                // also written imperatively by the streaming handler and the jump-to-latest
-                // button, so the transform's notion of "changed" can diverge from the state.
-                if nearBottom != isAtBottom {
-                    isAtBottom = nearBottom
-                }
+        content.onScrollGeometryChange(for: Bool.self) { geometry in
+            // `contentInsets` is deliberately ignored: the fully general maximum offset is
+            // `contentSize.height + contentInsets.bottom - containerSize.height`, but this
+            // scroll view has no `.contentMargins`/`.safeAreaInset` and its 28pt padding
+            // lives inside the content, so the two agree today and the 80pt threshold
+            // absorbs the difference. Adding content margins later would make the flag
+            // sticky-false — fold `contentInsets.bottom` in here if that happens.
+            ChatScrollAnchor.isNearBottom(
+                contentOffsetY: geometry.contentOffset.y,
+                contentHeight: geometry.contentSize.height,
+                containerHeight: geometry.containerSize.height
+            )
+        } action: { _, nearBottom in
+            // Kept even though `onScrollGeometryChange` only fires on change: `isAtBottom` is
+            // also written imperatively by the streaming handler and the jump-to-latest
+            // button, so the transform's notion of "changed" can diverge from the state.
+            if nearBottom != isAtBottom {
+                isAtBottom = nearBottom
             }
-        } else {
-            // macOS 14 has no scroll-geometry observation. Rather than reintroduce the layout
-            // loop, `isAtBottom` stays pinned at its default `true`, which means the transcript
-            // ALWAYS follows the tail — including while the user is scrolled up mid-selection —
-            // and the jump-to-latest button never appears.
-            content
         }
     }
 }

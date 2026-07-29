@@ -16,7 +16,7 @@ The macOS app, the protocol SDK, and the daemon all live in one repository, `loc
 
 Install these before opening the app in Xcode:
 
-- macOS 14.0 or newer on Apple Silicon.
+- macOS 15.0 or newer on Apple Silicon.
 - 16 GB RAM minimum for the local Gemma 4 E4B model setup.
 - Xcode 16 or newer, with Command Line Tools installed. Use the latest stable Xcode when possible; the app target is built with Swift 6.
 - An Apple Development team selected in Xcode for local app signing.
@@ -67,7 +67,7 @@ cbindgen 0.29.2
 brew install ggml
 ```
 
-The packaged v0.1 alpha app is built for macOS 14+. For release packaging, do not assume the Homebrew `llama.cpp`/`ggml` bottles on your current machine are macOS 14-compatible; use `LOCAL_LLAMA_PREFIX` with dylibs compiled for `CMAKE_OSX_DEPLOYMENT_TARGET=14.0` as described in `scripts/README.md`.
+The packaged v0.1 alpha app is built for macOS 15+. For release packaging, do not assume the Homebrew `llama.cpp`/`ggml` bottles on your current machine are macOS 15-compatible; use `LOCAL_LLAMA_PREFIX` with dylibs compiled for `CMAKE_OSX_DEPLOYMENT_TARGET=15.0` as described in `scripts/README.md`.
 
 ## Clone The Local Monorepo
 
@@ -246,7 +246,7 @@ brew reinstall llama.cpp
 
 Then rebuild the FFI bridge and app.
 
-For release packaging, verify the embedded `llama.cpp`/`ggml` dylibs are built for macOS 14.0 or older. Recent Homebrew bottles can be built with a newer deployment target on newer macOS versions; in that case, build a local macOS 14-compatible prefix and pass it with `LOCAL_LLAMA_PREFIX`.
+For release packaging, verify the embedded `llama.cpp`/`ggml` dylibs are built for macOS 15.0 or older. Recent Homebrew bottles can be built with a newer deployment target on newer macOS versions; in that case, build a local macOS 15-compatible prefix and pass it with `LOCAL_LLAMA_PREFIX`.
 
 ### Xcode project is out of date
 

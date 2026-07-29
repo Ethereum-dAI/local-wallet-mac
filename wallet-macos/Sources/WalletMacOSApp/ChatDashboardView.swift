@@ -769,6 +769,13 @@ private final class ChatDashboardModel: ObservableObject {
         Task { await walletModel.refreshLiveGasPrices() }
     }
 
+    /// Quiet balance re-read for a user action that reveals the balance. Subject to the same
+    /// coalescing floor as the other event-driven triggers, so repeatedly toggling the cards
+    /// doesn't repeatedly hit the chain.
+    func refreshAccountBalanceOnDemand() {
+        Task { await walletModel.refreshAccountBalanceQuietly(logContext: "balance-reveal") }
+    }
+
     func startSessionActivityTracking() {
         walletModel.handleAppBecameActive()
         if sessionActivityEventMonitor == nil {
@@ -3876,6 +3883,12 @@ struct LocalWalletChatDashboardView: View {
                     onToggle: {
                         withAnimation(.easeInOut(duration: 0.18)) {
                             isAccountHeaderExpanded.toggle()
+                        }
+                        // Opening the cards is the clearest signal that the user wants to see a
+                        // current balance, and it's the only place the balance is actually shown.
+                        // Collapsing them is not, so this is deliberately one-directional.
+                        if isAccountHeaderExpanded {
+                            model.refreshAccountBalanceOnDemand()
                         }
                     }
                 )

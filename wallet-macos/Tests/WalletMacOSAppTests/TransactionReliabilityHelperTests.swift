@@ -42,7 +42,7 @@ private func userOpStatus(
 }
 
 @Test func gateAllowsChangesWhenNoOperationInFlight() {
-    #expect(NetworkSettingsGate.allowed(
+    #expect(WalletIdleGate.allowed(
         isBootstrapping: false,
         isRunningDemo: false,
         isRefreshingBalance: false,
@@ -52,7 +52,7 @@ private func userOpStatus(
 }
 
 @Test func gateBlocksOnlyDuringSubmission() {
-    #expect(NetworkSettingsGate.allowed(
+    #expect(WalletIdleGate.allowed(
         isBootstrapping: false,
         isRunningDemo: false,
         isRefreshingBalance: false,
@@ -62,14 +62,14 @@ private func userOpStatus(
 }
 
 @Test func gateBlocksWhileBuildingOrBootstrapping() {
-    #expect(NetworkSettingsGate.allowed(
+    #expect(WalletIdleGate.allowed(
         isBootstrapping: true,
         isRunningDemo: false,
         isRefreshingBalance: false,
         isBuildingUserOperation: false,
         isSendingUserOperation: false
     ) == false)
-    #expect(NetworkSettingsGate.allowed(
+    #expect(WalletIdleGate.allowed(
         isBootstrapping: false,
         isRunningDemo: false,
         isRefreshingBalance: false,

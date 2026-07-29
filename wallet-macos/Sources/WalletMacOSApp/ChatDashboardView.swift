@@ -3370,28 +3370,58 @@ private final class ChatDashboardModel: ObservableObject {
 /// 100% CPU. Mapping to a plain `Bool` here means at most one state mutation per threshold
 /// crossing, so the follow-scroll cannot re-trigger itself.
 private struct ChatBottomTracker: ViewModifier {
-    /// Treat "within this many points of the end" as at-bottom, so a settling scroll animation
-    /// or a one-pixel rounding difference doesn't flip the flag.
-    private static let nearBottomThreshold: CGFloat = 80
-
     @Binding var isAtBottom: Bool
 
     func body(content: Content) -> some View {
         if #available(macOS 15.0, *) {
             content.onScrollGeometryChange(for: Bool.self) { geometry in
-                let maxOffset = max(0, geometry.contentSize.height - geometry.containerSize.height)
-                return geometry.contentOffset.y >= maxOffset - Self.nearBottomThreshold
+                // `contentInsets` is deliberately ignored: the fully general maximum offset is
+                // `contentSize.height + contentInsets.bottom - containerSize.height`, but this
+                // scroll view has no `.contentMargins`/`.safeAreaInset` and its 28pt padding
+                // lives inside the content, so the two agree today and the 80pt threshold
+                // absorbs the difference. Adding content margins later would make the flag
+                // sticky-false — fold `contentInsets.bottom` in here if that happens.
+                ChatScrollAnchor.isNearBottom(
+                    contentOffsetY: geometry.contentOffset.y,
+                    contentHeight: geometry.contentSize.height,
+                    containerHeight: geometry.containerSize.height
+                )
             } action: { _, nearBottom in
+                // Kept even though `onScrollGeometryChange` only fires on change: `isAtBottom` is
+                // also written imperatively by the streaming handler and the jump-to-latest
+                // button, so the transform's notion of "changed" can diverge from the state.
                 if nearBottom != isAtBottom {
                     isAtBottom = nearBottom
                 }
             }
         } else {
             // macOS 14 has no scroll-geometry observation. Rather than reintroduce the layout
-            // loop, fall back to always following the tail: `isAtBottom` stays at its default
-            // `true`, so new messages scroll into view and the jump-to-latest button stays hidden.
+            // loop, `isAtBottom` stays pinned at its default `true`, which means the transcript
+            // ALWAYS follows the tail — including while the user is scrolled up mid-selection —
+            // and the jump-to-latest button never appears.
             content
         }
+    }
+}
+
+/// The near-bottom decision, hoisted out of the `ViewModifier` closure so it can be tested.
+enum ChatScrollAnchor {
+    /// Treat "within this many points of the end" as at-bottom, so a settling scroll animation
+    /// or a one-pixel rounding difference doesn't flip the flag.
+    ///
+    /// Note this is a scroll-offset delta, whereas the value it replaced was a `.global`-frame
+    /// distance between two views. They coincide in practice, but the `80` is not literally
+    /// "unchanged behaviour".
+    static let nearBottomThreshold: CGFloat = 80
+
+    static func isNearBottom(
+        contentOffsetY: CGFloat,
+        contentHeight: CGFloat,
+        containerHeight: CGFloat
+    ) -> Bool {
+        // Content shorter than the container can't scroll, so it is always at the bottom.
+        let maxOffset = max(0, contentHeight - containerHeight)
+        return contentOffsetY >= maxOffset - nearBottomThreshold
     }
 }
 

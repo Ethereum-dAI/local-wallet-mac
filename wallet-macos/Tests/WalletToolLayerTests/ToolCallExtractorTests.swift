@@ -7,7 +7,7 @@ import LocalLLM
 
 @Test func extractorParsesPlainTextAsContentOnly() async throws {
     let url = URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_K_M.gguf")
+        .appendingPathComponent("Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf")
     guard FileManager.default.fileExists(atPath: url.path) else { return }
     let rt = LlamaRuntime()
     try rt.loadModel(at: url)
@@ -23,7 +23,7 @@ import LocalLLM
     // OPEN-POINTS P1.A: hand-crafted DSL on Gemma parser currently returns
     // empty tool_calls. This test pins the envelope-shape contract.
     let url = URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_K_M.gguf")
+        .appendingPathComponent("Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf")
     guard FileManager.default.fileExists(atPath: url.path) else { return }
     let rt = LlamaRuntime()
     try rt.loadModel(at: url)

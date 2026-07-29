@@ -13,7 +13,7 @@ When Homebrew or the release build prefix bumps `llama.cpp`, re-vendor the `comm
 
 ## Minja / template-render spike (2026-05-18)
 
-**Result: PASS.** `common_chat_templates_apply` against the cached Gemma 4 E4B template renders both system+user-only and system+user+tools shapes correctly. The Gemma DSL markers (`<|turn>system`, `<|tool>declaration:transfer`, `<|"|>` quoting, `<|turn>model\n` generation prompt suffix) all appear as expected. Tests under `Tests/LocalLLMTests/TemplateRenderSpikeTests.swift` verify the contract; both pass on Apple Silicon with the Q4_K_M GGUF installed at `~/Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_K_M.gguf`. This spike unblocked Phase 1 of the bridge upgrade, since merged to `main`.
+**Result: PASS.** `common_chat_templates_apply` against the cached Gemma 4 E4B template renders both system+user-only and system+user+tools shapes correctly. The Gemma DSL markers (`<|turn>system`, `<|tool>declaration:transfer`, `<|"|>` quoting, `<|turn>model\n` generation prompt suffix) all appear as expected. Tests under `Tests/LocalLLMTests/TemplateRenderSpikeTests.swift` verify the contract; both pass on Apple Silicon with the Gemma 4 E4B GGUF installed at `~/Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf`. This spike unblocked Phase 1 of the bridge upgrade, since merged to `main`.
 
 ## Public API
 
@@ -70,7 +70,7 @@ Legacy `generate(_:)`, `generateWithStats(_:)`, `generateStream(_:)` remain on `
 
 ## Benchmarks
 
-`llm-bench` is an SwiftPM executable target in this package. It loads the model installed at `~/Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_K_M.gguf` by default and produces human-readable output (plus optional structured JSON).
+`llm-bench` is an SwiftPM executable target in this package. It loads the model installed at `~/Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf` by default and produces human-readable output (plus optional structured JSON).
 
 Subcommands:
 
@@ -88,7 +88,7 @@ Shared flags:
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--model PATH`   | `~/Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_K_M.gguf` | Path to a Gemma 4 GGUF |
+| `--model PATH`   | `~/Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf` | Path to a Gemma 4 GGUF |
 | `--repeats N`    | `5`              | Number of measured runs (after warmup) |
 | `--warmup N`     | `1`              | Unmeasured warmup runs |
 | `--seed S`       | `0xC0DEFEED`     | Hex (`0x...`) or decimal |

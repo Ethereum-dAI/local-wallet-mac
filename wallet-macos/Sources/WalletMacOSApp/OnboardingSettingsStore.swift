@@ -173,14 +173,16 @@ struct LocalAIModel: Identifiable, Equatable {
     static let recommended = LocalAIModel(
         id: "google/gemma-4-E4B-it",
         name: "Gemma 4 E4B",
-        size: "5.34 GB",
-        detail: "Instruction-tuned Gemma 4 E4B, downloaded as a Q4_K_M GGUF for local llama.cpp inference.",
+        size: "4.59 GB",
+        detail: "Instruction-tuned Gemma 4 E4B, downloaded as a Q4_0 GGUF for local llama.cpp inference.",
         tag: "GGUF",
         systemImage: "sparkles",
         artifactRepo: "ggml-org/gemma-4-E4B-it-GGUF",
-        artifactFileName: "gemma-4-E4B-it-Q4_K_M.gguf",
-        artifactURL: URL(string: "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf?download=true")!,
-        sha256: "90ce98129eb3e8cc57e62433d500c97c624b1e3af1fcc85dd3b55ad7e0313e9f",
+        artifactFileName: "gemma-4-E4B-it-Q4_0.gguf",
+        // ggml-org re-quantized this repo and dropped Q4_K_M, so the old URL 404s. Q4_0 is
+        // the closest surviving quant.
+        artifactURL: URL(string: "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf?download=true")!,
+        sha256: "a555b900214b477d8880e7832e0b8925e139b0159640036b09fe472b6f2097f2",
         // Trained context for Gemma 4 E4B. Confirm against the model card; presets are
         // filtered to this value. Conservative cap keeps the KV cache bounded.
         maxContextTokens: 32768

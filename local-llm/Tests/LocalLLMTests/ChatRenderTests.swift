@@ -22,7 +22,7 @@ private func render(_ rt: LlamaRuntime, messages: String, tools: String?, thinki
 
 private func loadedRuntime() throws -> LlamaRuntime? {
     let url = URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_K_M.gguf")
+        .appendingPathComponent("Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf")
     guard FileManager.default.fileExists(atPath: url.path) else { return nil }
     let rt = LlamaRuntime()
     try rt.loadModel(at: url)

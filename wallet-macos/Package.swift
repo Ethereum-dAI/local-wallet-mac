@@ -7,7 +7,7 @@ let bridgeLibraryPath = packageRoot.deletingLastPathComponent().appendingPathCom
 
 let package = Package(
     name: "WalletMacOS",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     products: [
         .executable(name: "WalletMacOSApp", targets: ["WalletMacOSApp"]),
         .library(name: "WalletToolLayer", targets: ["WalletToolLayer"]),

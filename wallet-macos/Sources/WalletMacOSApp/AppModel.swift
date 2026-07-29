@@ -133,6 +133,10 @@ final class AppModel: ObservableObject {
         2_000_000_000,
     ]
     private static let walletNodeLaunchFailureCooldownSeconds: TimeInterval = 4
+    /// How often the dashboard re-reads the Kernel account's native balance. Matched to the
+    /// gas-price poll: ETH that arrives after launch has to show up without a relaunch (#52),
+    /// but this is a chain read per tick, so it stays coarse.
+    private static let accountBalancePollInterval: UInt64 = 30_000_000_000
     private static let sessionUserActivityPersistenceMinInterval: TimeInterval = 15
     private static let relayerBalanceRetryDelays: [UInt64] = [
         400_000_000,
@@ -532,6 +536,9 @@ final class AppModel: ObservableObject {
 
     func handleAppBecameActive(now: Date = Date()) {
         expireExpiredSessionIfNeeded(now: now, logContext: "session-resume")
+        // Coming back to the app is the moment a user is most likely to be checking whether a
+        // deposit landed, so don't make them wait out the poll interval.
+        Task { await refreshAccountBalanceQuietly(logContext: "balance-resume") }
     }
 
     func recordSessionUserActivity(now: Date = Date()) {
@@ -2302,12 +2309,20 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func refreshAccountInspection(logContext: String) async throws -> AccountInspection {
+    /// - Parameter verbose: `false` suppresses the per-read log lines. Background polls
+    ///   (`refreshAccountBalanceQuietly`) run every 30s and would otherwise dominate the
+    ///   240-line debug log ring, pushing out the entries that matter.
+    private func refreshAccountInspection(
+        logContext: String,
+        verbose: Bool = true
+    ) async throws -> AccountInspection {
         guard let record = walletRecord, let address = record.kernelAccountAddress else {
             throw AppError.invalidCounterfactualAddress
         }
 
-        appendLog("\(logContext): querying code and balance for \(address.shortAddress) via \(activeChain.shortName)")
+        if verbose {
+            appendLog("\(logContext): querying code and balance for \(address.shortAddress) via \(activeChain.shortName)")
+        }
 
         let inspection = try await withWalletNodeClient(operation: "\(logContext) account inspection") { client in
             try await client.inspectAccount(address: address)
@@ -2331,11 +2346,47 @@ final class AppModel: ObservableObject {
         try metadataStore.save(refreshed)
         walletRecord = refreshed
 
-        appendLog(
-            "\(logContext): state=\(inspection.stateTitle), balance=\(inspection.balanceDisplay), codeBytes=\(inspection.codeHex.hexByteCount)"
-        )
+        if verbose {
+            appendLog(
+                "\(logContext): state=\(inspection.stateTitle), balance=\(inspection.balanceDisplay), codeBytes=\(inspection.codeHex.hexByteCount)"
+            )
+        }
 
         return inspection
+    }
+
+    /// Best-effort re-read of the Kernel account's balance, for background triggers (poll, app
+    /// activation, a receipt landing). Unlike `refreshBalance()` it publishes no status text and
+    /// swallows failures: a transient RPC hiccup should leave the last known balance on screen,
+    /// not an error banner, and the next trigger retries.
+    func refreshAccountBalanceQuietly(logContext: String) async {
+        guard walletRecord?.kernelAccountAddress != nil else { return }
+        // Another operation already owns the daemon connection and will refresh the inspection
+        // itself; skipping avoids a redundant chain read and a racing `accountInspection` write.
+        guard !isBootstrapping, !isRunningDemo, !isRefreshingBalance,
+              !isBuildingUserOperation, !isSendingUserOperation else { return }
+
+        let previous = accountInspection?.balanceDisplay
+        do {
+            let inspection = try await refreshAccountInspection(logContext: logContext, verbose: false)
+            if inspection.balanceDisplay != previous {
+                appendLog("\(logContext): balance now \(inspection.balanceDisplay)")
+            }
+        } catch {
+            // Intentionally quiet — see the doc comment.
+        }
+    }
+
+    /// Keeps the account card's balance live. Without this the balance was read once during
+    /// `bootstrap()` and then frozen until the user sent something or hit Refresh, so ETH that
+    /// arrived after launch made the app look like it had lost the deposit (#52).
+    func runAccountBalanceUpdates() async {
+        while !Task.isCancelled {
+            // Sleep first: `bootstrap()` has already done the initial read.
+            try? await Task.sleep(nanoseconds: Self.accountBalancePollInterval)
+            guard !Task.isCancelled else { return }
+            await refreshAccountBalanceQuietly(logContext: "balance-poll")
+        }
     }
 
     private func refreshAccountInspectionWithRetry(logContext: String) async throws -> AccountInspection {
@@ -2634,6 +2685,9 @@ final class AppModel: ObservableObject {
             }
             attempt = ReconcilerLoopStep.nextAttempt(current: attempt, stillPending: stillPending)
             guard stillPending else {
+                // Everything this loop was watching has finalised, so the balance almost
+                // certainly moved. Pick it up now instead of at the next poll tick.
+                await refreshAccountBalanceQuietly(logContext: "balance-receipt")
                 return
             }
             try? await Task.sleep(nanoseconds: Self.reconcilerDelay(forAttempt: attempt))

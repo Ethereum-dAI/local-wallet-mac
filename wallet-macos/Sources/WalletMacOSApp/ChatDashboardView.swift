@@ -594,6 +594,7 @@ private final class ChatDashboardModel: ObservableObject {
     private var walletModelCancellable: AnyCancellable?
     private var gasPollTask: Task<Void, Never>?
     private var reconcilerTask: Task<Void, Never>?
+    private var balancePollTask: Task<Void, Never>?
     private var sessionActivityEventMonitor: Any?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private let inferenceService: EmbeddedLlamaInferenceService
@@ -687,6 +688,9 @@ private final class ChatDashboardModel: ObservableObject {
         reconcilerTask = Task {
             await gasModel.runUserOperationReconciler()
         }
+        balancePollTask = Task {
+            await gasModel.runAccountBalanceUpdates()
+        }
         backfillWalletHistoryFromChat()
         reloadWalletHistory()
         refreshTokenBalancesIfNeeded()
@@ -695,6 +699,7 @@ private final class ChatDashboardModel: ObservableObject {
     deinit {
         gasPollTask?.cancel()
         reconcilerTask?.cancel()
+        balancePollTask?.cancel()
     }
 
     var activeConversation: ChatConversation? {

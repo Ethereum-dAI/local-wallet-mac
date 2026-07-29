@@ -3366,10 +3366,61 @@ private final class ChatDashboardModel: ObservableObject {
     }
 }
 
-private struct ChatBottomDistanceKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
+/// Tracks whether the chat transcript is scrolled to (near) the bottom, so new messages can
+/// follow the tail without yanking a user who has scrolled up.
+///
+/// This deliberately observes the scroll view's own geometry instead of measuring a sentinel
+/// view during layout. The previous implementation published a `.global`-frame distance from a
+/// `GeometryReader` inside the `ScrollView` as a preference on every layout pass; that preference
+/// mutated `@State`, which drove an animated `scrollTo`, which moved the sentinel, which
+/// republished the preference. Layout never reached a fixed point and the main thread spun at
+/// 100% CPU. Mapping to a plain `Bool` here means at most one state mutation per threshold
+/// crossing, so the follow-scroll cannot re-trigger itself.
+private struct ChatBottomTracker: ViewModifier {
+    @Binding var isAtBottom: Bool
+
+    func body(content: Content) -> some View {
+        content.onScrollGeometryChange(for: Bool.self) { geometry in
+            // `contentInsets` is deliberately ignored: the fully general maximum offset is
+            // `contentSize.height + contentInsets.bottom - containerSize.height`, but this
+            // scroll view has no `.contentMargins`/`.safeAreaInset` and its 28pt padding
+            // lives inside the content, so the two agree today and the 80pt threshold
+            // absorbs the difference. Adding content margins later would make the flag
+            // sticky-false — fold `contentInsets.bottom` in here if that happens.
+            ChatScrollAnchor.isNearBottom(
+                contentOffsetY: geometry.contentOffset.y,
+                contentHeight: geometry.contentSize.height,
+                containerHeight: geometry.containerSize.height
+            )
+        } action: { _, nearBottom in
+            // Kept even though `onScrollGeometryChange` only fires on change: `isAtBottom` is
+            // also written imperatively by the streaming handler and the jump-to-latest
+            // button, so the transform's notion of "changed" can diverge from the state.
+            if nearBottom != isAtBottom {
+                isAtBottom = nearBottom
+            }
+        }
+    }
+}
+
+/// The near-bottom decision, hoisted out of the `ViewModifier` closure so it can be tested.
+enum ChatScrollAnchor {
+    /// Treat "within this many points of the end" as at-bottom, so a settling scroll animation
+    /// or a one-pixel rounding difference doesn't flip the flag.
+    ///
+    /// Note this is a scroll-offset delta, whereas the value it replaced was a `.global`-frame
+    /// distance between two views. They coincide in practice, but the `80` is not literally
+    /// "unchanged behaviour".
+    static let nearBottomThreshold: CGFloat = 80
+
+    static func isNearBottom(
+        contentOffsetY: CGFloat,
+        contentHeight: CGFloat,
+        containerHeight: CGFloat
+    ) -> Bool {
+        // Content shorter than the container can't scroll, so it is always at the bottom.
+        let maxOffset = max(0, contentHeight - containerHeight)
+        return contentOffsetY >= maxOffset - nearBottomThreshold
     }
 }
 
@@ -4018,136 +4069,122 @@ struct LocalWalletChatDashboardView: View {
             emptyState
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            GeometryReader { outer in
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 16) {
-                            ForEach(model.messages) { message in
-                                switch message.kind {
-                                case .userText, .assistantText:
-                                    ChatBubble(
-                                        message: message,
-                                        canRegenerate: message.role == .assistant && !model.isGenerating,
-                                        onRegenerate: { model.regenerate(from: message) },
-                                        canEdit: message.kind == .userText && !model.isGenerating,
-                                        onEdit: { newText in
-                                            model.editAndResend(message, newText: newText)
-                                        }
-                                    )
-                                    .id(message.id)
-                                case .assistantError:
-                                    AssistantErrorBubble(
-                                        message: message,
-                                        canRetry: !model.isGenerating,
-                                        onRetry: { model.regenerate(from: message) }
-                                    )
-                                    .id(message.id)
-                                case .toolIntent:
-                                    if let intent = message.toolIntent {
-                                        let transferPreflightStatus = model.transferPreflightStatus(for: intent)
-                                        let swapPreflightStatus = model.swapPreflightStatus(for: intent)
-                                        HStack {
-                                            ToolIntentCardView(
-                                                intent: intent,
-                                                feedback: message.toolFeedback,
-                                                executionStatus: model.executionStatus(for: intent),
-                                                transferPreflightStatus: transferPreflightStatus,
-                                                swapPreflightStatus: swapPreflightStatus,
-                                                signingPreview: model.signingPreview(
-                                                    for: intent,
-                                                    transferPreflightStatus: transferPreflightStatus,
-                                                    swapPreflightStatus: swapPreflightStatus
-                                                ),
-                                                onConfirm: { model.confirmIntent(message) },
-                                                onReject: { model.rejectIntent(message) },
-                                                onEdit: { editedIntent in
-                                                    model.editIntent(message, with: editedIntent)
-                                                },
-                                                onFeedback: { rating, note in
-                                                    model.submitIntentFeedback(for: message, rating: rating, note: note)
-                                                }
-                                            )
-                                            Spacer(minLength: 0)
-                                        }
-                                        .onAppear {
-                                            model.prepareIntentPreview(message)
-                                        }
-                                        .padding(.horizontal)
-                                        .id(message.id)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 16) {
+                        ForEach(model.messages) { message in
+                            switch message.kind {
+                            case .userText, .assistantText:
+                                ChatBubble(
+                                    message: message,
+                                    canRegenerate: message.role == .assistant && !model.isGenerating,
+                                    onRegenerate: { model.regenerate(from: message) },
+                                    canEdit: message.kind == .userText && !model.isGenerating,
+                                    onEdit: { newText in
+                                        model.editAndResend(message, newText: newText)
                                     }
-                                case .onchainTransaction:
-                                    if let summary = OnchainTransactionCard.summary(from: message) {
-                                        let replacement = model.replacementStatus(for: summary)
-                                        HStack {
-                                            OnchainTransactionCard(
-                                                summary: summary,
-                                                replacementBlocked: replacement?.blocked ?? false,
-                                                replacementBlockedReason: replacement?.blockedReason,
-                                                replacementActionState: model.replacementActionState(for: summary.userOpHash),
-                                                onOpenHistory: { userOpHash in
-                                                    model.selectHistoryRecord(userOpHash: userOpHash)
-                                                    selectedSection = .history
-                                                },
-                                                onSpeedUp: { model.speedUpPendingOperation($0) },
-                                                onCancel: { model.cancelPendingOperation($0) }
-                                            )
-                                            Spacer(minLength: 0)
-                                        }
-                                        .padding(.horizontal)
-                                        .id(message.id)
-                                    }
-                                case .toolResponse:
-                                    EmptyView()
-                                }
-                            }
-                            if let streamingID = model.streamingMessageID {
-                                StreamingAssistantBubble(
-                                    text: model.streamingText,
-                                    onStop: { model.stop() }
                                 )
-                                .id(streamingID)
+                                .id(message.id)
+                            case .assistantError:
+                                AssistantErrorBubble(
+                                    message: message,
+                                    canRetry: !model.isGenerating,
+                                    onRetry: { model.regenerate(from: message) }
+                                )
+                                .id(message.id)
+                            case .toolIntent:
+                                if let intent = message.toolIntent {
+                                    let transferPreflightStatus = model.transferPreflightStatus(for: intent)
+                                    let swapPreflightStatus = model.swapPreflightStatus(for: intent)
+                                    HStack {
+                                        ToolIntentCardView(
+                                            intent: intent,
+                                            feedback: message.toolFeedback,
+                                            executionStatus: model.executionStatus(for: intent),
+                                            transferPreflightStatus: transferPreflightStatus,
+                                            swapPreflightStatus: swapPreflightStatus,
+                                            signingPreview: model.signingPreview(
+                                                for: intent,
+                                                transferPreflightStatus: transferPreflightStatus,
+                                                swapPreflightStatus: swapPreflightStatus
+                                            ),
+                                            onConfirm: { model.confirmIntent(message) },
+                                            onReject: { model.rejectIntent(message) },
+                                            onEdit: { editedIntent in
+                                                model.editIntent(message, with: editedIntent)
+                                            },
+                                            onFeedback: { rating, note in
+                                                model.submitIntentFeedback(for: message, rating: rating, note: note)
+                                            }
+                                        )
+                                        Spacer(minLength: 0)
+                                    }
+                                    .onAppear {
+                                        model.prepareIntentPreview(message)
+                                    }
+                                    .padding(.horizontal)
+                                    .id(message.id)
+                                }
+                            case .onchainTransaction:
+                                if let summary = OnchainTransactionCard.summary(from: message) {
+                                    let replacement = model.replacementStatus(for: summary)
+                                    HStack {
+                                        OnchainTransactionCard(
+                                            summary: summary,
+                                            replacementBlocked: replacement?.blocked ?? false,
+                                            replacementBlockedReason: replacement?.blockedReason,
+                                            replacementActionState: model.replacementActionState(for: summary.userOpHash),
+                                            onOpenHistory: { userOpHash in
+                                                model.selectHistoryRecord(userOpHash: userOpHash)
+                                                selectedSection = .history
+                                            },
+                                            onSpeedUp: { model.speedUpPendingOperation($0) },
+                                            onCancel: { model.cancelPendingOperation($0) }
+                                        )
+                                        Spacer(minLength: 0)
+                                    }
+                                    .padding(.horizontal)
+                                    .id(message.id)
+                                }
+                            case .toolResponse:
+                                EmptyView()
                             }
                         }
-                        .padding(.vertical, 28)
-                        .frame(maxWidth: 780)
-                        .frame(maxWidth: .infinity)
-
-                        Color.clear
-                            .frame(height: 1)
-                            .background(
-                                GeometryReader { inner in
-                                    Color.clear.preference(
-                                        key: ChatBottomDistanceKey.self,
-                                        value: inner.frame(in: .global).minY - outer.frame(in: .global).maxY
-                                    )
-                                }
+                        if let streamingID = model.streamingMessageID {
+                            StreamingAssistantBubble(
+                                text: model.streamingText,
+                                onStop: { model.stop() }
                             )
-                            .id("bottom-sentinel")
-                    }
-                    .onPreferenceChange(ChatBottomDistanceKey.self) { distance in
-                        let nearBottom = distance <= 80
-                        if nearBottom != isAtBottomOfChat {
-                            isAtBottomOfChat = nearBottom
+                            .id(streamingID)
                         }
                     }
-                    .onChange(of: model.messages) { _, messages in
-                        guard isAtBottomOfChat, let last = messages.last else { return }
-                        withAnimation(.easeOut(duration: 0.22)) {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
+                    .padding(.vertical, 28)
+                    .frame(maxWidth: 780)
+                    .frame(maxWidth: .infinity)
+                }
+                .modifier(ChatBottomTracker(isAtBottom: $isAtBottomOfChat))
+                .onChange(of: model.messages) { _, messages in
+                    guard isAtBottomOfChat, let last = messages.last else { return }
+                    withAnimation(.easeOut(duration: 0.22)) {
+                        proxy.scrollTo(last.id, anchor: .bottom)
                     }
-                    .onChange(of: model.streamingMessageID) { _, newID in
-                        guard let newID else { return }
-                        isAtBottomOfChat = true
-                        withAnimation(.easeOut(duration: 0.22)) {
-                            proxy.scrollTo(newID, anchor: .bottom)
-                        }
+                }
+                .onChange(of: model.streamingMessageID) { _, newID in
+                    guard let newID else { return }
+                    isAtBottomOfChat = true
+                    withAnimation(.easeOut(duration: 0.22)) {
+                        proxy.scrollTo(newID, anchor: .bottom)
                     }
-                    .onChange(of: model.streamingText) { _, _ in
-                        guard isAtBottomOfChat, let id = model.streamingMessageID else { return }
-                        proxy.scrollTo(id, anchor: .bottom)
-                    }
-                    .overlay(alignment: .bottomTrailing) {
+                }
+                .onChange(of: model.streamingText) { _, _ in
+                    guard isAtBottomOfChat, let id = model.streamingMessageID else { return }
+                    proxy.scrollTo(id, anchor: .bottom)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    // The implicit animation is scoped to this overlay. Applied to the ScrollView
+                    // itself it animated the whole transcript — re-measuring every selectable
+                    // text run — each time the near-bottom flag flipped.
+                    ZStack {
                         if !isAtBottomOfChat {
                             Button {
                                 let targetID: AnyHashable

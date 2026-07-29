@@ -15,9 +15,9 @@ on:
 jobs:
   macos:
     runs-on: macos-15   # Apple Silicon (arm64); newer default Xcode/Swift (6.1+) than macos-14.
-    # NOTE: wallet-macos does not compile under Swift 6.0.3 (macos-14's newest Xcode) due to a
-    # pre-existing strict-concurrency error in ChatDashboardView.swift — tracked in issue #41.
-    # Using macos-15 (Swift 6.1+) is a stopgap until that source fix lands.
+    # This is no longer a stopgap: the app's deployment target is macOS 15, so the runner has to
+    # ship a macOS 15 SDK. (It originally worked around issue #41, a strict-concurrency error
+    # under macos-14's Swift 6.0.3; that source fix has since landed.)
     steps:
       - uses: actions/checkout@v4
 

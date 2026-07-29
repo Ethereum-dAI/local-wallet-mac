@@ -8,7 +8,7 @@ Run scripts from the repository root unless the script says otherwise.
 
 ### `build-ffi.sh`
 
-Builds the Rust FFI bridge for Apple Silicon macOS, generates the C header with `cbindgen`, copies the `wallet-node-api` version header, and stages the static library for Swift. The default deployment target is macOS 14.0.
+Builds the Rust FFI bridge for Apple Silicon macOS, generates the C header with `cbindgen`, copies the `wallet-node-api` version header, and stages the static library for Swift. The default deployment target is macOS 15.0.
 
 ```bash
 ./scripts/build-ffi.sh
@@ -51,13 +51,13 @@ LOCAL_WALLET_SEPOLIA_BUNDLER_URL=https://your-bundler.example \
 ./scripts/package-macos-demo.sh
 ```
 
-By default the script builds `wallet-node` from the in-repo `local-wallet-daemon` directory, targets macOS 14.0, and does not embed the recommended model, so the v0.1 alpha zip stays smaller and onboarding installs the model during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` to embed the model, downloading it if it is not already present in `~/Library/Application Support/LocalWallet/Models/`. Override with `LOCAL_WALLET_ZIP_NAME`, `LOCAL_WALLET_DAEMON_REPO`, `LOCAL_WALLET_NODE_BIN`, `LOCAL_MODEL_PATH`, `LOCAL_LLAMA_PREFIX`, `LOCAL_LLAMA_LIB_DIR`, `LOCAL_WALLET_DEPLOYMENT_TARGET`, or `LOCAL_WALLET_MODEL_CACHE_DIR` as needed.
+By default the script builds `wallet-node` from the in-repo `local-wallet-daemon` directory, targets macOS 15.0, and does not embed the recommended model, so the v0.1 alpha zip stays smaller and onboarding installs the model during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` to embed the model, downloading it if it is not already present in `~/Library/Application Support/LocalWallet/Models/`. Override with `LOCAL_WALLET_ZIP_NAME`, `LOCAL_WALLET_DAEMON_REPO`, `LOCAL_WALLET_NODE_BIN`, `LOCAL_MODEL_PATH`, `LOCAL_LLAMA_PREFIX`, `LOCAL_LLAMA_LIB_DIR`, `LOCAL_WALLET_DEPLOYMENT_TARGET`, or `LOCAL_WALLET_MODEL_CACHE_DIR` as needed.
 
-For a macOS 14-compatible package, make sure any external llama.cpp/ggml dylibs were compiled with `CMAKE_OSX_DEPLOYMENT_TARGET=14.0` and `CMAKE_OSX_ARCHITECTURES=arm64`, then pass their install prefix:
+For a macOS 15-compatible package, make sure any external llama.cpp/ggml dylibs were compiled with `CMAKE_OSX_DEPLOYMENT_TARGET=15.0` and `CMAKE_OSX_ARCHITECTURES=arm64`, then pass their install prefix:
 
 ```bash
-LOCAL_LLAMA_PREFIX="$PWD/build/llama-macos14-prefix" \
-LOCAL_WALLET_DEPLOYMENT_TARGET=14.0 \
+LOCAL_LLAMA_PREFIX="$PWD/build/llama-macos15-prefix" \
+LOCAL_WALLET_DEPLOYMENT_TARGET=15.0 \
 ./scripts/package-macos-demo.sh
 ```
 

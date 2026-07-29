@@ -9,7 +9,7 @@ Swift package providing a local LLM inference bridge for the Local Wallet macOS 
 - llama.cpp pinned commit: `3e12fbdea5c1ac4225c7dcf79506d30950283fc3` (Homebrew bottle b9200)
 - Vendored from: `https://github.com/ggml-org/llama.cpp/tree/3e12fbdea5c1ac4225c7dcf79506d30950283fc3/common`
 
-When Homebrew or the release build prefix bumps `llama.cpp`, re-vendor the `common/` headers from the matching commit and run `swift test` to catch ABI drift early (see `Sources/CLlamaBridge/third_party/llama_cpp_common/COMMIT` for the step-by-step procedure). For release packaging, prefer a local llama.cpp/ggml prefix compiled with `CMAKE_OSX_DEPLOYMENT_TARGET=14.0` and `CMAKE_OSX_ARCHITECTURES=arm64`.
+When Homebrew or the release build prefix bumps `llama.cpp`, re-vendor the `common/` headers from the matching commit and run `swift test` to catch ABI drift early (see `Sources/CLlamaBridge/third_party/llama_cpp_common/COMMIT` for the step-by-step procedure). For release packaging, prefer a local llama.cpp/ggml prefix compiled with `CMAKE_OSX_DEPLOYMENT_TARGET=15.0` and `CMAKE_OSX_ARCHITECTURES=arm64`.
 
 ## Minja / template-render spike (2026-05-18)
 

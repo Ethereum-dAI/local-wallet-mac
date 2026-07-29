@@ -2,7 +2,7 @@ name: LocalWallet
 options:
   minimumXcodeGenVersion: 2.45.4
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "15.0"
 packages:
   WalletBridge:
     path: swift-bridge
@@ -14,7 +14,7 @@ targets:
   LocalWalletApp:
     type: application
     platform: macOS
-    deploymentTarget: "14.0"
+    deploymentTarget: "15.0"
     sources:
       - path: wallet-macos/Sources/WalletMacOSApp
       - path: wallet-macos/App/Assets.xcassets
@@ -38,7 +38,7 @@ targets:
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: wallet-macos/App/LocalWallet.entitlements
         GENERATE_INFOPLIST_FILE: NO
-        MACOSX_DEPLOYMENT_TARGET: 14.0
+        MACOSX_DEPLOYMENT_TARGET: 15.0
         ARCHS: arm64
         EXCLUDED_ARCHS: x86_64
         MARKETING_VERSION: 0.1.0

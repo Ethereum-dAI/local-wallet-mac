@@ -8,7 +8,7 @@ let llamaLibDir = ProcessInfo.processInfo.environment["LOCAL_LLAMA_LIB_DIR"] ?? 
 
 let package = Package(
     name: "LocalLLM",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     products: [
         .library(name: "LocalLLM", targets: ["LocalLLM"]),
         .executable(name: "llm-bench", targets: ["llm-bench"]),

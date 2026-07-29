@@ -14,6 +14,7 @@ enum AppError: LocalizedError {
     case localDaemonNotConfigured
     case localDaemonLaunchFailed(String)
     case localRelayerKeyMissing
+    case localRelayerKeyAuthorizationFailed
     case modelNotInstalled
     case metadataKeyMismatch
     case corruptedMetadataStore
@@ -55,6 +56,8 @@ enum AppError: LocalizedError {
             return message
         case .localRelayerKeyMissing:
             return "The active local relayer private key is missing from Keychain. The app will not generate a replacement during daemon launch."
+        case .localRelayerKeyAuthorizationFailed:
+            return "Authorization for the local relayer key failed, so it could not be created or unlocked. Retry and approve the Touch ID prompt, or use your login password when offered. A relayer key created before this Mac's Touch ID enrollment changed may need to be replaced from Settings."
         case .modelNotInstalled:
             return "The selected local model file is not installed."
         case .metadataKeyMismatch:

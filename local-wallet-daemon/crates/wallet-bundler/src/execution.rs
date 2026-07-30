@@ -1,11 +1,17 @@
 use alloy_primitives::{Address, Bytes, U256};
-use alloy_sol_types::{sol, SolCall};
+use alloy_sol_types::{sol, SolCall, SolValue};
 
 use crate::reclaimable_entry_point_deposit;
 
 sol! {
     function execute(bytes32 mode, bytes executionCalldata);
     function withdrawTo(address withdrawAddress, uint256 amount);
+
+    struct Execution {
+        address target;
+        uint256 value;
+        bytes callData;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,6 +97,76 @@ pub fn decode_erc7579_single_execution(call_data: &[u8]) -> Option<Erc7579Single
         value: U256::from_be_slice(&decoded.executionCalldata[20..52]),
         call_data: Bytes::copy_from_slice(&decoded.executionCalldata[52..]),
     })
+}
+
+/// Headroom suggested for a single ERC-7579 execution when the account-call-gas
+/// estimate is unavailable, on top of [`UNESTIMATED_BASE_CALL_GAS_HEADROOM`].
+pub const UNESTIMATED_PER_EXECUTION_CALL_GAS_HEADROOM: u64 = 400_000;
+
+/// Fixed headroom applied once per UserOperation, covering Kernel dispatch
+/// overhead before any execution runs.
+pub const UNESTIMATED_BASE_CALL_GAS_HEADROOM: u64 = 200_000;
+
+/// Decodes both single (`0x00`) and batch (`0x01`) ERC-7579 exec modes.
+///
+/// This is deliberately separate from [`decode_erc7579_single_execution`], which
+/// rejects batch mode because the break-glass validation path depends on that
+/// strictness. Returns `None` for delegate/unknown call types and malformed
+/// payloads.
+pub fn decode_erc7579_executions(call_data: &[u8]) -> Option<Vec<Erc7579SingleExecution>> {
+    let decoded = executeCall::abi_decode(call_data).ok()?;
+    let mode = decoded.mode.as_slice();
+    if mode.len() != 32 || !matches!(mode[1], 0x00 | 0x01) || !mode[2..].iter().all(|b| *b == 0) {
+        return None;
+    }
+
+    match mode[0] {
+        0x00 => {
+            if decoded.executionCalldata.len() < 52 {
+                return None;
+            }
+            let mut target = [0u8; 20];
+            target.copy_from_slice(&decoded.executionCalldata[..20]);
+            Some(vec![Erc7579SingleExecution {
+                target: Address::from(target),
+                value: U256::from_be_slice(&decoded.executionCalldata[20..52]),
+                call_data: Bytes::copy_from_slice(&decoded.executionCalldata[52..]),
+            }])
+        }
+        0x01 => {
+            let executions = <Vec<Execution>>::abi_decode(&decoded.executionCalldata).ok()?;
+            Some(
+                executions
+                    .into_iter()
+                    .map(|execution| Erc7579SingleExecution {
+                        target: execution.target,
+                        value: execution.value,
+                        call_data: execution.callData,
+                    })
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Call-gas limit to suggest when estimation is unavailable.
+///
+/// Scales with the number of sub-executions so a simple transfer stays cheap
+/// while a batch gets room, and is clamped to the policy cap. Undecodable
+/// calldata falls back to single-execution headroom rather than erroring, so an
+/// unknown exec mode still yields a usable suggestion.
+///
+/// The result is a hard balance floor for the account: EntryPoint charges
+/// `required_prefund = (callGasLimit + verificationGasLimit + preVerificationGas) * maxFeePerGas`
+/// up front. That is why this is proportional rather than simply the policy cap.
+pub fn suggested_unestimated_call_gas_limit(call_data: &[u8], max_call_gas_limit: U256) -> U256 {
+    let executions = decode_erc7579_executions(call_data)
+        .map(|executions| executions.len().max(1))
+        .unwrap_or(1) as u64;
+    let raw = U256::from(UNESTIMATED_BASE_CALL_GAS_HEADROOM)
+        + U256::from(UNESTIMATED_PER_EXECUTION_CALL_GAS_HEADROOM) * U256::from(executions);
+    raw.min(max_call_gas_limit)
 }
 
 pub fn encode_entry_point_withdraw_to(withdraw_address: Address, amount: U256) -> Bytes {
@@ -334,6 +410,173 @@ mod tests {
                 requested_amount: U256::from(8),
                 reclaimable: U256::from(7),
             }
+        );
+    }
+
+    fn encode_batch_execution(executions: &[(Address, U256, Bytes)]) -> Bytes {
+        use alloy_sol_types::SolValue;
+
+        let mut mode = [0u8; 32];
+        mode[0] = 0x01;
+        let items: Vec<Execution> = executions
+            .iter()
+            .map(|(target, value, call_data)| Execution {
+                target: *target,
+                value: *value,
+                callData: call_data.clone(),
+            })
+            .collect();
+
+        Bytes::from(
+            executeCall {
+                mode: mode.into(),
+                executionCalldata: Bytes::from(items.abi_encode()),
+            }
+            .abi_encode(),
+        )
+    }
+
+    #[test]
+    fn decodes_single_and_batch_exec_modes() {
+        let target = ENTRY_POINT_V07;
+        let inner = Bytes::from_static(&[0x11, 0x22, 0x33, 0x44]);
+
+        let single = encode_erc7579_single_execution(target, U256::from(7), inner.clone());
+        let decoded = decode_erc7579_executions(&single).expect("single mode decodes");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].target, target);
+        assert_eq!(decoded[0].value, U256::from(7));
+        assert_eq!(decoded[0].call_data, inner);
+
+        let other = address!("d73c7780b1c1da1586a8332d5499f36b7cbb33c2");
+        let batch = encode_batch_execution(&[
+            (target, U256::from(1), inner.clone()),
+            (other, U256::from(2), Bytes::new()),
+        ]);
+        let decoded = decode_erc7579_executions(&batch).expect("batch mode decodes");
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].target, target);
+        assert_eq!(decoded[0].value, U256::from(1));
+        assert_eq!(decoded[0].call_data, inner);
+        assert_eq!(decoded[1].target, other);
+        assert_eq!(decoded[1].value, U256::from(2));
+        assert!(decoded[1].call_data.is_empty());
+    }
+
+    #[test]
+    fn rejects_delegate_and_unknown_exec_modes() {
+        for call_type in [0xffu8, 0x02, 0x7f] {
+            let mut mode = [0u8; 32];
+            mode[0] = call_type;
+            let encoded = Bytes::from(
+                executeCall {
+                    mode: mode.into(),
+                    executionCalldata: Bytes::new(),
+                }
+                .abi_encode(),
+            );
+            assert!(
+                decode_erc7579_executions(&encoded).is_none(),
+                "call type {call_type:#x} must not decode"
+            );
+        }
+
+        // A non-zero reserved tail is not a mode we understand.
+        let mut mode = [0u8; 32];
+        mode[31] = 0x01;
+        let reserved = Bytes::from(
+            executeCall {
+                mode: mode.into(),
+                executionCalldata: Bytes::new(),
+            }
+            .abi_encode(),
+        );
+        assert!(decode_erc7579_executions(&reserved).is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_execution_payloads() {
+        // Not an execute() call at all.
+        assert!(decode_erc7579_executions(&[0xde, 0xad, 0xbe, 0xef]).is_none());
+        assert!(decode_erc7579_executions(&[]).is_none());
+
+        // Single mode with fewer than the 52 packed header bytes.
+        let mode = [0u8; 32];
+        let truncated = Bytes::from(
+            executeCall {
+                mode: mode.into(),
+                executionCalldata: Bytes::from(vec![0u8; 51]),
+            }
+            .abi_encode(),
+        );
+        assert!(decode_erc7579_executions(&truncated).is_none());
+
+        // Batch mode whose payload is not a valid Execution[].
+        let mut batch_mode = [0u8; 32];
+        batch_mode[0] = 0x01;
+        let garbage = Bytes::from(
+            executeCall {
+                mode: batch_mode.into(),
+                executionCalldata: Bytes::from(vec![0xaa; 33]),
+            }
+            .abi_encode(),
+        );
+        assert!(decode_erc7579_executions(&garbage).is_none());
+    }
+
+    #[test]
+    fn suggests_headroom_proportional_to_execution_count() {
+        let cap = U256::from(10_000_000u64);
+        let target = ENTRY_POINT_V07;
+        let inner = Bytes::from_static(&[0x01]);
+
+        let single = encode_erc7579_single_execution(target, U256::ZERO, inner.clone());
+        assert_eq!(
+            suggested_unestimated_call_gas_limit(&single, cap),
+            U256::from(600_000u64)
+        );
+
+        let batch = encode_batch_execution(&[
+            (target, U256::ZERO, inner.clone()),
+            (target, U256::ZERO, inner.clone()),
+            (target, U256::ZERO, inner),
+        ]);
+        assert_eq!(
+            suggested_unestimated_call_gas_limit(&batch, cap),
+            U256::from(1_400_000u64)
+        );
+    }
+
+    #[test]
+    fn clamps_suggested_headroom_to_policy_cap() {
+        let cap = U256::from(1_000_000u64);
+        let target = ENTRY_POINT_V07;
+        let inner = Bytes::from_static(&[0x01]);
+        let batch = encode_batch_execution(&[
+            (target, U256::ZERO, inner.clone()),
+            (target, U256::ZERO, inner.clone()),
+            (target, U256::ZERO, inner),
+        ]);
+
+        // Raw suggestion would be 1_400_000; the cap wins.
+        assert_eq!(suggested_unestimated_call_gas_limit(&batch, cap), cap);
+    }
+
+    #[test]
+    fn falls_back_to_single_execution_headroom_when_undecodable() {
+        let cap = U256::from(10_000_000u64);
+
+        // Undecodable calldata must still yield a usable suggestion, not zero.
+        assert_eq!(
+            suggested_unestimated_call_gas_limit(&[0xde, 0xad, 0xbe, 0xef], cap),
+            U256::from(600_000u64)
+        );
+
+        // An empty batch decodes fine but must not suggest base-only headroom.
+        let empty_batch = encode_batch_execution(&[]);
+        assert_eq!(
+            suggested_unestimated_call_gas_limit(&empty_batch, cap),
+            U256::from(600_000u64)
         );
     }
 }

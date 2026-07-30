@@ -593,7 +593,6 @@ private final class ChatDashboardModel: ObservableObject {
     private var swapPreflightTasks: [UUID: Task<Void, Never>] = [:]
     private var walletModelCancellable: AnyCancellable?
     private var gasPollTask: Task<Void, Never>?
-    private var reconcilerTask: Task<Void, Never>?
     private var sessionActivityEventMonitor: Any?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private let inferenceService: EmbeddedLlamaInferenceService
@@ -684,9 +683,10 @@ private final class ChatDashboardModel: ObservableObject {
         gasPollTask = Task {
             await gasModel.runGasPriceUpdates()
         }
-        reconcilerTask = Task {
-            await gasModel.runUserOperationReconciler()
-        }
+        // Picks up operations left unfinalised by a previous session. Goes through the AppModel
+        // entry point rather than the loop body so this launch-time start and the post-send start
+        // share one dedup guard, instead of each owning a loop over the same history store.
+        self.walletModel.startUserOperationReconcilerIfNeeded()
         backfillWalletHistoryFromChat()
         reloadWalletHistory()
         refreshTokenBalancesIfNeeded()
@@ -694,7 +694,14 @@ private final class ChatDashboardModel: ObservableObject {
 
     deinit {
         gasPollTask?.cancel()
-        reconcilerTask?.cancel()
+        // The reconciler task now lives on the AppModel, and `deinit` is nonisolated, so stopping it
+        // means hopping to the main actor. Capture the model, not `self`, which is mid-deallocation.
+        // The running loop retains the AppModel for the duration of its current call, so without
+        // this it would keep polling after the dashboard is gone.
+        let walletModel = self.walletModel
+        Task { @MainActor in
+            walletModel.stopUserOperationReconciler()
+        }
     }
 
     var activeConversation: ChatConversation? {

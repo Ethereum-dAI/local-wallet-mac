@@ -2683,19 +2683,33 @@ final class AppModel: ObservableObject {
         reconcilerUpdatedAt = Date()
     }
 
+    /// The only way to run the reconciler. `reconcilerTask` is the single owner of the loop's
+    /// lifetime, so every caller must come through here — see `runUserOperationReconciler`.
     func startUserOperationReconcilerIfNeeded() {
         guard reconcilerTask == nil else {
             return
         }
+        // `defer`, not a trailing `await MainActor.run`: both this method and the inherited task
+        // context are @MainActor, so the reset runs synchronously on the actor with no suspension
+        // between the loop returning and the handle clearing. With an awaited reset, a send landing
+        // in that gap would see a non-nil handle for an already-finished loop, skip starting, and
+        // leave its own UserOperation unwatched until the next send or launch.
         reconcilerTask = Task { [weak self] in
+            defer { self?.reconcilerTask = nil }
             await self?.runUserOperationReconciler()
-            await MainActor.run {
-                self?.reconcilerTask = nil
-            }
         }
     }
 
-    func runUserOperationReconciler() async {
+    func stopUserOperationReconciler() {
+        reconcilerTask?.cancel()
+        reconcilerTask = nil
+    }
+
+    /// Deliberately private: the loop must only ever be entered through
+    /// `startUserOperationReconcilerIfNeeded()`, whose guard keeps a single loop polling a given
+    /// record. Two concurrent loops duplicate receipt polls, history writes, and the
+    /// `objectWillChange` traffic those writes publish.
+    private func runUserOperationReconciler() async {
         var attempt = 0
         while !Task.isCancelled {
             let accountAddress = walletRecord?.kernelAccountAddress

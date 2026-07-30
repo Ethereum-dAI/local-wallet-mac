@@ -29,6 +29,7 @@ pub async fn handle(
     .map_err(super::map_bundler_error)?;
     let entry_point = super::parse_entry_point(&params)?;
     let policy = super::policy_from_state(state)?;
+    let acknowledged_call_gas_limit = parse_acknowledged_call_gas_limit(&params, &policy)?;
     wallet_bundler::validate_user_operation(
         &policy,
         &op,
@@ -115,9 +116,15 @@ pub async fn handle(
                 wallet_bundler::SimulationMode::Estimate,
             )
             .map_err(super::map_bundler_error)?;
-            let estimated =
-                derive_estimated_op(state, entry_point, &simulation.op, block, &policy, None)
-                    .await?;
+            let estimated = derive_estimated_op(
+                state,
+                entry_point,
+                &simulation.op,
+                block,
+                &policy,
+                acknowledged_call_gas_limit,
+            )
+            .await?;
             Ok(
                 wallet_bundler::estimate_user_operation_gas_with_required_prefund(
                     &estimated,
@@ -128,8 +135,15 @@ pub async fn handle(
             )
         }
         None => {
-            let estimated =
-                derive_estimated_op(state, entry_point, &op, block, &policy, None).await?;
+            let estimated = derive_estimated_op(
+                state,
+                entry_point,
+                &op,
+                block,
+                &policy,
+                acknowledged_call_gas_limit,
+            )
+            .await?;
             Ok(wallet_bundler::estimate_user_operation_gas(&estimated))
         }
     }
@@ -388,6 +402,50 @@ fn unavailable(
 
 fn with_safety_margin(value: U256) -> U256 {
     value * U256::from(GAS_ESTIMATE_SAFETY_BPS) / U256::from(GAS_ESTIMATE_BPS_DENOMINATOR)
+}
+
+/// Parses the optional third parameter,
+/// `{ "acknowledgedCallGasLimit": "0x…" }`.
+///
+/// Present-and-valid means the client has explicitly consented to submitting at
+/// that call-gas limit *if and only if* estimation turns out to be unavailable.
+/// Malformed input is rejected rather than silently ignored: a client that meant
+/// to consent must not be told the estimate simply failed.
+fn parse_acknowledged_call_gas_limit(
+    params: &[Value],
+    policy: &wallet_bundler::BundlerPolicy,
+) -> Result<Option<U256>, wallet_node_api::JsonRpcError> {
+    let Some(value) = params.get(2) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| super::invalid_params("third parameter must be an object"))?;
+    let Some(raw) = object.get("acknowledgedCallGasLimit") else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+
+    let text = raw
+        .as_str()
+        .ok_or_else(|| super::invalid_params("acknowledgedCallGasLimit must be a hex quantity"))?;
+    let digits = text
+        .strip_prefix("0x")
+        .ok_or_else(|| super::invalid_params("acknowledgedCallGasLimit must be a hex quantity"))?;
+    let limit = U256::from_str_radix(digits, 16)
+        .map_err(|_| super::invalid_params("acknowledgedCallGasLimit must be a hex quantity"))?;
+
+    if limit > policy.max_call_gas_limit {
+        return Err(wallet_node_api::JsonRpcError::policy_cap_exceeded(
+            "callGasLimit",
+        ));
+    }
+    Ok(Some(limit))
 }
 
 #[cfg(test)]
@@ -663,5 +721,164 @@ mod tests {
         .expect("estimate must not fail on a sub-floor simulation attempt");
 
         assert!(simulation.is_none());
+    }
+
+    #[tokio::test]
+    async fn acknowledged_headroom_never_suppresses_a_revert() {
+        // Headroom buys gas, not silence.
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let entry_point = wallet_bundler::ENTRY_POINT_V07;
+        let op = op_with_call_data();
+        let block = BlockTag::Hash(B256::from([9; 32]));
+
+        chain.set_call_revert(
+            account_call_request(&op, entry_point),
+            block,
+            None,
+            Bytes::from(
+                Revert {
+                    reason: "CallFailed".to_string(),
+                }
+                .abi_encode(),
+            ),
+        );
+
+        let error = super::estimate_account_call_gas(
+            &state,
+            entry_point,
+            &op,
+            block,
+            &test_policy(),
+            Some(U256::from(2_000_000u64)),
+        )
+        .await
+        .expect_err("an acknowledged limit must not mask a revert");
+
+        assert_eq!(error.code, wallet_node_api::SIMULATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn acknowledged_headroom_never_overrides_a_successful_estimate() {
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let entry_point = wallet_bundler::ENTRY_POINT_V07;
+        let op = op_with_call_data();
+        let block = BlockTag::Hash(B256::from([9; 32]));
+
+        chain.set_call_response(
+            account_call_request(&op, entry_point),
+            block,
+            None,
+            Bytes::new(),
+        );
+        chain.set_gas_estimate(
+            account_call_request(&op, entry_point),
+            Some(block),
+            None,
+            300_000,
+        );
+
+        let gas = super::estimate_account_call_gas(
+            &state,
+            entry_point,
+            &op,
+            block,
+            &test_policy(),
+            Some(U256::from(2_000_000u64)),
+        )
+        .await
+        .expect("a successful estimate must win");
+
+        // 300_000 * 1.2, not the acknowledged 2_000_000.
+        assert_eq!(gas, U256::from(360_000u64));
+    }
+
+    #[tokio::test]
+    async fn acknowledged_headroom_is_honored_when_estimation_unavailable() {
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let entry_point = wallet_bundler::ENTRY_POINT_V07;
+        let op = op_with_call_data();
+        let block = BlockTag::Hash(B256::from([9; 32]));
+
+        // No mocks: eth_call resolves to a chain error.
+        let gas = super::estimate_account_call_gas(
+            &state,
+            entry_point,
+            &op,
+            block,
+            &test_policy(),
+            Some(U256::from(2_000_000u64)),
+        )
+        .await
+        .expect("an acknowledged limit must be honored when estimation is unavailable");
+
+        assert_eq!(gas, U256::from(2_000_000u64));
+    }
+
+    #[test]
+    fn parses_acknowledged_call_gas_limit_from_optional_third_param() {
+        use serde_json::json;
+
+        let policy = test_policy();
+        let base = vec![json!({}), json!("0x0")];
+
+        // Absent, explicit null, and an object without the key are all None.
+        assert_eq!(
+            super::parse_acknowledged_call_gas_limit(&base, &policy).unwrap(),
+            None
+        );
+        let mut with_null = base.clone();
+        with_null.push(json!(null));
+        assert_eq!(
+            super::parse_acknowledged_call_gas_limit(&with_null, &policy).unwrap(),
+            None
+        );
+        let mut without_key = base.clone();
+        without_key.push(json!({}));
+        assert_eq!(
+            super::parse_acknowledged_call_gas_limit(&without_key, &policy).unwrap(),
+            None
+        );
+
+        let mut valid = base.clone();
+        valid.push(json!({ "acknowledgedCallGasLimit": "0x1e8480" }));
+        assert_eq!(
+            super::parse_acknowledged_call_gas_limit(&valid, &policy).unwrap(),
+            Some(U256::from(2_000_000u64))
+        );
+
+        // Wrong types and non-hex values are invalid params, not silent Nones.
+        for bad in [
+            json!(7),
+            json!("nope"),
+            json!({ "acknowledgedCallGasLimit": 7 }),
+        ] {
+            let mut params = base.clone();
+            params.push(bad);
+            let error = super::parse_acknowledged_call_gas_limit(&params, &policy)
+                .expect_err("malformed override must be rejected");
+            assert_eq!(error.code, wallet_node_api::INVALID_REQUEST);
+        }
+    }
+
+    #[test]
+    fn acknowledged_headroom_above_policy_cap_is_rejected() {
+        use serde_json::json;
+
+        let policy = test_policy();
+        let params = vec![
+            json!({}),
+            json!("0x0"),
+            // 10_000_001 > max_call_gas_limit of 10_000_000.
+            json!({ "acknowledgedCallGasLimit": "0x989681" }),
+        ];
+
+        let error = super::parse_acknowledged_call_gas_limit(&params, &policy)
+            .expect_err("an override above the policy cap must be rejected");
+
+        assert_eq!(error.code, wallet_node_api::POLICY_CAP_EXCEEDED);
+        assert_eq!(error.data.unwrap()["field"], "callGasLimit");
     }
 }

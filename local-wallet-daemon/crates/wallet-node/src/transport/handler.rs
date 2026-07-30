@@ -3016,6 +3016,17 @@ mod tests {
             )),
             validation_response(U256::from(0x999), U256::from(1)),
         );
+        chain.set_call_response(
+            CallRequest {
+                from: Some(entry_point),
+                to: Some(op.sender),
+                data: Some(op.call_data.clone()),
+                ..Default::default()
+            },
+            BlockTag::Hash(head.hash),
+            None,
+            ChainBytes::new(),
+        );
         chain.set_gas_estimate(
             CallRequest {
                 from: Some(entry_point),
@@ -3043,7 +3054,8 @@ mod tests {
         assert!(result_u256(&value, "preVerificationGas") > U256::from(0x30));
         assert_required_prefund_matches_gas_fields(&value, U256::from(0x40));
         assert_eq!(chain.balance_call_count(), 1);
-        assert_eq!(chain.call_call_count(), 2);
+        // Deposit read, a single floored simulation, and the account-call revert gate.
+        assert_eq!(chain.call_call_count(), 3);
         assert_eq!(chain.estimate_gas_call_count(), 1);
     }
 
@@ -3097,6 +3109,17 @@ mod tests {
             overrides,
             validation_response(U256::from(0xabc), U256::ZERO),
         );
+        chain.set_call_response(
+            CallRequest {
+                from: Some(entry_point),
+                to: Some(op.sender),
+                data: Some(op.call_data.clone()),
+                ..Default::default()
+            },
+            BlockTag::Hash(head.hash),
+            None,
+            ChainBytes::new(),
+        );
         chain.set_gas_estimate(
             CallRequest {
                 from: Some(entry_point),
@@ -3123,9 +3146,8 @@ mod tests {
         assert_eq!(value["result"]["verificationGasLimit"], "0xf4240");
         assert!(result_u256(&value, "preVerificationGas") > U256::ZERO);
         assert_required_prefund_matches_gas_fields(&value, U256::from(0x40));
-        // Deposit read plus a single floored simulation; a sub-floor
-        // simulation attempt would surface here as an extra call.
-        assert_eq!(chain.call_call_count(), 2);
+        // Deposit read, a single floored simulation, and the account-call revert gate.
+        assert_eq!(chain.call_call_count(), 3);
         assert_eq!(chain.estimate_gas_call_count(), 1);
     }
 
@@ -3180,6 +3202,17 @@ mod tests {
                 ChainBytes::from(revert_data.clone()),
             );
         }
+        chain.set_call_response(
+            CallRequest {
+                from: Some(entry_point),
+                to: Some(op.sender),
+                data: Some(op.call_data.clone()),
+                ..Default::default()
+            },
+            BlockTag::Hash(head.hash),
+            None,
+            ChainBytes::new(),
+        );
         chain.set_gas_estimate(
             CallRequest {
                 from: Some(entry_point),
@@ -3206,8 +3239,9 @@ mod tests {
         assert_eq!(value["result"]["verificationGasLimit"], "0xf4240");
         assert!(result_u256(&value, "preVerificationGas") > U256::from(0x30));
         assert_required_prefund_matches_gas_fields(&value, U256::from(0x40));
-        // Deposit read plus one floored simulation per dummy-signature flavour.
-        assert_eq!(chain.call_call_count(), 3);
+        // Deposit read plus one floored simulation per dummy-signature flavour,
+        // and the account-call revert gate.
+        assert_eq!(chain.call_call_count(), 4);
         assert_eq!(chain.estimate_gas_call_count(), 1);
     }
 
@@ -3258,6 +3292,17 @@ mod tests {
             overrides,
             validation_response(U256::from(0xabc), U256::ZERO),
         );
+        chain.set_call_response(
+            CallRequest {
+                from: Some(entry_point),
+                to: Some(op.sender),
+                data: Some(op.call_data.clone()),
+                ..Default::default()
+            },
+            BlockTag::Hash(head.hash),
+            None,
+            ChainBytes::new(),
+        );
         chain.set_gas_estimate(
             CallRequest {
                 from: Some(entry_point),
@@ -3284,9 +3329,9 @@ mod tests {
         assert_eq!(value["result"]["verificationGasLimit"], "0xf4240");
         assert!(result_u256(&value, "preVerificationGas") > U256::from(0x30));
         assert_required_prefund_matches_gas_fields(&value, U256::from(0x40));
-        // Deposit read plus the single boosted simulation; the sub-floor seed
-        // must not be simulated.
-        assert_eq!(chain.call_call_count(), 2);
+        // Deposit read plus the single boosted simulation, and the
+        // account-call revert gate; the sub-floor seed must not be simulated.
+        assert_eq!(chain.call_call_count(), 3);
         assert_eq!(chain.estimate_gas_call_count(), 1);
     }
 

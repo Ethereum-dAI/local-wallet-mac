@@ -115,7 +115,9 @@ pub async fn handle(
                 wallet_bundler::SimulationMode::Estimate,
             )
             .map_err(super::map_bundler_error)?;
-            let estimated = derive_estimated_op(state, entry_point, &simulation.op, block).await?;
+            let estimated =
+                derive_estimated_op(state, entry_point, &simulation.op, block, &policy, None)
+                    .await?;
             Ok(
                 wallet_bundler::estimate_user_operation_gas_with_required_prefund(
                     &estimated,
@@ -126,7 +128,8 @@ pub async fn handle(
             )
         }
         None => {
-            let estimated = derive_estimated_op(state, entry_point, &op, block).await?;
+            let estimated =
+                derive_estimated_op(state, entry_point, &op, block, &policy, None).await?;
             Ok(wallet_bundler::estimate_user_operation_gas(&estimated))
         }
     }
@@ -261,10 +264,20 @@ async fn derive_estimated_op(
     entry_point: alloy_primitives::Address,
     op: &UserOperation,
     block: BlockTag,
+    policy: &wallet_bundler::BundlerPolicy,
+    acknowledged_call_gas_limit: Option<U256>,
 ) -> Result<UserOperation, wallet_node_api::JsonRpcError> {
     let pre_verification_gas = estimate_pre_verification_gas(op)?;
     let verification_gas_limit = op.verification_gas_limit.max(verification_gas_floor(op));
-    let call_gas_limit = estimate_account_call_gas(state, entry_point, op, block).await?;
+    let call_gas_limit = estimate_account_call_gas(
+        state,
+        entry_point,
+        op,
+        block,
+        policy,
+        acknowledged_call_gas_limit,
+    )
+    .await?;
 
     Ok(op.with_gas_limits(
         op.call_gas_limit.max(call_gas_limit),
@@ -295,6 +308,8 @@ async fn estimate_account_call_gas(
     entry_point: alloy_primitives::Address,
     op: &UserOperation,
     block: BlockTag,
+    policy: &wallet_bundler::BundlerPolicy,
+    acknowledged_call_gas_limit: Option<U256>,
 ) -> Result<U256, wallet_node_api::JsonRpcError> {
     if op.call_data.is_empty() {
         return Ok(U256::ZERO);
@@ -306,22 +321,69 @@ async fn estimate_account_call_gas(
         data: Some(op.call_data.clone()),
         ..CallRequest::default()
     };
-    match state.chain.eth_estimate_gas(tx, Some(block), None).await {
-        Ok(gas) => Ok(with_safety_margin(U256::from(gas)).max(U256::from(ACCOUNT_CALL_GAS_FLOOR))),
-        Err(ChainError::CallReverted(data)) => {
-            Err(super::map_bundler_error(BundlerError::SimulationFailed {
-                reason: wallet_bundler::simulation_revert_reason(&data),
-            }))
-        }
+
+    // eth_call is the revert oracle; eth_estimate_gas is only the gas oracle.
+    // Helios's estimate_gas returns Ok(result.gas_used()) for Revert and Halt
+    // alike (helios core/src/client/node.rs), so in the default read mode a
+    // reverting call would otherwise surface as a plausible small number. eth_call
+    // maps Revert -> CallReverted in both adapters, so gate on it first.
+    match state.chain.eth_call(tx.clone(), block, None).await {
+        Ok(_) => {}
+        Err(ChainError::CallReverted(data)) => return Err(call_reverted(&data)),
         Err(error) => {
-            tracing::warn!(
-                error = %error,
-                sender = format_args!("{:#x}", op.sender),
-                "account call gas estimate unavailable; using conservative floor"
-            );
-            Ok(U256::from(ACCOUNT_CALL_GAS_FLOOR))
+            return unavailable(op, policy, acknowledged_call_gas_limit, error);
         }
     }
+
+    match state.chain.eth_estimate_gas(tx, Some(block), None).await {
+        Ok(gas) => Ok(with_safety_margin(U256::from(gas)).max(U256::from(ACCOUNT_CALL_GAS_FLOOR))),
+        Err(ChainError::CallReverted(data)) => Err(call_reverted(&data)),
+        Err(error) => unavailable(op, policy, acknowledged_call_gas_limit, error),
+    }
+}
+
+fn call_reverted(data: &[u8]) -> wallet_node_api::JsonRpcError {
+    super::map_bundler_error(BundlerError::SimulationFailed {
+        reason: wallet_bundler::simulation_revert_reason(data),
+    })
+}
+
+/// Estimation could not run. Fails closed unless the client explicitly
+/// acknowledged a call-gas limit for exactly this case.
+///
+/// This is the *only* place `acknowledged_call_gas_limit` is consulted, which is
+/// what makes the override invariant structural: it can never override a
+/// successful estimate, and never suppress a revert.
+fn unavailable(
+    op: &UserOperation,
+    policy: &wallet_bundler::BundlerPolicy,
+    acknowledged_call_gas_limit: Option<U256>,
+    error: ChainError,
+) -> Result<U256, wallet_node_api::JsonRpcError> {
+    if let Some(limit) = acknowledged_call_gas_limit {
+        tracing::warn!(
+            error = %error,
+            sender = format_args!("{:#x}", op.sender),
+            acknowledged_call_gas_limit = %limit,
+            "account call gas estimate unavailable; client acknowledged submitting with headroom"
+        );
+        return Ok(limit);
+    }
+
+    let suggested = wallet_bundler::suggested_unestimated_call_gas_limit(
+        &op.call_data,
+        policy.max_call_gas_limit,
+    );
+    tracing::warn!(
+        error = %error,
+        sender = format_args!("{:#x}", op.sender),
+        suggested_call_gas_limit = %suggested,
+        "account call gas estimate unavailable; failing closed"
+    );
+    Err(wallet_node_api::JsonRpcError::gas_estimation_unavailable(
+        error,
+        &format!("{suggested:#x}"),
+    ))
 }
 
 fn with_safety_margin(value: U256) -> U256 {
@@ -339,6 +401,131 @@ mod tests {
     use wallet_chain::{BlockTag, CallRequest, MockChainAdapter};
 
     use crate::state::DaemonState;
+
+    fn account_call_request(op: &UserOperation, entry_point: Address) -> CallRequest {
+        CallRequest {
+            from: Some(entry_point),
+            to: Some(op.sender),
+            data: Some(op.call_data.clone()),
+            ..CallRequest::default()
+        }
+    }
+
+    fn op_with_call_data() -> UserOperation {
+        let mut op = sub_floor_user_operation();
+        op.call_data = wallet_bundler::encode_erc7579_single_execution(
+            Address::from([0x33; 20]),
+            U256::from(10_000_000_000_000_000u64),
+            Bytes::from(vec![0xab; 8]),
+        );
+        op
+    }
+
+    // Only `max_call_gas_limit` is read by the code under test; the rest just
+    // has to be well-formed. Mirrors the shape built by
+    // `handlers/bundler/mod.rs::policy_from_state`.
+    fn test_policy() -> wallet_bundler::BundlerPolicy {
+        wallet_bundler::BundlerPolicy {
+            chain_id: 11_155_111,
+            entry_points: vec![wallet_bundler::ENTRY_POINT_V07],
+            max_call_gas_limit: U256::from(10_000_000u64),
+            max_verification_gas_limit: U256::from(5_000_000u64),
+            max_pre_verification_gas: U256::from(1_000_000u64),
+            max_fee_per_gas: U256::from(50_000_000_000u64),
+            max_priority_fee_per_gas: U256::from(5_000_000_000u64),
+            invariants: wallet_bundler::BundlerPolicyInvariants::LOCAL_WALLET_V1,
+        }
+    }
+
+    #[tokio::test]
+    async fn reverting_call_is_reported_even_when_estimate_gas_returns_ok() {
+        // Regression guard for the Helios blindness: helios estimate_gas returns
+        // Ok(gas_used) for Revert and Halt, so eth_call is the only revert oracle.
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let entry_point = wallet_bundler::ENTRY_POINT_V07;
+        let op = op_with_call_data();
+        let block = BlockTag::Hash(B256::from([9; 32]));
+        let revert = Bytes::from(
+            Revert {
+                reason: "CallFailed".to_string(),
+            }
+            .abi_encode(),
+        );
+
+        chain.set_call_revert(account_call_request(&op, entry_point), block, None, revert);
+        chain.set_gas_estimate(
+            account_call_request(&op, entry_point),
+            Some(block),
+            None,
+            21_000,
+        );
+
+        let error =
+            super::estimate_account_call_gas(&state, entry_point, &op, block, &test_policy(), None)
+                .await
+                .expect_err("a reverting call must not produce a gas estimate");
+
+        assert_eq!(error.code, wallet_node_api::SIMULATION_FAILED);
+        let data = error.data.expect("data is present");
+        assert!(
+            data["reason"].as_str().unwrap().contains("CallFailed"),
+            "revert reason must be surfaced, got {data}"
+        );
+    }
+
+    #[tokio::test]
+    async fn estimation_transport_failure_fails_closed_with_suggestion() {
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let entry_point = wallet_bundler::ENTRY_POINT_V07;
+        let op = op_with_call_data();
+        let block = BlockTag::Hash(B256::from([9; 32]));
+
+        // No mock entries: eth_call resolves to a chain error, not a revert.
+        let error =
+            super::estimate_account_call_gas(&state, entry_point, &op, block, &test_policy(), None)
+                .await
+                .expect_err("an unavailable estimate must fail closed, not floor to 50k");
+
+        assert_eq!(error.code, wallet_node_api::NOT_READY);
+        let data = error.data.expect("data is present");
+        assert_eq!(data["reason"], "gas_estimation_unavailable");
+        assert!(data["detail"].is_string());
+        // Single execution -> 200k base + 400k per execution.
+        assert_eq!(data["suggestedCallGasLimit"], "0x927c0");
+    }
+
+    #[tokio::test]
+    async fn successful_estimate_still_applies_margin_and_floor() {
+        // The 50k floor survives on a *successful* estimate; only its use as a
+        // fallback is removed. 40_554 * 1.2 = 48_664, floored to 50_000.
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let entry_point = wallet_bundler::ENTRY_POINT_V07;
+        let op = op_with_call_data();
+        let block = BlockTag::Hash(B256::from([9; 32]));
+
+        chain.set_call_response(
+            account_call_request(&op, entry_point),
+            block,
+            None,
+            Bytes::new(),
+        );
+        chain.set_gas_estimate(
+            account_call_request(&op, entry_point),
+            Some(block),
+            None,
+            40_554,
+        );
+
+        let gas =
+            super::estimate_account_call_gas(&state, entry_point, &op, block, &test_policy(), None)
+                .await
+                .expect("a successful estimate must succeed");
+
+        assert_eq!(gas, U256::from(50_000u64));
+    }
 
     fn sub_floor_user_operation() -> UserOperation {
         UserOperation {

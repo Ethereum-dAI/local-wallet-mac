@@ -85,17 +85,29 @@ pub fn encode_erc7579_single_execution(target: Address, value: U256, call_data: 
 pub fn decode_erc7579_single_execution(call_data: &[u8]) -> Option<Erc7579SingleExecution> {
     let decoded = executeCall::abi_decode(call_data).ok()?;
     let mode = decoded.mode.as_slice();
-    if !is_single_call_mode(mode) || decoded.executionCalldata.len() < 52 {
+    if !is_single_call_mode(mode) {
+        return None;
+    }
+    parse_packed_execution(&decoded.executionCalldata)
+}
+
+/// Parses the packed single-execution payload shared by both the strict
+/// (`decode_erc7579_single_execution`) and permissive (`decode_erc7579_executions`)
+/// decoders: 20 bytes of target, 32 bytes of big-endian value, then the inner
+/// call data. Kept as the one place that knows this 52-byte header layout so
+/// the two decoders cannot silently drift apart.
+fn parse_packed_execution(execution_calldata: &[u8]) -> Option<Erc7579SingleExecution> {
+    if execution_calldata.len() < 52 {
         return None;
     }
 
     let mut target = [0u8; 20];
-    target.copy_from_slice(&decoded.executionCalldata[..20]);
+    target.copy_from_slice(&execution_calldata[..20]);
 
     Some(Erc7579SingleExecution {
         target: Address::from(target),
-        value: U256::from_be_slice(&decoded.executionCalldata[20..52]),
-        call_data: Bytes::copy_from_slice(&decoded.executionCalldata[52..]),
+        value: U256::from_be_slice(&execution_calldata[20..52]),
+        call_data: Bytes::copy_from_slice(&execution_calldata[52..]),
     })
 }
 
@@ -116,23 +128,12 @@ pub const UNESTIMATED_BASE_CALL_GAS_HEADROOM: u64 = 200_000;
 pub fn decode_erc7579_executions(call_data: &[u8]) -> Option<Vec<Erc7579SingleExecution>> {
     let decoded = executeCall::abi_decode(call_data).ok()?;
     let mode = decoded.mode.as_slice();
-    if mode.len() != 32 || !matches!(mode[1], 0x00 | 0x01) || !mode[2..].iter().all(|b| *b == 0) {
+    if !has_canonical_reserved_mode_bytes(mode) {
         return None;
     }
 
     match mode[0] {
-        0x00 => {
-            if decoded.executionCalldata.len() < 52 {
-                return None;
-            }
-            let mut target = [0u8; 20];
-            target.copy_from_slice(&decoded.executionCalldata[..20]);
-            Some(vec![Erc7579SingleExecution {
-                target: Address::from(target),
-                value: U256::from_be_slice(&decoded.executionCalldata[20..52]),
-                call_data: Bytes::copy_from_slice(&decoded.executionCalldata[52..]),
-            }])
-        }
+        0x00 => parse_packed_execution(&decoded.executionCalldata).map(|execution| vec![execution]),
         0x01 => {
             let executions = <Vec<Execution>>::abi_decode(&decoded.executionCalldata).ok()?;
             Some(
@@ -233,10 +234,16 @@ pub fn validate_entry_point_reclaim_break_glass(
 }
 
 fn is_single_call_mode(mode: &[u8]) -> bool {
-    mode.len() == 32
-        && mode[0] == 0x00
-        && matches!(mode[1], 0x00 | 0x01)
-        && mode[2..].iter().all(|byte| *byte == 0)
+    has_canonical_reserved_mode_bytes(mode) && mode[0] == 0x00
+}
+
+/// True when the exec-mode's non-call-type bytes are canonical: `mode[1]` is
+/// one of the two call types this crate understands (single `0x00` / batch
+/// `0x01` — `mode[0]` still decides which), and the remaining reserved bytes
+/// are all zero. Shared by the strict and permissive decoders so a change to
+/// what counts as "reserved" can't drift between them.
+fn has_canonical_reserved_mode_bytes(mode: &[u8]) -> bool {
+    mode.len() == 32 && matches!(mode[1], 0x00 | 0x01) && mode[2..].iter().all(|byte| *byte == 0)
 }
 
 #[cfg(test)]

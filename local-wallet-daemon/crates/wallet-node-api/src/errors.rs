@@ -349,6 +349,10 @@ mod tests {
                 JsonRpcError::body_too_large(300_000),
                 r#"{"actual":300000,"max":262144}"#,
             ),
+            (
+                JsonRpcError::gas_estimation_unavailable("rpc timeout", "0x927c0"),
+                r#"{"detail":"rpc timeout","reason":"gas_estimation_unavailable","suggestedCallGasLimit":"0x927c0"}"#,
+            ),
         ];
         for (err, expected_data) in cases {
             let v = serde_json::to_value(err).expect("serialize");

@@ -383,8 +383,36 @@ fn execution_halted() -> wallet_node_api::JsonRpcError {
 /// `CallReverted`. A halt is a deterministic execution failure, not an
 /// unavailable estimate: retrying it and then buying gas headroom cannot help,
 /// so classify it as a revert and fail with a reason instead.
+/// Phrases that mean "the account call itself could not complete" rather than
+/// "we could not reach the chain". Deliberately narrow: a false positive here
+/// converts a transient transport failure into a permanent verdict and blocks a
+/// send the user could have retried, which is worse than the offer-headroom
+/// failure it prevents.
+/// The call request carries no `gas` field, so the node applies its own cap:
+/// "gas required exceeds" therefore means the call needs more than that cap, far
+/// above `policy.max_call_gas_limit`, and headroom cannot reach it either.
+const EXECUTION_HALT_MARKERS: [&str; 3] = [
+    // helios-core's `display_revert` for a `Halt` outcome.
+    "execution halted",
+    // Execution-RPC providers report a halt as a plain error with no revert data.
+    "out of gas",
+    "gas required exceeds",
+];
+
+/// True when the error says the call halted deterministically, in either read
+/// mode. Helios surfaces a halt as `Helios(..)`; `execution_rpc` mode surfaces
+/// the same condition as `RpcError(..)` because the provider returns an error
+/// body with no revert data (`wallet-chain/src/execution_rpc.rs`, `rpc_error_body`).
+/// Both must fail closed — a halt is not something more gas headroom can fix.
 fn is_execution_halted(error: &ChainError) -> bool {
-    matches!(error, ChainError::Helios(message) if message.contains("execution halted"))
+    let message = match error {
+        ChainError::Helios(message) | ChainError::RpcError(message) => message,
+        _ => return false,
+    };
+    let message = message.to_ascii_lowercase();
+    EXECUTION_HALT_MARKERS
+        .iter()
+        .any(|marker| message.contains(marker))
 }
 
 /// Estimation could not run. Fails closed unless the client explicitly
@@ -456,6 +484,19 @@ fn parse_acknowledged_call_gas_limit(
     let object = value
         .as_object()
         .ok_or_else(|| super::invalid_params("third parameter must be an object"))?;
+    // ERC-4337 gives slot 3 of `eth_estimateUserOperationGas` to `stateOverride`,
+    // and `method.rs` accepts that name as an alias for this method. We do not
+    // implement state overrides, so an unrecognised key must be rejected loudly:
+    // silently ignoring one would answer a spec-conforming client with an estimate
+    // computed against state it did not ask for.
+    if let Some(unexpected) = object
+        .keys()
+        .find(|key| key.as_str() != "acknowledgedCallGasLimit")
+    {
+        return Err(super::invalid_params(&format!(
+            "third parameter does not support {unexpected:?} (state overrides are not implemented)"
+        )));
+    }
     let Some(raw) = object.get("acknowledgedCallGasLimit") else {
         return Ok(None);
     };
@@ -1009,6 +1050,114 @@ mod tests {
         assert_eq!(error.code, wallet_node_api::SIMULATION_FAILED);
         let data = error.data.expect("data is present");
         assert_eq!(data["reason"], "execution_halted");
+    }
+
+    #[tokio::test]
+    async fn execution_rpc_mode_halt_is_reported_as_simulation_failed_not_unavailable() {
+        // `read_verification = "execution_rpc"` reports a halt through a
+        // different ChainError variant: the provider returns an error body with
+        // no revert data, so `rpc_error_body` (wallet-chain/src/execution_rpc.rs)
+        // produces `ChainError::RpcError`, not `Helios`. Without this the app
+        // burns its warm-up backoff and then offers gas headroom that cannot
+        // help, and consenting submits an op that reverts on-chain — the exact
+        // failure #49 is about, on the non-default read path.
+        for message in [
+            "eth_call error -32000: out of gas",
+            "eth_call error -32000: gas required exceeds allowance (50000000)",
+            "eth_call error -32000: Out Of Gas",
+        ] {
+            let chain = Arc::new(MockChainAdapter::new());
+            let state = DaemonState::for_tests(chain.clone());
+            let entry_point = wallet_bundler::ENTRY_POINT_V07;
+            let op = op_with_call_data();
+            let block = BlockTag::Hash(B256::from([9; 32]));
+
+            let owned = message.to_string();
+            chain.inject_error(Box::new(move || ChainError::RpcError(owned.clone())));
+
+            let error = super::estimate_account_call_gas(
+                &state,
+                entry_point,
+                &op,
+                block,
+                &test_policy(),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(
+                error.code,
+                wallet_node_api::SIMULATION_FAILED,
+                "{message:?} must fail closed"
+            );
+            assert_eq!(
+                error.data.expect("data is present")["reason"],
+                "execution_halted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_rpc_failure_is_still_unavailable_not_halted() {
+        // The other half of the previous test: the halt markers must stay narrow
+        // enough that an ordinary transport failure remains retryable. A false
+        // positive here would turn a transient error into a permanent verdict
+        // and block a send the user could have retried.
+        for message in [
+            "eth_call error -32603: request timed out",
+            "eth_call error 429: too many requests",
+        ] {
+            let chain = Arc::new(MockChainAdapter::new());
+            let state = DaemonState::for_tests(chain.clone());
+            let entry_point = wallet_bundler::ENTRY_POINT_V07;
+            let op = op_with_call_data();
+            let block = BlockTag::Hash(B256::from([9; 32]));
+
+            let owned = message.to_string();
+            chain.inject_error(Box::new(move || ChainError::RpcError(owned.clone())));
+
+            let error = super::estimate_account_call_gas(
+                &state,
+                entry_point,
+                &op,
+                block,
+                &test_policy(),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(
+                error.code,
+                wallet_node_api::NOT_READY,
+                "{message:?} must stay retryable"
+            );
+            assert_eq!(
+                error.data.expect("data is present")["reason"],
+                "gas_estimation_unavailable"
+            );
+        }
+    }
+
+    #[test]
+    fn third_param_state_override_is_rejected_not_silently_dropped() {
+        use serde_json::json;
+
+        // ERC-4337 gives slot 3 of `eth_estimateUserOperationGas` to
+        // `stateOverride`, and method.rs accepts that alias. Returning Ok(None)
+        // for an object we don't understand would answer a spec-conforming
+        // client with an estimate computed against state it never asked for.
+        let policy = test_policy();
+        for bad in [
+            json!({ "0x1111111111111111111111111111111111111111": { "balance": "0x1" } }),
+            json!({ "acknowledgedCallGasLimit": "0x1e8480", "stateOverride": {} }),
+        ] {
+            let params = vec![json!({}), json!("0x0"), bad];
+            let error = super::parse_acknowledged_call_gas_limit(&params, &policy)
+                .expect_err("an unrecognised third-param key must be rejected");
+            assert_eq!(error.code, wallet_node_api::INVALID_REQUEST);
+        }
     }
 
     #[test]

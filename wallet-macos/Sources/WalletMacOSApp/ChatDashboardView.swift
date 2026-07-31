@@ -415,8 +415,10 @@ enum ChatIntentExecutionStatus: Equatable {
         case "failed":
             return .failed(object["error"] as? String ?? "Transaction failed")
         case "gas_estimation_unavailable":
+            // UInt64(exactly:) rather than UInt64.init: this decodes a
+            // chat.sqlite round-trip, and a negative Int would trap.
             guard let suggested = object["suggested_call_gas_limit"] as? UInt64
-                    ?? (object["suggested_call_gas_limit"] as? Int).map(UInt64.init)
+                    ?? (object["suggested_call_gas_limit"] as? Int).flatMap(UInt64.init(exactly:))
             else {
                 return .failed("Gas estimation unavailable")
             }
@@ -3006,6 +3008,11 @@ private final class ChatDashboardModel: ObservableObject {
                 case .shield:
                     try await self.executeShield(intent: intent, acknowledgedCallGasLimit: acknowledgedCallGasLimit)
                 case .unshield:
+                    // Intentionally drops acknowledgedCallGasLimit: unshield is
+                    // sidecar-relayed and never reaches daemon gas estimation, so
+                    // it cannot produce .gasEstimationUnavailable. Thread the
+                    // acknowledgement through if unshield ever moves onto the
+                    // 4337 paymaster path, or this becomes a silent no-op.
                     try await self.executeUnshield(intent: intent)
                 }
             } catch {

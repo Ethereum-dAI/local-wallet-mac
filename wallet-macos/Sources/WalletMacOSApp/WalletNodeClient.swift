@@ -299,9 +299,26 @@ struct WalletNodeClient {
         }
     }
 
+    static func estimateGasParams(
+        userOperation: Any,
+        entryPoint: String,
+        acknowledgedCallGasLimit: UInt64?
+    ) -> [Any] {
+        var params: [Any] = [userOperation, entryPoint]
+        if let acknowledgedCallGasLimit {
+            // Only sent when the user has explicitly consented to submitting
+            // without a real estimate; the daemon ignores it otherwise.
+            params.append([
+                "acknowledgedCallGasLimit": "0x" + String(acknowledgedCallGasLimit, radix: 16)
+            ])
+        }
+        return params
+    }
+
     func estimateUserOperationGas(
         draft: UserOperationDraft,
-        dummySignature: Data
+        dummySignature: Data,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationGasEstimate {
         let userOperation = rpcUserOperation(
             draft: draft,
@@ -316,7 +333,11 @@ struct WalletNodeClient {
         )
         let result = try await call(
             method: "localwallet_estimateUserOperationGas",
-            params: [userOperation, draft.entryPoint]
+            params: Self.estimateGasParams(
+                userOperation: userOperation,
+                entryPoint: draft.entryPoint,
+                acknowledgedCallGasLimit: acknowledgedCallGasLimit
+            )
         )
         guard let object = result as? [String: Any],
               let callGasLimit = object["callGasLimit"] as? String,

@@ -1913,7 +1913,8 @@ final class AppModel: ObservableObject {
     func executeBatch(
         executions: [KernelExecutionRequest],
         logContext: String = "batch",
-        signingReason: String? = nil
+        signingReason: String? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationSendResult {
         try await executeUserOperation(
             logContext: logContext,
@@ -1923,7 +1924,8 @@ final class AppModel: ObservableObject {
                 operation: .batch,
                 amount: String(executions.count),
                 token: executions.count == 1 ? "call" : "calls"
-            )
+            ),
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit
         ) { [self] buildContext in
             try await buildUserOperationDraft(
                 executions: executions,
@@ -1962,6 +1964,7 @@ final class AppModel: ObservableObject {
         intent: TransactionIntent?,
         historyDraft: WalletTransactionDraft?,
         afterSubmit: ((String) -> Void)? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil,
         buildDraft: @escaping (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
@@ -1988,6 +1991,7 @@ final class AppModel: ObservableObject {
                 intent: intent,
                 historyDraft: historyDraft,
                 afterSubmit: afterSubmit,
+                acknowledgedCallGasLimit: acknowledgedCallGasLimit,
                 buildDraft: buildDraft
             )
             isSendingUserOperation = false
@@ -2005,6 +2009,7 @@ final class AppModel: ObservableObject {
         intent: TransactionIntent?,
         historyDraft: WalletTransactionDraft?,
         afterSubmit: ((String) -> Void)? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil,
         buildDraft: (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         appendLog("\(logContext): preparing transaction on \(activeChain.name)")
@@ -2043,7 +2048,8 @@ final class AppModel: ObservableObject {
                 draft,
                 logContext: logContext,
                 usePrecompiled: usePrecompiled,
-                sessionPlan: sessionPlan
+                sessionPlan: sessionPlan,
+                acknowledgedCallGasLimit: acknowledgedCallGasLimit
             )
         } catch {
             clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
@@ -2473,7 +2479,8 @@ final class AppModel: ObservableObject {
         _ draft: UserOperationDraft,
         logContext: String,
         usePrecompiled: Bool,
-        sessionPlan: SessionUserOperationPlan? = nil
+        sessionPlan: SessionUserOperationPlan? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationDraft {
         appendLog("\(logContext): checking local wallet-node entry point support")
         try await withWalletNodeClient(operation: "\(logContext) entry point check") { client in
@@ -2499,7 +2506,8 @@ final class AppModel: ObservableObject {
             try await withWalletNodeClient(operation: "\(logContext) gas estimate") { client in
                 try await client.estimateUserOperationGas(
                     draft: draft,
-                    dummySignature: dummySignature
+                    dummySignature: dummySignature,
+                    acknowledgedCallGasLimit: acknowledgedCallGasLimit
                 )
             }
         }

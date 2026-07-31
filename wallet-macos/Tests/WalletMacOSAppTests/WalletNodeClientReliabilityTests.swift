@@ -146,6 +146,25 @@ private func stubbedClient() -> WalletNodeClient {
     #expect(WalletNodeWarmupRetryPolicy.isWarmupError(error))
 }
 
+@Test func encodesAcknowledgedCallGasLimitAsThirdParam() throws {
+    let params = WalletNodeClient.estimateGasParams(
+        userOperation: ["sender": "0x00"],
+        entryPoint: "0xEP",
+        acknowledgedCallGasLimit: 600_000
+    )
+
+    #expect(params.count == 3)
+    let options = try #require(params[2] as? [String: String])
+    #expect(options["acknowledgedCallGasLimit"] == "0x927c0")
+
+    let omitted = WalletNodeClient.estimateGasParams(
+        userOperation: ["sender": "0x00"],
+        entryPoint: "0xEP",
+        acknowledgedCallGasLimit: nil
+    )
+    #expect(omitted.count == 2)
+}
+
 @Test func decodesBundlerStatusReplacementBlock() throws {
     var json: [String: Any] = [
         "ready": true,

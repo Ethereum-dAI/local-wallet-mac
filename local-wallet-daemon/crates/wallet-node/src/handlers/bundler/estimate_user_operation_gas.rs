@@ -1080,4 +1080,28 @@ mod tests {
         assert_eq!(error.code, wallet_node_api::POLICY_CAP_EXCEEDED);
         assert_eq!(error.data.unwrap()["field"], "callGasLimit");
     }
+
+    #[test]
+    fn acknowledged_headroom_exactly_at_the_policy_cap_is_accepted() {
+        use serde_json::json;
+
+        // `parse_acknowledged_call_gas_limit` rejects with `>`, so `limit ==
+        // max_call_gas_limit` must be accepted, not rejected -- a `>=` typo here
+        // would reject every override once the cap binds, which is exactly the
+        // common case: `suggested_unestimated_call_gas_limit` returns the cap
+        // itself once its raw suggestion exceeds it, and the app echoes that
+        // suggestion straight back as the acknowledgement.
+        let policy = test_policy();
+        let params = vec![
+            json!({}),
+            json!("0x0"),
+            // Exactly max_call_gas_limit of 10_000_000.
+            json!({ "acknowledgedCallGasLimit": "0x989680" }),
+        ];
+
+        assert_eq!(
+            super::parse_acknowledged_call_gas_limit(&params, &policy).unwrap(),
+            Some(policy.max_call_gas_limit)
+        );
+    }
 }

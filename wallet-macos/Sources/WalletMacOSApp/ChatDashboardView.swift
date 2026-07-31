@@ -1656,6 +1656,17 @@ private final class ChatDashboardModel: ObservableObject {
 
     /// The user consented, from the execution status row, to submit with the
     /// daemon-suggested `callGasLimit` after a real estimate could not run.
+    ///
+    /// Deliberately does not pass cached `transferPreflightStatus`/`swapPreview`
+    /// through, so `executeIfSupported` re-resolves ENS and re-quotes the swap
+    /// from scratch rather than reusing whatever was current on the first
+    /// attempt. That is the safer choice on its own -- calldata built from a
+    /// stale quote/resolution could differ from what the user actually
+    /// reviewed -- and it is now also required for correctness: the daemon
+    /// floors `acknowledgedCallGasLimit` against a suggestion it re-derives
+    /// from *this* retry's calldata, so a headroom value sized for a different
+    /// (e.g. smaller-batch) attempt can only be raised, never trusted as-is.
+    /// Do not "optimize" this into passing stale cached preflight state.
     func retryIntentWithGasHeadroom(_ intent: ToolIntent, callGasLimit: UInt64) {
         Task { await executeIfSupported(intent, acknowledgedCallGasLimit: callGasLimit) }
     }

@@ -307,7 +307,11 @@ struct WalletNodeClient {
         var params: [Any] = [userOperation, entryPoint]
         if let acknowledgedCallGasLimit {
             // Only sent when the user has explicitly consented to submitting
-            // without a real estimate; the daemon ignores it otherwise.
+            // without a real estimate. The daemon validates this value
+            // unconditionally (it can reject with a policy-cap error before any
+            // estimation runs) and only *honours* it as the call-gas limit when
+            // estimation turns out to be unavailable -- a successful estimate
+            // or a detected revert always take precedence over it.
             params.append([
                 "acknowledgedCallGasLimit": "0x" + String(acknowledgedCallGasLimit, radix: 16)
             ])

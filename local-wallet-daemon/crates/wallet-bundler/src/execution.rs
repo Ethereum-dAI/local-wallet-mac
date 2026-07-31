@@ -237,10 +237,12 @@ fn is_single_call_mode(mode: &[u8]) -> bool {
     has_canonical_reserved_mode_bytes(mode) && mode[0] == 0x00
 }
 
-/// True when the exec-mode's non-call-type bytes are canonical: `mode[1]` is
-/// one of the two call types this crate understands (single `0x00` / batch
-/// `0x01` — `mode[0]` still decides which), and the remaining reserved bytes
-/// are all zero. Shared by the strict and permissive decoders so a change to
+/// True when the exec-mode's non-call-type bytes are canonical. In ERC-7579,
+/// `mode[0]` is CallType (single `0x00` / batch `0x01` — decoded separately by
+/// the caller) and `mode[1]` is ExecType: `0x00` (revert-on-failure) or `0x01`
+/// (try-execute, failures do not revert). This crate accepts either ExecType
+/// and leaves failure handling to the account; the remaining reserved bytes
+/// must be zero. Shared by the strict and permissive decoders so a change to
 /// what counts as "reserved" can't drift between them.
 fn has_canonical_reserved_mode_bytes(mode: &[u8]) -> bool {
     mode.len() == 32 && matches!(mode[1], 0x00 | 0x01) && mode[2..].iter().all(|byte| *byte == 0)
@@ -461,6 +463,69 @@ mod tests {
             (other, U256::from(2), Bytes::new()),
         ]);
         let decoded = decode_erc7579_executions(&batch).expect("batch mode decodes");
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].target, target);
+        assert_eq!(decoded[0].value, U256::from(1));
+        assert_eq!(decoded[0].call_data, inner);
+        assert_eq!(decoded[1].target, other);
+        assert_eq!(decoded[1].value, U256::from(2));
+        assert!(decoded[1].call_data.is_empty());
+    }
+
+    #[test]
+    fn decodes_try_exec_type_for_single_and_batch_call_types() {
+        // mode[1] is ExecType (0x00 revert-on-failure / 0x01 try-execute);
+        // mode[0] is CallType and still decides single vs. batch. Both
+        // ExecTypes must decode identically since this crate leaves
+        // failure-handling semantics to the account.
+        let target = ENTRY_POINT_V07;
+        let inner = Bytes::from_static(&[0x11, 0x22, 0x33, 0x44]);
+
+        let mut single_try_mode = [0u8; 32];
+        single_try_mode[1] = 0x01;
+        let mut execution_calldata = Vec::new();
+        execution_calldata.extend_from_slice(target.as_slice());
+        execution_calldata.extend_from_slice(&U256::from(7).to_be_bytes::<32>());
+        execution_calldata.extend_from_slice(&inner);
+        let single_try = Bytes::from(
+            executeCall {
+                mode: single_try_mode.into(),
+                executionCalldata: Bytes::from(execution_calldata),
+            }
+            .abi_encode(),
+        );
+        let decoded = decode_erc7579_executions(&single_try)
+            .expect("single call type with try ExecType must decode");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].target, target);
+        assert_eq!(decoded[0].value, U256::from(7));
+        assert_eq!(decoded[0].call_data, inner);
+
+        let other = address!("d73c7780b1c1da1586a8332d5499f36b7cbb33c2");
+        let mut batch_try_mode = [0u8; 32];
+        batch_try_mode[0] = 0x01;
+        batch_try_mode[1] = 0x01;
+        let items = vec![
+            Execution {
+                target,
+                value: U256::from(1),
+                callData: inner.clone(),
+            },
+            Execution {
+                target: other,
+                value: U256::from(2),
+                callData: Bytes::new(),
+            },
+        ];
+        let batch_try = Bytes::from(
+            executeCall {
+                mode: batch_try_mode.into(),
+                executionCalldata: Bytes::from(items.abi_encode()),
+            }
+            .abi_encode(),
+        );
+        let decoded = decode_erc7579_executions(&batch_try)
+            .expect("batch call type with try ExecType must decode");
         assert_eq!(decoded.len(), 2);
         assert_eq!(decoded[0].target, target);
         assert_eq!(decoded[0].value, U256::from(1));

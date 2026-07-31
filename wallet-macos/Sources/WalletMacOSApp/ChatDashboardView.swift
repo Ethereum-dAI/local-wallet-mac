@@ -77,6 +77,9 @@ private struct ChatAccountIdentity: Equatable {
     let bundlerAddress: String
     let bundlerBalance: String
     let bundlerState: String
+    /// Whether the bundler can pay for the next transaction. Drives both the card's funding
+    /// controls and the pre-flight decline on the intent card.
+    let bundlerGas: BundlerGasStatus
 
     static func placeholder(
         chain: ChainConfiguration,
@@ -92,7 +95,12 @@ private struct ChatAccountIdentity: Equatable {
             kernelState: "Not inspected",
             bundlerAddress: bundlerAddress,
             bundlerBalance: "Balance unavailable",
-            bundlerState: "Not checked"
+            bundlerState: "Not checked",
+            bundlerGas: BundlerGasStatus.from(
+                relayer: nil,
+                fallbackAddress: bundlerAddress,
+                chain: chain
+            )
         )
     }
 }
@@ -944,6 +952,7 @@ private final class ChatDashboardModel: ObservableObject {
             kernelAccountBalance: accountIdentity.kernelBalance,
             relayerAddress: accountIdentity.bundlerAddress,
             relayerState: accountIdentity.bundlerState,
+            relayerNeedsGas: accountIdentity.bundlerGas.needsGas,
             relayerBalance: accountIdentity.bundlerBalance,
             relayerKeyRef: relayerStatus?.keyRef ?? "Not available",
             relayerLifecycle: relayerStatus?.lifecycle.capitalized ?? accountIdentity.bundlerState,
@@ -1620,6 +1629,11 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     func confirmIntent(_ message: ChatMessage) {
+        // The card disables confirm while the bundler is out of gas; this is the model-side
+        // half of the same gate, so no path can sign a UserOp the daemon would refuse.
+        if let intent = message.toolIntent, bundlerGasStatus(for: intent) != nil {
+            return
+        }
         let transferPreflightStatus = message.toolIntent.flatMap {
             transferPreflightStatuses[$0.id]
         }
@@ -1678,6 +1692,10 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     func editIntent(_ message: ChatMessage, with args: [String: String]) {
+        // "Save & confirm" executes, so it is gated exactly like `confirmIntent`.
+        if let intent = message.toolIntent, bundlerGasStatus(for: intent) != nil {
+            return
+        }
         if let intent = updateIntent(message, disposition: .edited, args: args) {
             executeIfSupported(intent)
         }
@@ -1742,6 +1760,21 @@ private final class ChatDashboardModel: ObservableObject {
 
     func transferPreflightStatus(for intent: ToolIntent) -> ChatTransferPreflightStatus? {
         transferPreflightStatuses[intent.id]
+    }
+
+    /// The bundler-gas block for a still-pending intent, or `nil` when nothing is blocking.
+    ///
+    /// Pre-flighting here means an intent the daemon would refuse with
+    /// `bundler_eoa_needs_topup` never reaches the Secure Enclave prompt. The daemon remains
+    /// the authority: this is a client-side read of the last `wallet_bundlerStatus`, so a
+    /// stale cache falls through to the daemon's own refusal, translated by
+    /// `BundlerGasStatus.friendlyMessage(for:status:)`.
+    func bundlerGasStatus(for intent: ToolIntent) -> BundlerGasStatus? {
+        BundlerGasPolicy.block(
+            tool: intent.tool,
+            disposition: intent.disposition,
+            status: accountIdentity.bundlerGas
+        )
     }
 
     func swapPreflightStatus(for intent: ToolIntent) -> ChatSwapPreflightStatus? {
@@ -2362,9 +2395,18 @@ private final class ChatDashboardModel: ObservableObject {
             ?? onboardingSettingsStore.bundlerAddress(chainId: chain.id)
             ?? "Not available"
         let bundlerBalance = Self.displayETHBalance(walletModel.localRelayerStatus?.balance)
+        let bundlerGas = BundlerGasStatus.from(
+            relayer: walletModel.localRelayerStatus,
+            fallbackAddress: bundlerAddress,
+            chain: chain
+        )
         let bundlerState: String
         if let status = walletModel.localRelayerStatus {
-            bundlerState = status.ready ? "Ready" : status.needsTopup ? "Needs top-up" : status.lifecycle.capitalized
+            // "Out of gas — can't send" over "Needs top-up": under the threshold every send is
+            // refused, and the badge is the only place that says so before the user tries.
+            bundlerState = status.ready
+                ? "Ready"
+                : bundlerGas.needsGas ? bundlerGas.badgeText : status.lifecycle.capitalized
         } else {
             bundlerState = walletModel.localRelayerMessage
         }
@@ -2378,7 +2420,8 @@ private final class ChatDashboardModel: ObservableObject {
             kernelState: kernelState,
             bundlerAddress: bundlerAddress,
             bundlerBalance: bundlerBalance,
-            bundlerState: bundlerState
+            bundlerState: bundlerState,
+            bundlerGas: bundlerGas
         )
     }
 
@@ -2606,6 +2649,14 @@ private final class ChatDashboardModel: ObservableObject {
             setHelperFundError("Enter an amount greater than 0 to fund \(label).", address: address)
             return
         }
+        // Every helper top-up is a UserOp the bundler has to relay — including one aimed at
+        // the bundler itself — so an out-of-gas bundler refuses all of them. Decline here
+        // rather than after a Secure Enclave prompt the daemon will reject anyway.
+        let gas = accountIdentity.bundlerGas
+        if gas.needsGas {
+            setHelperFundError("\(BundlerGasStatus.warningTitle). \(gas.declineDetail)", address: address)
+            return
+        }
         fundingHelperAddress = address
         helperFundError = nil
         helperFundErrorAddress = nil
@@ -2636,10 +2687,21 @@ private final class ChatDashboardModel: ObservableObject {
                     self.refreshShieldedBalance()
                 }
             } catch {
-                self.setHelperFundError("Funding the \(label) failed: \(error.localizedDescription)", address: address)
+                // A broadcaster top-up is itself relayed by the bundler, so it fails the same
+                // way when the bundler is empty — name the real blocker instead of the RPC
+                // reason string.
+                self.setHelperFundError(
+                    self.fundingFailureMessage(error, label: label),
+                    address: address
+                )
                 self.appendFundingError(error, label: label)
             }
         }
+    }
+
+    private func fundingFailureMessage(_ error: Error, label: String) -> String {
+        BundlerGasStatus.friendlyMessage(for: error, status: accountIdentity.bundlerGas)
+            ?? "Funding the \(label) failed: \(error.localizedDescription)"
     }
 
     private func setHelperFundError(_ message: String, address: String) {
@@ -2694,7 +2756,7 @@ private final class ChatDashboardModel: ObservableObject {
             ChatMessage(
                 kind: .assistantError,
                 role: .assistant,
-                text: "Funding the \(label) failed: \(error.localizedDescription)"
+                text: fundingFailureMessage(error, label: label)
             ),
             to: conversationID
         )
@@ -3356,6 +3418,14 @@ private final class ChatDashboardModel: ObservableObject {
             return
         }
 
+        // Backstop for a relayer status too stale to pre-flight against: the daemon refused
+        // after all, so replace its raw `-32002 … bundler_eoa_needs_topup` with the same
+        // sentence the intent card would have shown.
+        let message = BundlerGasStatus.friendlyMessage(
+            for: error,
+            status: accountIdentity.bundlerGas
+        ) ?? error.localizedDescription
+
         appendMessage(
             ChatMessage(
                 kind: .toolResponse,
@@ -3363,7 +3433,7 @@ private final class ChatDashboardModel: ObservableObject {
                 text: jsonString([
                     "status": "failed",
                     "intent_id": intent.id.uuidString,
-                    "error": error.localizedDescription,
+                    "error": message,
                 ]),
                 toolCallId: intent.id.uuidString
             ),
@@ -3373,7 +3443,7 @@ private final class ChatDashboardModel: ObservableObject {
             ChatMessage(
                 kind: .assistantError,
                 role: .assistant,
-                text: error.localizedDescription
+                text: message
             ),
             to: conversationID
         )
@@ -4043,6 +4113,7 @@ struct LocalWalletChatDashboardView: View {
                         isRefreshingTokenBalances: model.isRefreshingTokenBalances,
                         onRefreshTokenBalances: { model.refreshTokenBalances(force: true) },
                         explorerURL: explorerAddressURL(model.accountIdentity.bundlerAddress),
+                        gasWarning: model.accountIdentity.bundlerGas,
                         onFund: { amount in
                             model.fundHelper(
                                 address: model.accountIdentity.bundlerAddress,
@@ -4195,6 +4266,7 @@ struct LocalWalletChatDashboardView: View {
                                             executionStatus: model.executionStatus(for: intent),
                                             transferPreflightStatus: transferPreflightStatus,
                                             swapPreflightStatus: swapPreflightStatus,
+                                            bundlerGasStatus: model.bundlerGasStatus(for: intent),
                                             signingPreview: model.signingPreview(
                                                 for: intent,
                                                 transferPreflightStatus: transferPreflightStatus,
@@ -5206,6 +5278,12 @@ private struct AddressPill: View {
 /// `AddressPill`, it leads with the gas balance and a **Fund** action — the raw address is
 /// demoted to a copy button (the external-funding fallback the bundler needs when empty).
 /// "Send" moves ETH from the Kernel account as a passkey UserOp; see `fundHelper`.
+///
+/// When `gasWarning` says the bundler is under the daemon's threshold, the Fund control is
+/// replaced by the only route that can work — its address, a Copy button and (on testnets) a
+/// faucet link — because the empty bundler would have to relay its own top-up. Only the
+/// bundler passes a `gasWarning`; the broadcaster's in-app top-up is relayed by the bundler,
+/// so it stays fundable from the Kernel account whatever its own balance is.
 private struct FundableAccountCard: View {
     let icon: String
     let title: String
@@ -5219,6 +5297,7 @@ private struct FundableAccountCard: View {
     let isRefreshingTokenBalances: Bool
     let onRefreshTokenBalances: () -> Void
     let explorerURL: URL?
+    var gasWarning: BundlerGasStatus?
     let onFund: (String) -> Void
 
     @State private var fundAmount = "0.02"
@@ -5226,7 +5305,12 @@ private struct FundableAccountCard: View {
     @State private var isTokenListPresented = false
 
     private var hasAddress: Bool { address.hasPrefix("0x") && address.count == 42 }
+    /// Out of gas by the daemon's own threshold — the in-app Fund control cannot work.
+    private var isOutOfGas: Bool { gasWarning?.needsGas == true }
     private var needsFunding: Bool {
+        if isOutOfGas {
+            return true
+        }
         let s = state.lowercased()
         return s.contains("need") || s.contains("top")
     }
@@ -5236,7 +5320,7 @@ private struct FundableAccountCard: View {
             HStack(alignment: .top, spacing: 9) {
                 Image(systemName: icon)
                     .font(.system(size: 13, weight: .black))
-                    .foregroundStyle(ChatPalette.accent)
+                    .foregroundStyle(isOutOfGas ? ChatPalette.warning : ChatPalette.accent)
                     .frame(width: 30, height: 30)
                     .background(Circle().fill(ChatPalette.buttonCircle))
 
@@ -5248,7 +5332,7 @@ private struct FundableAccountCard: View {
                         .lineLimit(1)
                     Text(balance)
                         .font(.system(size: 18, weight: .heavy, design: .rounded))
-                        .foregroundStyle(ChatPalette.primaryText)
+                        .foregroundStyle(isOutOfGas ? ChatPalette.warning : ChatPalette.primaryText)
                         .lineLimit(1)
                         .minimumScaleFactor(0.5)
                 }
@@ -5260,14 +5344,18 @@ private struct FundableAccountCard: View {
 
             stateBadge
 
-            fundControl
+            if let gasWarning, isOutOfGas {
+                externalFundingControl(gasWarning)
+            } else {
+                fundControl
+            }
 
             if let fundError {
                 Text(fundError)
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(ChatPalette.warning)
                     .fixedSize(horizontal: false, vertical: true)
-            } else {
+            } else if isOutOfGas == false {
                 Text("Send from your Kernel account (passkey), or copy the address to fund externally.")
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(ChatPalette.mutedText)
@@ -5285,11 +5373,15 @@ private struct FundableAccountCard: View {
 
     private var trailingIcons: some View {
         HStack(spacing: 5) {
-            iconButton(systemName: copied ? "checkmark" : "doc.on.doc",
-                       tint: copied ? ChatPalette.success : ChatPalette.secondaryText,
-                       help: copied ? "Copied" : "Copy address to fund externally",
-                       disabled: !hasAddress) {
-                copy(address)
+            // Out of gas, the external-funding block below carries a full Copy button; a
+            // second copy icon up here would just be the same action twice.
+            if isOutOfGas == false {
+                iconButton(systemName: copied ? "checkmark" : "doc.on.doc",
+                           tint: copied ? ChatPalette.success : ChatPalette.secondaryText,
+                           help: copied ? "Copied" : "Copy address to fund externally",
+                           disabled: !hasAddress) {
+                    copy(address)
+                }
             }
             if tokenBalances.isEmpty == false || isRefreshingTokenBalances {
                 tokenListButton
@@ -5322,6 +5414,78 @@ private struct FundableAccountCard: View {
         .overlay(
             Capsule().stroke((needsFunding ? ChatPalette.warning : ChatPalette.success).opacity(0.35), lineWidth: 1)
         )
+    }
+
+    /// Shown instead of `fundControl` while the bundler is under the daemon's threshold: the
+    /// reason it can't be funded from inside the app, then the address and a faucet link.
+    private func externalFundingControl(_ gas: BundlerGasStatus) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .black))
+                    .foregroundStyle(ChatPalette.warning)
+                Text(gas.cardDetail)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(ChatPalette.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(ChatPalette.warning.opacity(0.10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(ChatPalette.warning.opacity(0.30), lineWidth: 1)
+                    )
+            )
+
+            HStack(spacing: 8) {
+                Text(hasAddress ? address : "Address not available yet")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(ChatPalette.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                Spacer(minLength: 4)
+                Button {
+                    copy(address)
+                } label: {
+                    Text(copied ? "Copied" : "Copy")
+                        .font(.system(size: 11, weight: .heavy))
+                        .foregroundStyle(hasAddress ? Color.black.opacity(0.85) : ChatPalette.mutedText)
+                        .padding(.horizontal, 9)
+                        .frame(height: 24)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(hasAddress ? ChatPalette.warning : ChatPalette.buttonCircle)
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(!hasAddress)
+                .help("Copy the bundler address to fund it from another wallet")
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(ChatPalette.input)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .stroke(ChatPalette.border, style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                    )
+            )
+
+            if let faucetURL = gas.faucetURL {
+                Link(destination: faucetURL) {
+                    Text("Open \(gas.networkLabel) faucet")
+                        .font(.system(size: 10.5, weight: .heavy))
+                        .foregroundStyle(ChatPalette.accent)
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 
     private var fundControl: some View {

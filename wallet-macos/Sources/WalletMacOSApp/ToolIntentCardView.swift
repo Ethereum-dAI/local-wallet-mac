@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import WalletToolLayer
 
@@ -41,6 +42,10 @@ struct ToolIntentCardView: View {
     let executionStatus: ChatIntentExecutionStatus
     let transferPreflightStatus: ChatTransferPreflightStatus?
     let swapPreflightStatus: ChatSwapPreflightStatus?
+    /// Non-nil when the bundler is out of gas and would refuse to relay this intent. The card
+    /// declines before the Secure Enclave prompt instead of letting the daemon reject a
+    /// UserOperation the user already signed.
+    let bundlerGasStatus: BundlerGasStatus?
     let signingPreview: ChatSigningPreview?
     let onConfirm: () -> Void
     let onReject: () -> Void
@@ -51,6 +56,7 @@ struct ToolIntentCardView: View {
     @State private var showingEditSheet = false
     @State private var showingFeedbackSheet = false
     @State private var feedbackNote = ""
+    @State private var copiedBundlerAddress = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -88,6 +94,8 @@ struct ToolIntentCardView: View {
 
             swapPreflightRow
 
+            bundlerGasRow
+
             signingPreviewRow
 
             executionStatusRow
@@ -97,16 +105,21 @@ struct ToolIntentCardView: View {
             switch intent.disposition {
             case .pending:
                 HStack(spacing: 8) {
+                    // Edit is disabled alongside confirm while the bundler is out of gas:
+                    // "Save & confirm" executes, so leaving it live would just no-op.
                     Button("Edit") { showingEditSheet = true }
                         .buttonStyle(.bordered)
-                        .disabled(isExecutionRunning)
+                        .disabled(isExecutionRunning || isBlockedByBundlerGas)
                     Button("Reject", role: .destructive, action: onReject)
                         .buttonStyle(.bordered)
                         .disabled(isExecutionRunning)
                     Spacer()
-                    Button("Looks good", action: onConfirm)
+                    Button(isBlockedByBundlerGas ? "Can't send" : "Looks good", action: onConfirm)
                         .buttonStyle(.borderedProminent)
                         .disabled(isExecutionRunning || !canConfirm)
+                        .help(isBlockedByBundlerGas
+                              ? "\(BundlerGasStatus.warningTitle) — top it up to enable this."
+                              : "Sign and submit this intent")
                 }
             case .confirmed:
                 HStack(spacing: 6) {
@@ -164,13 +177,23 @@ struct ToolIntentCardView: View {
     }
 
     private var shouldShowSigningPreview: Bool {
+        // Suppress while blocked: the signing preview promises a Secure Enclave prompt that
+        // the bundler-gas row has just ruled out.
+        guard isBlockedByBundlerGas == false else {
+            return false
+        }
         if case .idle = executionStatus {
             return true
         }
         return false
     }
 
+    private var isBlockedByBundlerGas: Bool { bundlerGasStatus?.needsGas == true }
+
     private var canConfirm: Bool {
+        if isBlockedByBundlerGas {
+            return false
+        }
         switch transferPreflightStatus {
         case .resolving, .failed:
             return false
@@ -344,6 +367,50 @@ struct ToolIntentCardView: View {
         }
     }
 
+    /// The pre-flight decline: the bundler cannot pay for this transaction, so nothing is
+    /// signed or submitted. Offers the address to top up from another wallet.
+    @ViewBuilder
+    private var bundlerGasRow: some View {
+        if let bundlerGasStatus, isBlockedByBundlerGas {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(BundlerGasStatus.warningTitle)
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                }
+                Text(bundlerGasStatus.declineDetail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    if let address = bundlerGasStatus.address {
+                        Button(copiedBundlerAddress ? "Copied" : "Copy bundler address") {
+                            copyBundlerAddress(address)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    if let faucetURL = bundlerGasStatus.faucetURL {
+                        Link("Open \(bundlerGasStatus.networkLabel) faucet", destination: faucetURL)
+                            .font(.caption2.bold())
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func copyBundlerAddress(_ address: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(address, forType: .string)
+        copiedBundlerAddress = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
+            copiedBundlerAddress = false
+        }
+    }
+
     @ViewBuilder
     private var signingPreviewRow: some View {
         if shouldShowSigningPreview, let signingPreview {
@@ -434,12 +501,16 @@ struct ToolIntentCardView: View {
             }
             .padding(.vertical, 4)
         case .idle:
-            Text(intent.tool == .transfer
-                 ? "Review before signing. Confirmation will request Secure Enclave approval and submit onchain."
-                 : "Review before confirming this tool intent.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .italic()
+            // Nothing to promise while blocked — the bundler-gas row above already says the
+            // send is refused, and this line would contradict it.
+            if isBlockedByBundlerGas == false {
+                Text(intent.tool == .transfer
+                     ? "Review before signing. Confirmation will request Secure Enclave approval and submit onchain."
+                     : "Review before confirming this tool intent.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .italic()
+            }
         }
     }
 

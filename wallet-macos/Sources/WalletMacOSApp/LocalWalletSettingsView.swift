@@ -198,6 +198,9 @@ struct LocalWalletSettingsSnapshot: Equatable {
     let kernelAccountBalance: String
     let relayerAddress: String
     let relayerState: String
+    /// The relayer is under the daemon's low-balance threshold, so every send is refused.
+    /// A flag rather than a match on `relayerState`, whose wording is display copy.
+    let relayerNeedsGas: Bool
     let relayerBalance: String
     let relayerKeyRef: String
     let relayerLifecycle: String
@@ -1358,7 +1361,7 @@ struct LocalWalletSettingsView: View {
                         value: snapshot.relayerState,
                         detail: "\(snapshot.relayerBalance) available",
                         systemImage: "fuelpump.fill",
-                        tint: snapshot.relayerState == "Needs top-up" ? SettingsPalette.orange : SettingsPalette.green
+                        tint: snapshot.relayerNeedsGas ? SettingsPalette.orange : SettingsPalette.green
                     )
                 }
             }
@@ -1404,7 +1407,7 @@ struct LocalWalletSettingsView: View {
                             value: snapshot.relayerBalance,
                             detail: snapshot.relayerLifecycle,
                             systemImage: "fuelpump.fill",
-                            tint: snapshot.relayerState == "Needs top-up" ? SettingsPalette.orange : SettingsPalette.green
+                            tint: snapshot.relayerNeedsGas ? SettingsPalette.orange : SettingsPalette.green
                         )
                         SettingsInfoItem(
                             title: "Pending funding",

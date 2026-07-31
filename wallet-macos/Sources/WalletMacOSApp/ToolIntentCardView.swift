@@ -46,6 +46,7 @@ struct ToolIntentCardView: View {
     let onReject: () -> Void
     let onEdit: ([String: String]) -> Void
     let onFeedback: (ToolIntentFeedback.Rating, String?) -> Void
+    let onSubmitWithGasHeadroom: (UInt64) -> Void
 
     @State private var showingEditSheet = false
     @State private var showingFeedbackSheet = false
@@ -200,6 +201,8 @@ struct ToolIntentCardView: View {
             return "paperplane.circle.fill"
         case .failed:
             return "exclamationmark.triangle.fill"
+        case .gasEstimationUnavailable:
+            return "exclamationmark.triangle.fill"
         case .idle:
             return "checkmark.circle.fill"
         }
@@ -212,6 +215,8 @@ struct ToolIntentCardView: View {
         case .submitted(_, _, let success):
             return success == false ? .red : .green
         case .failed:
+            return .orange
+        case .gasEstimationUnavailable:
             return .orange
         case .idle:
             return .green
@@ -232,6 +237,8 @@ struct ToolIntentCardView: View {
             return txHash == nil ? "Submitted; receipt pending" : "Submitted onchain"
         case .failed(let message):
             return message
+        case .gasEstimationUnavailable:
+            return "Gas estimation unavailable — action required above."
         case .idle:
             return "Confirmed at \(Self.timeFormatter.string(from: intent.updatedAt))"
         }
@@ -397,6 +404,35 @@ struct ToolIntentCardView: View {
                 .font(.caption.bold())
                 .foregroundStyle(.orange)
                 .padding(.vertical, 4)
+        case let .gasEstimationUnavailable(detail, suggestedCallGasLimit):
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("Gas estimation unavailable — check your RPC.")
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                }
+                Text(detail)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                Text("""
+                You can submit with a \(suggestedCallGasLimit.formatted()) gas headroom instead. \
+                Your account must hold enough ETH to cover that limit up front, and EntryPoint \
+                charges a 10% penalty on whatever the transaction does not use.
+                """)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Submit with gas headroom") {
+                    onSubmitWithGasHeadroom(suggestedCallGasLimit)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(.vertical, 4)
         case .idle:
             Text(intent.tool == .transfer
                  ? "Review before signing. Confirmation will request Secure Enclave approval and submit onchain."

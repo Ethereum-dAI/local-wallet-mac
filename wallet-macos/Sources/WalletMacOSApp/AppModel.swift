@@ -1771,12 +1771,14 @@ final class AppModel: ObservableObject {
         recipient: String,
         amountETH: String,
         logContext: String = "transfer",
-        signingReason: String? = nil
+        signingReason: String? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationSendResult {
         try await executeTransfer(
             intent: .nativeTransfer(recipient: recipient, amountETH: amountETH),
             logContext: logContext,
-            signingReason: signingReason ?? "Authorize ETH transfer on \(activeChain.name)"
+            signingReason: signingReason ?? "Authorize ETH transfer on \(activeChain.name)",
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit
         )
     }
 
@@ -1785,12 +1787,14 @@ final class AppModel: ObservableObject {
         recipient: String,
         amount: String,
         logContext: String = "transfer",
-        signingReason: String? = nil
+        signingReason: String? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationSendResult {
         try await executeTransfer(
             intent: .erc20Transfer(token: token, recipient: recipient, amount: amount),
             logContext: logContext,
-            signingReason: signingReason ?? "Authorize \(amount) \(token.symbol) transfer on \(activeChain.name)"
+            signingReason: signingReason ?? "Authorize \(amount) \(token.symbol) transfer on \(activeChain.name)",
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit
         )
     }
 
@@ -1889,7 +1893,8 @@ final class AppModel: ObservableObject {
         from tokenIn: WalletToken,
         to tokenOut: WalletToken,
         logContext: String = "swap",
-        signingReason: String? = nil
+        signingReason: String? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationSendResult {
         guard let walletAddress = walletRecord?.kernelAccountAddress else {
             throw AppError.invalidCounterfactualAddress
@@ -1906,7 +1911,8 @@ final class AppModel: ObservableObject {
         return try await executeTransfer(
             intent: .exactInputSwap(request),
             logContext: logContext,
-            signingReason: signingReason ?? defaultSigningReason
+            signingReason: signingReason ?? defaultSigningReason,
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit
         )
     }
 
@@ -1938,7 +1944,8 @@ final class AppModel: ObservableObject {
     private func executeTransfer(
         intent: TransactionIntent,
         logContext: String,
-        signingReason: String
+        signingReason: String,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationSendResult {
         // Lazily install the session permission on its first use (a separate
         // passkey-validated op) so the one-time install runs in execution and is
@@ -1948,7 +1955,8 @@ final class AppModel: ObservableObject {
             logContext: logContext,
             signingReason: signingReason,
             intent: intent,
-            historyDraft: historyDraft(for: intent)
+            historyDraft: historyDraft(for: intent),
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit
         ) { [self] buildContext in
             try await buildUserOperationDraft(
                 intent: intent,

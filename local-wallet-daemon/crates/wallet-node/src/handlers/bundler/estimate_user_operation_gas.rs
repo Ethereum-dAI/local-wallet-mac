@@ -850,10 +850,15 @@ mod tests {
         );
 
         // Wrong types and non-hex values are invalid params, not silent Nones.
+        // Covers: a non-object third param, a non-string value under the key,
+        // a string missing the `0x` prefix, and a `0x`-prefixed string with
+        // non-hex digits.
         for bad in [
             json!(7),
             json!("nope"),
             json!({ "acknowledgedCallGasLimit": 7 }),
+            json!({ "acknowledgedCallGasLimit": "12345" }),
+            json!({ "acknowledgedCallGasLimit": "0xzz" }),
         ] {
             let mut params = base.clone();
             params.push(bad);

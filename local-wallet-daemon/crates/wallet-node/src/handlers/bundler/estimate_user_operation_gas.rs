@@ -367,27 +367,34 @@ fn call_reverted(data: &[u8]) -> wallet_node_api::JsonRpcError {
 ///
 /// This is the *only* place `acknowledged_call_gas_limit` is consulted, which is
 /// what makes the override invariant structural: it can never override a
-/// successful estimate, and never suppress a revert.
+/// successful estimate, and never suppress a revert. The suggestion is
+/// re-derived from the op actually being estimated on every call (not cached
+/// from an earlier attempt), so a client-supplied acknowledgement can raise the
+/// call-gas limit but never lower it below what this op's own calldata implies.
 fn unavailable(
     op: &UserOperation,
     policy: &wallet_bundler::BundlerPolicy,
     acknowledged_call_gas_limit: Option<U256>,
     error: ChainError,
 ) -> Result<U256, wallet_node_api::JsonRpcError> {
-    if let Some(limit) = acknowledged_call_gas_limit {
-        tracing::warn!(
-            error = %error,
-            sender = format_args!("{:#x}", op.sender),
-            acknowledged_call_gas_limit = %limit,
-            "account call gas estimate unavailable; client acknowledged submitting with headroom"
-        );
-        return Ok(limit);
-    }
-
     let suggested = wallet_bundler::suggested_unestimated_call_gas_limit(
         &op.call_data,
         policy.max_call_gas_limit,
     );
+
+    if let Some(limit) = acknowledged_call_gas_limit {
+        let floored = limit.max(suggested);
+        tracing::warn!(
+            error = %error,
+            sender = format_args!("{:#x}", op.sender),
+            acknowledged_call_gas_limit = %limit,
+            suggested_call_gas_limit = %suggested,
+            floored_call_gas_limit = %floored,
+            "account call gas estimate unavailable; client acknowledged submitting with headroom"
+        );
+        return Ok(floored);
+    }
+
     tracing::warn!(
         error = %error,
         sender = format_args!("{:#x}", op.sender),
@@ -453,12 +460,47 @@ mod tests {
     use std::sync::Arc;
 
     use alloy_primitives::{Address, Bytes, B256, U256};
-    use alloy_sol_types::{Revert, SolError};
+    use alloy_sol_types::{sol, Revert, SolCall, SolError, SolValue};
     use serde_json::json;
     use wallet_bundler::UserOperation;
     use wallet_chain::{BlockTag, CallRequest, MockChainAdapter};
 
     use crate::state::DaemonState;
+
+    // Local re-declaration of the ERC-7579 `execute(bytes32,bytes)` selector and
+    // `Execution` tuple shape, scoped to this test module, so batch calldata can
+    // be built without reaching into `wallet_bundler::execution`'s private items.
+    // ABI encoding is structural, not name-based, so this round-trips through
+    // `wallet_bundler::decode_erc7579_executions` identically to the real type.
+    sol! {
+        struct BatchExecution {
+            address target;
+            uint256 value;
+            bytes callData;
+        }
+        function execute(bytes32 mode, bytes executionCalldata);
+    }
+
+    fn encode_batch_call_data(executions: &[(Address, U256, Bytes)]) -> Bytes {
+        let mut mode = [0u8; 32];
+        mode[0] = 0x01;
+        let items: Vec<BatchExecution> = executions
+            .iter()
+            .map(|(target, value, call_data)| BatchExecution {
+                target: *target,
+                value: *value,
+                callData: call_data.clone(),
+            })
+            .collect();
+
+        Bytes::from(
+            executeCall {
+                mode: mode.into(),
+                executionCalldata: Bytes::from(items.abi_encode()),
+            }
+            .abi_encode(),
+        )
+    }
 
     fn account_call_request(op: &UserOperation, entry_point: Address) -> CallRequest {
         CallRequest {
@@ -476,6 +518,19 @@ mod tests {
             U256::from(10_000_000_000_000_000u64),
             Bytes::from(vec![0xab; 8]),
         );
+        op
+    }
+
+    // 2 sub-executions -> suggested_unestimated_call_gas_limit = 200_000 base +
+    // 400_000 per execution * 2 = 1_000_000.
+    fn op_with_batch_call_data() -> UserOperation {
+        let mut op = sub_floor_user_operation();
+        let target = Address::from([0x33; 20]);
+        let inner = Bytes::from(vec![0xab; 8]);
+        op.call_data = encode_batch_call_data(&[
+            (target, U256::from(10_000_000_000_000_000u64), inner.clone()),
+            (target, U256::from(10_000_000_000_000_000u64), inner),
+        ]);
         op
     }
 
@@ -815,6 +870,60 @@ mod tests {
         .expect("an acknowledged limit must be honored when estimation is unavailable");
 
         assert_eq!(gas, U256::from(2_000_000u64));
+    }
+
+    #[tokio::test]
+    async fn acknowledged_headroom_below_the_freshly_derived_suggestion_is_floored_to_it() {
+        // Regression guard for Finding 1: the suggestion must be re-derived from
+        // the op actually being estimated on every call, not trusted from an
+        // earlier attempt. A batch op suggests 1_000_000 (200_000 base +
+        // 400_000 * 2 executions); an acknowledgement of 600_000 -- correct for
+        // a *single*-execution op -- must be raised to the batch op's own floor,
+        // not submitted as-is.
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let entry_point = wallet_bundler::ENTRY_POINT_V07;
+        let op = op_with_batch_call_data();
+        let block = BlockTag::Hash(B256::from([9; 32]));
+
+        // No mocks: eth_call resolves to a chain error, so estimation is
+        // unavailable and the acknowledged limit is consulted.
+        let gas = super::estimate_account_call_gas(
+            &state,
+            entry_point,
+            &op,
+            block,
+            &test_policy(),
+            Some(U256::from(600_000u64)),
+        )
+        .await
+        .expect("a below-suggestion acknowledgement must still be honored, floored up");
+
+        assert_eq!(gas, U256::from(1_000_000u64));
+    }
+
+    #[tokio::test]
+    async fn acknowledged_headroom_above_the_suggestion_is_returned_unchanged() {
+        // Companion to the floor test above: an acknowledgement that already
+        // covers the freshly-derived suggestion must not be clamped down to it.
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let entry_point = wallet_bundler::ENTRY_POINT_V07;
+        let op = op_with_batch_call_data();
+        let block = BlockTag::Hash(B256::from([9; 32]));
+
+        let gas = super::estimate_account_call_gas(
+            &state,
+            entry_point,
+            &op,
+            block,
+            &test_policy(),
+            Some(U256::from(3_000_000u64)),
+        )
+        .await
+        .expect("an above-suggestion acknowledgement must be returned unchanged");
+
+        assert_eq!(gas, U256::from(3_000_000u64));
     }
 
     #[test]

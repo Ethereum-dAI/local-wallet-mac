@@ -3310,7 +3310,7 @@ enum TerminalUserOperationStatus {
 
 enum ReplacementActionFailurePolicy {
     static func shouldMarkLocalHistoryFailed(_ error: Error) -> Bool {
-        guard case let WalletNodeClient.ClientError.rpcError(_, code, _, reason, _) = error,
+        guard case let WalletNodeClient.ClientError.rpcError(_, code, _, reason, _, _) = error,
               code == -32011
         else {
             return false
@@ -3319,7 +3319,7 @@ enum ReplacementActionFailurePolicy {
     }
 
     static func displayMessage(action: String, error: Error) -> String {
-        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason, _) = error,
+        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason, _, _) = error,
               code == -32011
         else {
             return "\(action) failed: \(error.localizedDescription)"
@@ -3381,7 +3381,7 @@ enum ReconcilerLoopStep {
 
 enum WalletNodeWarmupRetryPolicy {
     static func isWarmupError(_ error: Error) -> Bool {
-        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason, _) = error else {
+        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason, _, _) = error else {
             return false
         }
         if code == -32010 {
@@ -3397,6 +3397,7 @@ enum WalletNodeWarmupRetryPolicy {
              "rpc_error",
              "block_not_found",
              "chain_internal_error",
+             "gas_estimation_unavailable",
              "state_override_smoke_pending":
             return true
         case nil:

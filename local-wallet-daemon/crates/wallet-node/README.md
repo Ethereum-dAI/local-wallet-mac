@@ -165,6 +165,27 @@ Notes:
 - `policy.max_request_body_bytes` (default `262144`) is enforced by the transport handler before JSON-RPC parsing; bodies above the cap are rejected with `PAYLOAD_TOO_LARGE`.
 - `[rate_limits]` configures token-bucket rate limits per method bucket. Defaults: `eth_sendUserOperation` 3 burst @ 0.166/sec, `eth_estimateUserOperationGas` 10 burst @ 1/sec, `read_methods_total` 20 burst @ 1.66/sec. Methods without a bucket bypass the limiter.
 
+### Gas estimation failure behaviour
+
+`localwallet_estimateUserOperationGas` **fails closed**. If the account-call-gas
+estimate cannot run — light-client proof fetch failure, RPC transport error,
+stale state — the daemon returns `-32002` with
+`data.reason = "gas_estimation_unavailable"` rather than substituting a floor.
+Returning a low-but-plausible limit would produce a UserOp that is signed,
+submitted, and guaranteed to run out of gas on-chain, which costs the user more
+than refusing.
+
+The response carries `suggestedCallGasLimit`, scaled to the number of ERC-7579
+sub-executions in the call and clamped to `policy.max_call_gas_limit`. A client
+may echo it back as `acknowledgedCallGasLimit` in an optional third parameter to
+submit with that headroom. That override applies **only** when estimation is
+unavailable: it never overrides a successful estimate, and never suppresses a
+revert.
+
+Reverts are detected via `eth_call`, not `eth_estimateGas`. In `helios` read mode
+the light client returns `Ok(gas_used)` for reverted and halted executions alike,
+so `eth_estimateGas` cannot distinguish a successful call from a reverting one.
+
 ## JSON-RPC Methods
 
 Wallet methods:

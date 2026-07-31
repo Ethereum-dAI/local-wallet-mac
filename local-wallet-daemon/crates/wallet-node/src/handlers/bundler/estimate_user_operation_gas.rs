@@ -344,6 +344,7 @@ async fn estimate_account_call_gas(
     match state.chain.eth_call(tx.clone(), block, None).await {
         Ok(_) => {}
         Err(ChainError::CallReverted(data)) => return Err(call_reverted(&data)),
+        Err(error) if is_execution_halted(&error) => return Err(execution_halted()),
         Err(error) => {
             return unavailable(op, policy, acknowledged_call_gas_limit, error);
         }
@@ -352,6 +353,7 @@ async fn estimate_account_call_gas(
     match state.chain.eth_estimate_gas(tx, Some(block), None).await {
         Ok(gas) => Ok(with_safety_margin(U256::from(gas)).max(U256::from(ACCOUNT_CALL_GAS_FLOOR))),
         Err(ChainError::CallReverted(data)) => Err(call_reverted(&data)),
+        Err(error) if is_execution_halted(&error) => Err(execution_halted()),
         Err(error) => unavailable(op, policy, acknowledged_call_gas_limit, error),
     }
 }
@@ -360,6 +362,29 @@ fn call_reverted(data: &[u8]) -> wallet_node_api::JsonRpcError {
     super::map_bundler_error(BundlerError::SimulationFailed {
         reason: wallet_bundler::simulation_revert_reason(data),
     })
+}
+
+/// Same shape as [`call_reverted`] (`SIMULATION_FAILED`), but with a reason
+/// string of its own rather than reusing `reverted_without_data`: that string
+/// already means "reverted with empty revert data", which is a different,
+/// EVM-signalled outcome from a Halt (invalid opcode, precompile error,
+/// call-depth exceeded) that Helios's Display text collapses onto the same
+/// "no usable revert bytes" shape. Keeping the reason distinct preserves that
+/// distinction for anyone reading logs or the RPC error `data.reason`.
+fn execution_halted() -> wallet_node_api::JsonRpcError {
+    super::map_bundler_error(BundlerError::SimulationFailed {
+        reason: "execution_halted".to_string(),
+    })
+}
+
+/// Helios reports an EVM Halt as `EvmError::Revert(None)`, whose Display text is
+/// "execution reverted: execution halted" — not hex, so the adapter's revert
+/// parser rejects it and it arrives here as `ChainError::Helios` rather than
+/// `CallReverted`. A halt is a deterministic execution failure, not an
+/// unavailable estimate: retrying it and then buying gas headroom cannot help,
+/// so classify it as a revert and fail with a reason instead.
+fn is_execution_halted(error: &ChainError) -> bool {
+    matches!(error, ChainError::Helios(message) if message.contains("execution halted"))
 }
 
 /// Estimation could not run. Fails closed unless the client explicitly
@@ -463,7 +488,7 @@ mod tests {
     use alloy_sol_types::{sol, Revert, SolCall, SolError, SolValue};
     use serde_json::json;
     use wallet_bundler::UserOperation;
-    use wallet_chain::{BlockTag, CallRequest, MockChainAdapter};
+    use wallet_chain::{BlockTag, CallRequest, ChainError, MockChainAdapter};
 
     use crate::state::DaemonState;
 
@@ -924,6 +949,66 @@ mod tests {
         .expect("an above-suggestion acknowledgement must be returned unchanged");
 
         assert_eq!(gas, U256::from(3_000_000u64));
+    }
+
+    #[tokio::test]
+    async fn eth_call_evm_halt_is_reported_as_simulation_failed_not_unavailable() {
+        // Regression guard for Finding 2: Helios reports an EVM Halt as
+        // `EvmError::Revert(None)`, whose Display text ("execution reverted:
+        // execution halted") is not hex, so the adapter's revert parser can't
+        // turn it into `ChainError::CallReverted` and it arrives here as a
+        // plain `ChainError::Helios`. That must not be classified alongside a
+        // transient transport failure (`gas_estimation_unavailable`): a halt is
+        // deterministic, so retrying and buying gas headroom cannot help.
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let entry_point = wallet_bundler::ENTRY_POINT_V07;
+        let op = op_with_call_data();
+        let block = BlockTag::Hash(B256::from([9; 32]));
+
+        chain.inject_error(Box::new(|| {
+            ChainError::Helios("execution reverted: execution halted".to_string())
+        }));
+
+        let error =
+            super::estimate_account_call_gas(&state, entry_point, &op, block, &test_policy(), None)
+                .await
+                .expect_err("an EVM halt must be reported as a simulation failure");
+
+        assert_eq!(error.code, wallet_node_api::SIMULATION_FAILED);
+        let data = error.data.expect("data is present");
+        assert_eq!(data["reason"], "execution_halted");
+    }
+
+    #[tokio::test]
+    async fn eth_estimate_gas_evm_halt_is_reported_as_simulation_failed_not_unavailable() {
+        // Same check applied to the eth_estimate_gas gate, for consistency:
+        // eth_call must succeed (so the flow reaches eth_estimate_gas) and only
+        // eth_estimate_gas sees the halt.
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let entry_point = wallet_bundler::ENTRY_POINT_V07;
+        let op = op_with_call_data();
+        let block = BlockTag::Hash(B256::from([9; 32]));
+
+        chain.set_call_response(
+            account_call_request(&op, entry_point),
+            block,
+            None,
+            Bytes::new(),
+        );
+        chain.inject_gas_estimate_error(Box::new(|| {
+            ChainError::Helios("execution reverted: execution halted".to_string())
+        }));
+
+        let error =
+            super::estimate_account_call_gas(&state, entry_point, &op, block, &test_policy(), None)
+                .await
+                .expect_err("an EVM halt from eth_estimate_gas must also be a simulation failure");
+
+        assert_eq!(error.code, wallet_node_api::SIMULATION_FAILED);
+        let data = error.data.expect("data is present");
+        assert_eq!(data["reason"], "execution_halted");
     }
 
     #[test]

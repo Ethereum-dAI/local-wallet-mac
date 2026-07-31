@@ -47,6 +47,7 @@ struct MockState {
     current_max_priority_fee_per_gas: Option<U256>,
     error_factory: Option<ErrorFactory>,
     current_head_error_factory: Option<ErrorFactory>,
+    gas_estimate_error_factory: Option<ErrorFactory>,
 }
 
 impl MockChainAdapter {
@@ -167,6 +168,14 @@ impl MockChainAdapter {
 
     pub fn inject_current_head_error(&self, error_factory: ErrorFactory) -> &Self {
         self.state().current_head_error_factory = Some(error_factory);
+        self
+    }
+
+    /// Injects an error for `eth_estimate_gas` only, distinct from the generic
+    /// `inject_error`, so a test can make `eth_call` succeed while
+    /// `eth_estimate_gas` fails -- exercising the two call sites independently.
+    pub fn inject_gas_estimate_error(&self, error_factory: ErrorFactory) -> &Self {
+        self.state().gas_estimate_error_factory = Some(error_factory);
         self
     }
 
@@ -325,6 +334,13 @@ impl ChainAdapter for MockChainAdapter {
     ) -> Result<u64, ChainError> {
         self.estimate_gas_calls.fetch_add(1, Ordering::SeqCst);
         let state = self.state();
+        if let Some(error) = state
+            .gas_estimate_error_factory
+            .as_ref()
+            .map(|factory| factory())
+        {
+            return Err(error);
+        }
         if let Some(error) = Self::injected_error(&state) {
             return Err(error);
         }

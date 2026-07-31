@@ -29,10 +29,12 @@ pub use allowlist::{
 pub use entry_point::{encode_empty_handle_ops, encode_handle_ops, ENTRY_POINT_V07};
 pub use error::{BundlerError, Result};
 pub use execution::{
-    decode_entry_point_withdraw_to, decode_erc7579_single_execution,
+    decode_entry_point_withdraw_to, decode_erc7579_executions, decode_erc7579_single_execution,
     encode_entry_point_withdraw_to, encode_erc7579_single_execution,
-    validate_entry_point_reclaim_break_glass, EntryPointReclaimBreakGlass,
-    EntryPointReclaimBreakGlassError, EntryPointWithdrawTo, Erc7579SingleExecution,
+    suggested_unestimated_call_gas_limit, validate_entry_point_reclaim_break_glass,
+    EntryPointReclaimBreakGlass, EntryPointReclaimBreakGlassError, EntryPointWithdrawTo,
+    Erc7579SingleExecution, UNESTIMATED_BASE_CALL_GAS_HEADROOM,
+    UNESTIMATED_PER_EXECUTION_CALL_GAS_HEADROOM,
 };
 pub use funding::{
     displayed_topup_minimum, gas_shortfall, minimum_account_balance,

@@ -24,6 +24,11 @@ pub const ACCOUNT_CODE_NOT_ALLOWLISTED: i64 = -32016;
 pub const SERVICE_UNAVAILABLE: i64 = -32099;
 pub const MAX_REQUEST_BODY_BYTES: usize = 262_144;
 
+/// `data.reason` for a `NOT_READY` raised when account-call-gas estimation could
+/// not run. Distinct from `SIMULATION_FAILED`, which means the simulation ran and
+/// the call reverted.
+pub const REASON_GAS_ESTIMATION_UNAVAILABLE: &str = "gas_estimation_unavailable";
+
 impl JsonRpcError {
     pub fn method_not_found(method: &str) -> Self {
         Self {
@@ -134,6 +139,26 @@ impl JsonRpcError {
             data: Some(json!({
                 "current": current,
                 "supportedMinimum": supported_minimum,
+            })),
+        }
+    }
+
+    /// Estimation could not run (transport, light-client proof fetch, stale
+    /// state). Deliberately `NOT_READY` rather than `SIMULATION_FAILED`: nothing
+    /// was simulated, and the app's warm-up retry policy already backs off on
+    /// `NOT_READY`. `suggested_call_gas_limit` is a hex quantity the client may
+    /// echo back as `acknowledgedCallGasLimit` to submit with headroom.
+    pub fn gas_estimation_unavailable(
+        detail: impl ToString,
+        suggested_call_gas_limit: &str,
+    ) -> Self {
+        Self {
+            code: NOT_READY,
+            message: format!("Not ready: {REASON_GAS_ESTIMATION_UNAVAILABLE}"),
+            data: Some(json!({
+                "reason": REASON_GAS_ESTIMATION_UNAVAILABLE,
+                "detail": detail.to_string(),
+                "suggestedCallGasLimit": suggested_call_gas_limit,
             })),
         }
     }
@@ -280,6 +305,29 @@ mod tests {
     }
 
     #[test]
+    fn gas_estimation_unavailable_reuses_not_ready_without_a_new_code() {
+        let error = JsonRpcError::gas_estimation_unavailable(
+            "helios_error: proof fetch failed",
+            "0x1e8480",
+        );
+
+        assert_eq!(error.code, NOT_READY);
+        let data = error.data.expect("data is present");
+        assert_eq!(data["reason"], REASON_GAS_ESTIMATION_UNAVAILABLE);
+        assert_eq!(data["detail"], "helios_error: proof fetch failed");
+        assert_eq!(data["suggestedCallGasLimit"], "0x1e8480");
+    }
+
+    #[test]
+    fn gas_estimation_unavailable_reason_is_stable() {
+        // The app matches on this exact string in WalletNodeWarmupRetryPolicy.
+        assert_eq!(
+            REASON_GAS_ESTIMATION_UNAVAILABLE,
+            "gas_estimation_unavailable"
+        );
+    }
+
+    #[test]
     fn data_shapes_are_stable() {
         // Pins the exact wire shape of `data` for each public error code.
         // Renumbering or restructuring `data` is a breaking change — this test
@@ -300,6 +348,10 @@ mod tests {
             (
                 JsonRpcError::body_too_large(300_000),
                 r#"{"actual":300000,"max":262144}"#,
+            ),
+            (
+                JsonRpcError::gas_estimation_unavailable("rpc timeout", "0x927c0"),
+                r#"{"detail":"rpc timeout","reason":"gas_estimation_unavailable","suggestedCallGasLimit":"0x927c0"}"#,
             ),
         ];
         for (err, expected_data) in cases {

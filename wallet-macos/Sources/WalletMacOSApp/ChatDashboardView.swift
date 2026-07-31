@@ -392,6 +392,57 @@ enum ChatIntentExecutionStatus: Equatable {
     case running(String)
     case submitted(userOpHash: String, transactionHash: String?, success: Bool?)
     case failed(String)
+    /// Estimation could not run. Distinct from `.failed` because it is
+    /// recoverable: the daemon told us what limit would work if the user
+    /// consents to submitting without a real estimate.
+    case gasEstimationUnavailable(detail: String, suggestedCallGasLimit: UInt64)
+
+    static func fromToolResponse(_ text: String) -> ChatIntentExecutionStatus? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let status = object["status"] as? String
+        else {
+            return nil
+        }
+
+        switch status {
+        case "submitted":
+            return .submitted(
+                userOpHash: object["user_op_hash"] as? String ?? "",
+                transactionHash: object["transaction_hash"] as? String,
+                success: object["success"] as? Bool
+            )
+        case "failed":
+            return .failed(object["error"] as? String ?? "Transaction failed")
+        case "gas_estimation_unavailable":
+            // UInt64(exactly:) rather than UInt64.init: this decodes a
+            // chat.sqlite round-trip, and a negative Int would trap.
+            guard let suggested = object["suggested_call_gas_limit"] as? UInt64
+                    ?? (object["suggested_call_gas_limit"] as? Int).flatMap(UInt64.init(exactly:))
+            else {
+                return .failed("Gas estimation unavailable")
+            }
+            return .gasEstimationUnavailable(
+                detail: object["detail"] as? String ?? "Gas estimation unavailable",
+                suggestedCallGasLimit: suggested
+            )
+        default:
+            return nil
+        }
+    }
+
+    static func gasEstimationUnavailable(from error: Error) -> ChatIntentExecutionStatus? {
+        guard case let WalletNodeClient.ClientError.rpcError(_, _, _, reason, detail, suggested) = error,
+              reason == "gas_estimation_unavailable",
+              let suggested
+        else {
+            return nil
+        }
+        return .gasEstimationUnavailable(
+            detail: detail ?? "Gas estimation unavailable",
+            suggestedCallGasLimit: suggested
+        )
+    }
 }
 
 enum ChatTransferPreflightStatus: Equatable {
@@ -1605,6 +1656,23 @@ private final class ChatDashboardModel: ObservableObject {
         }
     }
 
+    /// The user consented, from the execution status row, to submit with the
+    /// daemon-suggested `callGasLimit` after a real estimate could not run.
+    ///
+    /// Deliberately does not pass cached `transferPreflightStatus`/`swapPreview`
+    /// through, so `executeIfSupported` re-resolves ENS and re-quotes the swap
+    /// from scratch rather than reusing whatever was current on the first
+    /// attempt. That is the safer choice on its own -- calldata built from a
+    /// stale quote/resolution could differ from what the user actually
+    /// reviewed -- and it is now also required for correctness: the daemon
+    /// floors `acknowledgedCallGasLimit` against a suggestion it re-derives
+    /// from *this* retry's calldata, so a headroom value sized for a different
+    /// (e.g. smaller-batch) attempt can only be raised, never trusted as-is.
+    /// Do not "optimize" this into passing stale cached preflight state.
+    func retryIntentWithGasHeadroom(_ intent: ToolIntent, callGasLimit: UInt64) {
+        Task { await executeIfSupported(intent, acknowledgedCallGasLimit: callGasLimit) }
+    }
+
     func rejectIntent(_ message: ChatMessage) {
         _ = updateIntent(message, disposition: .rejected, args: nil)
     }
@@ -1662,24 +1730,11 @@ private final class ChatDashboardModel: ObservableObject {
         for message in messages.reversed()
         where message.kind == .toolResponse && message.toolCallId == intent.id.uuidString {
             guard let text = message.text,
-                  let data = text.data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let status = object["status"] as? String
+                  let status = ChatIntentExecutionStatus.fromToolResponse(text)
             else {
                 continue
             }
-
-            if status == "submitted" {
-                return .submitted(
-                    userOpHash: object["user_op_hash"] as? String ?? "",
-                    transactionHash: object["transaction_hash"] as? String,
-                    success: object["success"] as? Bool
-                )
-            }
-
-            if status == "failed" {
-                return .failed(object["error"] as? String ?? "Transaction failed")
-            }
+            return status
         }
 
         return .idle
@@ -2647,7 +2702,7 @@ private final class ChatDashboardModel: ObservableObject {
 
     /// `/shield <amount>` — deposit ETH into the RAILGUN pool. The sidecar builds the pool
     /// deposit tx(s); the OWNER self-submits them as a Kernel `execute` UserOp (passkey).
-    private func executeShield(intent: ToolIntent) async throws {
+    private func executeShield(intent: ToolIntent, acknowledgedCallGasLimit: UInt64? = nil) async throws {
         guard let amount = intent.args["amount"] else { throw AppError.invalidAmount }
         let amountWei = try EtherAmountParser.weiDecimalString(fromETHString: amount)
         let client = try await railgunHelperClient()
@@ -2656,7 +2711,8 @@ private final class ChatDashboardModel: ObservableObject {
         let result = try await walletModel.executeBatch(
             executions: executions,
             logContext: "chat-shield",
-            signingReason: "Authorize shielding \(amount) ETH into the RAILGUN pool on \(walletModel.activeChain.name)"
+            signingReason: "Authorize shielding \(amount) ETH into the RAILGUN pool on \(walletModel.activeChain.name)",
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit
         )
         appendShieldExecutionResult(result, amount: amount, for: intent)
         refreshShieldedBalanceUntilSettled()
@@ -2882,7 +2938,8 @@ private final class ChatDashboardModel: ObservableObject {
     private func executeIfSupported(
         _ intent: ToolIntent,
         transferPreflightStatus: ChatTransferPreflightStatus? = nil,
-        swapPreview: ChatSwapPreview? = nil
+        swapPreview: ChatSwapPreview? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) {
         guard intent.tool == .transfer || intent.tool == .swap
             || intent.tool == .shield || intent.tool == .unshield else {
@@ -2916,7 +2973,8 @@ private final class ChatDashboardModel: ObservableObject {
                             recipient: request.recipient,
                             amountETH: request.amount,
                             logContext: "chat-transfer",
-                            signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer to \(recipientLabel) on \(self.walletModel.activeChain.name)"
+                            signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer to \(recipientLabel) on \(self.walletModel.activeChain.name)",
+                            acknowledgedCallGasLimit: acknowledgedCallGasLimit
                         )
                     case .erc20:
                         result = try await self.walletModel.executeERC20Transfer(
@@ -2924,7 +2982,8 @@ private final class ChatDashboardModel: ObservableObject {
                             recipient: request.recipient,
                             amount: request.amount,
                             logContext: "chat-transfer",
-                            signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer to \(recipientLabel) on \(self.walletModel.activeChain.name)"
+                            signingReason: "Authorize \(request.amount) \(request.token.symbol) transfer to \(recipientLabel) on \(self.walletModel.activeChain.name)",
+                            acknowledgedCallGasLimit: acknowledgedCallGasLimit
                         )
                     }
                     self.appendExecutionResult(result, for: intent, request: request)
@@ -2942,12 +3001,18 @@ private final class ChatDashboardModel: ObservableObject {
                         from: request.fromToken,
                         to: request.toToken,
                         logContext: "chat-swap",
-                        signingReason: "\(signingAction) on \(self.walletModel.activeChain.name)"
+                        signingReason: "\(signingAction) on \(self.walletModel.activeChain.name)",
+                        acknowledgedCallGasLimit: acknowledgedCallGasLimit
                     )
                     self.appendSwapExecutionResult(result, for: intent, request: request)
                 case .shield:
-                    try await self.executeShield(intent: intent)
+                    try await self.executeShield(intent: intent, acknowledgedCallGasLimit: acknowledgedCallGasLimit)
                 case .unshield:
+                    // Intentionally drops acknowledgedCallGasLimit: unshield is
+                    // sidecar-relayed and never reaches daemon gas estimation, so
+                    // it cannot produce .gasEstimationUnavailable. Thread the
+                    // acknowledgement through if unshield ever moves onto the
+                    // 4337 paymaster path, or this becomes a silent no-op.
                     try await self.executeUnshield(intent: intent)
                 }
             } catch {
@@ -3271,6 +3336,26 @@ private final class ChatDashboardModel: ObservableObject {
         guard let conversationID = activeConversationIDIfPresent else {
             return
         }
+
+        if case let .gasEstimationUnavailable(detail, suggested)? =
+            ChatIntentExecutionStatus.gasEstimationUnavailable(from: error) {
+            appendMessage(
+                ChatMessage(
+                    kind: .toolResponse,
+                    role: .tool,
+                    text: jsonString([
+                        "status": "gas_estimation_unavailable",
+                        "intent_id": intent.id.uuidString,
+                        "detail": detail,
+                        "suggested_call_gas_limit": suggested,
+                    ]),
+                    toolCallId: intent.id.uuidString
+                ),
+                to: conversationID
+            )
+            return
+        }
+
         appendMessage(
             ChatMessage(
                 kind: .toolResponse,
@@ -4122,6 +4207,9 @@ struct LocalWalletChatDashboardView: View {
                                             },
                                             onFeedback: { rating, note in
                                                 model.submitIntentFeedback(for: message, rating: rating, note: note)
+                                            },
+                                            onSubmitWithGasHeadroom: { suggested in
+                                                model.retryIntentWithGasHeadroom(intent, callGasLimit: suggested)
                                             }
                                         )
                                         Spacer(minLength: 0)

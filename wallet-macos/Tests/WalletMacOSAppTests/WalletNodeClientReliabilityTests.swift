@@ -110,6 +110,61 @@ private func stubbedClient() -> WalletNodeClient {
     #expect(error.localizedDescription.contains("detail: out of sync: 42 blocks behind"))
 }
 
+@Test func decodesGasEstimationUnavailableError() throws {
+    let body = """
+    {"jsonrpc":"2.0","id":1,"error":{"code":-32002,\
+    "message":"Not ready: gas_estimation_unavailable",\
+    "data":{"reason":"gas_estimation_unavailable",\
+    "detail":"helios_error: proof fetch failed",\
+    "suggestedCallGasLimit":"0x927c0"}}}
+    """
+    let error = WalletNodeClient.decodeRPCError(
+        from: try #require(body.data(using: .utf8)),
+        method: "localwallet_estimateUserOperationGas"
+    )
+
+    guard case let .rpcError(_, code, _, reason, detail, suggested) = try #require(error) else {
+        Issue.record("expected an rpcError")
+        return
+    }
+    #expect(code == -32002)
+    #expect(reason == "gas_estimation_unavailable")
+    #expect(detail == "helios_error: proof fetch failed")
+    #expect(suggested == 600_000)
+}
+
+@Test func treatsGasEstimationUnavailableAsRetryable() {
+    let error = WalletNodeClient.ClientError.rpcError(
+        method: "localwallet_estimateUserOperationGas",
+        code: -32002,
+        message: "Not ready: gas_estimation_unavailable",
+        reason: "gas_estimation_unavailable",
+        detail: nil,
+        suggestedCallGasLimit: 600_000
+    )
+
+    #expect(WalletNodeWarmupRetryPolicy.isWarmupError(error))
+}
+
+@Test func encodesAcknowledgedCallGasLimitAsThirdParam() throws {
+    let params = WalletNodeClient.estimateGasParams(
+        userOperation: ["sender": "0x00"],
+        entryPoint: "0xEP",
+        acknowledgedCallGasLimit: 600_000
+    )
+
+    #expect(params.count == 3)
+    let options = try #require(params[2] as? [String: String])
+    #expect(options["acknowledgedCallGasLimit"] == "0x927c0")
+
+    let omitted = WalletNodeClient.estimateGasParams(
+        userOperation: ["sender": "0x00"],
+        entryPoint: "0xEP",
+        acknowledgedCallGasLimit: nil
+    )
+    #expect(omitted.count == 2)
+}
+
 @Test func decodesBundlerStatusReplacementBlock() throws {
     var json: [String: Any] = [
         "ready": true,

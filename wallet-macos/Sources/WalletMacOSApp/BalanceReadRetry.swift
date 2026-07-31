@@ -41,7 +41,7 @@ enum BalanceReadRetryPolicy {
         case let .transport(message):
             return containsTransientSignal(message)
                 || WalletNodeClient.isRecoverableUnixSocketFailure(clientError)
-        case let .rpcError(_, code, message, _, _):
+        case let .rpcError(_, code, message, _, _, _):
             // -32005 is EIP-1474 "limit exceeded". Providers also report throttling as a
             // generic internal error with the detail only in the message.
             if code == -32005 {

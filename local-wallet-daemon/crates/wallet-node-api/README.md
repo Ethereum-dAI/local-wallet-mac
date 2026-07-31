@@ -79,6 +79,13 @@ ERC-4337/bundler methods:
 - `localwallet_getUserOperationStatus`
 - `localwallet_getUserOperationGasPrice`
 
+`localwallet_estimateUserOperationGas` accepts
+`[userOperation, entryPoint, options?]` where `options` is
+`{ "acknowledgedCallGasLimit": "0x…" }`. Supplying it opts into submitting with
+that call-gas limit *only* when estimation is unavailable. It never overrides a
+successful estimate and never suppresses a revert. Values above
+`policy.max_call_gas_limit` are rejected with `-32006 { field: "callGasLimit" }`.
+
 ### Deprecated Aliases
 
 The following legacy bundler-shaped method names remain accepted on the wire for
@@ -132,7 +139,7 @@ Standard JSON-RPC range:
 Wallet-node range (`-32001` through `-32099`):
 
 - `-32001` UNAUTHORIZED — bearer token missing or invalid
-- `-32002` NOT_READY — daemon not ready (chain not synced, etc.)
+- `-32002` NOT_READY — daemon not ready (chain not synced, etc.); reasons include `gas_estimation_unavailable` (account-call-gas estimation could not run — `data` also carries `detail` and `suggestedCallGasLimit`)
 - `-32003` ENTRYPOINT_NOT_ALLOWLISTED — UserOp targets an EntryPoint the daemon does not support
 - `-32004` CHAIN_MISMATCH — UserOp's `chainId` differs from the daemon's configured chain
 - `-32005` RATE_LIMITED — method bucket exceeded

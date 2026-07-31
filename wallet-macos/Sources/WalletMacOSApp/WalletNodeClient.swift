@@ -211,7 +211,14 @@ struct WalletNodeClient {
     enum ClientError: LocalizedError {
         case invalidResponse
         case transport(String)
-        case rpcError(method: String, code: Int, message: String, reason: String?, detail: String? = nil)
+        case rpcError(
+            method: String,
+            code: Int,
+            message: String,
+            reason: String?,
+            detail: String? = nil,
+            suggestedCallGasLimit: UInt64? = nil
+        )
 
         var errorDescription: String? {
             switch self {
@@ -219,7 +226,7 @@ struct WalletNodeClient {
                 return "wallet-node returned an invalid response"
             case let .transport(message):
                 return message
-            case let .rpcError(method, code, message, reason, detail):
+            case let .rpcError(method, code, message, reason, detail, _):
                 var context: [String] = []
                 if let reason {
                     context.append(reason)
@@ -292,9 +299,30 @@ struct WalletNodeClient {
         }
     }
 
+    static func estimateGasParams(
+        userOperation: Any,
+        entryPoint: String,
+        acknowledgedCallGasLimit: UInt64?
+    ) -> [Any] {
+        var params: [Any] = [userOperation, entryPoint]
+        if let acknowledgedCallGasLimit {
+            // Only sent when the user has explicitly consented to submitting
+            // without a real estimate. The daemon validates this value
+            // unconditionally (it can reject with a policy-cap error before any
+            // estimation runs) and only *honours* it as the call-gas limit when
+            // estimation turns out to be unavailable -- a successful estimate
+            // or a detected revert always take precedence over it.
+            params.append([
+                "acknowledgedCallGasLimit": "0x" + String(acknowledgedCallGasLimit, radix: 16)
+            ])
+        }
+        return params
+    }
+
     func estimateUserOperationGas(
         draft: UserOperationDraft,
-        dummySignature: Data
+        dummySignature: Data,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationGasEstimate {
         let userOperation = rpcUserOperation(
             draft: draft,
@@ -309,7 +337,11 @@ struct WalletNodeClient {
         )
         let result = try await call(
             method: "localwallet_estimateUserOperationGas",
-            params: [userOperation, draft.entryPoint]
+            params: Self.estimateGasParams(
+                userOperation: userOperation,
+                entryPoint: draft.entryPoint,
+                acknowledgedCallGasLimit: acknowledgedCallGasLimit
+            )
         )
         guard let object = result as? [String: Any],
               let callGasLimit = object["callGasLimit"] as? String,
@@ -659,19 +691,8 @@ struct WalletNodeClient {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw ClientError.invalidResponse
         }
-        if let error = object["error"] as? [String: Any] {
-            let code = error["code"] as? Int ?? 0
-            let message = error["message"] as? String ?? "RPC error"
-            let errorData = error["data"] as? [String: Any]
-            let reason = Self.errorDataString(errorData?["reason"])
-            let detail = Self.errorDataString(errorData?["detail"])
-            throw ClientError.rpcError(
-                method: method,
-                code: code,
-                message: message,
-                reason: reason,
-                detail: detail
-            )
+        if object["error"] is [String: Any] {
+            throw Self.decodeRPCError(from: data, method: method) ?? ClientError.invalidResponse
         }
         guard let result = object["result"] else {
             throw ClientError.invalidResponse
@@ -726,6 +747,30 @@ struct WalletNodeClient {
 
     private func hexString(_ data: Data) -> String {
         "0x" + data.hexEncodedString
+    }
+
+    static func decodeRPCError(from data: Data, method: String) -> ClientError? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let error = object["error"] as? [String: Any]
+        else {
+            return nil
+        }
+        let errorData = error["data"] as? [String: Any]
+        return .rpcError(
+            method: method,
+            code: error["code"] as? Int ?? 0,
+            message: error["message"] as? String ?? "RPC error",
+            reason: errorDataString(errorData?["reason"]),
+            detail: errorDataString(errorData?["detail"]),
+            suggestedCallGasLimit: hexQuantity(errorData?["suggestedCallGasLimit"])
+        )
+    }
+
+    private static func hexQuantity(_ value: Any?) -> UInt64? {
+        guard let text = value as? String, text.hasPrefix("0x") else {
+            return nil
+        }
+        return UInt64(text.dropFirst(2), radix: 16)
     }
 
     private static func errorDataString(_ value: Any?) -> String? {

@@ -864,6 +864,28 @@ mod tests {
     }
 
     #[test]
+    fn helios_error_leaves_evm_halt_text_intact_for_halt_classification() {
+        // helios-core renders an EVM `Halt` as `EvmError::Revert(None)`, whose
+        // Display text is "execution reverted: execution halted". The bundler's
+        // gas estimator classifies a halt by looking for "execution halted" in
+        // the `ChainError::Helios` message, so this parser must not consume it:
+        // `extract_revert_value` splits on whitespace and yields the token
+        // "execution", which is non-empty, so `has_empty_revert_data` is false
+        // and the text falls through intact. If that parser is ever widened,
+        // the halt silently becomes `CallReverted` and the estimator reports a
+        // revert instead — this pins the boundary at the source.
+        match helios_error("execution reverted: execution halted") {
+            ChainError::Helios(message) => {
+                assert!(
+                    message.contains("execution halted"),
+                    "halt text must survive for the estimator's classifier: {message:?}"
+                );
+            }
+            other => panic!("expected Helios, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn helios_revert_parser_accepts_prefixed_and_quoted_revert_data() {
         let data = extract_revert_data(
             r#"provider error ("execution reverted: 0x810f00230000000000000000000000000000000000000000000000000000000000000001")"#,

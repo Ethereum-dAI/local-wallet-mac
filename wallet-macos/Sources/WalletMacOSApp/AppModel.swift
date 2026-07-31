@@ -1771,12 +1771,14 @@ final class AppModel: ObservableObject {
         recipient: String,
         amountETH: String,
         logContext: String = "transfer",
-        signingReason: String? = nil
+        signingReason: String? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationSendResult {
         try await executeTransfer(
             intent: .nativeTransfer(recipient: recipient, amountETH: amountETH),
             logContext: logContext,
-            signingReason: signingReason ?? "Authorize ETH transfer on \(activeChain.name)"
+            signingReason: signingReason ?? "Authorize ETH transfer on \(activeChain.name)",
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit
         )
     }
 
@@ -1785,12 +1787,14 @@ final class AppModel: ObservableObject {
         recipient: String,
         amount: String,
         logContext: String = "transfer",
-        signingReason: String? = nil
+        signingReason: String? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationSendResult {
         try await executeTransfer(
             intent: .erc20Transfer(token: token, recipient: recipient, amount: amount),
             logContext: logContext,
-            signingReason: signingReason ?? "Authorize \(amount) \(token.symbol) transfer on \(activeChain.name)"
+            signingReason: signingReason ?? "Authorize \(amount) \(token.symbol) transfer on \(activeChain.name)",
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit
         )
     }
 
@@ -1889,7 +1893,8 @@ final class AppModel: ObservableObject {
         from tokenIn: WalletToken,
         to tokenOut: WalletToken,
         logContext: String = "swap",
-        signingReason: String? = nil
+        signingReason: String? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationSendResult {
         guard let walletAddress = walletRecord?.kernelAccountAddress else {
             throw AppError.invalidCounterfactualAddress
@@ -1906,14 +1911,16 @@ final class AppModel: ObservableObject {
         return try await executeTransfer(
             intent: .exactInputSwap(request),
             logContext: logContext,
-            signingReason: signingReason ?? defaultSigningReason
+            signingReason: signingReason ?? defaultSigningReason,
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit
         )
     }
 
     func executeBatch(
         executions: [KernelExecutionRequest],
         logContext: String = "batch",
-        signingReason: String? = nil
+        signingReason: String? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationSendResult {
         try await executeUserOperation(
             logContext: logContext,
@@ -1923,7 +1930,8 @@ final class AppModel: ObservableObject {
                 operation: .batch,
                 amount: String(executions.count),
                 token: executions.count == 1 ? "call" : "calls"
-            )
+            ),
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit
         ) { [self] buildContext in
             try await buildUserOperationDraft(
                 executions: executions,
@@ -1936,7 +1944,8 @@ final class AppModel: ObservableObject {
     private func executeTransfer(
         intent: TransactionIntent,
         logContext: String,
-        signingReason: String
+        signingReason: String,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationSendResult {
         // Lazily install the session permission on its first use (a separate
         // passkey-validated op) so the one-time install runs in execution and is
@@ -1946,7 +1955,8 @@ final class AppModel: ObservableObject {
             logContext: logContext,
             signingReason: signingReason,
             intent: intent,
-            historyDraft: historyDraft(for: intent)
+            historyDraft: historyDraft(for: intent),
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit
         ) { [self] buildContext in
             try await buildUserOperationDraft(
                 intent: intent,
@@ -1962,6 +1972,7 @@ final class AppModel: ObservableObject {
         intent: TransactionIntent?,
         historyDraft: WalletTransactionDraft?,
         afterSubmit: ((String) -> Void)? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil,
         buildDraft: @escaping (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
@@ -1988,6 +1999,7 @@ final class AppModel: ObservableObject {
                 intent: intent,
                 historyDraft: historyDraft,
                 afterSubmit: afterSubmit,
+                acknowledgedCallGasLimit: acknowledgedCallGasLimit,
                 buildDraft: buildDraft
             )
             isSendingUserOperation = false
@@ -2005,6 +2017,7 @@ final class AppModel: ObservableObject {
         intent: TransactionIntent?,
         historyDraft: WalletTransactionDraft?,
         afterSubmit: ((String) -> Void)? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil,
         buildDraft: (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         appendLog("\(logContext): preparing transaction on \(activeChain.name)")
@@ -2043,7 +2056,8 @@ final class AppModel: ObservableObject {
                 draft,
                 logContext: logContext,
                 usePrecompiled: usePrecompiled,
-                sessionPlan: sessionPlan
+                sessionPlan: sessionPlan,
+                acknowledgedCallGasLimit: acknowledgedCallGasLimit
             )
         } catch {
             clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
@@ -2473,7 +2487,8 @@ final class AppModel: ObservableObject {
         _ draft: UserOperationDraft,
         logContext: String,
         usePrecompiled: Bool,
-        sessionPlan: SessionUserOperationPlan? = nil
+        sessionPlan: SessionUserOperationPlan? = nil,
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationDraft {
         appendLog("\(logContext): checking local wallet-node entry point support")
         try await withWalletNodeClient(operation: "\(logContext) entry point check") { client in
@@ -2499,7 +2514,8 @@ final class AppModel: ObservableObject {
             try await withWalletNodeClient(operation: "\(logContext) gas estimate") { client in
                 try await client.estimateUserOperationGas(
                     draft: draft,
-                    dummySignature: dummySignature
+                    dummySignature: dummySignature,
+                    acknowledgedCallGasLimit: acknowledgedCallGasLimit
                 )
             }
         }
@@ -3310,7 +3326,7 @@ enum TerminalUserOperationStatus {
 
 enum ReplacementActionFailurePolicy {
     static func shouldMarkLocalHistoryFailed(_ error: Error) -> Bool {
-        guard case let WalletNodeClient.ClientError.rpcError(_, code, _, reason, _) = error,
+        guard case let WalletNodeClient.ClientError.rpcError(_, code, _, reason, _, _) = error,
               code == -32011
         else {
             return false
@@ -3319,7 +3335,7 @@ enum ReplacementActionFailurePolicy {
     }
 
     static func displayMessage(action: String, error: Error) -> String {
-        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason, _) = error,
+        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason, _, _) = error,
               code == -32011
         else {
             return "\(action) failed: \(error.localizedDescription)"
@@ -3381,7 +3397,7 @@ enum ReconcilerLoopStep {
 
 enum WalletNodeWarmupRetryPolicy {
     static func isWarmupError(_ error: Error) -> Bool {
-        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason, _) = error else {
+        guard case let WalletNodeClient.ClientError.rpcError(_, code, message, reason, _, _) = error else {
             return false
         }
         if code == -32010 {
@@ -3397,6 +3413,7 @@ enum WalletNodeWarmupRetryPolicy {
              "rpc_error",
              "block_not_found",
              "chain_internal_error",
+             "gas_estimation_unavailable",
              "state_override_smoke_pending":
             return true
         case nil:

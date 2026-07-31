@@ -182,9 +182,19 @@ submit with that headroom. That override applies **only** when estimation is
 unavailable: it never overrides a successful estimate, and never suppresses a
 revert.
 
+ERC-4337 gives the third parameter of `eth_estimateUserOperationGas` to
+`stateOverride`, which this daemon does not implement. The third parameter object
+therefore rejects any key other than `acknowledgedCallGasLimit` with
+`INVALID_REQUEST`, rather than silently ignoring a state override and returning an
+estimate computed against state the client did not ask for.
+
 Reverts are detected via `eth_call`, not `eth_estimateGas`. In `helios` read mode
 the light client returns `Ok(gas_used)` for reverted and halted executions alike,
 so `eth_estimateGas` cannot distinguish a successful call from a reverting one.
+A halt is classified as a deterministic failure in both read modes — `helios`
+surfaces it as `ChainError::Helios`, `execution_rpc` as `ChainError::RpcError`
+with no revert data — so it fails closed instead of offering gas headroom that
+cannot help.
 
 ## JSON-RPC Methods
 

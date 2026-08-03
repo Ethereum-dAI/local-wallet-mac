@@ -1,9 +1,13 @@
 //! Monotonic per-exit counter, persisted as `<state_dir>/exit-index`.
 //!
-//! Each exit derives its single-use EIP-7702 sender at `m/44'/60'/0'/0/{index}`, so the
-//! counter is what makes senders rotate. It is NOT a secret — it holds no key material, only
-//! a rotation index. Losing it risks reusing an index, which costs unlinkability for that one
-//! exit; it never risks funds, because the key is re-derivable from the seed either way.
+//! Each exit derives its single-use EIP-7702 sender at `m/44'/60'/0'/1/{index}` — BIP-44's
+//! internal branch, kept disjoint from the broadcaster's `change = 0` chain — so the counter is
+//! what makes senders rotate. It is NOT a secret: it holds no key material, only a rotation
+//! index. Losing it risks reusing an index, which costs unlinkability for that one exit; it
+//! never risks funds, because the key is re-derivable from the seed either way.
+//!
+//! The counter starts at 0 and stays 1:1 with the derivation index, which is why the disjoint
+//! keyspace is a separate BIP-44 branch rather than an offset applied here.
 
 use std::fs;
 use std::io;

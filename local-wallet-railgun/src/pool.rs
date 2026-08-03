@@ -139,8 +139,10 @@ impl RailgunHelper {
     /// RAILGUN's privacy paymaster and submitted by a PUBLIC bundler.
     ///
     /// The unshield targets an ephemeral EIP-7702 account derived at
-    /// `m/44'/60'/0'/0/{index}`; the UserOp's `callData` unwraps and forwards, so the whole
-    /// exit is ONE atomic transaction from a single-use, never-funded address.
+    /// `m/44'/60'/0'/1/{index}` — BIP-44's INTERNAL branch, disjoint from the `change = 0`
+    /// chain the broadcaster EOA lives on, so the sender is genuinely never-funded and has no
+    /// public history. The UserOp's `callData` unwraps and forwards, so the whole exit is ONE
+    /// atomic transaction from that single-use address.
     ///
     /// **Generates one Groth16 proof per fee-loop iteration** (two is the floor: the SDK's
     /// seed `fee_value` is ~7 orders of magnitude below a real sponsored fee, so iteration 1
@@ -202,6 +204,20 @@ impl RailgunHelper {
         let weth_addr = self.chain.wrapped_base_token;
         let fee_bps = self.chain.unshield_fee_bps;
 
+        // `fee_bps` is a HARDCODED 25 in Kohaku's ChainConfig, but `unshieldFee` is
+        // governance-settable on RailgunSmartWallet. Verify against the live value and fail
+        // closed on any disagreement: a higher rate would make `forward` over-claim, and
+        // `withdraw` would then revert in the EXECUTION phase, after the unshield had already
+        // executed during paymaster validation — stranding the whole amount, silently, on every
+        // exit thereafter. One `eth_call` is cheap insurance against that.
+        let onchain_fee_bps =
+            exit::RailgunSmartWallet::new(self.chain.railgun_smart_wallet, self.provider.clone())
+                .unshieldFee()
+                .call()
+                .await
+                .map_err(|e| ExitError::Other(format!("read unshield fee: {e}")))?;
+        exit::check_unshield_fee_matches(fee_bps, onchain_fee_bps)?;
+
         // Checked before burning an index or a proof: a request this small can never produce a
         // forwardable amount, and `withdraw(0)` followed by a 0-wei send is pointless.
         let forward = exit::forward_amount(value, fee_bps);
@@ -221,7 +237,9 @@ impl RailgunHelper {
             .parse()
             .map_err(|_| ExitError::Other("exit key is not a valid secp256k1 key".to_string()))?;
         let sender = eoa.address();
-        tracing::info!("exit {index} sender {sender:?}");
+        // The wire form of the sender, reused by every error that needs a recovery pointer.
+        let sender_hex = format!("{sender:?}");
+        tracing::info!("exit {index} sender {sender_hex}");
 
         let account = SimpleSmartAccount::new(sender, self.chain.id, self.provider.clone());
         let bundler = PimlicoBundler::new(
@@ -262,16 +280,24 @@ impl RailgunHelper {
                 &mut rng,
             )
             .await
-            .map_err(|e| classify_prepare_error(&e))?;
+            .map_err(|e| classify_prepare_error(&e, index, &sender_hex))?;
 
         let signed = signable
             .sign(&eoa)
             .await
             .map_err(|e| ExitError::Other(format!("sign userop: {e}")))?;
-        let hash = bundler
-            .send_user_operation(&signed)
-            .await
-            .map_err(|e| ExitError::BundlerRejected(e.to_string()))?;
+        // If this POST reaches the bundler but the response is lost, the op is already in the
+        // mempool: it can land, pass validation, and execute the unshield. So the error carries
+        // the recovery pointer and does not claim the op was rejected.
+        let hash =
+            bundler
+                .send_user_operation(&signed)
+                .await
+                .map_err(|e| ExitError::BundlerRejected {
+                    message: e.to_string(),
+                    exit_index: index,
+                    sender: sender_hex.clone(),
+                })?;
         let hash_hex = exit::format_op_hash(hash.0);
         tracing::info!("exit {index} submitted op {hash_hex}");
 
@@ -279,7 +305,7 @@ impl RailgunHelper {
         // holding this mutex, so balance reads stay responsive during a slow inclusion.
         Ok(ExitSubmission {
             user_op_hash: hash_hex,
-            sender: format!("{sender:?}"),
+            sender: sender_hex,
             delivered_wei: forward,
             exit_index: index,
         })
@@ -320,9 +346,21 @@ impl RailgunHelper {
 /// `RailgunProviderError::Other(io::Error("Failed to converge on fee estimate"))`
 /// (`railgun/src/provider.rs:328-331`), so on this pin a string match is the only discriminator.
 /// Getting it wrong means the gas-gated retry never fires.
-fn classify_prepare_error(e: &RailgunProviderError) -> ExitError {
+fn classify_prepare_error(e: &RailgunProviderError, exit_index: u32, sender: &str) -> ExitError {
     if matches!(e, RailgunProviderError::PrivacyPaymasterNotConfigured(_)) {
         return ExitError::PaymasterNotConfigured;
+    }
+    // `prepare_userop` calls `estimate_gas` internally, so an AA23/AA33-style rejection arrives
+    // here as `Bundler(_)` and would otherwise fall through to the generic arm — giving the app a
+    // nondescript failure for precisely the bundler-rejected case. Nothing has been submitted at
+    // this point, which is why `BundlerRejected`'s message is phrased "if it was submitted":
+    // the pointer is informational here, actionable at the send site.
+    if let RailgunProviderError::Bundler(bundler_err) = e {
+        return ExitError::BundlerRejected {
+            message: format!("rejected during gas estimation: {bundler_err}"),
+            exit_index,
+            sender: sender.to_string(),
+        };
     }
     let msg = e.to_string();
     if msg.contains("converge") {
@@ -387,13 +425,34 @@ mod tests {
             "Failed to converge on fee estimate",
         )));
         assert!(e.to_string().contains("converge"), "sdk text: {e}");
-        assert_eq!(classify_prepare_error(&e).code(), "feeDidNotConverge");
+        assert_eq!(
+            classify_prepare_error(&e, 1, "0xa").code(),
+            "feeDidNotConverge"
+        );
+    }
+
+    #[test]
+    fn gas_estimation_rejection_is_bundler_rejected_not_generic() {
+        // prepare_userop calls estimate_gas internally, so an AA23/AA33-style rejection surfaces
+        // as Bundler(_). It must reach the app as the bundler card, not a generic error.
+        let e = RailgunProviderError::Bundler(userop_kit::bundler::BundlerError::Other(Box::new(
+            std::io::Error::other("AA33 reverted"),
+        )));
+        let classified = classify_prepare_error(&e, 9, "0xsender");
+        assert_eq!(classified.code(), "bundlerRejected");
+        let msg = classified.to_string();
+        assert!(msg.contains("AA33"), "must keep the cause: {msg}");
+        assert!(msg.contains("index 9"), "must name the index: {msg}");
+        assert!(msg.contains("0xsender"), "must name the sender: {msg}");
     }
 
     #[test]
     fn missing_paymaster_is_classified_by_variant_not_substring() {
         let e = RailgunProviderError::PrivacyPaymasterNotConfigured(11155111);
-        assert_eq!(classify_prepare_error(&e).code(), "paymasterNotConfigured");
+        assert_eq!(
+            classify_prepare_error(&e, 2, "0xb").code(),
+            "paymasterNotConfigured"
+        );
         // Why we match the variant: the Display text capitalises "Paymaster", so a lowercase
         // substring probe would miss it entirely.
         assert!(
@@ -406,6 +465,6 @@ mod tests {
     #[test]
     fn unrelated_sdk_errors_stay_generic() {
         let e = RailgunProviderError::FeeNoteNotFound;
-        assert_eq!(classify_prepare_error(&e).code(), "error");
+        assert_eq!(classify_prepare_error(&e, 3, "0xc").code(), "error");
     }
 }

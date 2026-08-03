@@ -84,13 +84,9 @@ pub fn railgun_node_key(seed: &[u8], path: &[u32]) -> [u8; 32] {
     node.key
 }
 
-/// Standard secp256k1 BIP-32: seed → private key at `m/44'/60'/0'/0/{index}`.
-///
-/// `index` is the per-exit counter, so every exit gets a fresh, never-funded 7702 sender —
-/// rotation is free because the sender never holds a balance. Deriving (rather than using a
-/// random key) is what makes a stuck exit recoverable from the seed alone.
-pub fn secp256k1_from_seed_at_index(seed: &[u8], index: u32) -> Result<[u8; 32], DerivationError> {
-    let path: bip32::DerivationPath = format!("m/44'/60'/0'/0/{index}")
+/// Standard secp256k1 BIP-32 walk of `path` from `seed`.
+fn secp256k1_at_path(seed: &[u8], path: &str) -> Result<[u8; 32], DerivationError> {
+    let path: bip32::DerivationPath = path
         .parse()
         .map_err(|e: bip32::Error| DerivationError::Bip32(e.to_string()))?;
     let xprv = bip32::XPrv::derive_from_path(seed, &path)
@@ -98,6 +94,39 @@ pub fn secp256k1_from_seed_at_index(seed: &[u8], index: u32) -> Result<[u8; 32],
     let mut out = [0u8; 32];
     out.copy_from_slice(xprv.private_key().to_bytes().as_slice());
     Ok(out)
+}
+
+/// Standard secp256k1 BIP-32: seed → private key on the EXTERNAL chain, `m/44'/60'/0'/0/{index}`.
+///
+/// This is the broadcaster's keyspace, NOT the exit senders' — see
+/// [`exit_secp256k1_from_seed_at_index`].
+// Removed in Task 6 with the broadcaster itself; kept so every commit builds.
+pub fn secp256k1_from_seed_at_index(seed: &[u8], index: u32) -> Result<[u8; 32], DerivationError> {
+    secp256k1_at_path(seed, &format!("m/44'/60'/0'/0/{index}"))
+}
+
+/// Standard secp256k1 BIP-32: seed → exit-sender private key at `m/44'/60'/0'/1/{index}`.
+///
+/// `index` is the per-exit counter, so every exit gets a fresh, never-funded 7702 sender —
+/// rotation is free because the sender never holds a balance. Deriving (rather than using a
+/// random key) is what makes a stuck exit recoverable from the seed alone.
+///
+/// **`change = 1` is load-bearing, not cosmetic.** It is BIP-44's internal branch, which gives
+/// exit senders a keyspace DISJOINT from the external `change = 0` chain. On `change = 0`, exit
+/// index 0 would be byte-identical to the local broadcaster EOA at `m/44'/60'/0'/0/0` — an
+/// address that gets FUNDED and submits public relay transactions — so the first
+/// "single-use, never-funded" exit sender would in fact be an already-published, funded,
+/// on-chain identity, voiding the unlinkability the ephemeral sender exists to provide.
+/// Deleting the broadcaster does not un-publish an address that already transacted.
+///
+/// A separate branch rather than an offset on the counter is deliberate: an offset would desync
+/// the on-disk index from the derivation index, whereas this keeps them 1:1 so recovery from
+/// the seed is a direct lookup.
+pub fn exit_secp256k1_from_seed_at_index(
+    seed: &[u8],
+    index: u32,
+) -> Result<[u8; 32], DerivationError> {
+    secp256k1_at_path(seed, &format!("m/44'/60'/0'/1/{index}"))
 }
 
 /// Standard secp256k1 BIP-32: seed → private key at m/44'/60'/0'/0/0 (the broadcaster EOA).
@@ -177,13 +206,56 @@ mod tests {
     #[test]
     fn distinct_indices_give_distinct_keys_and_are_deterministic() {
         let seed = mnemonic_to_seed(HARDHAT).unwrap();
-        let a = secp256k1_from_seed_at_index(&seed, 7).unwrap();
-        let b = secp256k1_from_seed_at_index(&seed, 8).unwrap();
+        let a = exit_secp256k1_from_seed_at_index(&seed, 7).unwrap();
+        let b = exit_secp256k1_from_seed_at_index(&seed, 8).unwrap();
         assert_ne!(a, b, "different indices must not collide");
         assert_eq!(
             a,
-            secp256k1_from_seed_at_index(&seed, 7).unwrap(),
+            exit_secp256k1_from_seed_at_index(&seed, 7).unwrap(),
             "derivation must be deterministic so a stuck exit is recoverable"
         );
+    }
+
+    #[test]
+    fn exit_keyspace_is_disjoint_from_the_broadcaster_chain() {
+        // The whole point of `change = 1`. On `change = 0`, exit index 0 IS the broadcaster
+        // EOA — a funded address that has already submitted public relay transactions — so the
+        // first "never-funded, single-use" exit sender would be an already-published identity.
+        let seed = mnemonic_to_seed(HARDHAT).unwrap();
+        let broadcaster = broadcaster_secp256k1_from_seed(&seed).unwrap();
+        assert_ne!(
+            exit_secp256k1_from_seed_at_index(&seed, 0).unwrap(),
+            broadcaster,
+            "exit index 0 must not be the broadcaster key"
+        );
+        // No exit index may land anywhere on the external chain either.
+        for i in 0..8u32 {
+            let exit = exit_secp256k1_from_seed_at_index(&seed, i).unwrap();
+            for j in 0..8u32 {
+                assert_ne!(
+                    exit,
+                    secp256k1_from_seed_at_index(&seed, j).unwrap(),
+                    "exit index {i} collided with external index {j}"
+                );
+            }
+        }
+    }
+
+    /// Frozen vector for the exit branch: `m/44'/60'/0'/1/0` on the hardhat mnemonic. Pins the
+    /// path so a silent change of `change` or `account` cannot go unnoticed — that would make
+    /// every previously-derived exit sender unrecoverable from the seed.
+    ///
+    /// Cross-checked against an independent BIP-32 implementation, which reproduces the
+    /// published hardhat accounts #0/#1 for `m/44'/60'/0'/0/{0,1}`, so this is a parity vector
+    /// rather than a self-pin.
+    const HARDHAT_EXIT_0: &str = "0x4b39F7b0624b9dB86AD293686bc38B903142dbBc";
+
+    #[test]
+    fn exit_path_is_pinned_to_the_internal_branch() {
+        let seed = mnemonic_to_seed(HARDHAT).unwrap();
+        let key = exit_secp256k1_from_seed_at_index(&seed, 0).unwrap();
+        let signer: alloy::signers::local::PrivateKeySigner =
+            format!("0x{}", hex::encode(key)).parse().unwrap();
+        assert_eq!(format!("{}", signer.address()), HARDHAT_EXIT_0);
     }
 }

@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use alloy::primitives::B256;
+use alloy::primitives::{B256, U256};
 use alloy::sol;
 use userop_kit::bundler::{pimlico::PimlicoBundler, Bundler};
 use userop_kit::user_operation::UserOperationHash;
@@ -17,6 +17,22 @@ sol! {
     #[sol(rpc)]
     contract WETH {
         function withdraw(uint256 wad) external;
+    }
+}
+
+sol! {
+    /// The one RailgunSmartWallet getter we need. The pinned SDK's own ABI
+    /// (`railgun/src/abis/railgun.rs`) declares only `rootHistory`/`shield`/`transact`, so we
+    /// declare this ourselves — the same thing we already do for `WETH.withdraw`, not an SDK
+    /// patch.
+    ///
+    /// `unshieldFee` is a `uint120` state variable on RailgunLogic, but a public getter for any
+    /// `uintN` ABI-encodes as one left-padded 32-byte word, so decoding it as `uint256` is
+    /// exact. Verified live: selector `0x053ed12a` returns 25 on both mainnet
+    /// (`0xFA7093CD…`) and Sepolia (`0xeCFCf3b4…`).
+    #[sol(rpc)]
+    contract RailgunSmartWallet {
+        function unshieldFee() external view returns (uint256);
     }
 }
 
@@ -33,8 +49,20 @@ pub const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(6);
 pub enum ExitError {
     #[error("fee estimate did not converge (gas is moving too fast right now)")]
     FeeDidNotConverge,
-    #[error("no bundler accepted the operation: {0}")]
-    BundlerRejected(String),
+    /// The bundler did not confirm the operation. Deliberately NOT worded as "rejected": if
+    /// `eth_sendUserOperation` reached the bundler but the response was lost (connection reset,
+    /// read timeout), the op is already in the mempool and may land, run validation, and
+    /// execute the unshield. Carries the recovery pointer for exactly that case — the same
+    /// reason `DeliveryReverted` does.
+    #[error(
+        "bundler did not confirm the operation ({message}); if it was submitted, the exit is \
+         recoverable at index {exit_index} (sender {sender})"
+    )]
+    BundlerRejected {
+        message: String,
+        exit_index: u32,
+        sender: String,
+    },
     #[error("the privacy paymaster is not configured for this chain")]
     PaymasterNotConfigured,
     #[error(
@@ -54,7 +82,7 @@ impl ExitError {
     pub fn code(&self) -> &'static str {
         match self {
             ExitError::FeeDidNotConverge => "feeDidNotConverge",
-            ExitError::BundlerRejected(_) => "bundlerRejected",
+            ExitError::BundlerRejected { .. } => "bundlerRejected",
             ExitError::PaymasterNotConfigured => "paymasterNotConfigured",
             ExitError::DeliveryReverted { .. } => "deliveryReverted",
             ExitError::Other(_) => "error",
@@ -91,6 +119,12 @@ pub struct ExitSubmission {
     pub exit_index: u32,
 }
 
+/// The result of waiting on a submitted exit.
+///
+/// There is no `reverted` field: a revert is `ExitError::DeliveryReverted`, so the only two
+/// outcomes here are "landed successfully" (`included: true`) and "not yet known"
+/// (`included: false`). A `reverted` flag could only ever be constructed `false`, which would
+/// hand the RPC handler and the app card a branch that can never fire.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExitOutcome {
@@ -100,7 +134,29 @@ pub struct ExitOutcome {
     pub delivered_wei: u128,
     pub exit_index: u32,
     pub included: bool,
-    pub reverted: bool,
+}
+
+/// Fail closed when RailgunSmartWallet's live unshield fee disagrees with the rate our
+/// arithmetic assumed.
+///
+/// `configured_bps` comes from Kohaku's `ChainConfig`, where 25 is a HARDCODED constant, but
+/// `unshieldFee` is a governance-settable state variable on the contract. At 50 bps,
+/// `delivered_lower_bound` would over-claim by ~2.5e15 wei on a 1 ETH exit — five orders of
+/// magnitude past the 1000-wei epsilon — so `WETH.withdraw` would revert in the EXECUTION
+/// phase, *after* the unshield already executed during paymaster validation. That strands the
+/// full amount, on every exit thereafter, silently.
+///
+/// We refuse rather than adapt: an unexpected rate means the arithmetic assumptions need
+/// re-checking by a human, which is this project's fail-closed convention.
+pub fn check_unshield_fee_matches(configured_bps: u16, onchain_bps: U256) -> Result<(), ExitError> {
+    if onchain_bps == U256::from(configured_bps) {
+        return Ok(());
+    }
+    Err(ExitError::Other(format!(
+        "RailgunSmartWallet reports an unshield fee of {onchain_bps} bps but this build's \
+         amount arithmetic assumes {configured_bps} bps; refusing to exit until the fee \
+         handling is re-checked"
+    )))
 }
 
 /// Poll for the op's receipt. A FREE FUNCTION, not a `RailgunHelper` method, so the caller does
@@ -128,22 +184,21 @@ async fn await_exit_within(
     );
     let hash = UserOperationHash(parse_op_hash(&sub.user_op_hash)?);
 
-    let outcome = |included: bool, reverted: bool| ExitOutcome {
+    let outcome = |included: bool| ExitOutcome {
         user_op_hash: sub.user_op_hash.clone(),
         sender: sub.sender.clone(),
         delivered_wei: sub.delivered_wei,
         exit_index: sub.exit_index,
         included,
-        reverted,
     };
 
     let started = std::time::Instant::now();
     loop {
         if started.elapsed() > budget {
-            return Ok(outcome(false, false));
+            return Ok(outcome(false));
         }
         match bundler.wait_for_receipt(hash).await {
-            Ok(receipt) if receipt.success => return Ok(outcome(true, false)),
+            Ok(receipt) if receipt.success => return Ok(outcome(true)),
             // `success == false` is a real on-chain verdict, not a polling hiccup. The
             // unshield already executed during paymaster validation and an execution-phase
             // revert does NOT roll it back, so this is genuinely terminal — do not soften it.
@@ -177,6 +232,10 @@ async fn await_exit_within(
 
 /// Wei of native ETH to unwrap and forward: the conservative delivered lower bound, less the
 /// epsilon guard. Saturating, so a tiny exit yields 0 rather than underflowing.
+///
+/// `fee_bps` must be the rate the contract will ACTUALLY charge, not just the one Kohaku's
+/// `ChainConfig` hardcodes — the caller verifies that against `unshieldFee()` via
+/// [`check_unshield_fee_matches`] before sizing anything on this result.
 pub fn forward_amount(value: u128, fee_bps: u16) -> u128 {
     delivered_lower_bound(value, fee_bps).saturating_sub(DELIVERY_EPSILON_WEI)
 }
@@ -273,7 +332,12 @@ mod tests {
         // The app switches card state on these; renaming one silently breaks the UI.
         assert_eq!(ExitError::FeeDidNotConverge.code(), "feeDidNotConverge");
         assert_eq!(
-            ExitError::BundlerRejected("nope".into()).code(),
+            ExitError::BundlerRejected {
+                message: "nope".into(),
+                exit_index: 4,
+                sender: "0xbeef".into(),
+            }
+            .code(),
             "bundlerRejected"
         );
         assert_eq!(
@@ -305,6 +369,52 @@ mod tests {
             msg.contains("0xdead"),
             "message must name the op hash: {msg}"
         );
+    }
+
+    #[test]
+    fn bundler_rejection_names_the_recoverable_index_and_sender() {
+        // `send_user_operation` can POST successfully and lose the response, leaving the op in
+        // the mempool: it lands, validation runs, the unshield executes. So this error must
+        // carry the same recovery pointer as DeliveryReverted, and must NOT claim the op was
+        // rejected.
+        let e = ExitError::BundlerRejected {
+            message: "connection reset".into(),
+            exit_index: 11,
+            sender: "0xsender".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("11"), "must name the index: {msg}");
+        assert!(msg.contains("0xsender"), "must name the sender: {msg}");
+        assert!(
+            msg.contains("connection reset"),
+            "must keep the cause: {msg}"
+        );
+        assert!(
+            !msg.contains("no bundler accepted"),
+            "must not assert the op was rejected: {msg}"
+        );
+    }
+
+    #[test]
+    fn matching_unshield_fee_passes_and_a_changed_one_fails_closed() {
+        // The rate our arithmetic assumes must be the rate the contract charges. Verified live
+        // at the time of writing: unshieldFee() == 25 on both mainnet and Sepolia.
+        assert!(check_unshield_fee_matches(25, U256::from(25)).is_ok());
+
+        // A governance change to 50 bps would make delivered_lower_bound over-claim by ~2.5e15
+        // wei on a 1 ETH exit, so `withdraw` reverts AFTER the unshield already executed —
+        // stranding the full amount. Refuse instead of adapting.
+        let err = check_unshield_fee_matches(25, U256::from(50))
+            .expect_err("a changed fee must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("50") && msg.contains("25"),
+            "names both: {msg}"
+        );
+        assert_eq!(err.code(), "error");
+
+        // A fee *drop* is also a mismatch: it means our model of the contract is stale.
+        assert!(check_unshield_fee_matches(25, U256::from(0)).is_err());
     }
 
     #[test]
@@ -348,7 +458,6 @@ mod tests {
         .expect("a transport error must not be reported as a failed exit");
 
         assert!(!out.included, "unknown inclusion must not claim included");
-        assert!(!out.reverted, "a poll error is not an on-chain revert");
         // The submission's facts survive the poll unchanged.
         assert_eq!(out.user_op_hash, sub.user_op_hash);
         assert_eq!(out.sender, sub.sender);

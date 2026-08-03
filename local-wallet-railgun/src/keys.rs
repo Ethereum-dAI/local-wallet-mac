@@ -34,28 +34,41 @@ pub fn derive_railgun_signer(
     Ok(PrivateKeySigner::new_evm(spending, viewing, chain_id))
 }
 
+/// entropy hex → BIP-39 mnemonic → 64-byte BIP-39 seed. The shared prefix of every
+/// secp256k1 derivation below.
+fn seed_from_entropy(entropy_hex: &str) -> Result<[u8; 64], SecretError> {
+    let entropy = parse_entropy_32(entropy_hex)?;
+    let mnemonic = derivation::entropy_to_mnemonic(&entropy)
+        .map_err(|e| SecretError::Derivation(e.to_string()))?;
+    derivation::mnemonic_to_seed(&mnemonic).map_err(|e| SecretError::Derivation(e.to_string()))
+}
+
 /// Derive the ephemeral EIP-7702 exit-sender private key (0x-hex) for exit `index`, from the
-/// same 32-byte entropy as the RAILGUN account, at `m/44'/60'/0'/0/{index}`.
+/// same 32-byte entropy as the RAILGUN account, at `m/44'/60'/0'/1/{index}`.
+///
+/// **`change = 1`, the BIP-44 internal branch, is deliberate**: it keeps exit senders in a
+/// keyspace disjoint from the broadcaster EOA at `m/44'/60'/0'/0/0`, which is funded and has
+/// already transacted publicly. See `derivation::exit_secp256k1_from_seed_at_index`.
 ///
 /// This key signs the UserOperation and its 7702 authorization. It is never funded, never
 /// logged, and never returned over RPC. A seed leak gains an attacker nothing here: that
 /// same seed already controls the shielded funds.
 pub fn derive_exit_key(entropy_hex: &str, index: u32) -> Result<String, SecretError> {
-    let entropy = parse_entropy_32(entropy_hex)?;
-    let mnemonic = derivation::entropy_to_mnemonic(&entropy)
-        .map_err(|e| SecretError::Derivation(e.to_string()))?;
-    let seed = derivation::mnemonic_to_seed(&mnemonic)
-        .map_err(|e| SecretError::Derivation(e.to_string()))?;
-    let key = derivation::secp256k1_from_seed_at_index(&seed, index)
+    let seed = seed_from_entropy(entropy_hex)?;
+    let key = derivation::exit_secp256k1_from_seed_at_index(&seed, index)
         .map_err(|e| SecretError::Derivation(e.to_string()))?;
     Ok(format!("0x{}", hex::encode(key)))
 }
 
 /// Derive the local broadcaster EOA private key (0x-hex) from the same 32-byte entropy,
-/// at standard Ethereum path m/44'/60'/0'/0/0. Distinct from the RAILGUN account.
+/// at standard Ethereum path m/44'/60'/0'/0/0. Distinct from the RAILGUN account, and — since
+/// exit senders live on `change = 1` — distinct from every exit sender.
 // Removed in Task 6 with the broadcaster itself; kept so every commit builds.
 pub fn derive_broadcaster_key(entropy_hex: &str) -> Result<String, SecretError> {
-    derive_exit_key(entropy_hex, 0)
+    let seed = seed_from_entropy(entropy_hex)?;
+    let key = derivation::broadcaster_secp256k1_from_seed(&seed)
+        .map_err(|e| SecretError::Derivation(e.to_string()))?;
+    Ok(format!("0x{}", hex::encode(key)))
 }
 
 #[cfg(test)]
@@ -161,5 +174,53 @@ mod tests {
         let k = derive_broadcaster_key(E1).unwrap();
         assert!(k.starts_with("0x") && k.len() == 66);
         let _: alloy::signers::local::PrivateKeySigner = k.parse().unwrap();
+    }
+
+    /// Address of an EOA key, so assertions never print key material on failure.
+    fn eoa_address(key_hex: &str) -> String {
+        let signer: alloy::signers::local::PrivateKeySigner = key_hex.parse().unwrap();
+        format!("{}", signer.address())
+    }
+
+    #[test]
+    fn exit_index_zero_is_not_the_broadcaster_address() {
+        // Before this was fixed, `derive_exit_key(e, 0)` was byte-identical to
+        // `derive_broadcaster_key(e)`: both `m/44'/60'/0'/0/0`. The broadcaster gets FUNDED and
+        // submits public relay transactions, so for any wallet that ever used the old unshield
+        // path, the first "single-use, never-funded" exit sender would have been their
+        // already-published broadcaster address — voiding the unlinkability the derived sender
+        // exists to provide. Deleting the broadcaster cannot un-publish it.
+        let broadcaster = eoa_address(&derive_broadcaster_key(E1).unwrap());
+        assert_ne!(
+            eoa_address(&derive_exit_key(E1, 0).unwrap()),
+            broadcaster,
+            "exit index 0 must not reuse the broadcaster address"
+        );
+        // No exit index may collide with it either.
+        for i in 0..8u32 {
+            assert_ne!(
+                eoa_address(&derive_exit_key(E1, i).unwrap()),
+                broadcaster,
+                "exit index {i} must not be the broadcaster address"
+            );
+        }
+    }
+
+    #[test]
+    fn exit_keys_are_deterministic_and_index_unique() {
+        // Determinism is what makes a stranded exit recoverable from the seed alone.
+        assert_eq!(
+            derive_exit_key(E1, 5).unwrap(),
+            derive_exit_key(E1, 5).unwrap()
+        );
+        assert_ne!(
+            eoa_address(&derive_exit_key(E1, 5).unwrap()),
+            eoa_address(&derive_exit_key(E1, 6).unwrap())
+        );
+        assert_ne!(
+            eoa_address(&derive_exit_key(E1, 5).unwrap()),
+            eoa_address(&derive_exit_key(E2, 5).unwrap()),
+            "different wallets must not share an exit sender"
+        );
     }
 }

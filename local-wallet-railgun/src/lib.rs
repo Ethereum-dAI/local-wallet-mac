@@ -9,6 +9,7 @@
 
 pub mod broadcaster;
 pub mod derivation;
+pub mod exit_index;
 pub mod fee;
 pub mod keys;
 // NOTE: module is `pool`, not `railgun` — a module named `railgun` would shadow the

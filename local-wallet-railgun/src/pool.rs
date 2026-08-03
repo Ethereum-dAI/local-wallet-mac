@@ -147,6 +147,12 @@ impl RailgunHelper {
     /// can never converge). On a convergence failure we retry ONCE, and only if a fresh gas
     /// sample shows gas is not still climbing.
     ///
+    /// **The exit index is NOT 1:1 with a user-visible exit.** A gas-gated retry derives a
+    /// SECOND sender at a SECOND index — deliberately, because reusing a sender across attempts
+    /// would link them — so the on-disk counter can advance by 2 for one exit, and the
+    /// first attempt's address may have been logged without ever being used. Recovery tooling
+    /// must scan indices rather than assume one index per exit.
+    ///
     /// Returns as soon as the bundler accepts the op. Receipt polling is `exit::await_exit`,
     /// a free function the caller runs WITHOUT holding this helper's mutex.
     pub async fn submit_exit(

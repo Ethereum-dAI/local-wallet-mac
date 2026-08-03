@@ -110,6 +110,17 @@ pub struct ExitOutcome {
 /// A budget overrun is reported as `included: false` — NOT an error — because a `slow`-tier op
 /// may still land. Treating it as failure would mark a successful exit as reverted.
 pub async fn await_exit(bundler_url: &str, sub: &ExitSubmission) -> Result<ExitOutcome, ExitError> {
+    await_exit_within(bundler_url, sub, RECEIPT_POLL_BUDGET, RECEIPT_POLL_INTERVAL).await
+}
+
+/// [`await_exit`] with the timings injected, so a test can exercise the poll loop in
+/// milliseconds instead of ten minutes.
+async fn await_exit_within(
+    bundler_url: &str,
+    sub: &ExitSubmission,
+    budget: Duration,
+    interval: Duration,
+) -> Result<ExitOutcome, ExitError> {
     let bundler = PimlicoBundler::new(
         bundler_url
             .parse()
@@ -128,22 +139,38 @@ pub async fn await_exit(bundler_url: &str, sub: &ExitSubmission) -> Result<ExitO
 
     let started = std::time::Instant::now();
     loop {
-        if started.elapsed() > RECEIPT_POLL_BUDGET {
+        if started.elapsed() > budget {
             return Ok(outcome(false, false));
         }
         match bundler.wait_for_receipt(hash).await {
             Ok(receipt) if receipt.success => return Ok(outcome(true, false)),
+            // `success == false` is a real on-chain verdict, not a polling hiccup. The
+            // unshield already executed during paymaster validation and an execution-phase
+            // revert does NOT roll it back, so this is genuinely terminal — do not soften it.
             Ok(_) => {
                 return Err(ExitError::DeliveryReverted {
                     exit_index: sub.exit_index,
                     user_op_hash: sub.user_op_hash.clone(),
                 })
             }
-            // wait_for_receipt's own 60s timeout is NOT our budget — keep polling.
-            Err(userop_kit::bundler::BundlerError::Timeout) => {
-                tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
+            // EVERY poll error is retryable, not just `Timeout`. `wait_for_receipt`'s own 60s
+            // timeout is not our budget, and a transport error — a 502 from the public
+            // bundler, a dropped connection, one malformed response — carries no more
+            // information about inclusion than a timeout does. Returning an error here would
+            // show the user a "reverted" card for an exit whose funds arrived seconds later,
+            // which is the worst outcome in this path.
+            //
+            // Safe against a permanently-failing poll: we only reach `await_exit` after
+            // `send_user_operation` returned a hash, so the op demonstrably exists. The budget
+            // stays the single bound, and the honest worst case is waiting it out and saying
+            // "pending".
+            Err(e) => {
+                tracing::warn!(
+                    "receipt poll for op {} failed, retrying: {e}",
+                    sub.user_op_hash
+                );
+                tokio::time::sleep(interval).await;
             }
-            Err(e) => return Err(ExitError::Other(format!("receipt: {e}"))),
         }
     }
 }
@@ -291,6 +318,57 @@ mod tests {
     fn forward_amount_is_zero_when_below_the_guard() {
         // Must never underflow into a huge value that would revert the withdraw.
         assert_eq!(forward_amount(100, 25), 0);
+    }
+
+    fn submission() -> ExitSubmission {
+        ExitSubmission {
+            user_op_hash: "0x1c3fa5b0e2d47c8916aa0b3d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081"
+                .to_string(),
+            sender: "0x0000000000000000000000000000000000000001".to_string(),
+            delivered_wei: 8_975,
+            exit_index: 7,
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_poll_errors_end_as_pending_not_failure() {
+        // Port 1 has no listener, so every `eth_getUserOperationReceipt` fails at the transport
+        // layer — a real `BundlerError::Other`, not a `Timeout`. That must NOT become a
+        // terminal error: the op already has a hash, so it may land at any moment, and an
+        // `Err` here would render a "reverted" card for an exit whose funds arrive seconds
+        // later. The budget is the only bound, and exhausting it means "we do not know yet".
+        let sub = submission();
+        let out = await_exit_within(
+            "http://127.0.0.1:1/",
+            &sub,
+            Duration::from_millis(60),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect("a transport error must not be reported as a failed exit");
+
+        assert!(!out.included, "unknown inclusion must not claim included");
+        assert!(!out.reverted, "a poll error is not an on-chain revert");
+        // The submission's facts survive the poll unchanged.
+        assert_eq!(out.user_op_hash, sub.user_op_hash);
+        assert_eq!(out.sender, sub.sender);
+        assert_eq!(out.delivered_wei, sub.delivered_wei);
+        assert_eq!(out.exit_index, sub.exit_index);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_bundler_url_still_fails_fast() {
+        // Retrying is for POLL errors. A URL that cannot be parsed is a caller bug that no
+        // amount of waiting fixes, so it must not be swallowed into a pending outcome.
+        let err = await_exit_within(
+            "not-a-url",
+            &submission(),
+            Duration::from_millis(10),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("an unparseable bundler url must be reported, not polled");
+        assert_eq!(err.code(), "error");
     }
 
     #[test]

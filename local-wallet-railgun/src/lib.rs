@@ -9,6 +9,7 @@
 
 pub mod broadcaster;
 pub mod derivation;
+pub mod exit;
 pub mod exit_index;
 pub mod fee;
 pub mod keys;

@@ -1,17 +1,18 @@
-//! Build the alloy provider the sidecar/broadcaster use.
+//! Build the alloy provider the sidecar uses.
 //!
 //! For the fork/standalone path this connects directly to an HTTP RPC (the anvil fork).
 //! The daemon-socket backend (Helios-verified reads) is the app-integration path, added
 //! later; the rest of the code only needs a `DynProvider`, so either backend plugs in.
 //!
-//! A read-only provider (no wallet) is enough for RAILGUN reads/sync/proving. A wallet is
-//! supplied only for the process that actually submits txs (owner for shield, broadcaster
-//! for unshield).
+//! A read-only provider (no wallet) is enough for RAILGUN reads/sync/proving, and for the
+//! exit — the UserOperation is signed by the ephemeral sender and broadcast by a public
+//! bundler, so no provider-level wallet submits it. A wallet is supplied only where a tx is
+//! self-submitted (the owner's shield).
 //!
 //! All providers carry a transport-level retry/backoff layer: a transient RPC error or a
-//! 429 rate-limit on ANY call (RAILGUN UTXO sync, the broadcaster's `balanceOf`/receipt
-//! polling, tx submission) is retried rather than aborting the whole shield/unshield. Public
-//! and free-tier RPCs rate-limit readily, so without this a single blip kills a privacy op.
+//! 429 rate-limit on ANY call (RAILGUN UTXO sync, the exit's `unshieldFee`/gas reads) is
+//! retried rather than aborting the whole shield/unshield. Public and free-tier RPCs
+//! rate-limit readily, so without this a single blip kills a privacy op.
 
 use alloy::network::Ethereum;
 // `Provider` brings the `.erased()` method into scope.

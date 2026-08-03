@@ -1,35 +1,35 @@
 //! `railgun-helper` sidecar: the wallet's single privacy entry point. Serves
-//! `balance` / `prepareShield` / `unshield` / `unshieldStatus` over a bearer-authenticated
-//! Unix-socket JSON-RPC API, wrapping the RAILGUN Rust SDK.
+//! `balance` / `maxUnshieldable` / `prepareShield` / `unshield` / `unshieldStatus` over a
+//! bearer-authenticated Unix-socket JSON-RPC API, wrapping the RAILGUN Rust SDK.
 //!
-//! It SPAWNS and owns the `railgun-broadcaster` child process (secret delivered over fd 5)
-//! and proxies unshields through it, so the app only ever talks to this one socket.
+//! An unshield exits through RAILGUN's privacy paymaster as an ERC-4337 UserOperation
+//! submitted by a PUBLIC bundler. There is no local broadcaster child: nothing of ours pays
+//! gas, so this is the only process the app talks to and there is nothing to fund.
 //!
 //! - `balance` → `{valid,pending,total}` (0x hex wei).
+//! - `maxUnshieldable` → `{maxValueWei,receivableAtMaxWei,reserveWei}` (0x hex wei).
 //! - `prepareShield {amountWei}` → `[{to,data,value}]` for the OWNER to self-submit.
-//! - `unshield {amountWei,to}` → `{jobId}` immediately; Groth16 proving + the broadcaster
-//!   relay run in the background (proving exceeds any sane RPC timeout).
-//! - `unshieldStatus {jobId}` → `{status: pending|done|error, result?|error?}`.
+//! - `unshield {amountWei,to}` → `{jobId}` immediately; proving + submission run in the
+//!   background (proving alone exceeds any sane RPC timeout).
+//! - `unshieldStatus {jobId}` → `{status: pending|submitted|done|error, result?, error?, code?}`.
 //!
 //! The secret (RAILGUN entropy) arrives on **fd 5** (`HelperFd5`); env is a standalone/dev
-//! fallback only. The broadcaster EOA key is derived from that same entropy root, never
+//! fallback only. Every ephemeral exit sender is derived from that same entropy root, never
 //! carried separately. Non-secret config is via env.
 
 use std::collections::HashMap;
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy::primitives::Address;
-use alloy::providers::Provider;
 use railgun::chain_config::ChainConfig;
 use railgun_helper::pool::RailgunHelper;
 use railgun_helper::provider::connect_provider;
-use railgun_helper::rpc::{self, serve_rpc, Handlers};
+use railgun_helper::rpc::{serve_rpc, Handlers};
 use railgun_helper::secret::HelperFd5;
-use railgun_helper::spawn::{read_fd5, spawn_child_with_fd5, ChildGuard};
-use railgun_helper::{keys, rpc_handler};
+use railgun_helper::spawn::read_fd5;
+use railgun_helper::{exit, fee, keys, rpc_handler};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
@@ -38,10 +38,16 @@ fn env(key: &str) -> String {
 }
 
 /// How long a finished (or abandoned-pending) unshield job lingers before the TTL sweep
-/// drops it. Far longer than proving (tens of seconds) + the client's poll deadline, so it
-/// never evicts a job a caller still cares about — it only bounds the map against jobs that
-/// are never polled to a terminal read.
-const JOB_TTL: Duration = Duration::from_secs(600);
+/// drops it. It only bounds the map against jobs that are never polled to a terminal read;
+/// it must never evict a job that is still progressing.
+///
+/// Derived from [`exit::RECEIPT_POLL_BUDGET`] rather than hardcoded, because a `submitted`
+/// job's timestamp is only refreshed when receipt polling finishes. At an equal TTL, an op
+/// that takes the full budget to land would be swept out from under the app mid-poll —
+/// `unknown jobId` on an exit that is fine — and then RESURRECTED when polling finally wrote
+/// its result. The margin also covers `wait_for_receipt`'s own 60s timeout overshooting the
+/// budget's top-of-loop check.
+const JOB_TTL: Duration = Duration::from_secs(exit::RECEIPT_POLL_BUDGET.as_secs() + 300);
 
 /// Drop job entries whose last update is older than `JOB_TTL`. Cheap linear sweep — the map
 /// holds at most a handful of in-flight jobs for this single-user sidecar.
@@ -49,11 +55,20 @@ fn prune_jobs(map: &mut HashMap<String, (Instant, Value)>, now: Instant) {
     map.retain(|_, (updated, _)| now.duration_since(*updated) < JOB_TTL);
 }
 
+/// Parse a wei amount from the wire.
+///
+/// Accepts `0x`-prefixed hex as well as decimal, because every wei amount this sidecar
+/// RETURNS is `0x`-hex (`balance`, `maxUnshieldable`) — so a caller that feeds
+/// `maxValueWei` straight back into `unshield` must not be rejected. A JSON number is
+/// tolerated for hand-driven calls only: above 2^53 it is not representable, which is
+/// exactly why the wire format is a string.
 fn parse_amount(v: &Value) -> Result<u128, String> {
     match v {
-        Value::String(s) => s
-            .parse::<u128>()
-            .map_err(|e| format!("bad amount {s}: {e}")),
+        Value::String(s) => match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            Some(hex) => u128::from_str_radix(hex, 16),
+            None => s.parse::<u128>(),
+        }
+        .map_err(|e| format!("bad amount {s}: {e}")),
         Value::Number(n) => n
             .as_u64()
             .map(u128::from)
@@ -82,17 +97,35 @@ fn load_secrets() -> String {
     }
 }
 
-async fn wait_for_socket(path: &str, secs: u64) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(secs);
-    loop {
-        if tokio::net::UnixStream::connect(path).await.is_ok() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("broadcaster socket {path} not ready after {secs}s"));
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+/// The spendable ceiling: the largest `value` that can leave the pool, plus the headroom
+/// held back for it.
+struct Ceiling {
+    max: fee::MaxUnshieldable,
+    /// Wei held back in the pool to pay the paymaster's in-pool fee note.
+    reserve: u128,
+}
+
+/// Compute the ceiling from a live shielded balance and a live bundler gas sample (two
+/// network calls — not an accessor).
+///
+/// ONE implementation on purpose, shared by `maxUnshieldable` and `unshield`'s fail-fast
+/// pre-check. `maxUnshieldable` tells the app the largest amount it may ask for and
+/// `unshield` refuses anything larger; if the two computed it separately they could drift
+/// apart and the UI would offer a maximum the sidecar then rejects.
+async fn spendable_ceiling(helper: &mut RailgunHelper) -> Result<Ceiling, String> {
+    let split = helper.balance_split().await?;
+    // POI is intentionally OFF (see `pool`), so `total == valid`: every note is spendable now
+    // and `total` is exactly what the app's balance card shows. If POI is ever enabled this
+    // must switch to `valid`, or the ceiling would promise notes that cannot yet be spent.
+    let balance = u128::from_str_radix(split.total.trim_start_matches("0x"), 16)
+        .map_err(|e| format!("parse balance {}: {e}", split.total))?;
+    let url = exit::resolve_bundler_url(helper.chain_id());
+    let max_fee = exit::fetch_max_fee_per_gas(&url).await?;
+    let reserve = fee::gas_reserve_wei(&fee::RAILGUN_UNSHIELD_GAS_UNITS, max_fee);
+    Ok(Ceiling {
+        max: fee::max_unshieldable(balance, helper.unshield_fee_bps(), reserve),
+        reserve,
+    })
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -112,45 +145,26 @@ async fn main() {
         .unwrap_or(0);
     let socket = env("RAILGUN_SOCKET");
     let token = env("RAILGUN_TOKEN");
-    let bc_bin = env("RAILGUN_BROADCASTER_BIN");
-    let bc_socket = env("RAILGUN_BROADCASTER_SOCKET");
-    let bc_token = env("RAILGUN_BROADCASTER_TOKEN");
+    // Where the per-exit rotation counter lives. Not a secret. The app passes its
+    // Application Support dir; the fork fixture passes a tempdir.
+    let state_dir =
+        std::path::PathBuf::from(std::env::var("RAILGUN_STATE_DIR").unwrap_or_else(|_| {
+            std::path::Path::new(&socket)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ".".to_string())
+        }));
+    // The RAILGUN account seed AND every exit sender come from this one root. Never logged.
     let entropy = load_secrets();
-    // Derive the broadcaster EOA key from the same root (m/44'/60'/0'/0/0).
-    let bc_key = keys::derive_broadcaster_key(&entropy).expect("derive broadcaster key");
 
     let chain = ChainConfig::sepolia();
 
-    // 1) Spawn the local broadcaster as our child, delivering its EOA key over fd 5.
-    let mut cmd = Command::new(&bc_bin);
-    cmd.env("RAILGUN_RPC_URL", &rpc_url)
-        .env("RAILGUN_BROADCASTER_SOCKET", &bc_socket)
-        .env("RAILGUN_BROADCASTER_TOKEN", &bc_token)
-        .env_remove("RAILGUN_BROADCASTER_KEY"); // key travels via fd-5, not env
-    let bc_secret = json!({ "keyHex": bc_key }).to_string();
-    let _bc_guard = ChildGuard(
-        spawn_child_with_fd5(cmd, bc_secret.as_bytes()).expect("spawn railgun-broadcaster"),
-    );
-    wait_for_socket(&bc_socket, 30)
-        .await
-        .expect("broadcaster not ready");
-    let bc_addr_v = rpc::call(&bc_socket, &bc_token, "address", json!(null))
-        .await
-        .expect("broadcaster address");
-    let broadcaster_addr: Address = bc_addr_v["address"]
-        .as_str()
-        .expect("address")
-        .parse()
-        .expect("parse broadcaster address");
-    tracing::info!("owns broadcaster {broadcaster_addr:?} on {bc_socket}");
-
-    // 2) Build the RAILGUN provider (read-only; POI off).
+    // Build the RAILGUN provider (read-only: the exit's UserOperation is signed by its
+    // ephemeral sender and broadcast by a public bundler, so nothing here submits a tx).
     let signer = keys::derive_railgun_signer(&entropy, chain.id).expect("derive signer");
     let provider = connect_provider(&rpc_url, None)
         .await
         .expect("connect provider");
-    // Keep a provider handle for reading the broadcaster EOA's gas balance (broadcasterStatus).
-    let balance_provider = provider.clone();
     let helper = RailgunHelper::new(chain, provider, fork_block, signer)
         .await
         .expect("build railgun helper");
@@ -167,34 +181,32 @@ async fn main() {
     let mut handlers: Handlers = HashMap::new();
 
     {
-        // broadcasterStatus: the local broadcaster's EOA + its gas balance, so the app can
-        // show it (like the bundler) and prompt to top it up when it can't pay unshield gas.
-        let bp = balance_provider.clone();
-        handlers.insert(
-            "broadcasterStatus".to_string(),
-            rpc_handler!(move |_p: Value| {
-                let bp = bp.clone();
-                async move {
-                    let bal = bp
-                        .get_balance(broadcaster_addr)
-                        .await
-                        .map_err(|e| format!("broadcaster balance: {e}"))?;
-                    Ok(json!({
-                        "address": format!("{broadcaster_addr:?}"),
-                        "balanceWei": format!("0x{bal:x}"),
-                    }))
-                }
-            }),
-        );
-    }
-
-    {
         let h = helper.clone();
         handlers.insert(
             "balance".to_string(),
             rpc_handler!(move |_p: Value| {
                 let h = h.clone();
                 async move { Ok(serde_json::to_value(h.lock().await.balance_split().await?).unwrap()) }
+            }),
+        );
+    }
+    {
+        // maxUnshieldable: the largest amountWei we will accept, plus what the recipient
+        // would receive at that amount. Two numbers because there is NO gross-up — the
+        // requested amount is what leaves the pool.
+        let h = helper.clone();
+        handlers.insert(
+            "maxUnshieldable".to_string(),
+            rpc_handler!(move |_p: Value| {
+                let h = h.clone();
+                async move {
+                    let c = spendable_ceiling(&mut *h.lock().await).await?;
+                    Ok(json!({
+                        "maxValueWei": format!("0x{:x}", c.max.max_value),
+                        "receivableAtMaxWei": format!("0x{:x}", c.max.receivable_at_max),
+                        "reserveWei": format!("0x{:x}", c.reserve),
+                    }))
+                }
             }),
         );
     }
@@ -213,20 +225,35 @@ async fn main() {
         );
     }
     {
-        // unshield: kick off proving + relay in the background, return a jobId now.
+        // unshield: kick off proving + submission in the background, return a jobId now.
         let h = helper.clone();
         let jobs = jobs.clone();
         let seq = job_seq.clone();
-        let bc_socket = bc_socket.clone();
-        let bc_token = bc_token.clone();
+        let entropy = entropy.clone();
+        let state_dir = state_dir.clone();
         handlers.insert(
             "unshield".to_string(),
             rpc_handler!(move |p: Value| {
                 let (h, jobs, seq) = (h.clone(), jobs.clone(), seq.clone());
-                let (bc_socket, bc_token) = (bc_socket.clone(), bc_token.clone());
+                let (entropy, state_dir) = (entropy.clone(), state_dir.clone());
                 async move {
                     let amount = parse_amount(p.get("amountWei").unwrap_or(&Value::Null))?;
                     let recipient = parse_addr(p.get("to").unwrap_or(&Value::Null))?;
+
+                    // Fail fast: nobody should wait ~13s (or ~28s if the fee loop struggles)
+                    // for a proof that cannot fit. Same ceiling `maxUnshieldable` reports.
+                    {
+                        let c = spendable_ceiling(&mut *h.lock().await).await?;
+                        if amount > c.max.max_value {
+                            return Err(format!(
+                                "insufficientShieldedBalance: {amount} wei exceeds the \
+                                 spendable maximum {} wei (gas fee headroom {} wei must stay \
+                                 in the pool)",
+                                c.max.max_value, c.reserve
+                            ));
+                        }
+                    }
+
                     let job_id = format!("job-{}", seq.fetch_add(1, Ordering::SeqCst));
                     {
                         let mut map = jobs.lock().await;
@@ -240,23 +267,65 @@ async fn main() {
                     let jid = job_id.clone();
                     // Proving is non-Send (RAILGUN provider) → spawn_local on this thread.
                     tokio::task::spawn_local(async move {
-                        let result: Result<Value, String> = async {
-                            // Unshield note recipient = the broadcaster (it will unwrap+forward).
-                            let proved = h
-                                .lock()
-                                .await
-                                .prepare_unshield(broadcaster_addr, amount)
-                                .await?;
-                            let params = json!({
-                                "tx": serde_json::to_value(proved).unwrap(),
-                                "recipient": format!("{recipient:?}"),
-                            });
-                            rpc::call(&bc_socket, &bc_token, "relayUnshieldNative", params).await
-                        }
-                        .await;
-                        let status = match result {
-                            Ok(receipt) => json!({"status":"done","result":receipt}),
-                            Err(e) => json!({"status":"error","error":e}),
+                        // Phase 1: prove + sign + submit, holding the helper lock. `chain_id`
+                        // comes from the same lock so phase 2 needs no lock at all.
+                        let (submitted, chain_id) = {
+                            let mut guard = h.lock().await;
+                            let chain_id = guard.chain_id();
+                            (
+                                guard
+                                    .submit_exit(recipient, amount, &state_dir, &entropy)
+                                    .await,
+                                chain_id,
+                            )
+                        };
+                        let sub = match submitted {
+                            Ok(s) => s,
+                            Err(e) => {
+                                jobs.lock().await.insert(
+                                    jid,
+                                    (
+                                        Instant::now(),
+                                        json!({
+                                            "status": "error",
+                                            "code": e.code(),
+                                            "error": e.to_string(),
+                                        }),
+                                    ),
+                                );
+                                return;
+                            }
+                        };
+
+                        // Publish `submitted` the moment a hash exists, so the app shows a real
+                        // op hash instead of a spinner and stops counting inclusion time
+                        // against its proving deadline. NOT terminal — the job stays in the map.
+                        jobs.lock().await.insert(
+                            jid.clone(),
+                            (
+                                Instant::now(),
+                                json!({
+                                    "status": "submitted",
+                                    "deliveredAsset": "ETH",
+                                    "result": serde_json::to_value(&sub).unwrap(),
+                                }),
+                            ),
+                        );
+
+                        // Phase 2: poll for the receipt WITHOUT the helper lock, so `balance`
+                        // and `maxUnshieldable` keep answering during inclusion.
+                        let url = exit::resolve_bundler_url(chain_id);
+                        let status = match exit::await_exit(&url, &sub).await {
+                            Ok(outcome) => json!({
+                                "status": if outcome.included { "done" } else { "submitted" },
+                                "deliveredAsset": "ETH",
+                                "result": serde_json::to_value(&outcome).unwrap(),
+                            }),
+                            Err(e) => json!({
+                                "status": "error",
+                                "code": e.code(),
+                                "error": e.to_string(),
+                            }),
                         };
                         jobs.lock().await.insert(jid, (Instant::now(), status));
                     });
@@ -286,6 +355,10 @@ async fn main() {
                     // Evict terminal jobs once observed so the common (polled-to-completion)
                     // path keeps the map tiny; the TTL sweep above backstops jobs that are
                     // never polled to a terminal read.
+                    //
+                    // `submitted` is deliberately ABSENT: the op has a hash but no receipt yet,
+                    // so the entry must survive this read for the app to keep polling it to
+                    // `done`. Only `done` and `error` are terminal.
                     let terminal = matches!(
                         status.get("status").and_then(|s| s.as_str()),
                         Some("done") | Some("error")
@@ -299,16 +372,13 @@ async fn main() {
         );
     }
 
-    println!(
-        "{}",
-        json!({"ready": true, "socket": socket, "broadcaster": format!("{broadcaster_addr:?}")})
-    );
+    println!("{}", json!({"ready": true, "socket": socket}));
     tracing::info!("railgun-helper serving on {socket}");
 
     // current_thread runtime + LocalSet so the non-Send proving tasks can spawn_local.
     let local = tokio::task::LocalSet::new();
     // Orphan backstop: exit if our parent (the app) dies, so we don't linger holding the
-    // shielded seed. Our broadcaster child has the same backstop, so it follows us out.
+    // shielded seed.
     local.spawn_local(async {
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -344,6 +414,38 @@ mod tests {
 
         assert!(!map.contains_key("old"), "expired job must be pruned");
         assert!(map.contains_key("fresh"), "in-TTL job must be retained");
+    }
+
+    #[test]
+    fn job_ttl_outlives_the_receipt_poll_budget() {
+        // A `submitted` job's timestamp is not refreshed while phase 2 polls, so an equal (or
+        // shorter) TTL would sweep a still-progressing exit and then see it resurrected.
+        assert!(
+            JOB_TTL > exit::RECEIPT_POLL_BUDGET,
+            "TTL {JOB_TTL:?} must exceed the poll budget {:?}",
+            exit::RECEIPT_POLL_BUDGET
+        );
+    }
+
+    #[test]
+    fn amounts_parse_from_hex_and_decimal_strings() {
+        // Hex is the format every wei amount LEAVES here in, so `maxUnshieldable`'s
+        // `maxValueWei` must be feedable straight back into `unshield {amountWei}`.
+        assert_eq!(parse_amount(&json!("0x2710")).unwrap(), 10_000);
+        assert_eq!(parse_amount(&json!("10000")).unwrap(), 10_000);
+        // Beyond 2^53, where a JSON number would already have lost precision.
+        assert_eq!(
+            parse_amount(&json!("0xde0b6b3a7640000")).unwrap(),
+            1_000_000_000_000_000_000
+        );
+        assert_eq!(
+            parse_amount(&json!("1000000000000000000")).unwrap(),
+            1_000_000_000_000_000_000
+        );
+        // Garbage must be refused, not silently coerced to 0.
+        assert!(parse_amount(&json!("0xzz")).is_err());
+        assert!(parse_amount(&json!("12abc")).is_err());
+        assert!(parse_amount(&json!(null)).is_err());
     }
 
     #[test]

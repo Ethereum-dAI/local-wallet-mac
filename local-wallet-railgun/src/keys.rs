@@ -47,8 +47,8 @@ fn seed_from_entropy(entropy_hex: &str) -> Result<[u8; 64], SecretError> {
 /// same 32-byte entropy as the RAILGUN account, at `m/44'/60'/0'/1/{index}`.
 ///
 /// **`change = 1`, the BIP-44 internal branch, is deliberate**: it keeps exit senders in a
-/// keyspace disjoint from the broadcaster EOA at `m/44'/60'/0'/0/0`, which is funded and has
-/// already transacted publicly. See `derivation::exit_secp256k1_from_seed_at_index`.
+/// keyspace disjoint from the external `m/44'/60'/0'/0/*` chain, where a wallet's ordinary
+/// (funded, already-published) EOAs live. See `derivation::exit_secp256k1_from_seed_at_index`.
 ///
 /// This key signs the UserOperation and its 7702 authorization. It is never funded, never
 /// logged, and never returned over RPC. A seed leak gains an attacker nothing here: that
@@ -56,17 +56,6 @@ fn seed_from_entropy(entropy_hex: &str) -> Result<[u8; 64], SecretError> {
 pub fn derive_exit_key(entropy_hex: &str, index: u32) -> Result<String, SecretError> {
     let seed = seed_from_entropy(entropy_hex)?;
     let key = derivation::exit_secp256k1_from_seed_at_index(&seed, index)
-        .map_err(|e| SecretError::Derivation(e.to_string()))?;
-    Ok(format!("0x{}", hex::encode(key)))
-}
-
-/// Derive the local broadcaster EOA private key (0x-hex) from the same 32-byte entropy,
-/// at standard Ethereum path m/44'/60'/0'/0/0. Distinct from the RAILGUN account, and — since
-/// exit senders live on `change = 1` — distinct from every exit sender.
-// Removed in Task 6 with the broadcaster itself; kept so every commit builds.
-pub fn derive_broadcaster_key(entropy_hex: &str) -> Result<String, SecretError> {
-    let seed = seed_from_entropy(entropy_hex)?;
-    let key = derivation::broadcaster_secp256k1_from_seed(&seed)
         .map_err(|e| SecretError::Derivation(e.to_string()))?;
     Ok(format!("0x{}", hex::encode(key)))
 }
@@ -153,29 +142,6 @@ mod tests {
         assert_eq!(actual, E1_SEPOLIA_ADDRESS);
     }
 
-    #[test]
-    fn broadcaster_key_matches_hardhat_when_derived_from_matching_entropy() {
-        // 12-word hardhat = 16-byte entropy; derive_broadcaster_key takes 32-byte entropy,
-        // so test the shared seed-based core directly for the published address, and assert
-        // derive_broadcaster_key returns a well-formed 0x-key for the 32-byte runtime path.
-        use crate::derivation::{broadcaster_secp256k1_from_seed, mnemonic_to_seed};
-        let seed = mnemonic_to_seed(HARDHAT).unwrap();
-        let key = broadcaster_secp256k1_from_seed(&seed).unwrap();
-        let signer: alloy::signers::local::PrivateKeySigner =
-            format!("0x{}", hex::encode(key)).parse().unwrap();
-        // `{:?}` on alloy's `Address` renders plain lowercase hex; `{}` (Display) renders
-        // the EIP-55 checksummed form, which is what the published hardhat vector uses.
-        assert_eq!(
-            format!("{}", signer.address()),
-            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-        );
-
-        // Runtime path (32-byte entropy) returns a valid, parseable key.
-        let k = derive_broadcaster_key(E1).unwrap();
-        assert!(k.starts_with("0x") && k.len() == 66);
-        let _: alloy::signers::local::PrivateKeySigner = k.parse().unwrap();
-    }
-
     /// Address of an EOA key, so assertions never print key material on failure.
     fn eoa_address(key_hex: &str) -> String {
         let signer: alloy::signers::local::PrivateKeySigner = key_hex.parse().unwrap();
@@ -183,27 +149,10 @@ mod tests {
     }
 
     #[test]
-    fn exit_index_zero_is_not_the_broadcaster_address() {
-        // Before this was fixed, `derive_exit_key(e, 0)` was byte-identical to
-        // `derive_broadcaster_key(e)`: both `m/44'/60'/0'/0/0`. The broadcaster gets FUNDED and
-        // submits public relay transactions, so for any wallet that ever used the old unshield
-        // path, the first "single-use, never-funded" exit sender would have been their
-        // already-published broadcaster address — voiding the unlinkability the derived sender
-        // exists to provide. Deleting the broadcaster cannot un-publish it.
-        let broadcaster = eoa_address(&derive_broadcaster_key(E1).unwrap());
-        assert_ne!(
-            eoa_address(&derive_exit_key(E1, 0).unwrap()),
-            broadcaster,
-            "exit index 0 must not reuse the broadcaster address"
-        );
-        // No exit index may collide with it either.
-        for i in 0..8u32 {
-            assert_ne!(
-                eoa_address(&derive_exit_key(E1, i).unwrap()),
-                broadcaster,
-                "exit index {i} must not be the broadcaster address"
-            );
-        }
+    fn exit_keys_are_well_formed_0x_secp256k1_keys() {
+        let k = derive_exit_key(E1, 0).unwrap();
+        assert!(k.starts_with("0x") && k.len() == 66);
+        let _: alloy::signers::local::PrivateKeySigner = k.parse().unwrap();
     }
 
     #[test]

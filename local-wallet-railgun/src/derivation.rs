@@ -1,7 +1,7 @@
 //! Standard RAILGUN key derivation, byte-compatible with RAILGUN-Community `engine`
 //! (`src/key-derivation`, commit e2913b3). One BIP-39 mnemonic → the RAILGUN account
 //! (custom HMAC-SHA512 HD walk, curve seed "babyjubjub seed", hardened-only) and the
-//! local broadcaster EOA (standard secp256k1 BIP-32). Pure bytes in/out; no I/O.
+//! ephemeral exit senders (standard secp256k1 BIP-32). Pure bytes in/out; no I/O.
 
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
@@ -96,15 +96,6 @@ fn secp256k1_at_path(seed: &[u8], path: &str) -> Result<[u8; 32], DerivationErro
     Ok(out)
 }
 
-/// Standard secp256k1 BIP-32: seed → private key on the EXTERNAL chain, `m/44'/60'/0'/0/{index}`.
-///
-/// This is the broadcaster's keyspace, NOT the exit senders' — see
-/// [`exit_secp256k1_from_seed_at_index`].
-// Removed in Task 6 with the broadcaster itself; kept so every commit builds.
-pub fn secp256k1_from_seed_at_index(seed: &[u8], index: u32) -> Result<[u8; 32], DerivationError> {
-    secp256k1_at_path(seed, &format!("m/44'/60'/0'/0/{index}"))
-}
-
 /// Standard secp256k1 BIP-32: seed → exit-sender private key at `m/44'/60'/0'/1/{index}`.
 ///
 /// `index` is the per-exit counter, so every exit gets a fresh, never-funded 7702 sender —
@@ -112,12 +103,12 @@ pub fn secp256k1_from_seed_at_index(seed: &[u8], index: u32) -> Result<[u8; 32],
 /// random key) is what makes a stuck exit recoverable from the seed alone.
 ///
 /// **`change = 1` is load-bearing, not cosmetic.** It is BIP-44's internal branch, which gives
-/// exit senders a keyspace DISJOINT from the external `change = 0` chain. On `change = 0`, exit
-/// index 0 would be byte-identical to the local broadcaster EOA at `m/44'/60'/0'/0/0` — an
-/// address that gets FUNDED and submits public relay transactions — so the first
-/// "single-use, never-funded" exit sender would in fact be an already-published, funded,
-/// on-chain identity, voiding the unlinkability the ephemeral sender exists to provide.
-/// Deleting the broadcaster does not un-publish an address that already transacted.
+/// exit senders a keyspace DISJOINT from the external `change = 0` chain — where the standard
+/// first account (`m/44'/60'/0'/0/0`) that any wallet derives from this mnemonic lives, an
+/// address liable to be funded and to have transacted publicly. On `change = 0`, exit index 0
+/// would be byte-identical to it, so the first "single-use, never-funded" exit sender would in
+/// fact be an already-published on-chain identity, voiding the unlinkability the ephemeral
+/// sender exists to provide.
 ///
 /// A separate branch rather than an offset on the counter is deliberate: an offset would desync
 /// the on-disk index from the derivation index, whereas this keeps them 1:1 so recovery from
@@ -127,12 +118,6 @@ pub fn exit_secp256k1_from_seed_at_index(
     index: u32,
 ) -> Result<[u8; 32], DerivationError> {
     secp256k1_at_path(seed, &format!("m/44'/60'/0'/1/{index}"))
-}
-
-/// Standard secp256k1 BIP-32: seed → private key at m/44'/60'/0'/0/0 (the broadcaster EOA).
-// Removed in Task 6 with the broadcaster itself; kept so every commit builds.
-pub fn broadcaster_secp256k1_from_seed(seed: &[u8]) -> Result<[u8; 32], DerivationError> {
-    secp256k1_from_seed_at_index(seed, 0)
 }
 
 #[cfg(test)]
@@ -163,47 +148,6 @@ mod tests {
     }
 
     #[test]
-    fn broadcaster_key_matches_hardhat_account_zero() {
-        let seed = mnemonic_to_seed(HARDHAT).unwrap();
-        let key = broadcaster_secp256k1_from_seed(&seed).unwrap();
-        // Feed the derived key to alloy's signer and check the address (hardhat account #0).
-        let hex_key = format!("0x{}", hex::encode(key));
-        let signer: alloy::signers::local::PrivateKeySigner = hex_key.parse().unwrap();
-        // `{:?}` on alloy's `Address` renders plain lowercase hex; `{}` (Display) renders
-        // the EIP-55 checksummed form, which is what the expected vector uses.
-        assert_eq!(
-            format!("{}", signer.address()),
-            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-        );
-    }
-
-    #[test]
-    fn index_zero_matches_the_previous_fixed_path() {
-        // m/44'/60'/0'/0/0 on the hardhat mnemonic is hardhat account #0. This pins that
-        // generalising the helper to take an index did not shift the path.
-        let seed = mnemonic_to_seed(HARDHAT).unwrap();
-        let key = secp256k1_from_seed_at_index(&seed, 0).unwrap();
-        let hex_key = format!("0x{}", hex::encode(key));
-        let signer: alloy::signers::local::PrivateKeySigner = hex_key.parse().unwrap();
-        assert_eq!(
-            format!("{}", signer.address()),
-            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-        );
-    }
-
-    #[test]
-    fn index_one_matches_hardhat_account_one() {
-        let seed = mnemonic_to_seed(HARDHAT).unwrap();
-        let key = secp256k1_from_seed_at_index(&seed, 1).unwrap();
-        let hex_key = format!("0x{}", hex::encode(key));
-        let signer: alloy::signers::local::PrivateKeySigner = hex_key.parse().unwrap();
-        assert_eq!(
-            format!("{}", signer.address()),
-            "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-        );
-    }
-
-    #[test]
     fn distinct_indices_give_distinct_keys_and_are_deterministic() {
         let seed = mnemonic_to_seed(HARDHAT).unwrap();
         let a = exit_secp256k1_from_seed_at_index(&seed, 7).unwrap();
@@ -216,31 +160,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn exit_keyspace_is_disjoint_from_the_broadcaster_chain() {
-        // The whole point of `change = 1`. On `change = 0`, exit index 0 IS the broadcaster
-        // EOA — a funded address that has already submitted public relay transactions — so the
-        // first "never-funded, single-use" exit sender would be an already-published identity.
-        let seed = mnemonic_to_seed(HARDHAT).unwrap();
-        let broadcaster = broadcaster_secp256k1_from_seed(&seed).unwrap();
-        assert_ne!(
-            exit_secp256k1_from_seed_at_index(&seed, 0).unwrap(),
-            broadcaster,
-            "exit index 0 must not be the broadcaster key"
-        );
-        // No exit index may land anywhere on the external chain either.
-        for i in 0..8u32 {
-            let exit = exit_secp256k1_from_seed_at_index(&seed, i).unwrap();
-            for j in 0..8u32 {
-                assert_ne!(
-                    exit,
-                    secp256k1_from_seed_at_index(&seed, j).unwrap(),
-                    "exit index {i} collided with external index {j}"
-                );
-            }
-        }
-    }
-
     /// Frozen vector for the exit branch: `m/44'/60'/0'/1/0` on the hardhat mnemonic. Pins the
     /// path so a silent change of `change` or `account` cannot go unnoticed — that would make
     /// every previously-derived exit sender unrecoverable from the seed.
@@ -250,12 +169,25 @@ mod tests {
     /// rather than a self-pin.
     const HARDHAT_EXIT_0: &str = "0x4b39F7b0624b9dB86AD293686bc38B903142dbBc";
 
+    /// Hardhat account #0 — `m/44'/60'/0'/0/0`, the EXTERNAL branch. Exit senders must never
+    /// land here: it is the address any wallet derives first from this mnemonic, so it is
+    /// liable to be funded and to have transacted publicly.
+    const HARDHAT_EXTERNAL_0: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+
     #[test]
     fn exit_path_is_pinned_to_the_internal_branch() {
         let seed = mnemonic_to_seed(HARDHAT).unwrap();
         let key = exit_secp256k1_from_seed_at_index(&seed, 0).unwrap();
         let signer: alloy::signers::local::PrivateKeySigner =
             format!("0x{}", hex::encode(key)).parse().unwrap();
-        assert_eq!(format!("{}", signer.address()), HARDHAT_EXIT_0);
+        let addr = format!("{}", signer.address());
+        assert_eq!(addr, HARDHAT_EXIT_0);
+        // The whole point of `change = 1`: index 0 is NOT the external first account. Asserted
+        // against the published address rather than a re-derivation, so nothing here depends on
+        // a `change = 0` helper existing.
+        assert_ne!(
+            addr, HARDHAT_EXTERNAL_0,
+            "exit index 0 must not be the external first account"
+        );
     }
 }

@@ -1,7 +1,7 @@
 //! fd-5 spawn contract (the secret-delivery half of the wallet-node contract).
 //!
-//! Secrets (the RAILGUN entropy for the helper; the broadcaster EOA key) are delivered to
-//! a child process over **fd 5** — never via argv or env — matching how the macOS app and
+//! The secret (the RAILGUN entropy for the helper) is delivered to a child process over
+//! **fd 5** — never via argv or env — matching how the macOS app and
 //! `wallet-node` already move the bundler secret. The parent writes the secret JSON to a
 //! pipe whose read end the child inherits as fd 5, then closes it so the child reads EOF.
 //!
@@ -145,7 +145,7 @@ pub fn spawn_child_with_fd5(mut cmd: Command, secret: &[u8]) -> io::Result<Child
     Ok(child)
 }
 
-/// Kills its child on drop so a panicking/exiting parent never leaks the broadcaster.
+/// Kills its child on drop so a panicking/exiting parent never leaks a spawned child.
 pub struct ChildGuard(pub Child);
 impl Drop for ChildGuard {
     fn drop(&mut self) {

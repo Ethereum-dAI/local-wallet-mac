@@ -74,7 +74,8 @@ impl fmt::Debug for SecretPayload {
 }
 
 /// fd-5 secret for `railgun-helper`: the RAILGUN entropy only (its shielded-account seed).
-/// The helper derives BOTH the RAILGUN account and the broadcaster EOA from this one root.
+/// The helper derives BOTH the RAILGUN account and every ephemeral exit sender from this
+/// one root.
 #[derive(Deserialize, Clone, PartialEq)]
 pub struct HelperFd5 {
     #[serde(rename = "entropyHex")]
@@ -85,21 +86,6 @@ impl fmt::Debug for HelperFd5 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HelperFd5")
             .field("entropy_hex", &"<redacted>")
-            .finish()
-    }
-}
-
-/// fd-5 secret for `railgun-broadcaster`: its own EOA private key.
-#[derive(Deserialize, Clone, PartialEq)]
-pub struct BroadcasterFd5 {
-    #[serde(rename = "keyHex")]
-    pub key_hex: String,
-}
-
-impl fmt::Debug for BroadcasterFd5 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BroadcasterFd5")
-            .field("key_hex", &"<redacted>")
             .finish()
     }
 }

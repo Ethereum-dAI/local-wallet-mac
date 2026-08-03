@@ -139,10 +139,10 @@ impl RailgunHelper {
     /// RAILGUN's privacy paymaster and submitted by a PUBLIC bundler.
     ///
     /// The unshield targets an ephemeral EIP-7702 account derived at
-    /// `m/44'/60'/0'/1/{index}` — BIP-44's INTERNAL branch, disjoint from the `change = 0`
-    /// chain the broadcaster EOA lives on, so the sender is genuinely never-funded and has no
-    /// public history. The UserOp's `callData` unwraps and forwards, so the whole exit is ONE
-    /// atomic transaction from that single-use address.
+    /// `m/44'/60'/0'/1/{index}` — BIP-44's INTERNAL branch, disjoint from the external
+    /// `change = 0` chain where a wallet's ordinary funded EOAs live, so the sender is
+    /// genuinely never-funded and has no public history. The UserOp's `callData` unwraps and
+    /// forwards, so the whole exit is ONE atomic transaction from that single-use address.
     ///
     /// **Generates one Groth16 proof per fee-loop iteration** (two is the floor: the SDK's
     /// seed `fee_value` is ~7 orders of magnitude below a real sponsored fee, so iteration 1
@@ -311,27 +311,21 @@ impl RailgunHelper {
         })
     }
 
-    /// Build + prove the unshield (withdraw) tx sending `amount` WETH to `to`.
-    /// **Generates a Groth16 proof** (downloads artifacts on first call). The returned tx
-    /// is submitted by the LOCAL BROADCASTER's EOA.
-    // Removed in Task 6 with the broadcaster itself; kept so every commit builds.
-    pub async fn prepare_unshield(&mut self, to: Address, amount: u128) -> Result<TxData, String> {
-        self.sync().await?;
-        let tb = TransactionBuilder::new()
-            .unshield(self.signer.clone(), to, self.weth, amount)
-            .map_err(|e| format!("unshield builder: {e}"))?;
-        let mut rng = rand::rng();
-        let proved = self
-            .railgun
-            .build(tb, &mut rng)
-            .await
-            .map_err(|e| format!("prove unshield: {e}"))?;
-        Ok(proved.tx_data)
-    }
-
     /// The RAILGUN account address (0zk…), for logging/UX. Not a secret.
     pub fn account_address(&self) -> String {
         format!("{:?}", self.signer.address())
+    }
+
+    /// Chain id this helper is bound to.
+    pub fn chain_id(&self) -> u64 {
+        self.chain.id
+    }
+
+    /// RAILGUN treasury unshield fee in basis points (25 on both supported chains). Only a
+    /// pre-flight estimate: `submit_exit` verifies it against the live `unshieldFee()` and
+    /// fails closed on any disagreement.
+    pub fn unshield_fee_bps(&self) -> u16 {
+        self.chain.unshield_fee_bps
     }
 }
 

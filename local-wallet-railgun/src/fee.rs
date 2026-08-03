@@ -33,6 +33,27 @@ pub struct GasUnits {
     pub paymaster_post_op_gas_limit: u128,
 }
 
+/// **Measured, for the recalibration the doc comment above invites — deliberately NOT applied.**
+///
+/// From `tests/e2e_fork.rs` on an anvil Sepolia fork at block 11011021, three sponsored exits in
+/// one sidecar session (`~1.7 gwei` maxFeePerGas):
+///
+/// | field | assumed here | observed |
+/// |---|---|---|
+/// | total | 3 350 000 | **~1 542 000 – 1 548 000** (2.17x conservative) |
+/// | `call_gas_limit` (+ `native_unwrap_call_gas`) | 2 580 000 | **23 647** (~100x over) |
+/// | `pre_verification_gas` | 100 000 | 117 801 (UNDER by ~18%) |
+/// | `verification_gas_limit` | 150 000 | 49 783 |
+/// | `paymaster_verification_gas_limit` | 400 000 | **1 356 340 – 1 697 000** (UNDER by 3-4x) |
+/// | `paymaster_post_op_gas_limit` | 120 000 | 1 |
+///
+/// Two reasons nothing is changed on this evidence. First, the *shape* is wrong in both
+/// directions at once — the call-gas fields are ~100x too large while the dominant
+/// paymaster-validation field is 3-4x too small — so the total being conservative is luck, not
+/// margin, and a naive per-field retune could make the reserve too SMALL. Second, that dominant
+/// field moved by 25% (1.36M → 1.70M) *within a single session on an idle fork*, so one fork
+/// sample is not a distribution. Retuning needs live-run data across a range of gas conditions,
+/// and the failure mode of an under-sized reserve is a stranded exit.
 pub const RAILGUN_UNSHIELD_GAS_UNITS: GasUnits = GasUnits {
     pre_verification_gas: 100_000,
     verification_gas_limit: 150_000,

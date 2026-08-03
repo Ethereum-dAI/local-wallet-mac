@@ -19,8 +19,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// EntryPoint v0.8 — the version the privacy paymaster path targets (`userop_kit::entry_point`).
-pub const ENTRY_POINT_08: &str = "0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108";
+/// EntryPoint v0.8 as a CLI argument — the version the privacy paymaster path targets.
+///
+/// Formatted from the SDK's own constant rather than re-typed, so the EntryPoint Alto is told to
+/// serve and the one the UserOperations are built against cannot silently diverge.
+fn entry_point_arg() -> String {
+    format!("{:?}", userop_kit::entry_point::ENTRY_POINT_08)
+}
 
 /// Anvil dev keys for Alto's executor and utility roles (testnet only). Same pair upstream
 /// Kohaku's `broadcast_utxo.rs` funds, so a stale fork state from either fixture is
@@ -100,7 +105,7 @@ pub async fn spawn(rpc_url: &str, port: u16, log_path: &Path) -> Result<Alto, St
         "--port".to_string(),
         port.to_string(),
         "--entrypoints".to_string(),
-        ENTRY_POINT_08.to_string(),
+        entry_point_arg(),
         "--executor-private-keys".to_string(),
         ALTO_EXECUTOR_KEY.to_string(),
         "--utility-private-key".to_string(),

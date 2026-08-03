@@ -84,9 +84,13 @@ pub fn railgun_node_key(seed: &[u8], path: &[u32]) -> [u8; 32] {
     node.key
 }
 
-/// Standard secp256k1 BIP-32: seed → private key at m/44'/60'/0'/0/0 (the broadcaster EOA).
-pub fn broadcaster_secp256k1_from_seed(seed: &[u8]) -> Result<[u8; 32], DerivationError> {
-    let path: bip32::DerivationPath = "m/44'/60'/0'/0/0"
+/// Standard secp256k1 BIP-32: seed → private key at `m/44'/60'/0'/0/{index}`.
+///
+/// `index` is the per-exit counter, so every exit gets a fresh, never-funded 7702 sender —
+/// rotation is free because the sender never holds a balance. Deriving (rather than using a
+/// random key) is what makes a stuck exit recoverable from the seed alone.
+pub fn secp256k1_from_seed_at_index(seed: &[u8], index: u32) -> Result<[u8; 32], DerivationError> {
+    let path: bip32::DerivationPath = format!("m/44'/60'/0'/0/{index}")
         .parse()
         .map_err(|e: bip32::Error| DerivationError::Bip32(e.to_string()))?;
     let xprv = bip32::XPrv::derive_from_path(seed, &path)
@@ -94,6 +98,12 @@ pub fn broadcaster_secp256k1_from_seed(seed: &[u8]) -> Result<[u8; 32], Derivati
     let mut out = [0u8; 32];
     out.copy_from_slice(xprv.private_key().to_bytes().as_slice());
     Ok(out)
+}
+
+/// Standard secp256k1 BIP-32: seed → private key at m/44'/60'/0'/0/0 (the broadcaster EOA).
+// Removed in Task 6 with the broadcaster itself; kept so every commit builds.
+pub fn broadcaster_secp256k1_from_seed(seed: &[u8]) -> Result<[u8; 32], DerivationError> {
+    secp256k1_from_seed_at_index(seed, 0)
 }
 
 #[cfg(test)]
@@ -135,6 +145,45 @@ mod tests {
         assert_eq!(
             format!("{}", signer.address()),
             "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+        );
+    }
+
+    #[test]
+    fn index_zero_matches_the_previous_fixed_path() {
+        // m/44'/60'/0'/0/0 on the hardhat mnemonic is hardhat account #0. This pins that
+        // generalising the helper to take an index did not shift the path.
+        let seed = mnemonic_to_seed(HARDHAT).unwrap();
+        let key = secp256k1_from_seed_at_index(&seed, 0).unwrap();
+        let hex_key = format!("0x{}", hex::encode(key));
+        let signer: alloy::signers::local::PrivateKeySigner = hex_key.parse().unwrap();
+        assert_eq!(
+            format!("{}", signer.address()),
+            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+        );
+    }
+
+    #[test]
+    fn index_one_matches_hardhat_account_one() {
+        let seed = mnemonic_to_seed(HARDHAT).unwrap();
+        let key = secp256k1_from_seed_at_index(&seed, 1).unwrap();
+        let hex_key = format!("0x{}", hex::encode(key));
+        let signer: alloy::signers::local::PrivateKeySigner = hex_key.parse().unwrap();
+        assert_eq!(
+            format!("{}", signer.address()),
+            "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+        );
+    }
+
+    #[test]
+    fn distinct_indices_give_distinct_keys_and_are_deterministic() {
+        let seed = mnemonic_to_seed(HARDHAT).unwrap();
+        let a = secp256k1_from_seed_at_index(&seed, 7).unwrap();
+        let b = secp256k1_from_seed_at_index(&seed, 8).unwrap();
+        assert_ne!(a, b, "different indices must not collide");
+        assert_eq!(
+            a,
+            secp256k1_from_seed_at_index(&seed, 7).unwrap(),
+            "derivation must be deterministic so a stuck exit is recoverable"
         );
     }
 }

@@ -34,17 +34,28 @@ pub fn derive_railgun_signer(
     Ok(PrivateKeySigner::new_evm(spending, viewing, chain_id))
 }
 
-/// Derive the local broadcaster EOA private key (0x-hex) from the same 32-byte entropy,
-/// at standard Ethereum path m/44'/60'/0'/0/0. Distinct from the RAILGUN account.
-pub fn derive_broadcaster_key(entropy_hex: &str) -> Result<String, SecretError> {
+/// Derive the ephemeral EIP-7702 exit-sender private key (0x-hex) for exit `index`, from the
+/// same 32-byte entropy as the RAILGUN account, at `m/44'/60'/0'/0/{index}`.
+///
+/// This key signs the UserOperation and its 7702 authorization. It is never funded, never
+/// logged, and never returned over RPC. A seed leak gains an attacker nothing here: that
+/// same seed already controls the shielded funds.
+pub fn derive_exit_key(entropy_hex: &str, index: u32) -> Result<String, SecretError> {
     let entropy = parse_entropy_32(entropy_hex)?;
     let mnemonic = derivation::entropy_to_mnemonic(&entropy)
         .map_err(|e| SecretError::Derivation(e.to_string()))?;
     let seed = derivation::mnemonic_to_seed(&mnemonic)
         .map_err(|e| SecretError::Derivation(e.to_string()))?;
-    let key = derivation::broadcaster_secp256k1_from_seed(&seed)
+    let key = derivation::secp256k1_from_seed_at_index(&seed, index)
         .map_err(|e| SecretError::Derivation(e.to_string()))?;
     Ok(format!("0x{}", hex::encode(key)))
+}
+
+/// Derive the local broadcaster EOA private key (0x-hex) from the same 32-byte entropy,
+/// at standard Ethereum path m/44'/60'/0'/0/0. Distinct from the RAILGUN account.
+// Removed in Task 6 with the broadcaster itself; kept so every commit builds.
+pub fn derive_broadcaster_key(entropy_hex: &str) -> Result<String, SecretError> {
+    derive_exit_key(entropy_hex, 0)
 }
 
 #[cfg(test)]

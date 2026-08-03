@@ -128,6 +128,22 @@ mod tests {
     const SPENDING: &str = "b0958f8bc286ae0832fa83b01b719a225a07ce7b861ff311323f221667b3bd50";
     const VIEWING: &str = "9da4b4f0b5493a6ba3f7df0611c3e0842f7e2bb3d640f313b235f1b75c1d80b9";
 
+    /// Address of a derived key, so a failing assertion prints an address rather than key bytes.
+    fn eoa_address(key: &[u8; 32]) -> String {
+        let signer: alloy::signers::local::PrivateKeySigner =
+            format!("0x{}", hex::encode(key)).parse().unwrap();
+        format!("{}", signer.address())
+    }
+
+    /// A key on the EXTERNAL (`change = 0`) chain, which the exit path must never touch.
+    ///
+    /// Calls the private path helper directly rather than reintroducing a `pub`
+    /// `change = 0` derivation just to test against: nothing outside this module has any
+    /// business deriving on that branch.
+    fn external_key(seed: &[u8], index: u32) -> [u8; 32] {
+        secp256k1_at_path(seed, &format!("m/44'/60'/0'/0/{index}")).unwrap()
+    }
+
     #[test]
     fn railgun_walk_matches_engine_vector() {
         let seed = mnemonic_to_seed(HARDHAT).unwrap();
@@ -177,17 +193,38 @@ mod tests {
     #[test]
     fn exit_path_is_pinned_to_the_internal_branch() {
         let seed = mnemonic_to_seed(HARDHAT).unwrap();
-        let key = exit_secp256k1_from_seed_at_index(&seed, 0).unwrap();
-        let signer: alloy::signers::local::PrivateKeySigner =
-            format!("0x{}", hex::encode(key)).parse().unwrap();
-        let addr = format!("{}", signer.address());
+        let addr = eoa_address(&exit_secp256k1_from_seed_at_index(&seed, 0).unwrap());
         assert_eq!(addr, HARDHAT_EXIT_0);
         // The whole point of `change = 1`: index 0 is NOT the external first account. Asserted
-        // against the published address rather than a re-derivation, so nothing here depends on
-        // a `change = 0` helper existing.
+        // against the published literal, so the pin holds even with no `change = 0` derivation
+        // in the crate to compare against.
         assert_ne!(
             addr, HARDHAT_EXTERNAL_0,
             "exit index 0 must not be the external first account"
         );
+        // Parity anchor for `external_key` itself: it must really reproduce hardhat #0, or the
+        // cross-product test below would be comparing against the wrong branch and pass
+        // vacuously.
+        assert_eq!(eoa_address(&external_key(&seed, 0)), HARDHAT_EXTERNAL_0);
+    }
+
+    #[test]
+    fn no_exit_index_lands_anywhere_on_the_external_chain() {
+        // A CROSS-PRODUCT, not a single pair. Checking only exit 0 vs external 0 would miss a
+        // regression that made the branch index-dependent — `m/44'/60'/0'/{index % 2}/{index}`
+        // keeps index 0 correct while dropping every odd sender onto the funded, publicly
+        // transacted external chain. This guards the index-collision defect found in Task 5
+        // round 2, so it is deliberately over- rather than under-covered.
+        let seed = mnemonic_to_seed(HARDHAT).unwrap();
+        for i in 0..8u32 {
+            let exit = eoa_address(&exit_secp256k1_from_seed_at_index(&seed, i).unwrap());
+            for j in 0..8u32 {
+                assert_ne!(
+                    exit,
+                    eoa_address(&external_key(&seed, j)),
+                    "exit index {i} collided with external index {j}"
+                );
+            }
+        }
     }
 }

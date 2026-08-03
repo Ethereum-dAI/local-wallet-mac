@@ -16,7 +16,59 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
-pub type RpcResult = Result<Value, String>;
+/// A handler failure: a stable machine code plus human text.
+///
+/// The code exists because JSON-RPC's own `error.code` is a transport-level integer — every
+/// handler failure is `-32000` — so without this the app can only tell "insufficient shielded
+/// balance" from "the bundler's gas endpoint returned 502" by substring-matching a sentence.
+/// It travels in the JSON-RPC error object's `data.code`, which is exactly what `data` is for,
+/// and mirrors [`crate::exit::ExitError::code`] on the async (job-status) path so both paths
+/// give the app the same kind of switchable string.
+///
+/// `From<String>` maps any plain-string error to code `"error"` — the same generic code
+/// `ExitError::Other` uses — so a handler only names a code where it has something specific
+/// to say.
+///
+/// `code` is a `String` rather than `&'static str` so [`call`] can reconstruct the code a peer
+/// sent, making the type round-trip across the socket instead of only outbound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpcError {
+    pub code: String,
+    pub message: String,
+}
+
+/// The generic code, used whenever a handler has nothing more specific to say. Matches
+/// `ExitError::Other.code()` so the two paths agree on the fallback.
+pub const CODE_GENERIC: &str = "error";
+
+impl RpcError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for RpcError {
+    fn from(message: String) -> Self {
+        Self::new(CODE_GENERIC, message)
+    }
+}
+
+impl From<&str> for RpcError {
+    fn from(message: &str) -> Self {
+        Self::new(CODE_GENERIC, message)
+    }
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.message, self.code)
+    }
+}
+
+pub type RpcResult = Result<Value, RpcError>;
 // Not `Send`: the RAILGUN provider (via `dyn RailgunSigner`) is not Send, so handler
 // futures aren't either. The server therefore handles connections sequentially on the
 // runtime's block_on task (never moved across threads) rather than spawning per-conn —
@@ -120,7 +172,13 @@ async fn handle(
             Ok(result) => json_resp(json!({"jsonrpc":"2.0","id":id,"result":result})),
             Err(e) => {
                 tracing::warn!("handler error for {method}: {e}");
-                json_resp(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":e}}))
+                // `data.code` is the stable, switchable code; `-32000` stays the transport-level
+                // "server error" every handler failure carries.
+                json_resp(json!({"jsonrpc":"2.0","id":id,"error":{
+                    "code": -32000,
+                    "message": e.message,
+                    "data": {"code": e.code},
+                }}))
             }
         },
     }
@@ -151,13 +209,17 @@ macro_rules! rpc_handler {
 }
 
 /// Minimal Unix-socket JSON-RPC client: connects, sends one request, reads to EOF.
-/// Returns the parsed `result` value, or an error carrying the RPC `error.message`.
+///
+/// Returns the parsed `result`, or an [`RpcError`] carrying the peer's `error.message` AND the
+/// stable `error.data.code` the handler set — so a Rust caller can switch on the code instead
+/// of matching the sentence, exactly like the app does. Transport/parse failures on our side
+/// read as [`CODE_GENERIC`].
 pub async fn call(
     socket_path: &str,
     token: &str,
     method: &str,
     params: Value,
-) -> Result<Value, String> {
+) -> Result<Value, RpcError> {
     let mut stream = UnixStream::connect(socket_path)
         .await
         .map_err(|e| format!("connect {socket_path}: {e}"))?;
@@ -187,16 +249,24 @@ pub async fn call(
         .map(|l| l.contains(" 200"))
         .unwrap_or(false);
     if !status_ok {
-        return Err(format!("HTTP error: {}", head.lines().next().unwrap_or("")));
+        // A non-200 (e.g. 401 from a bad bearer token) has no JSON body to carry a domain code.
+        return Err(format!("HTTP error: {}", head.lines().next().unwrap_or("")).into());
     }
     let v: Value = serde_json::from_str(payload.trim())
         .map_err(|e| format!("bad JSON body: {e}: {payload}"))?;
     if let Some(err) = v.get("error") {
-        return Err(err
+        let message = err
             .get("message")
             .and_then(|m| m.as_str())
-            .unwrap_or("rpc error")
-            .to_string());
+            .unwrap_or("rpc error");
+        // A peer that sends no `data.code` (or a transport-level JSON-RPC error like a parse
+        // failure) has no domain code to recover, so it reads as generic.
+        let code = err
+            .get("data")
+            .and_then(|d| d.get("code"))
+            .and_then(|c| c.as_str())
+            .unwrap_or(CODE_GENERIC);
+        return Err(RpcError::new(code, message));
     }
     Ok(v.get("result").cloned().unwrap_or(Value::Null))
 }
@@ -256,5 +326,68 @@ mod tests {
         // unknown method → error
         let unk = call(&sock, "tok", "nope", json!(null)).await;
         assert!(unk.is_err());
+    }
+
+    #[tokio::test]
+    async fn handler_error_codes_round_trip_over_the_socket() {
+        // The whole point of RpcError: a caller must be able to switch on a stable code rather
+        // than substring-match the message. If `data.code` were dropped anywhere between the
+        // handler and the client, every distinct failure would collapse into one -32000 blob.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("e.sock").to_string_lossy().to_string();
+        let sock2 = sock.clone();
+        std::thread::spawn(move || {
+            let mut handlers: Handlers = HashMap::new();
+            handlers.insert(
+                "coded".to_string(),
+                rpc_handler!(|_p: Value| async move {
+                    Err(RpcError::new(
+                        "insufficientShieldedBalance",
+                        "5 wei exceeds the spendable maximum 3 wei",
+                    ))
+                }),
+            );
+            // A handler that fails with a plain String must land on the generic code.
+            handlers.insert(
+                "plain".to_string(),
+                rpc_handler!(|_p: Value| async move {
+                    Err::<Value, RpcError>("something broke".to_string().into())
+                }),
+            );
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                serve_rpc(&sock2, "tok".to_string(), handlers)
+                    .await
+                    .unwrap();
+            });
+        });
+        for _ in 0..50 {
+            if UnixStream::connect(&sock).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let e = call(&sock, "tok", "coded", json!(null))
+            .await
+            .expect_err("must fail");
+        assert_eq!(e.code, "insufficientShieldedBalance");
+        assert_eq!(e.message, "5 wei exceeds the spendable maximum 3 wei");
+
+        let e = call(&sock, "tok", "plain", json!(null))
+            .await
+            .expect_err("must fail");
+        assert_eq!(e.code, CODE_GENERIC);
+        assert_eq!(e.message, "something broke");
+
+        // An unknown method is a transport-level JSON-RPC error with no `data`, so it reads
+        // generic rather than panicking or inventing a code.
+        let e = call(&sock, "tok", "nope", json!(null))
+            .await
+            .expect_err("must fail");
+        assert_eq!(e.code, CODE_GENERIC);
     }
 }

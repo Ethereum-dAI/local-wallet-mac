@@ -107,19 +107,52 @@ pub fn parse_op_hash(hash: &str) -> Result<B256, ExitError> {
         .map_err(|e| ExitError::Other(format!("bad op hash {hash}: {e}")))
 }
 
-/// Everything known once the bundler has accepted the op. Published as the job's `submitted`
-/// state so the app can show a submitted card with a real hash instead of a blank spinner.
+/// Serialise a wei amount as a `0x`-hex STRING. The in-memory type stays `u128`.
+///
+/// A JSON *number* here would be a silent correctness bug, not a style question. 2^53 wei is
+/// **0.009 ETH**, so essentially every real exit is already past the point a Double-backed
+/// JSON decoder can represent exactly, and beyond ~18.44 ETH it leaves `u64` too — the app
+/// would render a subtly wrong "you received" figure with no error raised anywhere. Hex
+/// strings also match what `BalanceSplit` and `maxUnshieldable` already put on the wire, so
+/// every wei amount crossing this boundary has one form.
+fn hex_wei<S: serde::Serializer>(v: &u128, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&format!("0x{v:x}"))
+}
+
+/// Everything known once the bundler has accepted the op.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExitSubmission {
     pub user_op_hash: String,
     pub sender: String,
     /// Wei of NATIVE ETH the callData forwards to the recipient.
+    #[serde(serialize_with = "hex_wei")]
     pub delivered_wei: u128,
     pub exit_index: u32,
 }
 
-/// The result of waiting on a submitted exit.
+impl ExitSubmission {
+    /// The outcome as known at submission time: every fact except inclusion, which is not yet
+    /// determined.
+    ///
+    /// This is what lets the sidecar publish its `submitted` state in the SAME schema that
+    /// receipt polling will later overwrite it with. Publishing a bare `ExitSubmission` there
+    /// instead would put two different shapes behind one status string — one with `included`,
+    /// one without — and a client decoder with a non-optional `included` would decode the
+    /// phase-2 form and fail the phase-1 form.
+    pub fn pending_outcome(&self) -> ExitOutcome {
+        ExitOutcome {
+            user_op_hash: self.user_op_hash.clone(),
+            sender: self.sender.clone(),
+            delivered_wei: self.delivered_wei,
+            exit_index: self.exit_index,
+            included: false,
+        }
+    }
+}
+
+/// The result of waiting on a submitted exit — and, with `included: false`, also the state
+/// published the moment the bundler accepts the op (see [`ExitSubmission::pending_outcome`]).
 ///
 /// There is no `reverted` field: a revert is `ExitError::DeliveryReverted`, so the only two
 /// outcomes here are "landed successfully" (`included: true`) and "not yet known"
@@ -131,6 +164,7 @@ pub struct ExitOutcome {
     pub user_op_hash: String,
     pub sender: String,
     /// Wei of NATIVE ETH forwarded to the recipient.
+    #[serde(serialize_with = "hex_wei")]
     pub delivered_wei: u128,
     pub exit_index: u32,
     pub included: bool,
@@ -184,12 +218,11 @@ async fn await_exit_within(
     );
     let hash = UserOperationHash(parse_op_hash(&sub.user_op_hash)?);
 
+    // Built from `pending_outcome` so the polled outcome and the `submitted` state the handler
+    // already published can never drift apart in any field but `included`.
     let outcome = |included: bool| ExitOutcome {
-        user_op_hash: sub.user_op_hash.clone(),
-        sender: sub.sender.clone(),
-        delivered_wei: sub.delivered_wei,
-        exit_index: sub.exit_index,
         included,
+        ..sub.pending_outcome()
     };
 
     let started = std::time::Instant::now();

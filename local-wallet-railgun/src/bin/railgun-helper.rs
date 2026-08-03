@@ -13,6 +13,23 @@
 //!   background (proving alone exceeds any sane RPC timeout).
 //! - `unshieldStatus {jobId}` → `{status: pending|submitted|done|error, result?, error?, code?}`.
 //!
+//! Every wei amount crossing this boundary — in BOTH directions — is a `0x`-hex string, never a
+//! JSON number: 2^53 wei is 0.009 ETH, so a number would silently lose precision in any
+//! Double-backed decoder.
+//!
+//! **Failure codes.** Both failure paths give the app a stable camelCase code to switch on
+//! instead of a sentence to substring-match. Asynchronous failures carry it as `code` inside
+//! the `unshieldStatus` payload (from `ExitError::code()`); synchronous rejections carry it as
+//! `error.data.code` in the JSON-RPC error object (from `RpcError`). The synchronous set is:
+//!
+//! - `badRequest` — malformed params (unparseable amount or recipient, missing `jobId`).
+//! - `insufficientShieldedBalance` — the amount exceeds the live spendable ceiling.
+//! - `bundlerUnavailable` — the bundler's gas endpoint could not be read, so the fee reserve
+//!   cannot be sized. Distinct from the above because nothing is wrong with the user's balance.
+//! - `unknownJobId` — no such job (never started, or already read to a terminal state, or
+//!   TTL-swept).
+//! - `error` — anything else (RAILGUN sync/build failures, internal invariants).
+//!
 //! The secret (RAILGUN entropy) arrives on **fd 5** (`HelperFd5`); env is a standalone/dev
 //! fallback only. Every ephemeral exit sender is derived from that same entropy root, never
 //! carried separately. Non-secret config is via env.
@@ -24,9 +41,10 @@ use std::time::{Duration, Instant};
 
 use alloy::primitives::Address;
 use railgun::chain_config::ChainConfig;
+use railgun_helper::exit::ExitOutcome;
 use railgun_helper::pool::RailgunHelper;
 use railgun_helper::provider::connect_provider;
-use railgun_helper::rpc::{serve_rpc, Handlers};
+use railgun_helper::rpc::{serve_rpc, Handlers, RpcError};
 use railgun_helper::secret::HelperFd5;
 use railgun_helper::spawn::read_fd5;
 use railgun_helper::{exit, fee, keys, rpc_handler};
@@ -37,16 +55,25 @@ fn env(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| panic!("missing env {key}"))
 }
 
-/// How long a finished (or abandoned-pending) unshield job lingers before the TTL sweep
-/// drops it. It only bounds the map against jobs that are never polled to a terminal read;
-/// it must never evict a job that is still progressing.
+/// Synchronous failure codes. See the module header for what each one means to the app; they
+/// are a wire contract, so rename one only alongside the client.
+const CODE_BAD_REQUEST: &str = "badRequest";
+const CODE_INSUFFICIENT: &str = "insufficientShieldedBalance";
+const CODE_BUNDLER_UNAVAILABLE: &str = "bundlerUnavailable";
+const CODE_UNKNOWN_JOB: &str = "unknownJobId";
+
+/// How long an unshield job lingers, since its last update, before the TTL sweep drops it.
+/// It exists only to bound the map against jobs a client abandons; it must never evict a job
+/// that is still progressing.
 ///
-/// Derived from [`exit::RECEIPT_POLL_BUDGET`] rather than hardcoded, because a `submitted`
-/// job's timestamp is only refreshed when receipt polling finishes. At an equal TTL, an op
-/// that takes the full budget to land would be swept out from under the app mid-poll —
-/// `unknown jobId` on an exit that is fine — and then RESURRECTED when polling finally wrote
-/// its result. The margin also covers `wait_for_receipt`'s own 60s timeout overshooting the
-/// budget's top-of-loop check.
+/// The primary defence against evicting a live job is that `unshieldStatus` restamps every
+/// non-terminal read, so an actively-polled job cannot expire at any TTL. This constant is the
+/// second line, for the window before the first poll: it is derived from
+/// [`exit::RECEIPT_POLL_BUDGET`] rather than hardcoded because at an equal TTL an op that took
+/// the full budget to land would be swept out from under the app mid-poll — `unknown jobId` on
+/// an exit that is fine — and then RESURRECTED when polling finally wrote its result. The
+/// margin also covers `wait_for_receipt`'s own 60s timeout overshooting the budget's
+/// top-of-loop check, plus one poll interval.
 const JOB_TTL: Duration = Duration::from_secs(exit::RECEIPT_POLL_BUDGET.as_secs() + 300);
 
 /// Drop job entries whose last update is older than `JOB_TTL`. Cheap linear sweep — the map
@@ -112,7 +139,7 @@ struct Ceiling {
 /// pre-check. `maxUnshieldable` tells the app the largest amount it may ask for and
 /// `unshield` refuses anything larger; if the two computed it separately they could drift
 /// apart and the UI would offer a maximum the sidecar then rejects.
-async fn spendable_ceiling(helper: &mut RailgunHelper) -> Result<Ceiling, String> {
+async fn spendable_ceiling(helper: &mut RailgunHelper) -> Result<Ceiling, RpcError> {
     let split = helper.balance_split().await?;
     // POI is intentionally OFF (see `pool`), so `total == valid`: every note is spendable now
     // and `total` is exactly what the app's balance card shows. If POI is ever enabled this
@@ -120,11 +147,42 @@ async fn spendable_ceiling(helper: &mut RailgunHelper) -> Result<Ceiling, String
     let balance = u128::from_str_radix(split.total.trim_start_matches("0x"), 16)
         .map_err(|e| format!("parse balance {}: {e}", split.total))?;
     let url = exit::resolve_bundler_url(helper.chain_id());
-    let max_fee = exit::fetch_max_fee_per_gas(&url).await?;
+    // Coded distinctly: the user's balance is fine, we just cannot size the reserve without a
+    // gas sample. Reporting this as "insufficient balance" would send the app to the wrong copy.
+    let max_fee = exit::fetch_max_fee_per_gas(&url).await.map_err(|e| {
+        RpcError::new(
+            CODE_BUNDLER_UNAVAILABLE,
+            format!("cannot read the bundler's gas price, so the fee reserve cannot be sized: {e}"),
+        )
+    })?;
     let reserve = fee::gas_reserve_wei(&fee::RAILGUN_UNSHIELD_GAS_UNITS, max_fee);
     Ok(Ceiling {
         max: fee::max_unshieldable(balance, helper.unshield_fee_bps(), reserve),
         reserve,
+    })
+}
+
+/// The `unshieldStatus` payload for an exit that has a real op hash.
+///
+/// ONE builder for BOTH phases, so `submitted` has exactly one schema on the wire no matter
+/// which phase wrote it: phase 1 publishes the outcome it can already prove
+/// (`included: false`) and phase 2 overwrites it with the polled one. Two shapes behind one
+/// status string would break any client decoder with a non-optional `included`.
+fn exit_status(outcome: &ExitOutcome) -> Value {
+    json!({
+        "status": if outcome.included { "done" } else { "submitted" },
+        "deliveredAsset": "ETH",
+        "result": serde_json::to_value(outcome).expect("ExitOutcome serialises"),
+    })
+}
+
+/// The `unshieldStatus` payload for a failed exit, carrying the same stable code the
+/// synchronous path puts in `error.data.code`.
+fn error_status(e: &exit::ExitError) -> Value {
+    json!({
+        "status": "error",
+        "code": e.code(),
+        "error": e.to_string(),
     })
 }
 
@@ -217,7 +275,8 @@ async fn main() {
             rpc_handler!(move |p: Value| {
                 let h = h.clone();
                 async move {
-                    let amount = parse_amount(p.get("amountWei").unwrap_or(&Value::Null))?;
+                    let amount = parse_amount(p.get("amountWei").unwrap_or(&Value::Null))
+                        .map_err(|e| RpcError::new(CODE_BAD_REQUEST, e))?;
                     let txs = h.lock().await.prepare_shield_native(amount).await?;
                     Ok(serde_json::to_value(txs).unwrap())
                 }
@@ -237,19 +296,23 @@ async fn main() {
                 let (h, jobs, seq) = (h.clone(), jobs.clone(), seq.clone());
                 let (entropy, state_dir) = (entropy.clone(), state_dir.clone());
                 async move {
-                    let amount = parse_amount(p.get("amountWei").unwrap_or(&Value::Null))?;
-                    let recipient = parse_addr(p.get("to").unwrap_or(&Value::Null))?;
+                    let amount = parse_amount(p.get("amountWei").unwrap_or(&Value::Null))
+                        .map_err(|e| RpcError::new(CODE_BAD_REQUEST, e))?;
+                    let recipient = parse_addr(p.get("to").unwrap_or(&Value::Null))
+                        .map_err(|e| RpcError::new(CODE_BAD_REQUEST, e))?;
 
                     // Fail fast: nobody should wait ~13s (or ~28s if the fee loop struggles)
                     // for a proof that cannot fit. Same ceiling `maxUnshieldable` reports.
                     {
                         let c = spendable_ceiling(&mut *h.lock().await).await?;
                         if amount > c.max.max_value {
-                            return Err(format!(
-                                "insufficientShieldedBalance: {amount} wei exceeds the \
-                                 spendable maximum {} wei (gas fee headroom {} wei must stay \
-                                 in the pool)",
-                                c.max.max_value, c.reserve
+                            return Err(RpcError::new(
+                                CODE_INSUFFICIENT,
+                                format!(
+                                    "{amount} wei exceeds the spendable maximum {} wei (gas fee \
+                                     headroom {} wei must stay in the pool)",
+                                    c.max.max_value, c.reserve
+                                ),
                             ));
                         }
                     }
@@ -282,17 +345,9 @@ async fn main() {
                         let sub = match submitted {
                             Ok(s) => s,
                             Err(e) => {
-                                jobs.lock().await.insert(
-                                    jid,
-                                    (
-                                        Instant::now(),
-                                        json!({
-                                            "status": "error",
-                                            "code": e.code(),
-                                            "error": e.to_string(),
-                                        }),
-                                    ),
-                                );
+                                jobs.lock()
+                                    .await
+                                    .insert(jid, (Instant::now(), error_status(&e)));
                                 return;
                             }
                         };
@@ -300,32 +355,20 @@ async fn main() {
                         // Publish `submitted` the moment a hash exists, so the app shows a real
                         // op hash instead of a spinner and stops counting inclusion time
                         // against its proving deadline. NOT terminal — the job stays in the map.
+                        //
+                        // Published as the `pending_outcome`, i.e. the SAME schema phase 2 will
+                        // overwrite it with, so `submitted` never has two shapes on the wire.
                         jobs.lock().await.insert(
                             jid.clone(),
-                            (
-                                Instant::now(),
-                                json!({
-                                    "status": "submitted",
-                                    "deliveredAsset": "ETH",
-                                    "result": serde_json::to_value(&sub).unwrap(),
-                                }),
-                            ),
+                            (Instant::now(), exit_status(&sub.pending_outcome())),
                         );
 
                         // Phase 2: poll for the receipt WITHOUT the helper lock, so `balance`
                         // and `maxUnshieldable` keep answering during inclusion.
                         let url = exit::resolve_bundler_url(chain_id);
                         let status = match exit::await_exit(&url, &sub).await {
-                            Ok(outcome) => json!({
-                                "status": if outcome.included { "done" } else { "submitted" },
-                                "deliveredAsset": "ETH",
-                                "result": serde_json::to_value(&outcome).unwrap(),
-                            }),
-                            Err(e) => json!({
-                                "status": "error",
-                                "code": e.code(),
-                                "error": e.to_string(),
-                            }),
+                            Ok(outcome) => exit_status(&outcome),
+                            Err(e) => error_status(&e),
                         };
                         jobs.lock().await.insert(jid, (Instant::now(), status));
                     });
@@ -345,13 +388,13 @@ async fn main() {
                     let id = p
                         .get("jobId")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| "missing jobId".to_string())?;
+                        .ok_or_else(|| RpcError::new(CODE_BAD_REQUEST, "missing jobId"))?;
+                    let now = Instant::now();
                     let mut map = jobs.lock().await;
-                    prune_jobs(&mut map, Instant::now());
-                    let status = map
-                        .get(id)
-                        .map(|(_, v)| v.clone())
-                        .ok_or_else(|| format!("unknown jobId: {id}"))?;
+                    prune_jobs(&mut map, now);
+                    let status = map.get(id).map(|(_, v)| v.clone()).ok_or_else(|| {
+                        RpcError::new(CODE_UNKNOWN_JOB, format!("unknown jobId: {id}"))
+                    })?;
                     // Evict terminal jobs once observed so the common (polled-to-completion)
                     // path keeps the map tiny; the TTL sweep above backstops jobs that are
                     // never polled to a terminal read.
@@ -365,6 +408,15 @@ async fn main() {
                     );
                     if terminal {
                         map.remove(id);
+                    } else if let Some((updated, _)) = map.get_mut(id) {
+                        // Refresh on every non-terminal read, which closes the sweep-then-
+                        // resurrect class outright instead of tuning JOB_TTL against it. A
+                        // generous TTL alone is not enough: `pending` is never restamped while
+                        // phase 1 runs, and phase 1 is UNBOUNDED — first-exit circuit-artifact
+                        // download plus up to 10 Groth16 proofs across the authorised retry. Any
+                        // fixed constant can be exceeded there. So long as a client is actually
+                        // polling, its job now cannot expire under it.
+                        *updated = now;
                     }
                     Ok(status)
                 }
@@ -398,6 +450,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// `wait_for_receipt`'s own internal timeout, which can carry one poll iteration past
+    /// `RECEIPT_POLL_BUDGET`'s top-of-loop check. The bundler client does not export it, so it
+    /// is mirrored here purely so the TTL margin assertion is honest about what it covers.
+    const BUNDLER_RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
+
     #[test]
     fn prune_drops_only_expired_jobs() {
         // Simulate ages via Instant arithmetic (no real waiting): the "old" entry is stamped
@@ -417,13 +474,22 @@ mod tests {
     }
 
     #[test]
-    fn job_ttl_outlives_the_receipt_poll_budget() {
-        // A `submitted` job's timestamp is not refreshed while phase 2 polls, so an equal (or
-        // shorter) TTL would sweep a still-progressing exit and then see it resurrected.
+    fn job_ttl_covers_the_worst_case_receipt_poll() {
+        // Encodes the FULL worst case the constant's doc comment claims to cover, not merely
+        // "bigger than the budget" — that weaker form would pass at budget+1s while still
+        // sweeping a job mid-poll, then resurrecting it when polling finally wrote its result.
+        //
+        // Worst case: the budget is only checked at the top of the loop, so one more iteration
+        // can start just under it and then block for `wait_for_receipt`'s own timeout, plus the
+        // inter-poll sleep.
+        let worst_case =
+            exit::RECEIPT_POLL_BUDGET + BUNDLER_RECEIPT_TIMEOUT + exit::RECEIPT_POLL_INTERVAL;
         assert!(
-            JOB_TTL > exit::RECEIPT_POLL_BUDGET,
-            "TTL {JOB_TTL:?} must exceed the poll budget {:?}",
-            exit::RECEIPT_POLL_BUDGET
+            JOB_TTL > worst_case,
+            "TTL {JOB_TTL:?} must exceed the worst-case poll {worst_case:?} \
+             (budget {:?} + receipt timeout {BUNDLER_RECEIPT_TIMEOUT:?} + interval {:?})",
+            exit::RECEIPT_POLL_BUDGET,
+            exit::RECEIPT_POLL_INTERVAL,
         );
     }
 
@@ -456,5 +522,89 @@ mod tests {
         map.insert("b".to_string(), (now, json!({"status": "done"})));
         prune_jobs(&mut map, now);
         assert_eq!(map.len(), 2);
+    }
+
+    fn submission() -> railgun_helper::exit::ExitSubmission {
+        railgun_helper::exit::ExitSubmission {
+            user_op_hash: "0x1c3fa5b0e2d47c8916aa0b3d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081"
+                .to_string(),
+            sender: "0x4b39f7b0624b9db86ad293686bc38b903142dbbc".to_string(),
+            // 1 ETH: past 2^53, so a JSON number here would already be inexact.
+            delivered_wei: 1_000_000_000_000_000_000,
+            exit_index: 3,
+        }
+    }
+
+    #[test]
+    fn submitted_and_done_share_one_schema_with_hex_wei_amounts() {
+        // Asserted as whole-document equality, not field probes, because this IS the wire
+        // contract Task 8's decoder is written against. Two things are pinned:
+        //   1. `deliveredWei` is a 0x-hex STRING, never a JSON number (1e18 > 2^53).
+        //   2. `submitted` and `done` differ ONLY in `status` and `included` — same keys, same
+        //      types — so one Decodable with a non-optional `included` handles both.
+        let sub = submission();
+
+        let submitted = exit_status(&sub.pending_outcome());
+        assert_eq!(
+            submitted,
+            json!({
+                "status": "submitted",
+                "deliveredAsset": "ETH",
+                "result": {
+                    "userOpHash": "0x1c3fa5b0e2d47c8916aa0b3d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081",
+                    "sender": "0x4b39f7b0624b9db86ad293686bc38b903142dbbc",
+                    "deliveredWei": "0xde0b6b3a7640000",
+                    "exitIndex": 3,
+                    "included": false,
+                },
+            })
+        );
+
+        let done = exit_status(&ExitOutcome {
+            included: true,
+            ..sub.pending_outcome()
+        });
+        assert_eq!(
+            done,
+            json!({
+                "status": "done",
+                "deliveredAsset": "ETH",
+                "result": {
+                    "userOpHash": "0x1c3fa5b0e2d47c8916aa0b3d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081",
+                    "sender": "0x4b39f7b0624b9db86ad293686bc38b903142dbbc",
+                    "deliveredWei": "0xde0b6b3a7640000",
+                    "exitIndex": 3,
+                    "included": true,
+                },
+            })
+        );
+
+        // Same key set in both, so neither is a superset of the other.
+        let keys = |v: &Value| {
+            let mut k: Vec<String> = v["result"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(&submitted), keys(&done));
+
+        // And the amount must survive the round trip back through the request parser.
+        assert_eq!(
+            parse_amount(&submitted["result"]["deliveredWei"]).unwrap(),
+            sub.delivered_wei
+        );
+    }
+
+    #[test]
+    fn error_status_carries_the_stable_code() {
+        // The app switches card state on `code`; the sentence is for humans only.
+        let s = error_status(&exit::ExitError::PaymasterNotConfigured);
+        assert_eq!(s["status"], "error");
+        assert_eq!(s["code"], "paymasterNotConfigured");
+        assert!(s["error"].as_str().unwrap().contains("privacy paymaster"));
     }
 }

@@ -63,7 +63,7 @@ rand = "0.9"
 
 # Direct HTTP for the bundler gas-price probe: PimlicoBundler computes the gas price inside
 # estimate_gas and does not expose it, so we call pimlico_getUserOperationGasPrice ourselves.
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 
 # BIP-39 mnemonic/seed + standard secp256k1 BIP-32 (broadcaster EOA). The RAILGUN
 # account uses a CUSTOM HMAC-SHA512 walk (see derivation.rs), hence hmac/sha2 too.

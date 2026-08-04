@@ -146,14 +146,27 @@ impl RailgunHelper {
     ///
     /// **Generates one Groth16 proof per fee-loop iteration** (two is the floor: the SDK's
     /// seed `fee_value` is ~7 orders of magnitude below a real sponsored fee, so iteration 1
-    /// can never converge). On a convergence failure we retry ONCE, and only if a fresh gas
-    /// sample shows gas is not still climbing.
+    /// can never converge). On a convergence failure we retry ONCE, **unconditionally**.
     ///
-    /// **The exit index is NOT 1:1 with a user-visible exit.** A gas-gated retry derives a
-    /// SECOND sender at a SECOND index — deliberately, because reusing a sender across attempts
-    /// would link them — so the on-disk counter can advance by 2 for one exit, and the
-    /// first attempt's address may have been logged without ever being used. Recovery tooling
-    /// must scan indices rather than assume one index per exit.
+    /// **Why unconditional, with no gas gate.** The SDK converges only when
+    /// `new_fee <= fee_value` AND the two are within 1% (`railgun/src/provider.rs:317`). The
+    /// gas estimate jitters ~0.006% between iterations — far inside the 1% band, but enough to
+    /// make the `<=` half roughly a coin flip each round. Measured across four fork runs on an
+    /// IDLE fork with a flat gas price, the loop consumed 2, 3, 4 and 5 of its 5 rounds, one
+    /// exit hitting the cap exactly: about 6% of attempts exhaust the cap for reasons having
+    /// nothing to do with gas direction. An earlier version gated the retry on a fresh gas
+    /// sample and refused when gas had ticked up; on this evidence that would decline a retry
+    /// with ~94% odds of succeeding, for a reason unrelated to the actual cause. One
+    /// unconditional retry takes first-attempt failure from ~6% to ~0.4%.
+    ///
+    /// Strictly at most once. That bound is what makes a retry provably unable to
+    /// double-submit, so it must not be relaxed into a loop.
+    ///
+    /// **The exit index is NOT 1:1 with a user-visible exit.** A retry derives a SECOND sender
+    /// at a SECOND index — deliberately, because reusing a sender across attempts would link
+    /// them — so the on-disk counter can advance by 2 for one exit, and the first attempt's
+    /// address may have been logged without ever being used. Recovery tooling must scan indices
+    /// rather than assume one index per exit.
     ///
     /// Returns as soon as the bundler accepts the op. Receipt polling is `exit::await_exit`,
     /// a free function the caller runs WITHOUT holding this helper's mutex.
@@ -167,23 +180,15 @@ impl RailgunHelper {
         self.sync().await.map_err(ExitError::Other)?;
 
         let bundler_url = exit::resolve_bundler_url(self.chain.id);
-        let baseline = exit::fetch_max_fee_per_gas(&bundler_url)
-            .await
-            .map_err(ExitError::Other)?;
 
         match self
             .try_submit(recipient, value, state_dir, entropy_hex, &bundler_url)
             .await
         {
             Err(ExitError::FeeDidNotConverge) => {
-                let fresh = exit::fetch_max_fee_per_gas(&bundler_url)
-                    .await
-                    .map_err(ExitError::Other)?;
-                if !exit::should_retry_after_convergence_failure(baseline, fresh) {
-                    tracing::warn!("gas climbed {baseline} -> {fresh}; not retrying the exit");
-                    return Err(ExitError::FeeDidNotConverge);
-                }
-                tracing::info!("gas flat/falling ({baseline} -> {fresh}); retrying the exit once");
+                tracing::info!("fee estimate did not converge; retrying the exit once");
+                // The second call is the last: `try_submit` is never invoked again on this path,
+                // so an exit can be submitted at most once.
                 self.try_submit(recipient, value, state_dir, entropy_hex, &bundler_url)
                     .await
             }

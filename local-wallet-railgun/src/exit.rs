@@ -1,7 +1,7 @@
 //! The ERC-4337 privacy-paymaster exit: turn a RAILGUN unshield into a landed,
 //! paymaster-sponsored UserOperation submitted by a PUBLIC bundler.
 //!
-//! Owns the ephemeral 7702 sender, the bundler client, the gas gate, and receipt polling.
+//! Owns the ephemeral 7702 sender, the bundler client, the amount guards, and receipt polling.
 //! Knows nothing about the socket, the job map, or the app.
 
 use std::time::Duration;
@@ -293,16 +293,6 @@ pub fn resolve_bundler_url(chain_id: u64) -> String {
     bundler_url_for(chain_id)
 }
 
-/// Whether to spend another round of proofs after a fee-convergence failure.
-///
-/// `prepare_userop` errors after 5 Groth16 proofs if the estimated fee keeps RISING. A blind
-/// retry into a climbing market just burns 5 more proofs, so gate on a fresh gas sample:
-/// retry only when gas is flat or falling. kohaku-cli does not retry at all, but it is a CLI
-/// where the user can press up-arrow; ours drives an async card.
-pub fn should_retry_after_convergence_failure(baseline_max_fee: u128, fresh_max_fee: u128) -> bool {
-    fresh_max_fee <= baseline_max_fee
-}
-
 /// Sample `pimlico_getUserOperationGasPrice` and return the `slow` tier's `maxFeePerGas`.
 ///
 /// `PimlicoBundler` computes this inside `estimate_gas` and does not expose it, so this is a
@@ -348,16 +338,6 @@ mod tests {
             "https://public.pimlico.io/v2/11155111/rpc"
         );
         assert!(!bundler_url_for(11155111).contains("apikey"));
-    }
-
-    #[test]
-    fn retries_only_when_gas_is_not_climbing() {
-        // Flat or falling gas → the failure was noise, retry is worth 5 more proofs.
-        assert!(should_retry_after_convergence_failure(100, 100));
-        assert!(should_retry_after_convergence_failure(100, 90));
-        // Climbing gas → the loop will fail again; refuse in one RPC instead of ~5 minutes.
-        assert!(!should_retry_after_convergence_failure(100, 101));
-        assert!(!should_retry_after_convergence_failure(100, 1_000));
     }
 
     #[test]

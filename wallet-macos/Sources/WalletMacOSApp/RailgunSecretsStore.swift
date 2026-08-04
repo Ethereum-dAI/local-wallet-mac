@@ -3,8 +3,10 @@ import LocalAuthentication
 import Security
 
 /// The single secret the railgun-helper needs, delivered over fd-5: the 32-byte entropy that
-/// seeds the RAILGUN account. The broadcaster EOA is derived from it in the helper, so it is
-/// no longer stored or transmitted separately.
+/// seeds the RAILGUN account. Every ephemeral per-exit EIP-7702 sender the paymaster exit
+/// uses is ALSO derived from this same root (a disjoint BIP-44 branch, indexed by the
+/// persisted rotation counter — see `RAILGUN_STATE_DIR`), so there is no separate broadcaster
+/// key to store or transmit.
 struct RailgunSecrets: Equatable {
     let entropyHex: String
 }

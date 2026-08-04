@@ -6,14 +6,27 @@ import Foundation
 /// `Connection: close`, body read to EOF, bearer-authenticated — byte-for-byte what the
 /// Rust `railgun_helper::rpc` server/client and `wallet-node` use.
 ///
-/// The sidecar is the wallet's single privacy entry point: it owns the local broadcaster
-/// and proxies the unshield, so the app only talks to this one socket.
+/// The sidecar is the wallet's single privacy entry point: an unshield exits through
+/// RAILGUN's privacy paymaster as an ERC-4337 UserOperation submitted by a PUBLIC bundler —
+/// there is no local broadcaster, so the app only ever talks to this one socket.
 struct RailgunHelperClient: Sendable {
     let socketPath: String
     let bearerToken: String
-    /// Overall connect+read budget for a single call (unshield proving is async — the
-    /// helper returns a jobId immediately — so calls themselves stay short).
+    /// Overall connect+read budget for a plain (fast) call — reads like `balance` and
+    /// `unshieldStatus` that touch no external network beyond the app's own RPC.
     var timeout: TimeInterval = 30
+
+    /// `unshield` and `maxUnshieldable` both perform a full RAILGUN UTXO sync PLUS a bundler
+    /// gas probe before returning — proving itself is asynchronous (see
+    /// `awaitUnshieldSubmitted`), so this covers sync + one gas-price round trip only, not
+    /// proving. The sidecar's RPC server handles one connection to completion (no
+    /// keep-alive), so the socket is held open for the whole call.
+    ///
+    /// Chosen as 2x the plain-call timeout: comfortable headroom over a sync + single RPC
+    /// round trip without creeping toward the 300s PROVING deadline `awaitUnshieldSubmitted`
+    /// waits on separately — conflating the two would make a slow sync look like a timed-out
+    /// proof, or mask a genuinely wedged sync inside the proving budget.
+    private static let syncCallTimeout: TimeInterval = 60
 
     enum ClientError: LocalizedError {
         case connectFailed(String)
@@ -21,6 +34,8 @@ struct RailgunHelperClient: Sendable {
         case httpError(String)
         case decodeFailed(String)
         case rpcError(String)
+        /// A failed exit, carrying the sidecar's stable code so the view layer can pick copy.
+        case exitFailed(code: String?, message: String)
 
         var errorDescription: String? {
             switch self {
@@ -29,6 +44,7 @@ struct RailgunHelperClient: Sendable {
             case .httpError(let m): return "railgun-helper HTTP error: \(m)"
             case .decodeFailed(let m): return "railgun-helper decode failed: \(m)"
             case .rpcError(let m): return "railgun-helper error: \(m)"
+            case .exitFailed(_, let m): return m
             }
         }
     }
@@ -49,32 +65,55 @@ struct RailgunHelperClient: Sendable {
     }
 
     struct UnshieldStatus: Decodable {
-        let status: String // "pending" | "done" | "error"
+        /// "pending" | "submitted" | "done" | "error". `submitted` means the bundler accepted
+        /// the UserOperation (a real op hash exists) and inclusion is pending; the card should
+        /// show submitted-not-yet-included. `submitted` and `done` share the SAME `result`
+        /// schema (an exit outcome), differing only in `included` — never model them as two
+        /// shapes.
+        let status: String
+        /// Stable failure code when `status == "error"`: feeDidNotConverge,
+        /// bundlerRejected, paymasterNotConfigured, deliveryReverted, error.
+        let code: String?
+        /// Always "ETH" for the paymaster exit — the tail call unwraps WETH before forwarding.
+        let deliveredAsset: String?
         let result: JSONValue?
         let error: String?
     }
 
-    struct BroadcasterStatus: Decodable, Equatable {
-        let address: String
-        let balanceWei: String
+    /// Headroom-aware limits for an exit. Two numbers because there is no gross-up: the
+    /// requested amount IS what leaves the pool, so `maxValueWei` is the input bound to
+    /// validate `unshield(amountWei:)` against, and `receivableAtMaxWei` is what the
+    /// recipient would actually receive at that amount — the two are NOT interchangeable.
+    struct MaxUnshieldable: Decodable, Equatable {
+        let maxValueWei: String
+        let receivableAtMaxWei: String
+        let reserveWei: String
     }
 
     func balance() async throws -> BalanceSplit {
         try decode(try await call(method: "balance", params: .null))
     }
 
-    /// The local broadcaster EOA + its gas balance (so the app can show a funding prompt).
-    func broadcasterStatus() async throws -> BroadcasterStatus {
-        try decode(try await call(method: "broadcasterStatus", params: .null))
+    /// The largest `amountWei` the sidecar will currently accept for `unshield`, plus what the
+    /// recipient would net at that amount. Also performs a live RAILGUN sync + bundler gas
+    /// probe, so it gets the same extended timeout as `unshield`.
+    func maxUnshieldable() async throws -> MaxUnshieldable {
+        try decode(try await call(method: "maxUnshieldable", params: .null, timeout: Self.syncCallTimeout))
     }
 
     func prepareShield(amountWei: String) async throws -> [ShieldTx] {
         try decode(try await call(method: "prepareShield", params: .object(["amountWei": .string(amountWei)])))
     }
 
-    /// Kicks off the async unshield (proving + local-broadcaster relay). Returns a jobId.
+    /// Kicks off the async unshield (paymaster-sponsored proving + bundler submission).
+    /// Returns a jobId immediately; poll `unshieldStatus` (or use `awaitUnshieldSubmitted` /
+    /// `awaitUnshieldIncluded`) to observe progress.
     func unshield(amountWei: String, to: String) async throws -> String {
-        let v = try await call(method: "unshield", params: .object(["amountWei": .string(amountWei), "to": .string(to)]))
+        let v = try await call(
+            method: "unshield",
+            params: .object(["amountWei": .string(amountWei), "to": .string(to)]),
+            timeout: Self.syncCallTimeout
+        )
         guard case let .object(o) = v, case let .string(id)? = o["jobId"] else {
             throw ClientError.decodeFailed("unshield: missing jobId")
         }
@@ -85,19 +124,58 @@ struct RailgunHelperClient: Sendable {
         try decode(try await call(method: "unshieldStatus", params: .object(["jobId": .string(jobId)])))
     }
 
-    /// Poll `unshieldStatus` until `done`/`error` or the deadline. Proving downloads
-    /// circuit artifacts on first use (tens of seconds), so allow a generous deadline.
-    func awaitUnshield(jobId: String, deadline: Date, poll: TimeInterval = 2) async throws -> JSONValue {
+    /// Poll until the sidecar has a UserOperation hash (`submitted`) or fails.
+    ///
+    /// The deadline bounds PROVING, not inclusion.
+    ///
+    /// MEASURED on an anvil Sepolia fork, circuit `railgun/01x03` — the shape the paymaster path
+    /// actually proves (unshield note + fee note + change): 8.45s cold, 5.01s warm per proof.
+    ///
+    /// 300s, not 120s, because Task 7 measured the SDK's fee loop consuming **2, 3, 4 and 5 of
+    /// its 5 rounds** on an IDLE fork with flat gas: convergence needs `new_fee <= fee_value`
+    /// AND within 1%, and the ~0.006% estimate jitter is far inside the 1% band but makes the
+    /// `<=` half roughly a coin flip per round. So ~6% of attempts exhaust the cap, and the
+    /// authorised unconditional retry means a worst case of TEN proofs (~54s) on top of UTXO
+    /// sync and artifact download — the fixture measured ~80s per exit end to end.
+    ///
+    /// Do NOT tighten this: nullifier count was never varied, so a wallet spending several
+    /// small notes proves a larger circuit than any of these measurements.
+    func awaitUnshieldSubmitted(
+        jobId: String,
+        deadline: Date = Date().addingTimeInterval(300),
+        poll: TimeInterval = 3
+    ) async throws -> JSONValue {
+        while Date() < deadline {
+            let st = try await unshieldStatus(jobId: jobId)
+            switch st.status {
+            case "submitted", "done": return st.result ?? .null
+            case "error": throw ClientError.exitFailed(code: st.code, message: st.error ?? "unshield failed")
+            default: break // "pending" — still proving.
+            }
+            try await Task.sleep(nanoseconds: UInt64(poll * 1_000_000_000))
+        }
+        throw ClientError.ioFailed("unshield job \(jobId) was not submitted before the deadline")
+    }
+
+    /// Poll a submitted job until it is included. Inclusion is the bundler's schedule, not
+    /// ours, so a timeout here leaves the card as submitted rather than reporting a failure —
+    /// reporting a reverted exit to a user whose funds actually arrived would be the worst
+    /// outcome in this whole feature, so a `nil` return here must NEVER be read as failure.
+    func awaitUnshieldIncluded(
+        jobId: String,
+        deadline: Date = Date().addingTimeInterval(900),
+        poll: TimeInterval = 6
+    ) async throws -> JSONValue? {
         while Date() < deadline {
             let st = try await unshieldStatus(jobId: jobId)
             switch st.status {
             case "done": return st.result ?? .null
-            case "error": throw ClientError.rpcError(st.error ?? "unshield failed")
+            case "error": throw ClientError.exitFailed(code: st.code, message: st.error ?? "unshield failed")
             default: break
             }
             try await Task.sleep(nanoseconds: UInt64(poll * 1_000_000_000))
         }
-        throw ClientError.ioFailed("unshield job \(jobId) did not finish before deadline")
+        return nil // Still pending — not an error.
     }
 
     // MARK: Transport
@@ -111,7 +189,9 @@ struct RailgunHelperClient: Sendable {
         }
     }
 
-    private func call(method: String, params: JSONValue) async throws -> JSONValue {
+    /// - Parameter timeout: overrides `self.timeout` for this one call (used by `unshield` /
+    ///   `maxUnshieldable`, which sync + probe gas before returning).
+    private func call(method: String, params: JSONValue, timeout overrideTimeout: TimeInterval? = nil) async throws -> JSONValue {
         let body = try JSONEncoder().encode(
             JSONValue.object([
                 "jsonrpc": .string("2.0"),
@@ -122,7 +202,7 @@ struct RailgunHelperClient: Sendable {
         )
         let socketPath = self.socketPath
         let token = self.bearerToken
-        let timeout = self.timeout
+        let timeout = overrideTimeout ?? self.timeout
         return try await withCheckedThrowingContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {

@@ -3,9 +3,13 @@ import Foundation
 import Security
 import SpawnHelper
 
-/// Spawns and owns the `railgun-helper` sidecar (the wallet's privacy entry point), which
-/// in turn spawns the `railgun-broadcaster`. Mirrors `WalletNodeDaemon`'s spawn contract:
-/// fd-3 ready / fd-4 alive / fd-5 secret, secrets delivered on fd-5 (never argv/env).
+/// Spawns and owns the `railgun-helper` sidecar, the wallet's single privacy entry point.
+/// Mirrors `WalletNodeDaemon`'s spawn contract: fd-3 ready / fd-4 alive / fd-5 secret, secrets
+/// delivered on fd-5 (never argv/env).
+///
+/// An unshield exits through RAILGUN's privacy paymaster as an ERC-4337 UserOperation
+/// submitted by a PUBLIC bundler — there is no local broadcaster child, so nothing of ours
+/// pays gas and there is nothing to fund or spawn beyond the helper itself.
 ///
 /// Differences from the daemon: the helper doesn't emit a ready token on fd-3 (the app
 /// chooses the socket + token), so readiness is detected by polling the socket; and the
@@ -31,8 +35,8 @@ final class RailgunHelperDaemon: @unchecked Sendable {
     }
 
     deinit {
-        // Closing the alive pipe + SIGTERM stops the helper; its broadcaster child follows
-        // via its own getppid backstop.
+        // Closing the alive pipe + SIGTERM stops the helper. No child process to follow it —
+        // the paymaster exit has no local broadcaster.
         if aliveWriteFD >= 0 { close(aliveWriteFD) }
         if pid > 0 { kill(pid, SIGTERM) }
     }
@@ -60,18 +64,21 @@ final class RailgunHelperDaemon: @unchecked Sendable {
             envKeys: ["RAILGUN_HELPER_BIN", "LOCAL_WALLET_PRIVACY_BIN"],
             environment: environment
         )
-        let broadcasterBin = try resolveBinary(
-            name: "railgun-broadcaster",
-            envKeys: ["RAILGUN_BROADCASTER_BIN"],
-            environment: environment
-        )
 
+        // A stable, persistent directory (NOT the per-launch temp dir) — it holds the
+        // per-exit rotation counter (`<state_dir>/exit-index`) the sidecar reads/writes on
+        // every unshield, so it must survive across app relaunches or the counter resets and
+        // an exit sender index can be reused, costing that exit's unlinkability.
+        //
+        // Deliberately NOT also the socket's directory: `~/Library/Application Support/...`
+        // is long enough on macOS that appending a filename risks `sockaddr_un.sun_path`'s
+        // ~103-usable-byte limit for longer usernames, so the (short-lived, per-launch)
+        // socket stays under `NSTemporaryDirectory()` as before.
+        let stateDir = try railgunSupportDirectory()
         let unique = UUID().uuidString.prefix(8)
         let dir = NSTemporaryDirectory()
         let helperSocket = "\(dir)lw-rg-\(unique)-h.sock"
-        let bcSocket = "\(dir)lw-rg-\(unique)-b.sock"
         let helperToken = randomToken()
-        let bcToken = randomToken()
 
         var readyPipe: [Int32] = [-1, -1]
         var alivePipe: [Int32] = [-1, -1]
@@ -89,9 +96,10 @@ final class RailgunHelperDaemon: @unchecked Sendable {
             "RAILGUN_RPC_URL": rpcURL,
             "RAILGUN_SOCKET": helperSocket,
             "RAILGUN_TOKEN": helperToken,
-            "RAILGUN_BROADCASTER_BIN": broadcasterBin,
-            "RAILGUN_BROADCASTER_SOCKET": bcSocket,
-            "RAILGUN_BROADCASTER_TOKEN": bcToken,
+            // Persists the per-exit rotation counter. Deliberately NOT `RAILGUN_BUNDLER_URL` —
+            // that override only exists under the sidecar's `fork-sync` test feature, and
+            // production must have no override path for the bundler endpoint.
+            "RAILGUN_STATE_DIR": stateDir.path,
             // Tell the helper its secret arrives on fd 5 (we deliver it there below). Without
             // this flag the helper won't read fd 5 (see read_fd5 / FD5_ENV_FLAG).
             "RAILGUN_FD5": "1",
@@ -132,7 +140,7 @@ final class RailgunHelperDaemon: @unchecked Sendable {
         close(secretPipe[1])
 
         // Wait for the helper socket to accept connections (it builds the RAILGUN provider
-        // + spawns the broadcaster first, so allow a generous window).
+        // first, so allow a generous window).
         let deadline = Date().addingTimeInterval(45)
         while Date() < deadline {
             if socketAccepts(path: helperSocket) {
@@ -209,6 +217,25 @@ final class RailgunHelperDaemon: @unchecked Sendable {
                 if let old { setenv(k, old, 1) } else { unsetenv(k) }
             }
         }
+    }
+
+    /// `~/Library/Application Support/Local Wallet/railgun-helper` — created if missing.
+    /// Mirrors `WalletNodeDaemon.daemonSupportDirectory()`'s "Local Wallet/<component>"
+    /// layout. Must be stable across relaunches: the sidecar persists the per-exit rotation
+    /// counter directly under it (`<state_dir>/exit-index`). NOT where the socket lives —
+    /// see the call site in `launch` for why the two are kept apart.
+    private static func railgunSupportDirectory(fileManager: FileManager = .default) throws -> URL {
+        let base = try fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let dir = base
+            .appendingPathComponent("Local Wallet", isDirectory: true)
+            .appendingPathComponent("railgun-helper", isDirectory: true)
+        try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
     }
 
     private static func resolveBinary(

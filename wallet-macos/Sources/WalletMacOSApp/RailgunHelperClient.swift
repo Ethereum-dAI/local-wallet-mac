@@ -33,7 +33,13 @@ struct RailgunHelperClient: Sendable {
         case ioFailed(String)
         case httpError(String)
         case decodeFailed(String)
-        case rpcError(String)
+        /// A synchronous RPC rejection. `code` is the sidecar's stable domain code from
+        /// `error.data.code` — `badRequest`, `insufficientShieldedBalance`,
+        /// `bundlerUnavailable`, `unknownJobId`, or `error` for anything unnamed — and is
+        /// `nil` only for rejections this client raised locally, which never crossed the wire.
+        /// Switch on the code; never substring-match `message`, which the sidecar
+        /// deliberately stripped of its prefix so that becomes impossible.
+        case rpcError(code: String?, message: String)
         /// A failed exit, carrying the sidecar's stable code so the view layer can pick copy.
         case exitFailed(code: String?, message: String)
 
@@ -43,7 +49,7 @@ struct RailgunHelperClient: Sendable {
             case .ioFailed(let m): return "railgun-helper I/O failed: \(m)"
             case .httpError(let m): return "railgun-helper HTTP error: \(m)"
             case .decodeFailed(let m): return "railgun-helper decode failed: \(m)"
-            case .rpcError(let m): return "railgun-helper error: \(m)"
+            case .rpcError(_, let m): return "railgun-helper error: \(m)"
             case .exitFailed(_, let m): return m
             }
         }
@@ -271,7 +277,9 @@ struct RailgunHelperClient: Sendable {
         return response
     }
 
-    private static func parseBody(_ raw: Data) throws -> JSONValue {
+    /// Internal (not private) so the wire-contract tests can drive it directly: `data.code`
+    /// extraction is the load-bearing behaviour here, not the socket plumbing around it.
+    static func parseBody(_ raw: Data) throws -> JSONValue {
         guard let text = String(data: raw, encoding: .utf8),
               let sep = text.range(of: "\r\n\r\n") else {
             throw ClientError.httpError("malformed HTTP response")
@@ -284,7 +292,11 @@ struct RailgunHelperClient: Sendable {
         let value = try JSONDecoder().decode(JSONValue.self, from: Data(bodyStr.utf8))
         if case let .object(o) = value {
             if case let .object(err)? = o["error"], case let .string(msg)? = err["message"] {
-                throw ClientError.rpcError(msg)
+                // The stable domain code rides in `error.data.code` (JSON-RPC's own `code` is a
+                // transport-level integer) — see `local-wallet-railgun/src/rpc.rs`. Keep it:
+                // dropping it collapses every distinct rejection into one untypeable blob, and
+                // the message is deliberately prefix-free so it cannot be matched instead.
+                throw ClientError.rpcError(code: err["data"]?["code"]?.stringValue, message: msg)
             }
             return o["result"] ?? .null
         }
@@ -325,5 +337,6 @@ enum JSONValue: Codable, Equatable {
     }
 
     var stringValue: String? { if case let .string(s) = self { return s } else { return nil } }
+    var boolValue: Bool? { if case let .bool(b) = self { return b } else { return nil } }
     subscript(_ key: String) -> JSONValue? { if case let .object(o) = self { return o[key] } else { return nil } }
 }

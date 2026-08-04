@@ -69,4 +69,94 @@ final class RailgunExitStatusTests: XCTestCase {
         XCTAssertEqual(submitted.result?["exitIndex"], done.result?["exitIndex"])
         XCTAssertEqual(submitted.result?["userOpHash"], done.result?["userOpHash"])
     }
+
+    func testExitFailureCopyIsActionablePerCode() {
+        let converge = RailgunExitCopy.exitFailureMessage(
+            code: "feeDidNotConverge", message: "raw rust error"
+        )
+        XCTAssertFalse(converge.contains("raw rust error"), "must not leak the raw error")
+        XCTAssertTrue(converge.lowercased().contains("try again"), "must tell the user what to do")
+
+        let rejected = RailgunExitCopy.exitFailureMessage(
+            code: "bundlerRejected", message: "raw"
+        )
+        XCTAssertTrue(
+            rejected.lowercased().contains("untouched"),
+            "must reassure that shielded funds are safe: \(rejected)"
+        )
+
+        // deliveryReverted is the one case where the detail matters for a bug report.
+        let reverted = RailgunExitCopy.exitFailureMessage(
+            code: "deliveryReverted", message: "index 7"
+        )
+        XCTAssertTrue(reverted.contains("index 7"), "recovery detail must survive")
+
+        // Unknown codes must fall through, never be swallowed into a generic string.
+        XCTAssertEqual(
+            RailgunExitCopy.exitFailureMessage(code: "somethingNew", message: "verbatim"),
+            "verbatim"
+        )
+        // A missing code means the generic `error`, which is also a fall-through.
+        XCTAssertEqual(
+            RailgunExitCopy.exitFailureMessage(code: nil, message: "verbatim"),
+            "verbatim"
+        )
+    }
+
+    /// Both sidecar failure paths carry a code and must reach the same copy: a synchronous
+    /// rejection (`error.data.code`) and an async job failure (`status: error` + `code`). A
+    /// non-RAILGUN error must pass through untouched so its own handler keeps its message.
+    func testFailureCopyIsSelectedByCodeFromBothErrorCases() {
+        XCTAssertEqual(
+            RailgunExitCopy.failureCopy(
+                for: RailgunHelperClient.ClientError.exitFailed(code: "bundlerRejected", message: "raw")
+            ),
+            RailgunExitCopy.exitFailureMessage(code: "bundlerRejected", message: "raw")
+        )
+        XCTAssertEqual(
+            RailgunExitCopy.failureCopy(
+                for: RailgunHelperClient.ClientError.rpcError(code: "insufficientShieldedBalance", message: "5 wei exceeds 3 wei")
+            ),
+            RailgunExitCopy.exitFailureMessage(code: "insufficientShieldedBalance", message: "5 wei exceeds 3 wei")
+        )
+        XCTAssertNil(
+            RailgunExitCopy.failureCopy(for: RailgunHelperClient.ClientError.ioFailed("socket")),
+            "transport failures have no domain code and must keep their own description"
+        )
+        XCTAssertNil(RailgunExitCopy.failureCopy(for: URLError(.timedOut)))
+    }
+
+    /// The stable code travels in the JSON-RPC error's `data.code`, not its transport-level
+    /// integer `code`. Dropping it would force the view layer back to substring-matching a
+    /// message the sidecar deliberately stripped of its prefix.
+    func testSyncRejectionCarriesTheStableCodeFromErrorData() throws {
+        let body = """
+        {"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"5 wei exceeds the spendable maximum 3 wei","data":{"code":"insufficientShieldedBalance"}}}
+        """
+        let raw = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\(body)".utf8)
+        do {
+            _ = try RailgunHelperClient.parseBody(raw)
+            XCTFail("an error body must throw")
+        } catch let RailgunHelperClient.ClientError.rpcError(code, message) {
+            XCTAssertEqual(code, "insufficientShieldedBalance")
+            XCTAssertEqual(message, "5 wei exceeds the spendable maximum 3 wei")
+        }
+    }
+
+    /// A peer that sends no `data.code` (or a transport-level JSON-RPC error like an unknown
+    /// method) has no domain code to recover, so it must read as "no code" rather than crash or
+    /// invent one.
+    func testSyncRejectionWithoutDataCodeHasNoCode() throws {
+        let body = """
+        {"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"unknown method: nope"}}
+        """
+        let raw = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\(body)".utf8)
+        do {
+            _ = try RailgunHelperClient.parseBody(raw)
+            XCTFail("an error body must throw")
+        } catch let RailgunHelperClient.ClientError.rpcError(code, message) {
+            XCTAssertNil(code)
+            XCTAssertEqual(message, "unknown method: nope")
+        }
+    }
 }

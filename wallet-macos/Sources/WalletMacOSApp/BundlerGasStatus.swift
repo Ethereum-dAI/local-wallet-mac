@@ -14,9 +14,9 @@ import WalletToolLayer
 /// 2. The gate is a *threshold*, not zero — 0.004 ETH dead-ends exactly like 0 ETH — so the UI
 ///    keys off the daemon's `needsTopup`, never a local `balance == 0` check.
 ///
-/// This does **not** apply to the RAILGUN local broadcaster, which shares the same card: the
-/// broadcaster is funded by a UserOp the *bundler* relays, so an in-app top-up works for it
-/// as long as the bundler itself has gas.
+/// This is about the *local* bundler EOA only. A RAILGUN exit is sponsored by RAILGUN's privacy
+/// paymaster and submitted by a public bundler, so it needs none of the user's gas and this
+/// type does not gate it — see `BundlerGasPolicy.requiresBundlerGas`.
 struct BundlerGasStatus: Equatable {
     /// The active bundler EOA, when the daemon has one installed.
     let address: String?
@@ -126,7 +126,8 @@ enum BundlerGasPolicy {
             // All submitted as UserOperations the bundler relays and pays the gas for.
             return true
         case .unshield:
-            // Relayed by the RAILGUN sidecar's local broadcaster, which pays its own gas.
+            // Sponsored by RAILGUN's privacy paymaster and submitted by a public bundler, so
+            // the local bundler EOA's balance is irrelevant to it.
             return false
         }
     }
@@ -164,8 +165,8 @@ extension BundlerGasStatus {
     /// card shows. Returns `nil` for every other error so callers keep their own message.
     ///
     /// This is the backstop for the paths that can still reach the daemon's refusal — a
-    /// relayer status too stale to pre-flight against, Settings, and the card's own Fund
-    /// control on the broadcaster.
+    /// relayer status too stale to pre-flight against, Settings, and the bundler card's own
+    /// Fund control.
     static func friendlyMessage(for error: Error, status: BundlerGasStatus?) -> String? {
         guard isNeedsTopupError(error) else { return nil }
         guard let status else {

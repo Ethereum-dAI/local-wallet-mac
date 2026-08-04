@@ -303,10 +303,16 @@ async fn await_exit_within(
             // stays the single bound, and the honest worst case is waiting it out and saying
             // "pending".
             Err(e) => {
-                tracing::warn!(
-                    "receipt poll for op {} failed, retrying: {e}",
-                    sub.user_op_hash
-                );
+                // Deliberately NUMBER- and HASH-free: the app spawns this sidecar with
+                // `RUST_LOG=railgun_helper=info` and the child inherits the app's stderr, which
+                // for a launchd-started `.app` is captured into the macOS unified log (and every
+                // `sysdiagnose`). `await_exit` retries EVERY poll error over a 600s budget at 6s
+                // intervals, so a `warn!` naming the op hash here would durably persist the
+                // machine <-> op-hash association on a single flaky bundler response, and up to
+                // ~100 times over one retried exit. The retry reason (`e`) still says WHY polling
+                // is failing; only the identifier that could be correlated across machines is
+                // dropped.
+                tracing::warn!("receipt poll failed, retrying: {e}");
                 tokio::time::sleep(interval).await;
             }
         }

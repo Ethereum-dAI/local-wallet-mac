@@ -32,6 +32,22 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo test --workspace
+  railgun:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local-wallet-railgun
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace -- -D warnings
+      # The fork fixture only exists under `fork-sync`, so without this step ~900 lines of test
+      # code would never be compiled by CI at all and would bitrot silently. Compiling it is
+      # safe: the fixture itself is `#[ignore]`d AND needs network, an RPC key, anvil and Alto,
+      # so `cargo test` below never runs it.
+      - run: cargo clippy --all-targets --features fork-sync -- -D warnings
+      - run: cargo test --workspace
   ffi:
     runs-on: ubuntu-latest
     defaults:

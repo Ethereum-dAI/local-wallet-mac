@@ -37,6 +37,50 @@ final class RailgunExitStatusTests: XCTestCase {
         XCTAssertEqual(m.reserveWei, "0x64")
     }
 
+    func testBreakdownStatesTheTreasuryFeeAndGasReserve() {
+        let text = ChatDashboardModel.unshieldBreakdown(
+            requestedWei: "0x2710",       // 10000
+            receivableWei: "0x230F",      // 8975 = floor(10000*9975/10000) − 1000 guard
+            reserveWei: "0x64"            // 100
+        )
+        XCTAssertTrue(text.contains("0.25%"), "must name the treasury fee: \(text)")
+        XCTAssertTrue(text.lowercased().contains("gas"), "must explain the gas reserve: \(text)")
+    }
+
+    /// The brief is explicit that BOTH deductions must be visible, not just named in prose —
+    /// a user who sees only the fee percentage (or only the word "gas") with no numbers to
+    /// match against their balance will think the figures don't add up. Pin that the actual
+    /// formatted amounts for both the recipient's net and the gas reserve appear verbatim.
+    func testBreakdownNamesBothDeductionsWithTheirAmounts() {
+        let text = ChatDashboardModel.unshieldBreakdown(
+            requestedWei: "0x2710",
+            receivableWei: "0x230F",
+            reserveWei: "0x64"
+        )
+        let receivable = WeiFormatter.ethDisplayString(fromHexWei: "0x230F")
+        let reserve = WeiFormatter.ethDisplayString(fromHexWei: "0x64")
+        XCTAssertTrue(text.contains(receivable), "must show what the recipient nets: \(text)")
+        XCTAssertTrue(text.contains(reserve), "must show the gas reserve held back: \(text)")
+    }
+
+    /// The two fields on `MaxUnshieldable` are NOT interchangeable: `maxValueWei` is what the
+    /// sidecar will accept as `amountWei` (and so what the Max button must fill in / validate
+    /// against), while `receivableAtMaxWei` is only what the recipient would net at that amount
+    /// — display-only. Swapping them would either reject a valid Max request (if receivable is
+    /// smaller) or attempt to move more than the sidecar allows.
+    func testMaxAffordanceFillsMaxValueNotReceivable() {
+        let max = RailgunHelperClient.MaxUnshieldable(
+            maxValueWei: "0x2710",
+            receivableAtMaxWei: "0x230F",
+            reserveWei: "0x64"
+        )
+        XCTAssertEqual(ChatDashboardModel.maxUnshieldFillAmountWei(max), max.maxValueWei)
+        XCTAssertNotEqual(
+            ChatDashboardModel.maxUnshieldFillAmountWei(max), max.receivableAtMaxWei,
+            "the fixture's two values differ on purpose — this must fail if the wrong field is wired"
+        )
+    }
+
     /// Guards the load-bearing detail from the wire contract: `deliveredWei` MUST decode as a
     /// string, never a number. 2^53 wei is only 0.009 ETH, so a Double-backed decode would
     /// silently corrupt essentially every real delivered amount. This value (1 ETH in wei) is

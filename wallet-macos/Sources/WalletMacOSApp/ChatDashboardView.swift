@@ -542,6 +542,19 @@ enum RailgunExitCopy {
     /// retrying, because a second exit would spend more notes.
     static let exitStillInFlightMessage = "This exit is still in progress — the wallet stopped waiting for it, which is not the same as the exit stopping. Proving a first exit can take several minutes. Check the recipient's balance before trying again, so you don't exit twice."
 
+    /// Names the third parties an exit actually involves, honestly. The privacy paymaster is an
+    /// on-chain contract and sponsorship is permissionless, so no off-chain service sees the
+    /// user — but the public bundler that submits the UserOperation DOES see their IP address
+    /// alongside the recipient and amount (both of which become public on-chain moments later
+    /// anyway), and traffic is not yet routed over Tor. Must not overclaim, and must not bury
+    /// the bundler.
+    static let privacyDisclosure = """
+    Exits are sponsored by RAILGUN's privacy paymaster (an on-chain contract — sponsorship is \
+    permissionless, so no off-chain service sees you) and submitted by a public ERC-4337 \
+    bundler. The bundler sees your IP address alongside the recipient and amount; both become \
+    public on-chain moments later anyway. Traffic is not yet routed over Tor.
+    """
+
     /// Map the sidecar's stable exit codes onto copy that tells the user what to do.
     ///
     /// Switching on the code is the whole point: the sidecar deliberately stripped its message
@@ -699,7 +712,12 @@ private enum ChatSidebarBucket: String, CaseIterable {
 }
 
 @MainActor
-private final class ChatDashboardModel: ObservableObject {
+// Not `private`: `RailgunExitStatusTests` calls the pure `unshieldBreakdown` /
+// `maxUnshieldFillAmountWei` static functions directly (via `@testable import`, which does
+// NOT lift `private`/`fileprivate` — the type itself must be at least internal). Everything
+// else about this class is unchanged; it is still confined to `WalletMacOSApp` and unusable
+// from outside the module.
+final class ChatDashboardModel: ObservableObject {
     @Published var inputText = ""
     @Published private(set) var conversations: [ChatConversation]
     @Published private(set) var activeConversationID: UUID
@@ -707,7 +725,12 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var runtimeStatus: String
     @Published var thinkingEnabled = true
     @Published var isSidebarVisible = true
-    @Published private(set) var accountIdentity: ChatAccountIdentity
+    // `fileprivate` (not the previous bare default access): `ChatAccountIdentity` is a
+    // file-private type, and the class itself is no longer `private`, so the getter must be
+    // pinned to fileprivate explicitly or the compiler rejects exposing a less-visible type
+    // through a more-visible property. No behavior change — everything using this is still in
+    // this same file.
+    @Published fileprivate private(set) var accountIdentity: ChatAccountIdentity
     @Published private(set) var streamingText: String = ""
     @Published private(set) var streamingMessageID: UUID? = nil
     @Published var feedbackExportMessage: String? = nil
@@ -715,8 +738,9 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var isRefreshingWalletHistory = false
     @Published var walletHistoryMessage: String? = nil
     @Published var selectedHistoryUserOpHash: String? = nil
-    @Published private(set) var kernelTokenBalances: [ChatTokenBalance] = []
-    @Published private(set) var bundlerTokenBalances: [ChatTokenBalance] = []
+    // Same `fileprivate` note as `accountIdentity` above — `ChatTokenBalance` is file-private.
+    @Published fileprivate private(set) var kernelTokenBalances: [ChatTokenBalance] = []
+    @Published fileprivate private(set) var bundlerTokenBalances: [ChatTokenBalance] = []
     @Published private(set) var isRefreshingTokenBalances = false
     // Shielded (RAILGUN) balance, split by pool status. `confirmed` = cleared and spendable;
     // `pending` = deposited but not yet included by the pool's approval set.
@@ -724,6 +748,11 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var shieldedPending: String?
     @Published private(set) var isRefreshingShieldedBalance = false
     @Published private(set) var shieldedBalanceError: String?
+    // Populated by the Max affordance (`fillMaxUnshieldAmount()`): the "you will receive"
+    // breakdown for the ceiling the sidecar just reported, or the error if the probe failed.
+    @Published private(set) var maxUnshieldableBreakdown: String?
+    @Published private(set) var isFetchingMaxUnshieldable = false
+    @Published private(set) var maxUnshieldableError: String?
     // Which helper EOA is mid gas-funding, so its card shows a spinner and disables its Send
     // button; nil when idle. Plus the last funding error. The bundler is the only gas-paying
     // helper the user funds — exits are sponsored by RAILGUN's privacy paymaster.
@@ -1211,7 +1240,9 @@ private final class ChatDashboardModel: ObservableObject {
         return replacement
     }
 
-    func replacementActionState(for userOpHash: String) -> ReplacementActionState? {
+    // Same `fileprivate` note as `accountIdentity` above — `ReplacementActionState` is
+    // file-private.
+    fileprivate func replacementActionState(for userOpHash: String) -> ReplacementActionState? {
         replacementActionStates[replacementActionKey(for: userOpHash)]
     }
 
@@ -2706,6 +2737,77 @@ private final class ChatDashboardModel: ObservableObject {
                 if [self.shieldedConfirmed, self.shieldedPending] != baseline {
                     return
                 }
+            }
+        }
+    }
+
+    /// The "you will receive" breakdown. Both deductions must be visible: RAILGUN's 25 bps
+    /// treasury fee (which reduces what the recipient gets — there is deliberately no
+    /// gross-up) and the in-pool gas fee note, which is why 100% cannot be unshielded.
+    // `nonisolated`: the class is `@MainActor`, but this is a pure function of its arguments
+    // (no shared mutable state), and the test suite calls it synchronously from a plain
+    // (non-actor, non-async) XCTest method.
+    nonisolated static func unshieldBreakdown(
+        requestedWei: String,
+        receivableWei: String,
+        reserveWei: String
+    ) -> String {
+        let requested = WeiFormatter.ethDisplayString(fromHexWei: requestedWei)
+        let receivable = WeiFormatter.ethDisplayString(fromHexWei: receivableWei)
+        let reserve = WeiFormatter.ethDisplayString(fromHexWei: reserveWei)
+        return """
+        Unshielding \(requested) ETH — the recipient receives \(receivable) ETH after \
+        RAILGUN's 0.25% unshield fee. Gas is paid from your shielded balance \
+        (about \(reserve) ETH held back), so you can't unshield your full balance.
+        """
+    }
+
+    /// The Max affordance fills the composer with — and validates against — `maxValueWei`,
+    /// the largest `amountWei` the sidecar will accept for `unshield`. It deliberately does
+    /// NOT use `receivableAtMaxWei`, which is only what the recipient would net at that amount
+    /// (display-only, folded into `unshieldBreakdown` instead): filling with the receivable
+    /// figure would understate what can actually be requested, and validating against it would
+    /// reject a legitimate max-value request.
+    nonisolated static func maxUnshieldFillAmountWei(_ max: RailgunHelperClient.MaxUnshieldable) -> String {
+        max.maxValueWei
+    }
+
+    /// Strips the " ETH" unit suffix `WeiFormatter.ethDisplayString` appends, so a wei amount
+    /// can be embedded in a `/unshield <amount> to <recipient>` composer scaffold (which takes
+    /// a bare decimal ETH string, the same shape `SlashCatalog`'s scaffold uses). Only edits the
+    /// already-formatted decimal string — no wei math happens here.
+    private nonisolated static func decimalETHAmount(fromHexWei hex: String) -> String {
+        let display = WeiFormatter.ethDisplayString(fromHexWei: hex)
+        guard display.hasSuffix(" ETH") else { return display }
+        return String(display.dropLast(" ETH".count))
+    }
+
+    /// The Max affordance: probe the sidecar's current spendable ceiling (a live RAILGUN sync +
+    /// bundler gas probe, same cost as `unshieldStatus`'s neighbours) and fill the composer with
+    /// a ready-to-send `/unshield` command at `maxValueWei`, alongside the breakdown showing what
+    /// the recipient would actually net (`receivableAtMaxWei`) and the gas reserve held back.
+    func fillMaxUnshieldAmount() {
+        guard !isFetchingMaxUnshieldable else { return }
+        isFetchingMaxUnshieldable = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isFetchingMaxUnshieldable = false }
+            do {
+                let client = try await self.railgunHelperClient()
+                let max = try await client.maxUnshieldable()
+                self.maxUnshieldableBreakdown = ChatDashboardModel.unshieldBreakdown(
+                    requestedWei: max.maxValueWei,
+                    receivableWei: max.receivableAtMaxWei,
+                    reserveWei: max.reserveWei
+                )
+                self.maxUnshieldableError = nil
+                let amountText = ChatDashboardModel.decimalETHAmount(
+                    fromHexWei: ChatDashboardModel.maxUnshieldFillAmountWei(max)
+                )
+                self.inputText = "/unshield \(amountText) to <recipient>"
+                NotificationCenter.default.post(name: .chatComposerFocusRequested, object: nil)
+            } catch {
+                self.maxUnshieldableError = error.localizedDescription
             }
         }
     }
@@ -4358,40 +4460,76 @@ struct LocalWalletChatDashboardView: View {
 
     /// Shielded (RAILGUN) balance row: confirmed = cleared/spendable, pending = deposited
     /// but awaiting the pool's approval set. Refreshed after shield/unshield or manually.
+    ///
+    /// Also hosts the Max affordance (fills the composer with the sidecar's current spendable
+    /// ceiling + shows the "you will receive" breakdown) and the privacy disclosure, so the two
+    /// facts a user needs before exiting — what they'll actually get, and who sees the exit —
+    /// live next to the balance they're about to move.
     private var shieldedBalanceRow: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "lock.shield.fill")
-                .foregroundStyle(.secondary)
-            Text("Shielded (RAILGUN)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-            if let confirmed = model.shieldedConfirmed {
-                Text("Confirmed \(confirmed) · Pending \(model.shieldedPending ?? "0 ETH")")
-                    .font(.caption.monospacedDigit())
-                    .help("Confirmed = cleared and spendable. Pending = deposited but not yet included by the pool's approval set.")
-            } else if model.isRefreshingShieldedBalance {
-                Text("Loading… (syncing the pool)")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield.fill")
+                    .foregroundStyle(.secondary)
+                Text("Shielded (RAILGUN)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            } else if model.shieldedBalanceError != nil {
-                Text("unavailable")
-                    .font(.caption)
+                Spacer()
+                if let confirmed = model.shieldedConfirmed {
+                    Text("Confirmed \(confirmed) · Pending \(model.shieldedPending ?? "0 ETH")")
+                        .font(.caption.monospacedDigit())
+                        .help("Confirmed = cleared and spendable. Pending = deposited but not yet included by the pool's approval set.")
+                } else if model.isRefreshingShieldedBalance {
+                    Text("Loading… (syncing the pool)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if model.shieldedBalanceError != nil {
+                    Text("unavailable")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .help(model.shieldedBalanceError ?? "")
+                } else {
+                    Text("—")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Button {
+                    model.fillMaxUnshieldAmount()
+                } label: {
+                    if model.isFetchingMaxUnshieldable {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text("Max")
+                            .font(.caption.bold())
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isFetchingMaxUnshieldable)
+                .help("Fill the composer with the most you can currently unshield")
+                Button {
+                    model.refreshShieldedBalance()
+                } label: {
+                    Image(systemName: model.isRefreshingShieldedBalance ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isRefreshingShieldedBalance)
+                .help("Refresh shielded balance")
+            }
+            if let breakdown = model.maxUnshieldableBreakdown {
+                Text(breakdown)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let maxUnshieldableError = model.maxUnshieldableError {
+                Text(maxUnshieldableError)
+                    .font(.system(size: 10.5))
                     .foregroundStyle(.orange)
-                    .help(model.shieldedBalanceError ?? "")
-            } else {
-                Text("—")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Button {
-                model.refreshShieldedBalance()
-            } label: {
-                Image(systemName: model.isRefreshingShieldedBalance ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
-            }
-            .buttonStyle(.plain)
-            .disabled(model.isRefreshingShieldedBalance)
-            .help("Refresh shielded balance")
+            Text(RailgunExitCopy.privacyDisclosure)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.top, 2)
         .task {

@@ -138,8 +138,8 @@ const ANVIL_FORK_RETRY_BACKOFF_MS: u32 = 1_000;
 const ANVIL_FORK_TIMEOUT_MS: u32 = 120_000;
 
 // Hard wall-clock cap for the whole test so nothing (a stuck sidecar, a hung socket read, a
-// wedged RPC) can hang the suite indefinitely — it fails instead. Two exits, each proving 2+
-// Groth16 proofs, plus a first-run circuit-artifact download and two inclusion waits.
+// wedged RPC) can hang the suite indefinitely — it fails instead. Three exits, each proving 2+
+// Groth16 proofs, plus a first-run circuit-artifact download and three inclusion waits.
 const OVERALL_TIMEOUT_SECS: u64 = 2700;
 // Per-operation cap on any single network/socket await (proving is polled separately). Covers a
 // `sync()` plus a bundler gas sample, both of which sit inside one RPC — and a `sync()` re-walks
@@ -158,7 +158,8 @@ const FEE_LOOP_HEADROOM_WARN: usize = 4;
 /// How many derived exit-sender indices to snapshot before each exit.
 ///
 /// A WINDOW rather than the single next index, because `submit_exit` burns a SECOND index on its
-/// gas-gated retry — so the index an exit will report is genuinely not knowable in advance.
+/// unconditional convergence retry — so the index an exit will report is genuinely not knowable
+/// in advance.
 const DERIVED_SENDER_WINDOW: u32 = 8;
 
 /// Await `fut` with a per-operation timeout, panicking with `what` if it is exceeded so a
@@ -807,12 +808,12 @@ async fn run_e2e() {
             predicted_delivery(value)
         );
         // The loop cannot converge on its first proof (the SDK's seed `fee_value` is orders of
-        // magnitude below a real sponsored fee), so 2 is the floor; >5 means the gas-gated retry
-        // fired, which is worth seeing but not a failure.
+        // magnitude below a real sponsored fee), so 2 is the floor; >5 means the convergence
+        // retry fired, which is worth seeing but not a failure.
         assert!(
             (2..=2 * FEE_LOOP_SDK_CAP).contains(&obs.fee_iterations),
             "exit of {value} wei: {} fee-loop iterations is outside the expected \
-             2..={} ({FEE_LOOP_SDK_CAP} per attempt, at most one gas-gated retry). Zero \
+             2..={} ({FEE_LOOP_SDK_CAP} per attempt, at most one convergence retry). Zero \
              iterations means the sidecar's log was not captured, NOT a convergence regression.",
             obs.fee_iterations,
             2 * FEE_LOOP_SDK_CAP

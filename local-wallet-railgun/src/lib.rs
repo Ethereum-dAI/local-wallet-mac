@@ -2,7 +2,8 @@
 //! it via RAILGUN's privacy paymaster, submitted by a public ERC-4337 bundler. There is no
 //! local broadcaster: nothing of ours pays gas, so nothing needs funding.
 //!
-//! See `docs/design/2026-07-13-railgun-shield-unshield-v2-design.md`.
+//! See this crate's `README.md` for the design, the paymaster-exit rationale, the POI/fork
+//! caveats, and the full env-config surface.
 //!
 //! One runnable process uses this library: `railgun-helper`, serving
 //! `balance` / `maxUnshieldable` / `prepareShield` / `unshield` / `unshieldStatus`.

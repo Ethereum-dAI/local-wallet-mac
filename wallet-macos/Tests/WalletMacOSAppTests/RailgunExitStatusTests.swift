@@ -38,7 +38,7 @@ final class RailgunExitStatusTests: XCTestCase {
     }
 
     func testBreakdownStatesTheTreasuryFeeAndGasReserve() {
-        let text = ChatDashboardModel.unshieldBreakdown(
+        let text = RailgunExitCopy.unshieldBreakdown(
             requestedWei: "0x2710",       // 10000
             receivableWei: "0x230F",      // 8975 = floor(10000*9975/10000) − 1000 guard
             reserveWei: "0x64"            // 100
@@ -52,7 +52,7 @@ final class RailgunExitStatusTests: XCTestCase {
     /// caught by hand-inspecting the actual rendered string, since the substring assertions
     /// above pass either way ("0 ETH" is a substring of "0 ETH ETH" too).
     func testBreakdownDoesNotDoubleTheEthUnit() {
-        let text = ChatDashboardModel.unshieldBreakdown(
+        let text = RailgunExitCopy.unshieldBreakdown(
             requestedWei: "0x2710",
             receivableWei: "0x230F",
             reserveWei: "0x64"
@@ -65,7 +65,7 @@ final class RailgunExitStatusTests: XCTestCase {
     /// match against their balance will think the figures don't add up. Pin that the actual
     /// formatted amounts for both the recipient's net and the gas reserve appear verbatim.
     func testBreakdownNamesBothDeductionsWithTheirAmounts() {
-        let text = ChatDashboardModel.unshieldBreakdown(
+        let text = RailgunExitCopy.unshieldBreakdown(
             requestedWei: "0x2710",
             receivableWei: "0x230F",
             reserveWei: "0x64"
@@ -87,10 +87,47 @@ final class RailgunExitStatusTests: XCTestCase {
             receivableAtMaxWei: "0x230F",
             reserveWei: "0x64"
         )
-        XCTAssertEqual(ChatDashboardModel.maxUnshieldFillAmountWei(max), max.maxValueWei)
+        XCTAssertEqual(RailgunExitCopy.maxUnshieldFillAmountWei(max), max.maxValueWei)
         XCTAssertNotEqual(
-            ChatDashboardModel.maxUnshieldFillAmountWei(max), max.receivableAtMaxWei,
+            RailgunExitCopy.maxUnshieldFillAmountWei(max), max.receivableAtMaxWei,
             "the fixture's two values differ on purpose — this must fail if the wrong field is wired"
+        )
+    }
+
+    /// The Max breakdown must not survive an edit that moves the composer away from what Max
+    /// filled in — the failure mode being guarded against is a stale "you will receive" figure
+    /// for an amount the user is no longer about to send, which is worse than no figure at all.
+    func testMaxBreakdownIsClearedOnceTheComposerNoLongerMatchesTheFill() {
+        let filled = "/unshield 0.01 to <recipient>"
+        // The exact string Max just wrote: no clear.
+        XCTAssertFalse(
+            RailgunExitCopy.shouldClearMaxBreakdown(composerText: filled, lastMaxFillComposerText: filled)
+        )
+        // The user edited the amount down: clear.
+        XCTAssertTrue(
+            RailgunExitCopy.shouldClearMaxBreakdown(
+                composerText: "/unshield 0.001 to <recipient>", lastMaxFillComposerText: filled
+            )
+        )
+        // The user typed the recipient in (still nominally "the same command" to a human, but
+        // NOT the same string Max wrote): clear. This is deliberately strict — the predicate
+        // does not try to parse the amount back out, it only compares the whole string.
+        XCTAssertTrue(
+            RailgunExitCopy.shouldClearMaxBreakdown(
+                composerText: "/unshield 0.01 to 0xRecipient", lastMaxFillComposerText: filled
+            )
+        )
+        // The user switched to a completely different command: clear.
+        XCTAssertTrue(
+            RailgunExitCopy.shouldClearMaxBreakdown(composerText: "/shield 0.01", lastMaxFillComposerText: filled)
+        )
+        // Max has never been used yet (`lastMaxFillComposerText == nil`): any composer text —
+        // even empty — compares unequal to `nil`, so this returns true too. That's harmless
+        // (there's no breakdown to clear yet, so the model just assigns `nil` to `nil`), and
+        // the important thing pinned here is that the predicate doesn't crash on a `nil`
+        // `lastMaxFillComposerText` — the state before Max is ever used.
+        XCTAssertTrue(
+            RailgunExitCopy.shouldClearMaxBreakdown(composerText: "", lastMaxFillComposerText: nil)
         )
     }
 

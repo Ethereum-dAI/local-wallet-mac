@@ -555,6 +555,57 @@ enum RailgunExitCopy {
     public on-chain moments later anyway. Traffic is not yet routed over Tor.
     """
 
+    /// The "you will receive" breakdown. Both deductions must be visible: RAILGUN's 25 bps
+    /// treasury fee (which reduces what the recipient gets — there is deliberately no
+    /// gross-up) and the in-pool gas fee note, which is why 100% cannot be unshielded.
+    ///
+    /// Lives here (not on `ChatDashboardModel`) for the same reason `privacyDisclosure` does:
+    /// it's a pure function of its arguments, with no dependency on model instance state, so it
+    /// belongs on this already-internal, test-visible copy enum rather than requiring
+    /// `ChatDashboardModel` itself to widen past `private`.
+    static func unshieldBreakdown(
+        requestedWei: String,
+        receivableWei: String,
+        reserveWei: String
+    ) -> String {
+        // `ethDisplayString` already appends the " ETH" unit suffix — do NOT append it again
+        // here, or every amount reads as "0.01 ETH ETH".
+        let requested = WeiFormatter.ethDisplayString(fromHexWei: requestedWei)
+        let receivable = WeiFormatter.ethDisplayString(fromHexWei: receivableWei)
+        let reserve = WeiFormatter.ethDisplayString(fromHexWei: reserveWei)
+        return """
+        Unshielding \(requested) — the recipient receives \(receivable) after \
+        RAILGUN's 0.25% unshield fee. Gas is paid from your shielded balance \
+        (about \(reserve) held back), so you can't unshield your full balance.
+        """
+    }
+
+    /// The Max affordance fills the composer with — and validates against — `maxValueWei`,
+    /// the largest `amountWei` the sidecar will accept for `unshield`. It deliberately does
+    /// NOT use `receivableAtMaxWei`, which is only what the recipient would net at that amount
+    /// (display-only, folded into `unshieldBreakdown` instead): filling with the receivable
+    /// figure would understate what can actually be requested, and validating against it would
+    /// reject a legitimate max-value request.
+    static func maxUnshieldFillAmountWei(_ max: RailgunHelperClient.MaxUnshieldable) -> String {
+        max.maxValueWei
+    }
+
+    /// Whether an edit to the composer should drop a previously computed `unshieldBreakdown`.
+    /// True whenever the composer no longer holds exactly what the Max affordance last filled
+    /// in — the user typed something else, edited the amount down, or picked a different slash
+    /// command — because a breakdown describing an amount that is no longer what's about to be
+    /// sent is worse than no breakdown at all (this is the whole reason the breakdown exists:
+    /// to be trustworthy). `lastMaxFillComposerText` is `nil` until Max has been used at least
+    /// once, so nothing is ever cleared before there is anything to clear.
+    ///
+    /// Deliberately does NOT try to recompute the breakdown for a hand-edited amount — that
+    /// would need a live sidecar round-trip (the same sync + gas probe `maxUnshieldable`
+    /// itself performs) on every keystroke, which is not worth it. Dropping it is the simplest
+    /// robust behavior: never show a figure that might not describe the pending action.
+    static func shouldClearMaxBreakdown(composerText: String, lastMaxFillComposerText: String?) -> Bool {
+        composerText != lastMaxFillComposerText
+    }
+
     /// Map the sidecar's stable exit codes onto copy that tells the user what to do.
     ///
     /// Switching on the code is the whole point: the sidecar deliberately stripped its message
@@ -712,25 +763,29 @@ private enum ChatSidebarBucket: String, CaseIterable {
 }
 
 @MainActor
-// Not `private`: `RailgunExitStatusTests` calls the pure `unshieldBreakdown` /
-// `maxUnshieldFillAmountWei` static functions directly (via `@testable import`, which does
-// NOT lift `private`/`fileprivate` — the type itself must be at least internal). Everything
-// else about this class is unchanged; it is still confined to `WalletMacOSApp` and unusable
-// from outside the module.
-final class ChatDashboardModel: ObservableObject {
-    @Published var inputText = ""
+private final class ChatDashboardModel: ObservableObject {
+    @Published var inputText = "" {
+        didSet {
+            // The decision itself (`shouldClearMaxBreakdown`) is a pure, tested predicate on
+            // `RailgunExitCopy`; this `didSet` is just the thin binding that calls it on every
+            // composer edit. The Max affordance's own write (`fillMaxUnshieldAmount`) records
+            // the exact string it's about to set in `lastMaxFillComposerText` right before
+            // setting it, so that specific assignment is a no-op here — everything else (typing,
+            // editing the amount, picking a different slash command) clears the breakdown.
+            guard RailgunExitCopy.shouldClearMaxBreakdown(
+                composerText: inputText, lastMaxFillComposerText: lastMaxFillComposerText
+            ) else { return }
+            maxUnshieldableBreakdown = nil
+            maxUnshieldableError = nil
+        }
+    }
     @Published private(set) var conversations: [ChatConversation]
     @Published private(set) var activeConversationID: UUID
     @Published private(set) var isGenerating = false
     @Published private(set) var runtimeStatus: String
     @Published var thinkingEnabled = true
     @Published var isSidebarVisible = true
-    // `fileprivate` (not the previous bare default access): `ChatAccountIdentity` is a
-    // file-private type, and the class itself is no longer `private`, so the getter must be
-    // pinned to fileprivate explicitly or the compiler rejects exposing a less-visible type
-    // through a more-visible property. No behavior change — everything using this is still in
-    // this same file.
-    @Published fileprivate private(set) var accountIdentity: ChatAccountIdentity
+    @Published private(set) var accountIdentity: ChatAccountIdentity
     @Published private(set) var streamingText: String = ""
     @Published private(set) var streamingMessageID: UUID? = nil
     @Published var feedbackExportMessage: String? = nil
@@ -738,9 +793,8 @@ final class ChatDashboardModel: ObservableObject {
     @Published private(set) var isRefreshingWalletHistory = false
     @Published var walletHistoryMessage: String? = nil
     @Published var selectedHistoryUserOpHash: String? = nil
-    // Same `fileprivate` note as `accountIdentity` above — `ChatTokenBalance` is file-private.
-    @Published fileprivate private(set) var kernelTokenBalances: [ChatTokenBalance] = []
-    @Published fileprivate private(set) var bundlerTokenBalances: [ChatTokenBalance] = []
+    @Published private(set) var kernelTokenBalances: [ChatTokenBalance] = []
+    @Published private(set) var bundlerTokenBalances: [ChatTokenBalance] = []
     @Published private(set) var isRefreshingTokenBalances = false
     // Shielded (RAILGUN) balance, split by pool status. `confirmed` = cleared and spendable;
     // `pending` = deposited but not yet included by the pool's approval set.
@@ -753,6 +807,10 @@ final class ChatDashboardModel: ObservableObject {
     @Published private(set) var maxUnshieldableBreakdown: String?
     @Published private(set) var isFetchingMaxUnshieldable = false
     @Published private(set) var maxUnshieldableError: String?
+    // The exact composer string `fillMaxUnshieldAmount()` last set, so `inputText`'s `didSet`
+    // can tell "Max just wrote this" apart from "the user changed it since" and only clear the
+    // breakdown in the second case. See the `didSet` on `inputText` above.
+    private var lastMaxFillComposerText: String?
     // Which helper EOA is mid gas-funding, so its card shows a spinner and disables its Send
     // button; nil when idle. Plus the last funding error. The bundler is the only gas-paying
     // helper the user funds — exits are sponsored by RAILGUN's privacy paymaster.
@@ -1240,9 +1298,7 @@ final class ChatDashboardModel: ObservableObject {
         return replacement
     }
 
-    // Same `fileprivate` note as `accountIdentity` above — `ReplacementActionState` is
-    // file-private.
-    fileprivate func replacementActionState(for userOpHash: String) -> ReplacementActionState? {
+    func replacementActionState(for userOpHash: String) -> ReplacementActionState? {
         replacementActionStates[replacementActionKey(for: userOpHash)]
     }
 
@@ -2741,39 +2797,6 @@ final class ChatDashboardModel: ObservableObject {
         }
     }
 
-    /// The "you will receive" breakdown. Both deductions must be visible: RAILGUN's 25 bps
-    /// treasury fee (which reduces what the recipient gets — there is deliberately no
-    /// gross-up) and the in-pool gas fee note, which is why 100% cannot be unshielded.
-    // `nonisolated`: the class is `@MainActor`, but this is a pure function of its arguments
-    // (no shared mutable state), and the test suite calls it synchronously from a plain
-    // (non-actor, non-async) XCTest method.
-    nonisolated static func unshieldBreakdown(
-        requestedWei: String,
-        receivableWei: String,
-        reserveWei: String
-    ) -> String {
-        // `ethDisplayString` already appends the " ETH" unit suffix — do NOT append it again
-        // here, or every amount reads as "0.01 ETH ETH".
-        let requested = WeiFormatter.ethDisplayString(fromHexWei: requestedWei)
-        let receivable = WeiFormatter.ethDisplayString(fromHexWei: receivableWei)
-        let reserve = WeiFormatter.ethDisplayString(fromHexWei: reserveWei)
-        return """
-        Unshielding \(requested) — the recipient receives \(receivable) after \
-        RAILGUN's 0.25% unshield fee. Gas is paid from your shielded balance \
-        (about \(reserve) held back), so you can't unshield your full balance.
-        """
-    }
-
-    /// The Max affordance fills the composer with — and validates against — `maxValueWei`,
-    /// the largest `amountWei` the sidecar will accept for `unshield`. It deliberately does
-    /// NOT use `receivableAtMaxWei`, which is only what the recipient would net at that amount
-    /// (display-only, folded into `unshieldBreakdown` instead): filling with the receivable
-    /// figure would understate what can actually be requested, and validating against it would
-    /// reject a legitimate max-value request.
-    nonisolated static func maxUnshieldFillAmountWei(_ max: RailgunHelperClient.MaxUnshieldable) -> String {
-        max.maxValueWei
-    }
-
     /// Strips the " ETH" unit suffix `WeiFormatter.ethDisplayString` appends, so a wei amount
     /// can be embedded in a `/unshield <amount> to <recipient>` composer scaffold (which takes
     /// a bare decimal ETH string, the same shape `SlashCatalog`'s scaffold uses). Only edits the
@@ -2797,16 +2820,24 @@ final class ChatDashboardModel: ObservableObject {
             do {
                 let client = try await self.railgunHelperClient()
                 let max = try await client.maxUnshieldable()
-                self.maxUnshieldableBreakdown = ChatDashboardModel.unshieldBreakdown(
+                self.maxUnshieldableBreakdown = RailgunExitCopy.unshieldBreakdown(
                     requestedWei: max.maxValueWei,
                     receivableWei: max.receivableAtMaxWei,
                     reserveWei: max.reserveWei
                 )
                 self.maxUnshieldableError = nil
                 let amountText = ChatDashboardModel.decimalETHAmount(
-                    fromHexWei: ChatDashboardModel.maxUnshieldFillAmountWei(max)
+                    fromHexWei: RailgunExitCopy.maxUnshieldFillAmountWei(max)
                 )
-                self.inputText = "/unshield \(amountText) to <recipient>"
+                // The Max affordance is the only writer that must NOT invalidate the breakdown
+                // it just computed — `inputText`'s `didSet` clears `maxUnshieldableBreakdown`
+                // on every OTHER edit (typing, a different slash command), because a stale
+                // breakdown would describe an amount the user is no longer sending. Recording
+                // the exact string here, before assigning it, is what lets `didSet` tell "Max
+                // just wrote this" apart from "the user changed it since".
+                let filled = "/unshield \(amountText) to <recipient>"
+                self.lastMaxFillComposerText = filled
+                self.inputText = filled
                 NotificationCenter.default.post(name: .chatComposerFocusRequested, object: nil)
             } catch {
                 self.maxUnshieldableError = error.localizedDescription

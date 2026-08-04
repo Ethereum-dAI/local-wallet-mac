@@ -562,8 +562,11 @@ enum RailgunExitCopy {
     /// `bundlerRejected` with `submitted == true` leaves the card Submitted (see
     /// `shouldRevertCard`) but must still reach the user with the exit index + sender that locate
     /// the notes if the op does land. The generic still-in-flight sentence would drop exactly that
-    /// recovery pointer. `unknownJobId` likewise has better copy of its own. Anything with no
-    /// domain code — a dropped socket, a timed-out read — falls back to the generic note.
+    /// recovery pointer. `unknownJobId` likewise has better copy of its own — reachable at all
+    /// only because `RailgunHelperClient.poll` ends the wait on that code (`isJobGone`) instead
+    /// of retrying it to the deadline; a deadline timeout carries no domain code and would fall
+    /// through to the generic note below. Anything else with no domain code — a dropped socket,
+    /// a timed-out read — falls back to that generic note.
     static func inFlightNotice(for error: Error) -> String {
         failureCopy(for: error) ?? exitStillInFlightMessage
     }

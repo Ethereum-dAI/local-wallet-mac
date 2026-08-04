@@ -47,13 +47,17 @@ final class RailgunPollRetryTests: XCTestCase {
     /// The core fix: transient poll failures are swallowed and polling continues, so the deadline
     /// stays the single bound. Mirrors what `exit::await_exit` does on the Rust side, where EVERY
     /// receipt-poll error is retryable.
+    ///
+    /// `unknownJobId` is deliberately NOT in this script — it ends the loop immediately instead
+    /// of being retried (see `testUnknownJobIdEndsTheWaitEarly`), because the sidecar evicts a
+    /// job from its in-RAM map as soon as it is read to a terminal state, so a jobId that has
+    /// once produced `unknownJobId` can never resolve again.
     func testTransientPollFailuresDoNotEndTheWait() async throws {
         let script = Script([
             .failure(RailgunHelperClient.ClientError.ioFailed("read: errno 60")),
             .failure(RailgunHelperClient.ClientError.connectFailed("ENOENT")),
             .failure(RailgunHelperClient.ClientError.decodeFailed("UnshieldStatus")),
             .failure(RailgunHelperClient.ClientError.httpError("HTTP/1.1 401")),
-            .failure(RailgunHelperClient.ClientError.rpcError(code: "unknownJobId", message: "gone")),
             .success(Self.status("submitted")),
         ])
         let result = try await RailgunHelperClient.poll(
@@ -62,8 +66,8 @@ final class RailgunPollRetryTests: XCTestCase {
             every: 0.001,
             fetch: { try script.next() }
         )
-        XCTAssertNotNil(result, "the wait must survive five failed polls and see the sixth")
-        XCTAssertEqual(script.calls, 6, "every failure must be retried, not aborted on")
+        XCTAssertNotNil(result, "the wait must survive four failed polls and see the fifth")
+        XCTAssertEqual(script.calls, 5, "every failure must be retried, not aborted on")
         XCTAssertEqual(result?["userOpHash"]?.stringValue, "0xabc")
     }
 
@@ -107,6 +111,38 @@ final class RailgunPollRetryTests: XCTestCase {
             XCTAssertEqual(message, "scripted")
         }
         XCTAssertEqual(script.calls, 2, "must stop at the failure, not poll on")
+    }
+
+    /// `unknownJobId` ends the wait immediately too, alongside a sidecar-reported failure — but
+    /// for the opposite reason: it is NOT evidence the exit failed, only that this jobId was
+    /// evicted from the sidecar's in-RAM map and can never resolve again (`unshieldStatus` evicts
+    /// on read — `railgun-helper.rs`). Before this fix, `unknownJobId` was retried like a
+    /// transient transport error, burning the whole poll budget (up to 900s) on ~150 polls
+    /// guaranteed to fail identically. Card-revert behaviour is pinned separately in
+    /// `RailgunExitStatusTests.testOnlyASidecarReportedFailureRevertsTheCard`, which asserts
+    /// `shouldRevertCard` stays false for this same code.
+    func testUnknownJobIdEndsTheWaitEarly() async throws {
+        let script = Script([
+            .failure(RailgunHelperClient.ClientError.ioFailed("read: errno 60")),
+            .failure(RailgunHelperClient.ClientError.rpcError(code: "unknownJobId", message: "unknown jobId: job-1")),
+            .success(Self.status("done", included: true)),
+        ])
+        do {
+            _ = try await RailgunHelperClient.poll(
+                until: ["done"],
+                deadline: Date().addingTimeInterval(30),
+                every: 0.001,
+                fetch: { try script.next() }
+            )
+            XCTFail("an unknownJobId eviction must throw rather than keep polling")
+        } catch let RailgunHelperClient.ClientError.rpcError(code, message) {
+            XCTAssertEqual(code, "unknownJobId")
+            XCTAssertEqual(message, "unknown jobId: job-1")
+        }
+        XCTAssertEqual(
+            script.calls, 2,
+            "must stop at the unknownJobId eviction, not poll on to the deadline (or exhaust the script)"
+        )
     }
 
     /// A deadline that passes with nothing terminal returns nil — "we don't know yet", never a

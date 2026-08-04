@@ -66,10 +66,12 @@ struct RailgunHelperClient: Sendable {
         /// Whether this is the SIDECAR's own report that the exit job reached a terminal failure,
         /// as opposed to something that went wrong with the poll that asked.
         ///
-        /// The one thing that ends a wait early — every other error describes the transport, and
-        /// each has a routine cause that coexists with a perfectly successful exit (see
-        /// `awaitUnshieldSubmitted`). Also the first half of the card-revert decision in
-        /// `RailgunExitCopy.shouldRevertCard`, which refines it further with `submitted`.
+        /// The one thing that means the EXIT failed — every other error describes the transport
+        /// (or, for `unknownJobId`, an in-RAM eviction that says nothing about the exit; see
+        /// `RailgunHelperClient.isJobGone` and `poll`), and each has a routine cause that
+        /// coexists with a perfectly successful exit (see `awaitUnshieldSubmitted`). Also the
+        /// first half of the card-revert decision in `RailgunExitCopy.shouldRevertCard`, which
+        /// refines it further with `submitted`.
         var isTerminalExitFailure: Bool {
             if case .exitFailed = self { return true }
             return false
@@ -77,9 +79,25 @@ struct RailgunHelperClient: Sendable {
     }
 
     /// Whether `error` is the sidecar reporting a terminally failed exit. Anything else — a
-    /// dropped socket, a timed-out read, a re-spawned helper — is evidence about the poll only.
+    /// dropped socket, a timed-out read, a re-spawned helper, or an `unknownJobId` eviction (see
+    /// `isJobGone`) — is evidence about the poll only, not about whether the exit itself failed.
     static func isTerminalExitFailure(_ error: Error) -> Bool {
         (error as? ClientError)?.isTerminalExitFailure ?? false
+    }
+
+    /// Whether `error` is the sidecar's `unknownJobId` rejection: the job existed but was
+    /// evicted from the in-RAM map after being read to a terminal state (`unshieldStatus` evicts
+    /// on read — `railgun-helper.rs`). Once seen, the SAME jobId can never resolve again, so
+    /// every subsequent poll is guaranteed to fail identically — this must end the poll loop
+    /// (see `poll`) exactly like `isTerminalExitFailure`, but it is NOT evidence the exit
+    /// failed: the eviction is equally consistent with the exit having landed. So it must NOT be
+    /// folded into `isTerminalExitFailure` — `shouldRevertCard` depends on that separation to
+    /// avoid reverting a card whose exit may well have succeeded.
+    static func isJobGone(_ error: Error) -> Bool {
+        if case let .rpcError(code, _)? = error as? ClientError {
+            return code == "unknownJobId"
+        }
+        return false
     }
 
     // MARK: Typed API
@@ -243,6 +261,16 @@ struct RailgunHelperClient: Sendable {
     /// in `exit::await_exit`, where EVERY receipt-poll error is retryable and only an on-chain
     /// verdict is terminal.
     ///
+    /// ONE exception to "retried until the deadline": `rpcError(unknownJobId)` (see `isJobGone`)
+    /// ends the loop immediately too, even though it is not a terminal exit failure. The sidecar
+    /// evicts a job from its in-RAM map the moment it is read to a terminal state, so once this
+    /// client has seen `unknownJobId` for a given jobId, that same jobId can never resolve again
+    /// — retrying it to the deadline would just burn the whole budget on ~100-150 polls that are
+    /// guaranteed to fail identically. It does NOT revert the card (`shouldRevertCard` only
+    /// looks at `isTerminalExitFailure`): the eviction proves the job is gone from the map, not
+    /// that the exit failed — it is equally consistent with a fast inclusion that already
+    /// resolved the job to `done`.
+    ///
     /// `Task.sleep` is OUTSIDE the retry-swallowing `catch` on purpose: a cancellation must
     /// propagate immediately rather than be mistaken for a transient poll failure.
     /// Internal, not private, so `RailgunPollRetryTests` can drive the retry behaviour with an
@@ -267,8 +295,11 @@ struct RailgunHelperClient: Sendable {
                 }
                 // Anything else ("pending", or a status a newer sidecar grows) → keep waiting.
             } catch {
-                // The sidecar's verdict is the one thing that ends the wait early.
-                if isTerminalExitFailure(error) { throw error }
+                // The sidecar's verdict ends the wait early because the exit failed; an
+                // `unknownJobId` eviction ends it early too, but for the opposite reason — the
+                // job is gone and can never come back, not that the exit failed. See the
+                // `isJobGone` doc comment and the exception noted above.
+                if isTerminalExitFailure(error) || isJobGone(error) { throw error }
                 logTransientPollFailure(error)
             }
             // Outside the `do`: a terminal status must surface its own decode failure (a

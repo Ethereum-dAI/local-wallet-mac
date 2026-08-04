@@ -67,8 +67,10 @@ final class RailgunHelperDaemon: @unchecked Sendable {
 
         // A stable, persistent directory (NOT the per-launch temp dir) — it holds the
         // per-exit rotation counter (`<state_dir>/exit-index`) the sidecar reads/writes on
-        // every unshield, so it must survive across app relaunches or the counter resets and
-        // an exit sender index can be reused, costing that exit's unlinkability.
+        // every unshield, so it must survive across app relaunches. A reset counter does not
+        // cost one exit: it restarts at 0 and re-walks every sender the wallet has already
+        // published, for as long as it keeps exiting. See `exit_index.rs` for why that also
+        // makes a same-entropy restore onto a second machine reuse the sequence.
         //
         // Deliberately NOT also the socket's directory: `~/Library/Application Support/...`
         // is long enough on macOS that appending a filename risks `sockaddr_un.sun_path`'s

@@ -76,8 +76,11 @@ so an exit sender can never collide with one of the wallet's own addresses. The 
 note lands on that sender and the same UserOperation's call data unwraps the WETH and
 forwards native ETH to the recipient — one atomic transaction, no separate forwarding tx.
 `index` is a monotonically increasing counter persisted under `RAILGUN_STATE_DIR` (see
-below): it must survive app relaunches, or a reused index reuses a sender across exits and
-costs that exit its unlinkability.
+below): it must survive app relaunches. A reset counter restarts at 0 and then re-walks the
+whole sequence of already-published senders — not one lost exit but every subsequent one — and
+because the counter is bound to the machine rather than to the seed, restoring the same
+entropy on a second machine does this by construction. See `src/exit_index.rs` for the full
+reasoning.
 
 Because the sender is **derived, not random**, a stranded exit is recoverable: if delivery
 reverts after the unshield already executed during paymaster validation, or the bundler's
@@ -192,8 +195,9 @@ is the default check.
   `RAILGUN_SOCKET`, `RAILGUN_TOKEN`, `RAILGUN_FORK_BLOCK` (fork-sync only). `RAILGUN_STATE_DIR`
   holds the per-exit rotation counter (`<state_dir>/exit-index`) and **must be a persistent
   directory** — the app points it at its own Application Support dir; losing or resetting it
-  risks reusing an exit sender. There is no broadcaster key: every exit sender is derived
-  from the entropy at spend time, never stored separately.
+  reuses the whole published sender sequence, not just one. The counter is per-machine, not
+  per-seed, so a restore onto a second machine reuses it too. There is no broadcaster key:
+  every exit sender is derived from the entropy at spend time, never stored separately.
 
 ## License
 

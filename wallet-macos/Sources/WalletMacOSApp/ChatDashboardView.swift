@@ -696,7 +696,12 @@ enum RailgunExitCopy {
         case "deliveryReverted":
             // The ONE case where the raw detail must survive: it carries the exit index, which
             // is what makes stranded funds re-derivable. Keep it verbatim for a bug report.
-            return "The exit landed on-chain but delivery to the recipient failed. Your funds are recoverable — please report this with the details below.\n\(message)"
+            //
+            // Deliberately does NOT say "recoverable" unqualified. Deriving the sender from the
+            // seed means the funds CAN be recovered, but nothing shipped here does it — no sweep
+            // command, no admin RPC — so promising recovery would leave the user holding a claim
+            // they can neither act on nor explain to someone who can.
+            return "The exit landed on-chain but delivery to the recipient failed. Your funds are not lost, but recovering them currently needs help from a developer — please report this with the details below.\n\(message)"
         case "insufficientShieldedBalance":
             // The sidecar's own sentence is deliberately NUMBER-FREE (naming the ceiling and the
             // reserve would write the user's shielded balance — exactly their sum — into the

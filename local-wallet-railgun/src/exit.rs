@@ -4,6 +4,7 @@
 //! Owns the ephemeral 7702 sender, the bundler client, the amount guards, and receipt polling.
 //! Knows nothing about the socket, the job map, or the app.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use alloy::primitives::{B256, U256};
@@ -74,9 +75,14 @@ pub enum ExitError {
     },
     #[error("the privacy paymaster is not configured for this chain")]
     PaymasterNotConfigured,
+    /// The index and op hash are the recovery pointer, but nothing in this build can act on
+    /// them: there is no sweep command and no admin RPC that spends an exit sender. Deriving
+    /// senders instead of randomizing them is what keeps recovery POSSIBLE, and the wording
+    /// says exactly that much and no more — "recoverable" on its own reads as a thing the user
+    /// can do, and they cannot.
     #[error(
-        "unshield landed but delivery reverted; WETH is recoverable at exit index \
-         {exit_index} (op {user_op_hash})"
+        "unshield landed but delivery reverted; the WETH is at exit index {exit_index} \
+         (op {user_op_hash}) and can only be recovered with developer assistance"
     )]
     DeliveryReverted {
         exit_index: u32,
@@ -99,9 +105,12 @@ fn render_bundler_rejection(
     sender: &str,
 ) -> String {
     if submitted {
+        // Same wording discipline as `DeliveryReverted`: name where the funds are, and say
+        // plainly that acting on it needs a developer, because no code here can.
         format!(
-            "bundler did not confirm the operation ({message}); if it was submitted, the exit is \
-             recoverable at index {exit_index} (sender {sender})"
+            "bundler did not confirm the operation ({message}); if it was submitted, the funds \
+             are at index {exit_index} (sender {sender}) and can only be recovered with \
+             developer assistance"
         )
     } else {
         format!(
@@ -349,11 +358,36 @@ pub fn resolve_bundler_url(chain_id: u64) -> String {
     bundler_url_for(chain_id)
 }
 
+/// Hard deadline on the gas-price probe.
+///
+/// A missing timeout here is not merely slow, it is unrecoverable: `spendable_ceiling` calls
+/// `fetch_max_fee_per_gas` while holding the helper lock, so a bundler that accepts the
+/// connection and then never answers (distinct from refusing or 429-ing) would hold that lock
+/// for the life of the process. `reqwest`'s default is no timeout at all, so this must be
+/// explicit.
+const GAS_PRICE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One client, built once, for every gas-price probe.
+///
+/// `Client` owns a connection pool and is designed to be reused; constructing one per call
+/// threw away the pool and paid a fresh TLS handshake on every Max click and every unshield
+/// pre-check. `LazyLock` also means the timeout above cannot be forgotten at a call site.
+static GAS_PRICE_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(GAS_PRICE_TIMEOUT)
+        .build()
+        // Only fails if the TLS backend cannot initialise, which is fatal anyway; the
+        // alternative is threading a build error through every caller of a gas-price probe.
+        .expect("reqwest client with a timeout")
+});
+
 /// Sample `pimlico_getUserOperationGasPrice` and return the `slow` tier's `maxFeePerGas`.
 ///
 /// `PimlicoBundler` computes this inside `estimate_gas` and does not expose it, so this is a
 /// direct JSON-RPC call. It must match the tier `PimlicoBundler` actually prices at
 /// (`bundler/pimlico.rs:96` uses `slow`), or the gate compares unlike numbers.
+///
+/// Bounded by [`GAS_PRICE_TIMEOUT`] — see there for why that is load-bearing.
 pub async fn fetch_max_fee_per_gas(bundler_url: &str) -> Result<u128, String> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -361,7 +395,7 @@ pub async fn fetch_max_fee_per_gas(bundler_url: &str) -> Result<u128, String> {
         "method": "pimlico_getUserOperationGasPrice",
         "params": []
     });
-    let resp: serde_json::Value = reqwest::Client::new()
+    let resp: serde_json::Value = GAS_PRICE_CLIENT
         .post(bundler_url)
         .json(&body)
         .send()
@@ -451,6 +485,12 @@ mod tests {
             msg.contains("0xdead"),
             "message must name the op hash: {msg}"
         );
+        // Naming the index is necessary but not sufficient: nothing in this build can spend an
+        // exit sender, so the message must not leave the user thinking recovery is self-service.
+        assert!(
+            msg.contains("developer assistance"),
+            "must say recovery needs a developer: {msg}"
+        );
     }
 
     #[test]
@@ -480,6 +520,10 @@ mod tests {
         assert!(
             !msg.contains("nothing left the pool"),
             "must not claim the funds are safe — the op may land: {msg}"
+        );
+        assert!(
+            msg.contains("developer assistance"),
+            "must not imply the user can recover this themselves: {msg}"
         );
     }
 

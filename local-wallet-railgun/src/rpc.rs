@@ -69,10 +69,9 @@ impl std::fmt::Display for RpcError {
 }
 
 pub type RpcResult = Result<Value, RpcError>;
-// Not `Send`: the RAILGUN provider (via `dyn RailgunSigner`) is not Send, so handler
-// futures aren't either. The server therefore handles connections sequentially on the
-// runtime's block_on task (never moved across threads) rather than spawning per-conn —
-// fine for a single-user sidecar, and requests are naturally serialized anyway.
+// Not `Send`: the RAILGUN provider (via `dyn RailgunSigner`) is not Send, so handler futures
+// aren't either. That rules out `tokio::spawn`, but NOT `spawn_local` — see `serve_rpc`, which
+// serves each connection as its own local task so a slow handler cannot block the listener.
 pub type BoxFuture = Pin<Box<dyn Future<Output = RpcResult>>>;
 pub type Handler = Arc<dyn Fn(Value) -> BoxFuture>;
 pub type Handlers = HashMap<String, Handler>;
@@ -91,6 +90,19 @@ pub fn check_auth(auth_header: Option<&str>, token: &str) -> bool {
 }
 
 /// Serve JSON-RPC on `socket_path` until the process exits. Removes a stale socket first.
+///
+/// Connections are served CONCURRENTLY, each as its own `spawn_local` task. Serving them one at
+/// a time was safe while every request was short, but the two-phase `unshield` API broke that
+/// assumption: phase 1 holds the helper lock for ~13-28s of proving, so a `balance` request that
+/// arrives during it occupies the listener while it waits on that lock, and every
+/// `unshieldStatus` poll behind it cannot even be accepted — each one burning its client-side
+/// timeout instead of answering. `unshieldStatus` reads only the job map and takes no helper
+/// lock, so with per-connection tasks it answers straight through a prove.
+///
+/// The handler futures are still `!Send` and still never leave this thread; `spawn_local`
+/// requires only that, which is why the `LocalSet` below is enough. Owning the `LocalSet` here
+/// rather than requiring one from the caller keeps every existing call site — the two bins and
+/// the tests, which all `block_on` this directly — working unchanged.
 pub async fn serve_rpc(
     socket_path: &str,
     token: String,
@@ -101,8 +113,10 @@ pub async fn serve_rpc(
         let _ = std::fs::create_dir_all(parent);
     }
     let listener = UnixListener::bind(socket_path)?;
-    // Owner-only socket: defense-in-depth beyond the bearer token, especially on the app
-    // path where the socket lives in Application Support rather than a private tempdir.
+    // Owner-only socket: defense-in-depth beyond the bearer token. Both callers already place
+    // the socket in a private tempdir (`RailgunHelperDaemon` deliberately keeps it under
+    // `NSTemporaryDirectory()` and puts only the state dir in Application Support), so this is
+    // belt-and-braces rather than the primary control — but it costs one syscall.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -111,24 +125,35 @@ pub async fn serve_rpc(
     // Non-Send by design (single-threaded server); shared only within this task.
     #[allow(clippy::arc_with_non_send_sync)]
     let handlers = Arc::new(handlers);
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let token = token.clone();
-        let handlers = handlers.clone();
-        let io = hyper_util::rt::TokioIo::new(stream);
-        let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
-            let token = token.clone();
-            let handlers = handlers.clone();
-            async move { Ok::<_, std::convert::Infallible>(handle(req, token, handlers).await) }
-        });
-        // Handle this connection to completion before accepting the next (see BoxFuture note).
-        if let Err(e) = hyper::server::conn::http1::Builder::new()
-            .serve_connection(io, service)
-            .await
-        {
-            tracing::debug!("connection error: {e}");
-        }
-    }
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            loop {
+                let (stream, _) = listener.accept().await?;
+                let token = token.clone();
+                let handlers = handlers.clone();
+                let io = hyper_util::rt::TokioIo::new(stream);
+                let service =
+                    hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
+                        let token = token.clone();
+                        let handlers = handlers.clone();
+                        async move {
+                            Ok::<_, std::convert::Infallible>(handle(req, token, handlers).await)
+                        }
+                    });
+                // Detached: this connection makes progress on the same thread while `accept`
+                // keeps running, so one slow handler no longer delays every later request.
+                tokio::task::spawn_local(async move {
+                    if let Err(e) = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, service)
+                        .await
+                    {
+                        tracing::debug!("connection error: {e}");
+                    }
+                });
+            }
+        })
+        .await
 }
 
 async fn handle(
@@ -326,6 +351,68 @@ mod tests {
         // unknown method → error
         let unk = call(&sock, "tok", "nope", json!(null)).await;
         assert!(unk.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_slow_handler_does_not_block_a_later_request() {
+        // The regression this guards: `serve_rpc` used to `await serve_connection` inline, so
+        // one in-flight request owned the listener. That was invisible while every handler was
+        // fast, and became a real bug once phase-1 `unshield` held the helper lock for ~13-28s
+        // of proving — a `balance` call arriving in that window stalled the accept loop, and the
+        // app's `unshieldStatus` polls behind it could not even be accepted, each burning its
+        // client-side timeout. `unshieldStatus` needs no helper lock, so it MUST answer during a
+        // prove. Asserting concurrency, not latency: `fast` completes while `slow` is parked.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("c.sock").to_string_lossy().to_string();
+        let sock2 = sock.clone();
+        std::thread::spawn(move || {
+            let mut handlers: Handlers = HashMap::new();
+            handlers.insert(
+                "slow".to_string(),
+                rpc_handler!(|_p: Value| async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    Ok(json!("never observed"))
+                }),
+            );
+            handlers.insert(
+                "fast".to_string(),
+                rpc_handler!(|_p: Value| async move { Ok(json!("quick")) }),
+            );
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                serve_rpc(&sock2, "tok".to_string(), handlers)
+                    .await
+                    .unwrap();
+            });
+        });
+        for _ in 0..50 {
+            if UnixStream::connect(&sock).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Park a 30s handler on its own connection and leave it in flight.
+        let slow_sock = sock.clone();
+        let slow = tokio::spawn(async move { call(&slow_sock, "tok", "slow", json!(null)).await });
+        // Give the server a moment to accept it, so `fast` genuinely queues behind it.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Generous relative to `fast` (instant) but far below the 30s park, so passing cannot
+        // mean "the slow handler finished first".
+        let fast = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            call(&sock, "tok", "fast", json!(null)),
+        )
+        .await
+        .expect("a fast request must not wait behind an in-flight slow one")
+        .unwrap();
+        assert_eq!(fast, json!("quick"));
+
+        slow.abort();
     }
 
     #[tokio::test]

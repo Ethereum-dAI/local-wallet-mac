@@ -3,8 +3,19 @@
 //! Each exit derives its single-use EIP-7702 sender at `m/44'/60'/0'/1/{index}` — BIP-44's
 //! internal branch, kept disjoint from the external `change = 0` chain — so the counter is
 //! what makes senders rotate. It is NOT a secret: it holds no key material, only a rotation
-//! index. Losing it risks reusing an index, which costs unlinkability for that one exit; it
-//! never risks funds, because the key is re-derivable from the seed either way.
+//! index. Losing it never risks funds, because the key is re-derivable from the seed either way.
+//!
+//! **It is bound to the machine, not to the seed, and losing it is not a one-exit problem.**
+//! A reset counter restarts at 0 and then walks the SAME sequence of indices the wallet has
+//! already spent from — so it is exit `n+1` reusing sender 0, exit `n+2` reusing sender 1, and
+//! so on for as long as the wallet keeps exiting. Restoring the same entropy on a second
+//! machine has exactly this effect by construction: the new machine has no counter, starts at
+//! 0, and every sender it derives is one the first machine already published on-chain. That
+//! links those exits to each other, which is the whole property the rotation buys.
+//!
+//! Keeping the counter next to the entropy (in the app's Keychain, where it would travel with
+//! a restore) would close the second-machine case; it lives here for now, which is why both
+//! callers treat the state dir as privacy-critical and why the standalone fallback warns.
 //!
 //! The counter starts at 0 and stays 1:1 with the derivation index, which is why the disjoint
 //! keyspace is a separate BIP-44 branch rather than an offset applied here.
@@ -85,7 +96,16 @@ pub fn next_index(state_dir: &Path) -> Result<u32, io::Error> {
     file.read_to_string(&mut raw)?;
     let current = raw.trim().parse::<u32>().unwrap_or(0);
 
-    let next = current.saturating_add(1);
+    // `checked_add`, not `saturating_add`: saturation would hand out `u32::MAX` on every
+    // subsequent exit, silently reusing one sender forever — the exact unlinkability failure the
+    // counter exists to prevent. Unreachable in practice (4 billion exits), so failing closed
+    // costs nothing and matches this file's posture everywhere else.
+    let next = current.checked_add(1).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "exit index counter is exhausted; refusing to reuse the final index",
+        )
+    })?;
     file.seek(SeekFrom::Start(0))?;
     file.set_len(0)?;
     file.write_all(next.to_string().as_bytes())?;

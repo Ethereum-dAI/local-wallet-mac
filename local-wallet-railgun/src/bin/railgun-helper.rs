@@ -457,7 +457,9 @@ async fn main() {
     println!("{}", json!({"ready": true, "socket": socket}));
     tracing::info!("railgun-helper serving on {socket}");
 
-    // current_thread runtime + LocalSet so the non-Send proving tasks can spawn_local.
+    // current_thread runtime + LocalSet so non-Send work can spawn_local. `serve_rpc` owns its
+    // own inner LocalSet for connections (and therefore for the proving tasks the handlers
+    // spawn), so this one exists for the backstop below and to host the server itself.
     let local = tokio::task::LocalSet::new();
     // Orphan backstop: exit if our parent (the app) dies, so we don't linger holding the
     // shielded seed.

@@ -46,7 +46,7 @@ jobs:
       # code would never be compiled by CI at all and would bitrot silently. Compiling it is
       # safe: the fixture itself is `#[ignore]`d AND needs network, an RPC key, anvil and Alto,
       # so `cargo test` below never runs it.
-      - run: cargo clippy --all-targets --features fork-sync -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features fork-sync -- -D warnings
       - run: cargo test --workspace
   ffi:
     runs-on: ubuntu-latest

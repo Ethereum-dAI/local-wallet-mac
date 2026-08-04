@@ -241,6 +241,16 @@ final class RailgunExitStatusTests: XCTestCase {
             code: "deliveryReverted", message: "index 7"
         )
         XCTAssertTrue(reverted.contains("index 7"), "recovery detail must survive")
+        // Nothing shipped here can sweep an exit sender, so the copy must route the user to a
+        // developer rather than imply recovery is something they can perform.
+        XCTAssertTrue(
+            reverted.lowercased().contains("developer"),
+            "must not promise self-service recovery: \(reverted)"
+        )
+        XCTAssertFalse(
+            reverted.contains("funds are recoverable"),
+            "the unqualified claim is what this copy exists to avoid: \(reverted)"
+        )
 
         // Unknown codes must fall through, never be swallowed into a generic string.
         XCTAssertEqual(

@@ -49,19 +49,28 @@ pub const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(6);
 pub enum ExitError {
     #[error("fee estimate did not converge (gas is moving too fast right now)")]
     FeeDidNotConverge,
-    /// The bundler did not confirm the operation. Deliberately NOT worded as "rejected": if
-    /// `eth_sendUserOperation` reached the bundler but the response was lost (connection reset,
-    /// read timeout), the op is already in the mempool and may land, run validation, and
-    /// execute the unshield. Carries the recovery pointer for exactly that case — the same
-    /// reason `DeliveryReverted` does.
-    #[error(
-        "bundler did not confirm the operation ({message}); if it was submitted, the exit is \
-         recoverable at index {exit_index} (sender {sender})"
-    )]
+    /// The bundler would not take the operation. TWO materially different situations share this
+    /// code, told apart by `submitted` — and conflating them is an outcome MISREPORT, not a copy
+    /// nicety:
+    ///
+    /// - `submitted: false` — rejected during gas estimation, i.e. before
+    ///   `eth_sendUserOperation` was ever called. Nothing was submitted, nothing moved, and the
+    ///   shielded notes are still in the pool. The card must revert.
+    /// - `submitted: true` — the send POST may have reached the bundler and the response was lost
+    ///   (connection reset, read timeout). The op may already be in the mempool, where it can
+    ///   land, pass validation and execute the unshield. The card must NOT revert, and the
+    ///   message carries the recovery pointer for exactly that case — the same reason
+    ///   `DeliveryReverted` does.
+    ///
+    /// One wire code cannot distinguish those, which is why `submitted` travels alongside it (see
+    /// [`ExitError::submitted`]).
+    #[error("{}", render_bundler_rejection(*submitted, message, *exit_index, sender))]
     BundlerRejected {
         message: String,
         exit_index: u32,
         sender: String,
+        /// Whether `eth_sendUserOperation` was actually attempted. See the variant docs.
+        submitted: bool,
     },
     #[error("the privacy paymaster is not configured for this chain")]
     PaymasterNotConfigured,
@@ -77,6 +86,31 @@ pub enum ExitError {
     Other(String),
 }
 
+/// Word a bundler refusal according to whether `eth_sendUserOperation` was actually attempted.
+///
+/// A pre-send refusal must state plainly that nothing moved; a lost-response refusal must NOT,
+/// and must carry the index + sender that locate the notes if the op does land. Rendering both
+/// from one hedged sentence is what made the app show "Reverted" for an exit that may still be
+/// executing.
+fn render_bundler_rejection(
+    submitted: bool,
+    message: &str,
+    exit_index: u32,
+    sender: &str,
+) -> String {
+    if submitted {
+        format!(
+            "bundler did not confirm the operation ({message}); if it was submitted, the exit is \
+             recoverable at index {exit_index} (sender {sender})"
+        )
+    } else {
+        format!(
+            "the bundler refused the operation before it was submitted ({message}); nothing left \
+             the pool"
+        )
+    }
+}
+
 impl ExitError {
     /// Stable wire code the app switches card state on.
     pub fn code(&self) -> &'static str {
@@ -86,6 +120,22 @@ impl ExitError {
             ExitError::PaymasterNotConfigured => "paymasterNotConfigured",
             ExitError::DeliveryReverted { .. } => "deliveryReverted",
             ExitError::Other(_) => "error",
+        }
+    }
+
+    /// Whether a UserOperation may already be in the bundler's mempool, i.e. whether the
+    /// unshield may still execute despite this failure.
+    ///
+    /// `None` for every code whose meaning is already unambiguous: `FeeDidNotConverge`,
+    /// `PaymasterNotConfigured` and the pre-send `Other` cases never reached
+    /// `eth_sendUserOperation`, and `DeliveryReverted` is a landed on-chain verdict that the app
+    /// already treats as terminal. Only `BundlerRejected` needs the extra bit, because it is the
+    /// one code that spans both sides of the send. Travelling as a separate field rather than a
+    /// second code keeps the code space (and the app's copy map) stable.
+    pub fn submitted(&self) -> Option<bool> {
+        match self {
+            ExitError::BundlerRejected { submitted, .. } => Some(*submitted),
+            _ => None,
         }
     }
 }
@@ -349,6 +399,19 @@ mod tests {
                 message: "nope".into(),
                 exit_index: 4,
                 sender: "0xbeef".into(),
+                submitted: true,
+            }
+            .code(),
+            "bundlerRejected"
+        );
+        // `submitted` must NOT fork the code — it is a separate field precisely so the code
+        // space (and the app's copy map) stays stable across both situations.
+        assert_eq!(
+            ExitError::BundlerRejected {
+                message: "nope".into(),
+                exit_index: 4,
+                sender: "0xbeef".into(),
+                submitted: false,
             }
             .code(),
             "bundlerRejected"
@@ -385,16 +448,18 @@ mod tests {
     }
 
     #[test]
-    fn bundler_rejection_names_the_recoverable_index_and_sender() {
+    fn a_submitted_bundler_rejection_names_the_recoverable_index_and_sender() {
         // `send_user_operation` can POST successfully and lose the response, leaving the op in
         // the mempool: it lands, validation runs, the unshield executes. So this error must
         // carry the same recovery pointer as DeliveryReverted, and must NOT claim the op was
-        // rejected.
+        // rejected or that the funds are safe.
         let e = ExitError::BundlerRejected {
             message: "connection reset".into(),
             exit_index: 11,
             sender: "0xsender".into(),
+            submitted: true,
         };
+        assert_eq!(e.submitted(), Some(true));
         let msg = e.to_string();
         assert!(msg.contains("11"), "must name the index: {msg}");
         assert!(msg.contains("0xsender"), "must name the sender: {msg}");
@@ -406,6 +471,52 @@ mod tests {
             !msg.contains("no bundler accepted"),
             "must not assert the op was rejected: {msg}"
         );
+        assert!(
+            !msg.contains("nothing left the pool"),
+            "must not claim the funds are safe — the op may land: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_unsubmitted_bundler_rejection_says_plainly_that_nothing_moved() {
+        // The gas-estimation rejection reaches the app under the SAME code, and this is the half
+        // that must read as a clean failure: `eth_sendUserOperation` was never called, so no op
+        // exists anywhere and the notes are still in the pool. Hedging here is what made the app
+        // show a permanently-Submitted card for an exit that provably never started.
+        let e = ExitError::BundlerRejected {
+            message: "rejected during gas estimation: AA33 reverted".into(),
+            exit_index: 11,
+            sender: "0xsender".into(),
+            submitted: false,
+        };
+        assert_eq!(e.submitted(), Some(false));
+        let msg = e.to_string();
+        assert!(
+            msg.contains("nothing left the pool"),
+            "must state plainly that nothing moved: {msg}"
+        );
+        assert!(msg.contains("AA33"), "must keep the cause: {msg}");
+        assert!(
+            !msg.contains("if it was submitted"),
+            "must not hedge about a send that never happened: {msg}"
+        );
+    }
+
+    #[test]
+    fn only_a_bundler_rejection_reports_a_submitted_bit() {
+        // Every other code's meaning is already unambiguous, so `submitted` stays absent from the
+        // wire for them rather than inviting the app to branch on a value it can't interpret.
+        assert_eq!(ExitError::FeeDidNotConverge.submitted(), None);
+        assert_eq!(ExitError::PaymasterNotConfigured.submitted(), None);
+        assert_eq!(
+            ExitError::DeliveryReverted {
+                exit_index: 3,
+                user_op_hash: "0xabc".into()
+            }
+            .submitted(),
+            None
+        );
+        assert_eq!(ExitError::Other("x".into()).submitted(), None);
     }
 
     #[test]

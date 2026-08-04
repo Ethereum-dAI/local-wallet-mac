@@ -11,7 +11,9 @@
 //! - `prepareShield {amountWei}` → `[{to,data,value}]` for the OWNER to self-submit.
 //! - `unshield {amountWei,to}` → `{jobId}` immediately; proving + submission run in the
 //!   background (proving alone exceeds any sane RPC timeout).
-//! - `unshieldStatus {jobId}` → `{status: pending|submitted|done|error, result?, error?, code?}`.
+//! - `unshieldStatus {jobId}` → `{status: pending|submitted|done|error, result?, error?, code?,
+//!   submitted?}`. `submitted` appears only on `status: error` for codes where the code alone
+//!   cannot say whether a UserOperation reached the bundler's mempool — see [`error_status`].
 //!
 //! Every wei amount crossing this boundary — in BOTH directions — is a `0x`-hex string, never a
 //! JSON number: 2^53 wei is 0.009 ETH, so a number would silently lose precision in any
@@ -178,12 +180,22 @@ fn exit_status(outcome: &ExitOutcome) -> Value {
 
 /// The `unshieldStatus` payload for a failed exit, carrying the same stable code the
 /// synchronous path puts in `error.data.code`.
+///
+/// `submitted` rides ALONGSIDE the code, present only where the code cannot answer the question
+/// on its own (today: `bundlerRejected`). The app needs it to decide whether to revert the card:
+/// `submitted: false` means nothing was ever sent and the card should revert, `true` means the op
+/// may be in the mempool and the card must stay Submitted. Encoding that as a second code instead
+/// would fork the code space and the app's copy map for one bit of information.
 fn error_status(e: &exit::ExitError) -> Value {
-    json!({
+    let mut v = json!({
         "status": "error",
         "code": e.code(),
         "error": e.to_string(),
-    })
+    });
+    if let Some(submitted) = e.submitted() {
+        v["submitted"] = json!(submitted);
+    }
+    v
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -205,13 +217,28 @@ async fn main() {
     let token = env("RAILGUN_TOKEN");
     // Where the per-exit rotation counter lives. Not a secret. The app passes its
     // Application Support dir; the fork fixture passes a tempdir.
-    let state_dir =
-        std::path::PathBuf::from(std::env::var("RAILGUN_STATE_DIR").unwrap_or_else(|_| {
-            std::path::Path::new(&socket)
+    //
+    // The fallback (the socket's parent) is a convenience for standalone runs, and it WARNS
+    // loudly: this is a privacy-critical value. If the socket lives somewhere volatile the
+    // counter is lost on restart, the index restarts at 0, and exit senders are reused across
+    // exits — silently costing each reused exit its unlinkability. Degrading quietly is exactly
+    // what must not happen here.
+    let state_dir = match std::env::var("RAILGUN_STATE_DIR") {
+        Ok(dir) => std::path::PathBuf::from(dir),
+        Err(_) => {
+            let fallback = std::path::Path::new(&socket)
                 .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| ".".to_string())
-        }));
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            tracing::warn!(
+                "RAILGUN_STATE_DIR is unset; keeping the per-exit rotation counter next to the \
+                 socket at {}. If that directory is not persistent, exit senders WILL be reused \
+                 across restarts and each reused exit loses its unlinkability.",
+                fallback.display()
+            );
+            fallback
+        }
+    };
     // The RAILGUN account seed AND every exit sender come from this one root. Never logged.
     let entropy = load_secrets();
 
@@ -220,9 +247,7 @@ async fn main() {
     // Build the RAILGUN provider (read-only: the exit's UserOperation is signed by its
     // ephemeral sender and broadcast by a public bundler, so nothing here submits a tx).
     let signer = keys::derive_railgun_signer(&entropy, chain.id).expect("derive signer");
-    let provider = connect_provider(&rpc_url, None)
-        .await
-        .expect("connect provider");
+    let provider = connect_provider(&rpc_url).await.expect("connect provider");
     let helper = RailgunHelper::new(chain, provider, fork_block, signer)
         .await
         .expect("build railgun helper");
@@ -306,13 +331,18 @@ async fn main() {
                     {
                         let c = spendable_ceiling(&mut *h.lock().await).await?;
                         if amount > c.max.max_value {
+                            // Deliberately NUMBER-FREE. `rpc.rs`'s handler-error `warn!` writes
+                            // this sentence to stderr, which for the app-spawned sidecar is
+                            // captured into the macOS unified log and every `sysdiagnose`. The
+                            // shielded balance is EXACTLY `max_value + reserve`, so naming both
+                            // would persist the user's balance to a system log on every
+                            // over-large unshield. The app already holds `maxUnshieldable` and
+                            // renders the ceiling itself, so it needs nothing from here.
                             return Err(RpcError::new(
                                 CODE_INSUFFICIENT,
-                                format!(
-                                    "{amount} wei exceeds the spendable maximum {} wei (gas fee \
-                                     headroom {} wei must stay in the pool)",
-                                    c.max.max_value, c.reserve
-                                ),
+                                "that amount is more than can currently leave the pool: gas for \
+                                 the exit is paid by a fee note inside the pool, so some of the \
+                                 shielded balance has to stay behind",
                             ));
                         }
                     }
@@ -606,5 +636,35 @@ mod tests {
         assert_eq!(s["status"], "error");
         assert_eq!(s["code"], "paymasterNotConfigured");
         assert!(s["error"].as_str().unwrap().contains("privacy paymaster"));
+        // Absent for every code whose meaning is unambiguous, so the app never branches on a
+        // value it cannot interpret.
+        assert!(s.get("submitted").is_none(), "unexpected submitted: {s}");
+    }
+
+    #[test]
+    fn bundler_rejection_status_reports_whether_anything_was_submitted() {
+        // The branch this whole field exists for. Same code both times — the app tells the two
+        // apart on `submitted`, and reverting the card on the `true` case would tell a user whose
+        // exit is still executing that it reverted.
+        let pre_send = error_status(&exit::ExitError::BundlerRejected {
+            message: "rejected during gas estimation: AA33 reverted".into(),
+            exit_index: 4,
+            sender: "0xbeef".into(),
+            submitted: false,
+        });
+        assert_eq!(pre_send["code"], "bundlerRejected");
+        assert_eq!(pre_send["submitted"], json!(false));
+
+        let lost_response = error_status(&exit::ExitError::BundlerRejected {
+            message: "connection reset".into(),
+            exit_index: 4,
+            sender: "0xbeef".into(),
+            submitted: true,
+        });
+        assert_eq!(lost_response["code"], "bundlerRejected");
+        assert_eq!(lost_response["submitted"], json!(true));
+        // The recovery pointer must survive into the payload the app renders.
+        let msg = lost_response["error"].as_str().unwrap();
+        assert!(msg.contains("index 4") && msg.contains("0xbeef"), "{msg}");
     }
 }

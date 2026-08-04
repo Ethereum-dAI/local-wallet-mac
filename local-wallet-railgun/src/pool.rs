@@ -3,7 +3,8 @@
 //!
 //! POI is intentionally left OFF (no `.with_poi()`): on an anvil fork a freshly-shielded
 //! note can never be POI-`Valid` (the aggregator validates against real chain state), and
-//! without POI a note is spendable immediately after `sync()`. See the design doc §6.
+//! without POI a note is spendable immediately after `sync()`. See the crate README's
+//! "Key facts / caveats".
 
 use std::path::Path;
 use std::sync::Arc;
@@ -244,7 +245,13 @@ impl RailgunHelper {
         let sender = eoa.address();
         // The wire form of the sender, reused by every error that needs a recovery pointer.
         let sender_hex = format!("{sender:?}");
-        tracing::info!("exit {index} sender {sender_hex}");
+        // `debug!`, NOT `info!`: the app spawns this sidecar with RUST_LOG defaulting to
+        // `railgun_helper=info` and the child inherits the app's stderr, which for a
+        // launchd-started `.app` is captured into the macOS unified log (and every
+        // `sysdiagnose`). At `info` this line would durably persist the association between this
+        // machine and every ephemeral exit sender — precisely the envelope-metadata leak this
+        // whole path exists to reduce. The index alone stays loggable; the address does not.
+        tracing::debug!("exit {index} sender {sender_hex}");
 
         let account = SimpleSmartAccount::new(sender, self.chain.id, self.provider.clone());
         let bundler = PimlicoBundler::new(
@@ -293,7 +300,9 @@ impl RailgunHelper {
             .map_err(|e| ExitError::Other(format!("sign userop: {e}")))?;
         // If this POST reaches the bundler but the response is lost, the op is already in the
         // mempool: it can land, pass validation, and execute the unshield. So the error carries
-        // the recovery pointer and does not claim the op was rejected.
+        // the recovery pointer, does not claim the op was rejected, and is marked
+        // `submitted: true` — the bit the app needs to keep the card Submitted instead of
+        // reverting it. Contrast `classify_prepare_error`, which is strictly pre-send.
         let hash =
             bundler
                 .send_user_operation(&signed)
@@ -302,9 +311,12 @@ impl RailgunHelper {
                     message: e.to_string(),
                     exit_index: index,
                     sender: sender_hex.clone(),
+                    submitted: true,
                 })?;
         let hash_hex = exit::format_op_hash(hash.0);
-        tracing::info!("exit {index} submitted op {hash_hex}");
+        // `debug!` for the same reason as the sender line above: at `info` the op hash would be
+        // persisted into the unified log, linking this machine to every exit it ever made.
+        tracing::debug!("exit {index} submitted op {hash_hex}");
 
         // Return here: receipt polling is `exit::await_exit`, called by the handler WITHOUT
         // holding this mutex, so balance reads stay responsive during a slow inclusion.
@@ -344,21 +356,26 @@ impl RailgunHelper {
 /// The convergence failure has no variant of its own: the SDK returns
 /// `RailgunProviderError::Other(io::Error("Failed to converge on fee estimate"))`
 /// (`railgun/src/provider.rs:328-331`), so on this pin a string match is the only discriminator.
-/// Getting it wrong means the gas-gated retry never fires.
+/// Getting it wrong means the convergence retry never fires.
 fn classify_prepare_error(e: &RailgunProviderError, exit_index: u32, sender: &str) -> ExitError {
     if matches!(e, RailgunProviderError::PrivacyPaymasterNotConfigured(_)) {
         return ExitError::PaymasterNotConfigured;
     }
     // `prepare_userop` calls `estimate_gas` internally, so an AA23/AA33-style rejection arrives
     // here as `Bundler(_)` and would otherwise fall through to the generic arm — giving the app a
-    // nondescript failure for precisely the bundler-rejected case. Nothing has been submitted at
-    // this point, which is why `BundlerRejected`'s message is phrased "if it was submitted":
-    // the pointer is informational here, actionable at the send site.
+    // nondescript failure for precisely the bundler-rejected case.
+    //
+    // `submitted: false` is load-bearing, not decoration: this is strictly PRE-send —
+    // `eth_sendUserOperation` has not been called — so nothing is in any mempool and the notes
+    // are still in the pool. Without the flag the app cannot tell this from the send site's
+    // lost-response case and hedges on both, leaving a permanently-Submitted card for an exit
+    // that provably never started.
     if let RailgunProviderError::Bundler(bundler_err) = e {
         return ExitError::BundlerRejected {
             message: format!("rejected during gas estimation: {bundler_err}"),
             exit_index,
             sender: sender.to_string(),
+            submitted: false,
         };
     }
     let msg = e.to_string();
@@ -418,7 +435,7 @@ mod tests {
     #[test]
     fn convergence_failure_is_classified_from_the_sdk_error_string() {
         // Reproduces the exact error the SDK returns after 5 non-converging proof rounds
-        // (railgun/src/provider.rs:328-331). If this stops matching, the gas-gated retry
+        // (railgun/src/provider.rs:328-331). If this stops matching, the convergence retry
         // never fires and every busy-gas exit reports a generic error instead.
         let e = RailgunProviderError::Other(Box::new(std::io::Error::other(
             "Failed to converge on fee estimate",
@@ -439,10 +456,16 @@ mod tests {
         )));
         let classified = classify_prepare_error(&e, 9, "0xsender");
         assert_eq!(classified.code(), "bundlerRejected");
+        // The half that matters for the app: gas estimation is strictly PRE-send, so this must
+        // report `submitted: false` and the card must revert. Reporting it as possibly-submitted
+        // (or omitting the bit) leaves the card stuck on Submitted for an exit that never started.
+        assert_eq!(classified.submitted(), Some(false));
         let msg = classified.to_string();
         assert!(msg.contains("AA33"), "must keep the cause: {msg}");
-        assert!(msg.contains("index 9"), "must name the index: {msg}");
-        assert!(msg.contains("0xsender"), "must name the sender: {msg}");
+        assert!(
+            msg.contains("nothing left the pool"),
+            "a pre-send rejection must say plainly that nothing moved: {msg}"
+        );
     }
 
     #[test]

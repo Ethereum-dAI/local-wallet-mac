@@ -508,6 +508,40 @@ enum RailgunExitCopy {
         }
     }
 
+    /// Whether a failed poll is evidence that the EXIT failed — the only thing that justifies
+    /// flipping the card to Reverted.
+    ///
+    /// Only `exitFailed` qualifies: it is the sidecar's own report that the job reached a
+    /// terminal failure. Every other error is evidence about the POLL, not the exit, and each
+    /// one has a routine, non-failing cause:
+    ///
+    /// - `rpcError(unknownJobId)` — the sidecar evicts terminal jobs ON READ
+    ///   (`railgun-helper.rs`), and phase 1 returns on `done` as well as `submitted`. A fast
+    ///   inclusion means phase 1 already read the job to `done` and consumed it, so a phase-2
+    ///   poll finds nothing. The card is already correctly Done at that point.
+    /// - `connectFailed` — the helper was torn down and re-spawned (e.g. an RPC/chain switch,
+    ///   see `railgunHelperClient()`), so the socket the detached task is polling is gone.
+    /// - `ioFailed` — a poll queued behind a long UTXO sync exceeded the client timeout (the
+    ///   sidecar serves one connection to completion), or phase 1 hit its own deadline. The
+    ///   sidecar calls phase 1 UNBOUNDED, so any fixed client deadline can be exceeded while
+    ///   the job goes on to submit and deliver.
+    /// - `decodeFailed` — a wire-shape mismatch says nothing about the exit either.
+    ///
+    /// Reverting on any of those tells a user whose funds actually arrived that they didn't,
+    /// which is the worst outcome in this feature. It is the same invariant the sidecar keeps
+    /// on its side, where `await_exit` reports a budget overrun as `included: false` rather
+    /// than as an error, for exactly this reason.
+    static func shouldRevertCard(for error: Error) -> Bool {
+        guard let client = error as? RailgunHelperClient.ClientError else { return false }
+        if case .exitFailed = client { return true }
+        return false
+    }
+
+    /// Copy for a poll that gave up without learning anything about the exit. It must not read
+    /// as a failure — the exit is probably still in flight — and must steer the user away from
+    /// retrying, because a second exit would spend more notes.
+    static let exitStillInFlightMessage = "This exit is still in progress — the wallet stopped waiting for it, which is not the same as the exit stopping. Proving a first exit can take several minutes. Check the recipient's balance before trying again, so you don't exit twice."
+
     /// Map the sidecar's stable exit codes onto copy that tells the user what to do.
     ///
     /// Switching on the code is the whole point: the sidecar deliberately stripped its message
@@ -519,11 +553,18 @@ enum RailgunExitCopy {
         case "feeDidNotConverge":
             return "Gas prices are moving too quickly to price this exit. Your shielded funds are untouched — please try again shortly."
         case "bundlerRejected":
-            return "No public bundler accepted this exit. Your shielded funds are untouched — please try again shortly."
+            // Deliberately NOT worded as "rejected", matching `ExitError::BundlerRejected`: if
+            // `eth_sendUserOperation` reached the bundler but the response was lost, the op is
+            // already in the mempool and may still land, pass validation and execute the
+            // unshield. So this must never claim the funds are untouched, and it must keep the
+            // sidecar's message, which carries the recoverable exit index and sender for
+            // exactly that case (`bundler_rejection_names_the_recoverable_index_and_sender`).
+            return "The bundler didn't confirm this exit, so it may or may not have been submitted. Check the recipient's balance before trying again — and keep the details below, which locate the funds if it did go through.\n\(message)"
         case "bundlerUnavailable":
+            // Distinct from bundlerRejected: nothing was submitted, so nothing can be in flight.
             return "No public bundler is reachable right now, so this exit can't be priced. Your shielded funds are untouched — please try again shortly."
         case "paymasterNotConfigured":
-            return "RAILGUN's privacy paymaster isn't available on this network, so there is no way to exit the pool here."
+            return "RAILGUN's privacy paymaster isn't available on this network, so there is no way to exit the pool here. Your shielded funds are untouched."
         case "deliveryReverted":
             // The ONE case where the raw detail must survive: it carries the exit index, which
             // is what makes stranded funds re-derivable. Keep it verbatim for a bug report.
@@ -2842,18 +2883,52 @@ private final class ChatDashboardModel: ObservableObject {
         // history store's UNIQUE(chain_id, user_op_hash) upsert) makes a new unshield inherit a
         // previous one's stale transactionHash. intent.id is globally unique per command.
         let cardID = "unshield:\(intent.id.uuidString)"
-        appendUnshieldSubmittedCard(id: cardID, amount: amount, to: to, for: intent)
-        // Phase 1: wait only for a UserOperation hash. Bounded by proving (see the client).
-        // A failure here is a failure to exit at all, so the card reverts and the error
-        // propagates to `appendExecutionError`, which maps its code to user-facing copy.
+        // Capture the conversation the card was actually appended to and address every later
+        // update to it explicitly. Phase 2 can outlive the user's attention on this chat, and
+        // resolving the ACTIVE conversation at completion time would leave this card stuck on
+        // Submitted in conversation A while a failure notice lands in conversation B, which
+        // never had this intent.
+        let cardConversationID = appendUnshieldSubmittedCard(
+            id: cardID, amount: amount, to: to, for: intent
+        )
+        // Phase 1: wait only for a UserOperation hash.
+        //
+        // A failure here reverts the card ONLY if the sidecar itself reported the job failed.
+        // The client's deadline is not such a report: the sidecar calls phase 1 unbounded
+        // (first-exit circuit-artifact download plus up to ten Groth16 proofs across the
+        // authorised retry), so the deadline can pass while the job goes on to submit and
+        // deliver — and the first exit on a cold machine is both the likeliest to exceed it and
+        // the worst one to falsely mark reverted.
         let submitted: JSONValue
         do {
             submitted = try await client.awaitUnshieldSubmitted(jobId: jobId)
         } catch {
-            markUnshieldCardReverted(id: cardID, amount: amount, to: to)
-            throw error
+            guard RailgunExitCopy.shouldRevertCard(for: error) else {
+                // The exit is probably still running. Leave the card submitted, say so, and do
+                // NOT throw — this is not an execution failure and must not be reported as one.
+                appendUnshieldStillInFlightNotice(for: intent, in: cardConversationID)
+                // The notes may already have left the pool, so still reconcile the balance.
+                refreshShieldedBalanceUntilSettled()
+                return
+            }
+            markUnshieldCardReverted(id: cardID, amount: amount, to: to, in: cardConversationID)
+            // Report in place rather than rethrowing: the generic catch resolves the ACTIVE
+            // conversation, and phase 1 can run for minutes, so a rethrow could revert the card
+            // in one conversation and explain it in another. Errors raised BEFORE the card
+            // exists still propagate normally, where "active" is by definition correct.
+            appendExecutionError(error, for: intent, in: cardConversationID)
+            return
         }
-        confirmUnshieldCard(id: cardID, result: submitted, amount: amount, to: to)
+        confirmUnshieldCard(
+            id: cardID, result: submitted, amount: amount, to: to, in: cardConversationID
+        )
+        // Phase 1 returns on `submitted` OR `done`, so a fast inclusion is already complete —
+        // and that read EVICTED the terminal job from the sidecar's map. Spawning phase 2
+        // anyway would poll a job that no longer exists and get `unknownJobId` back.
+        guard submitted["included"]?.boolValue != true else {
+            refreshShieldedBalanceUntilSettled()
+            return
+        }
         // Phase 2: inclusion runs on the bundler's schedule, so it must never block the user.
         // `awaitUnshieldIncluded` returns nil on timeout meaning "still pending" — leave the
         // card submitted in that case. Marking a slow-but-valid exit reverted would tell a user
@@ -2868,14 +2943,25 @@ private final class ChatDashboardModel: ObservableObject {
                     self.refreshShieldedBalanceUntilSettled()
                     return
                 }
-                self.confirmUnshieldCard(id: cardID, result: included, amount: amount, to: to)
+                self.confirmUnshieldCard(
+                    id: cardID, result: included, amount: amount, to: to, in: cardConversationID
+                )
                 self.refreshShieldedBalanceUntilSettled()
             } catch {
-                // A thrown error here IS a real failure (the sidecar reported `status: error`),
-                // unlike the nil above. Nothing is awaiting this task, so surface the reason
-                // itself rather than letting the card revert without explanation.
-                self.markUnshieldCardReverted(id: cardID, amount: amount, to: to)
-                self.appendExecutionError(error, for: intent)
+                guard RailgunExitCopy.shouldRevertCard(for: error) else {
+                    // The poll broke, not the exit (evicted job, re-spawned helper, timed-out
+                    // read). The card's current state — Submitted, or already Done — is still
+                    // the most accurate thing we know, so say nothing and change nothing; only
+                    // reconcile the balance, since the exit may well have landed.
+                    self.refreshShieldedBalanceUntilSettled()
+                    return
+                }
+                // The sidecar reported a terminal failure. Nothing is awaiting this task, so
+                // surface the reason itself rather than letting the card revert unexplained.
+                self.markUnshieldCardReverted(
+                    id: cardID, amount: amount, to: to, in: cardConversationID
+                )
+                self.appendExecutionError(error, for: intent, in: cardConversationID)
             }
         }
     }
@@ -2970,9 +3056,14 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     /// `/unshield` accepted: emit the tool response and a "submitted" card immediately, before
-    /// proving + relay finish (mirrors how `/shield` shows a submitted card up front).
-    private func appendUnshieldSubmittedCard(id: String, amount: String, to: String, for intent: ToolIntent) {
-        guard let conversationID = activeConversationIDIfPresent else { return }
+    /// proving + submission finish (mirrors how `/shield` shows a submitted card up front).
+    ///
+    /// Returns the conversation the card landed in, so every later update can address that
+    /// conversation explicitly instead of whichever one happens to be active by then.
+    private func appendUnshieldSubmittedCard(
+        id: String, amount: String, to: String, for intent: ToolIntent
+    ) -> UUID? {
+        guard let conversationID = activeConversationIDIfPresent else { return nil }
         let payload: [String: Any] = [
             "status": "submitted",
             "intent_id": intent.id.uuidString,
@@ -2989,6 +3080,36 @@ private final class ChatDashboardModel: ObservableObject {
         )
         appendMessage(.onchainTransaction(summary), to: conversationID)
         reloadWalletHistory()
+        return conversationID
+    }
+
+    /// The wallet stopped waiting for an exit that is probably still running. Deliberately an
+    /// assistant note rather than an error: nothing failed, and the user must not be nudged
+    /// into retrying and exiting twice.
+    private func appendUnshieldStillInFlightNotice(for intent: ToolIntent, in conversationID: UUID?) {
+        guard let conversationID else { return }
+        appendMessage(
+            ChatMessage(
+                kind: .toolResponse,
+                role: .tool,
+                text: jsonString([
+                    "status": "in_flight",
+                    "intent_id": intent.id.uuidString,
+                    "operation": "unshield",
+                ]),
+                toolCallId: intent.id.uuidString
+            ),
+            to: conversationID
+        )
+        appendMessage(
+            ChatMessage(
+                // `.assistantText`, not `.assistantError`: nothing failed here.
+                kind: .assistantText,
+                role: .assistant,
+                text: RailgunExitCopy.exitStillInFlightMessage
+            ),
+            to: conversationID
+        )
     }
 
     /// Fold an exit outcome into the card. Called TWICE with the same `id` — once when the
@@ -2998,27 +3119,39 @@ private final class ChatDashboardModel: ObservableObject {
     ///
     /// There is no forward transaction: the unwrap and the forward ride inside the same
     /// sponsored UserOperation, so the identifying hash is the UserOperation hash.
-    private func confirmUnshieldCard(id: String, result: JSONValue, amount: String, to: String) {
+    private func confirmUnshieldCard(
+        id: String, result: JSONValue, amount: String, to: String, in conversationID: UUID?
+    ) {
         let userOpHash = result["userOpHash"]?.stringValue
         let included = result["included"]?.boolValue ?? false
         // `deliveredWei` is a 0x-hex STRING on the wire and must stay one all the way into
         // WeiFormatter: 2^53 wei is 0.009 ETH, so any trip through Double would silently
         // corrupt nearly every real amount.
         let delivered = result["deliveredWei"]?.stringValue.map(WeiFormatter.ethDisplayString(fromHexWei:))
-        updateOnchainCard(userOpHash: id) { [self] old in
+        updateOnchainCard(userOpHash: id, in: conversationID) { [self] old in
+            // Fall back to what the card already shows: this runs twice, and the second call
+            // must never erase a hash or amount the first one displayed just because the later
+            // payload omitted the field.
             unshieldCardSummary(
                 id: id, amount: amount, to: to,
                 status: included ? .included : .submitted,
-                userOpHash: userOpHash, delivered: delivered, createdAt: old.createdAt
+                userOpHash: userOpHash ?? old.transactionHash,
+                delivered: delivered ?? old.amountOut,
+                createdAt: old.createdAt
             )
         }
     }
 
-    /// The exit failed: flip the card to "reverted" so it doesn't linger as submitted. Only ever
-    /// called for a reported failure — never for a slow inclusion, which stays submitted.
+    /// The exit failed: flip the card to "reverted" so it doesn't linger as submitted.
+    ///
+    /// Reachable ONLY when `RailgunExitCopy.shouldRevertCard(for:)` is true — i.e. the sidecar
+    /// reported the job terminally failed. Never for a slow inclusion, a client deadline, an
+    /// evicted job or a broken socket, all of which leave the card as it stands.
     /// The error's own message reaches the user via `appendExecutionError`.
-    private func markUnshieldCardReverted(id: String, amount: String, to: String) {
-        updateOnchainCard(userOpHash: id) { [self] old in
+    private func markUnshieldCardReverted(
+        id: String, amount: String, to: String, in conversationID: UUID?
+    ) {
+        updateOnchainCard(userOpHash: id, in: conversationID) { [self] old in
             // Carry the existing hash and amount over: a failure AFTER submission is exactly
             // when the user needs them to look the op up or report it.
             unshieldCardSummary(
@@ -3030,11 +3163,16 @@ private final class ChatDashboardModel: ObservableObject {
 
     /// Update an on-chain transaction card in place by its `userOpHash`, rewriting the most
     /// recent matching message. Used for cards the daemon doesn't reconcile (unshield).
+    ///
+    /// `conversationID` is required rather than resolved from the active conversation: the only
+    /// callers update a card from a task that may finish long after the user has moved to a
+    /// different chat, and the card lives where it was appended.
     private func updateOnchainCard(
         userOpHash: String,
+        in conversationID: UUID?,
         _ transform: (OnchainTransactionSummary) -> OnchainTransactionSummary
     ) {
-        guard let conversationID = activeConversationIDIfPresent,
+        guard let conversationID,
               let cIndex = conversations.firstIndex(where: { $0.id == conversationID })
         else { return }
         guard let mIndex = conversations[cIndex].messages.lastIndex(where: {
@@ -3469,8 +3607,14 @@ private final class ChatDashboardModel: ObservableObject {
         )?.symbol ?? intent.args["token"] ?? "ETH"
     }
 
-    private func appendExecutionError(_ error: Error, for intent: ToolIntent) {
-        guard let conversationID = activeConversationIDIfPresent else {
+    /// - Parameter conversationID: the conversation to report into. Defaults to the active one;
+    ///   the unshield paths pass an explicit id because their detached inclusion task can finish
+    ///   after the user has switched chats, and an error must not surface in a conversation that
+    ///   never ran the intent.
+    private func appendExecutionError(
+        _ error: Error, for intent: ToolIntent, in conversationID: UUID? = nil
+    ) {
+        guard let conversationID = conversationID ?? activeConversationIDIfPresent else {
             return
         }
 

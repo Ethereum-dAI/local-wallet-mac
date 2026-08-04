@@ -77,12 +77,31 @@ final class RailgunExitStatusTests: XCTestCase {
         XCTAssertFalse(converge.contains("raw rust error"), "must not leak the raw error")
         XCTAssertTrue(converge.lowercased().contains("try again"), "must tell the user what to do")
 
+        // Reassurance belongs ONLY where nothing was submitted.
+        for code in ["feeDidNotConverge", "bundlerUnavailable", "paymasterNotConfigured"] {
+            let copy = RailgunExitCopy.exitFailureMessage(code: code, message: "raw")
+            XCTAssertTrue(
+                copy.lowercased().contains("untouched"),
+                "\(code) cannot have submitted anything, so it must reassure: \(copy)"
+            )
+        }
+
+        // `bundlerRejected` is the trap: the sidecar words it as "did not confirm" precisely
+        // because a lost response leaves the op in the mempool, where it may still land and
+        // execute the unshield. Claiming the funds are untouched would invite a double exit, and
+        // dropping the message would discard the exit index + sender that locate already-spent
+        // notes (see `ExitError::BundlerRejected` and
+        // `bundler_rejection_names_the_recoverable_index_and_sender`).
         let rejected = RailgunExitCopy.exitFailureMessage(
-            code: "bundlerRejected", message: "raw"
+            code: "bundlerRejected", message: "recoverable at index 11 (sender 0xsender)"
+        )
+        XCTAssertFalse(
+            rejected.lowercased().contains("untouched"),
+            "must NOT claim the funds are untouched — the op may have landed: \(rejected)"
         )
         XCTAssertTrue(
-            rejected.lowercased().contains("untouched"),
-            "must reassure that shielded funds are safe: \(rejected)"
+            rejected.contains("recoverable at index 11 (sender 0xsender)"),
+            "the recovery pointer must survive: \(rejected)"
         )
 
         // deliveryReverted is the one case where the detail matters for a bug report.
@@ -124,6 +143,73 @@ final class RailgunExitStatusTests: XCTestCase {
             "transport failures have no domain code and must keep their own description"
         )
         XCTAssertNil(RailgunExitCopy.failureCopy(for: URLError(.timedOut)))
+    }
+
+    /// The invariant that matters most in this feature: a card is flipped to Reverted ONLY when
+    /// the sidecar itself reported the job failed. Every other error describes the POLL, and each
+    /// of these has a routine cause that coexists with a perfectly successful exit — so
+    /// reverting on one would tell a user whose funds arrived that they didn't.
+    func testOnlyASidecarReportedFailureRevertsTheCard() {
+        XCTAssertTrue(
+            RailgunExitCopy.shouldRevertCard(
+                for: RailgunHelperClient.ClientError.exitFailed(code: "deliveryReverted", message: "index 7")
+            ),
+            "a terminal job failure is the one thing that justifies Reverted"
+        )
+        // An exitFailed with no code is still the sidecar reporting `status: error`.
+        XCTAssertTrue(
+            RailgunExitCopy.shouldRevertCard(
+                for: RailgunHelperClient.ClientError.exitFailed(code: nil, message: "unshield failed")
+            )
+        )
+
+        // The sidecar evicts terminal jobs ON READ, and phase 1 returns on `done` as well as
+        // `submitted` — so a fast inclusion consumes the job and a later poll legitimately finds
+        // nothing, with the card already correctly Done.
+        XCTAssertFalse(
+            RailgunExitCopy.shouldRevertCard(
+                for: RailgunHelperClient.ClientError.rpcError(code: "unknownJobId", message: "unknown jobId: job-1")
+            ),
+            "an evicted terminal job means the exit SUCCEEDED, not that it failed"
+        )
+        // The helper was re-spawned (RPC/chain switch) under a detached poll.
+        XCTAssertFalse(
+            RailgunExitCopy.shouldRevertCard(for: RailgunHelperClient.ClientError.connectFailed("ENOENT"))
+        )
+        // A poll queued behind a long UTXO sync, or phase 1's own deadline. The sidecar calls
+        // phase 1 unbounded, so any fixed client deadline can be exceeded mid-flight.
+        XCTAssertFalse(
+            RailgunExitCopy.shouldRevertCard(
+                for: RailgunHelperClient.ClientError.ioFailed("unshield job job-1 was not submitted before the deadline")
+            )
+        )
+        XCTAssertFalse(
+            RailgunExitCopy.shouldRevertCard(for: RailgunHelperClient.ClientError.decodeFailed("UnshieldStatus"))
+        )
+        XCTAssertFalse(
+            RailgunExitCopy.shouldRevertCard(for: RailgunHelperClient.ClientError.httpError("HTTP/1.1 401"))
+        )
+        // Every other sync rejection is about the request, not the exit's outcome.
+        XCTAssertFalse(
+            RailgunExitCopy.shouldRevertCard(
+                for: RailgunHelperClient.ClientError.rpcError(code: "badRequest", message: "missing jobId")
+            )
+        )
+        XCTAssertFalse(RailgunExitCopy.shouldRevertCard(for: URLError(.timedOut)))
+    }
+
+    /// The copy for a give-up must not read as a failure, and must steer away from a retry that
+    /// would exit twice.
+    func testStillInFlightCopyDoesNotReadAsFailure() {
+        let copy = RailgunExitCopy.exitStillInFlightMessage
+        XCTAssertTrue(copy.lowercased().contains("still in progress"))
+        XCTAssertTrue(
+            copy.lowercased().contains("before trying again"),
+            "must steer the user away from an immediate retry: \(copy)"
+        )
+        for banned in ["failed", "reverted", "untouched"] {
+            XCTAssertFalse(copy.lowercased().contains(banned), "must not claim \(banned): \(copy)")
+        }
     }
 
     /// The stable code travels in the JSON-RPC error's `data.code`, not its transport-level

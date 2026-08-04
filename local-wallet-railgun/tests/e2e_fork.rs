@@ -92,6 +92,10 @@ const FORK_BLOCK: u64 = 11011021;
 const ANVIL_PORT: u16 = 8599;
 const ALTO_PORT: u16 = 3010;
 
+/// The chain id `RPC_URL_SEPOLIA` must answer (11155111 / `0xaa36a7`). Checked once, before
+/// anvil ever spawns — see the preflight in [`run_e2e`] for why.
+const SEPOLIA_CHAIN_ID: u64 = 11_155_111;
+
 /// Shield 0.1 ETH.
 ///
 /// Sized by the RESERVE, not by the exit amounts. The paymaster is paid from an in-pool fee
@@ -670,6 +674,56 @@ fn measured_delivery(value: u128) -> u128 {
     value - value * FEE_BPS / BPS_DENOMINATOR
 }
 
+// --- Chain-id preflight ---------------------------------------------------------------------
+//
+// A real run supplied `https://eth-mainnet.g.alchemy.com/v2/<key>` for RPC_URL_SEPOLIA. Nothing
+// downstream would have caught that cleanly: FORK_BLOCK (11011021) is a November-2020 mainnet
+// block, and the Sepolia RAILGUN contracts this fixture pins do not exist at those addresses on
+// mainnet, so the mistake would have surfaced as a confusing no-code/revert error deep inside
+// setup rather than at its actual cause. `run_e2e` calls `eth_chainId` once, before anvil ever
+// spawns, and routes the result through this pure predicate so the message — the whole point of
+// the guard — has a unit test independent of a real RPC.
+
+/// `Some(message)` naming the mismatch if `found_chain_id` is not Sepolia's; `None` if it matches.
+fn sepolia_chain_id_mismatch(found_chain_id: u64) -> Option<String> {
+    if found_chain_id == SEPOLIA_CHAIN_ID {
+        return None;
+    }
+    Some(format!(
+        "RPC_URL_SEPOLIA answered chain id {found_chain_id} (0x{found_chain_id:x}), not Sepolia's \
+         {SEPOLIA_CHAIN_ID} (0x{SEPOLIA_CHAIN_ID:x}) — a MAINNET (or other non-Sepolia) RPC URL \
+         was supplied where a SEPOLIA one is required. If this was copy-pasted from a working \
+         mainnet URL, the same provider key usually works by swapping the host from \
+         `eth-mainnet` to `eth-sepolia` — that is exactly the mismatch that produced this check."
+    ))
+}
+
+#[cfg(test)]
+mod chain_id_preflight_tests {
+    use super::{sepolia_chain_id_mismatch, SEPOLIA_CHAIN_ID};
+
+    #[test]
+    fn sepolia_itself_passes() {
+        assert!(sepolia_chain_id_mismatch(SEPOLIA_CHAIN_ID).is_none());
+    }
+
+    /// The exact mistake this guard responds to: a mainnet URL where Sepolia was required.
+    #[test]
+    fn mainnet_is_named_directly_and_hints_the_fix() {
+        let msg = sepolia_chain_id_mismatch(1).expect("chain id 1 (mainnet) must be rejected");
+        assert!(msg.contains("chain id 1"), "{msg}");
+        assert!(msg.contains(&SEPOLIA_CHAIN_ID.to_string()), "{msg}");
+        assert!(msg.contains("MAINNET"), "{msg}");
+        assert!(msg.contains("eth-mainnet"), "{msg}");
+        assert!(msg.contains("eth-sepolia"), "{msg}");
+    }
+
+    #[test]
+    fn any_other_chain_is_also_rejected() {
+        assert!(sepolia_chain_id_mismatch(137).is_some());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs RPC_URL_SEPOLIA + anvil + npx + network (proving artifacts, Subsquid)"]
 async fn shield_then_exit_native_via_the_privacy_paymaster() {
@@ -681,6 +735,30 @@ async fn shield_then_exit_native_via_the_privacy_paymaster() {
 
 async fn run_e2e() {
     let rpc = std::env::var("RPC_URL_SEPOLIA").expect("set RPC_URL_SEPOLIA to a Sepolia RPC");
+
+    // 0. Fail fast if RPC_URL_SEPOLIA is not actually Sepolia.
+    //
+    // A real run supplied an `eth-mainnet.g.alchemy.com` URL here. Nothing downstream would have
+    // caught that cleanly: FORK_BLOCK (11011021) is a November-2020 mainnet block, and the
+    // Sepolia RAILGUN contracts this fixture pins (RailgunSmartWallet, the privacy paymaster,
+    // WETH) do not exist at those addresses on mainnet — so the mistake would have surfaced as a
+    // confusing no-code/revert error deep inside setup, far from its actual cause. One
+    // `eth_chainId` call, before anvil (or anything else) spawns, turns that into an immediate,
+    // named failure instead — the cost is a single HTTP request.
+    let chain_probe: DynProvider = ProviderBuilder::new()
+        .network::<Ethereum>()
+        .connect(&rpc)
+        .await
+        .expect("RPC_URL_SEPOLIA does not parse as a URL")
+        .erased();
+    let found_chain_id = chain_probe
+        .get_chain_id()
+        .await
+        .rpc_expect("read chain id from RPC_URL_SEPOLIA (pre-flight network check)");
+    if let Some(msg) = sepolia_chain_id_mismatch(found_chain_id) {
+        panic!("{msg}");
+    }
+
     let dir = tempfile::tempdir().unwrap();
     // Held for the whole test: it holds the exit-index counter, which is what makes the two
     // exits derive DIFFERENT senders.
@@ -689,7 +767,7 @@ async fn run_e2e() {
     let entropy = "0x1122334455667788990011223344556677889900112233445566778899001122";
     let token = "helper-token";
 
-    // 0. Refuse to run against a leftover anvil, the same way `alto::spawn` refuses a leftover
+    // 1. Refuse to run against a leftover anvil, the same way `alto::spawn` refuses a leftover
     //    Alto. `wait_for_rpc` cannot tell a fresh fork from a stale one, and attaching to a stale
     //    one is not a clean failure: the derived senders are DETERMINISTIC, so they would already
     //    hold WETH dust from the previous run, and the exact fee-convention assertion would then
@@ -701,7 +779,7 @@ async fn run_e2e() {
          serving a STALE fork. Kill it before re-running; this fixture must own its fork."
     );
 
-    // 1. anvil fork of Sepolia.
+    // 2. anvil fork of Sepolia.
     //
     // The throttle flags are load-bearing, not tuning: verifying RAILGUN's UTXO trees walks
     // thousands of accounts/slots that the fork has to fetch from the upstream RPC, and at
@@ -741,7 +819,7 @@ async fn run_e2e() {
         .unwrap()
         .erased();
 
-    // 2. Fund Alto's executor and utility EOAs BEFORE Alto starts: the utility account deploys
+    // 3. Fund Alto's executor and utility EOAs BEFORE Alto starts: the utility account deploys
     //    the simulation contracts at startup and refills the executor, so an unfunded pair
     //    makes Alto come up unable to bundle anything.
     for key in [alto::ALTO_EXECUTOR_KEY, alto::ALTO_UTILITY_KEY] {
@@ -758,14 +836,14 @@ async fn run_e2e() {
             .rpc_expect("fund alto key");
     }
 
-    // 3. Local Alto: a public bundler cannot see the fork. Required, never skipped.
+    // 4. Local Alto: a public bundler cannot see the fork. Required, never skipped.
     let alto_log = dir.path().join("alto.log");
     let _alto = alto::spawn(&anvil_url(), ALTO_PORT, &alto_log)
         .await
         .unwrap_or_else(|e| rpc_fail_bare(e));
     let bundler_url = format!("http://127.0.0.1:{ALTO_PORT}");
 
-    // 4. Spawn ONLY the sidecar (entropy over fd 5 — this dogfoods the fd-5 spawn contract).
+    // 5. Spawn ONLY the sidecar (entropy over fd 5 — this dogfoods the fd-5 spawn contract).
     //    It spawns no children: there is no broadcaster.
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_railgun-helper"));
     cmd.env("RAILGUN_RPC_URL", anvil_url())
@@ -810,7 +888,7 @@ async fn run_e2e() {
         .unwrap()
         .erased();
 
-    // 5. SHIELD: the sidecar builds the tx(s), the owner self-submits each.
+    // 6. SHIELD: the sidecar builds the tx(s), the owner self-submits each.
     let shield_txs = within(
         "prepareShield",
         rpc::call(
@@ -842,7 +920,7 @@ async fn run_e2e() {
         );
     }
 
-    // 6. The shielded balance reflects the deposit.
+    // 7. The shielded balance reflects the deposit.
     let bal = within(
         "balance",
         rpc::call(&helper_sock, token, "balance", json!(null)),
@@ -856,7 +934,7 @@ async fn run_e2e() {
         "shielded balance {total} too low for a {SHIELD_WEI} wei shield"
     );
 
-    // 7. The reserve is the real constraint on SHIELD_WEI, and it is priced from the LIVE
+    // 8. The reserve is the real constraint on SHIELD_WEI, and it is priced from the LIVE
     //    bundler gas sample — so assert the margin against the live number rather than trusting
     //    the constant. If this fires, raise SHIELD_WEI; do not shrink the reserve.
     let ceiling = within(
@@ -892,7 +970,7 @@ async fn run_e2e() {
         log: &log,
     };
 
-    // 8. The exits. Asserted per-exit inside the loop rather than after it, so a failure names the
+    // 9. The exits. Asserted per-exit inside the loop rather than after it, so a failure names the
     //    amount that produced it and stops before spending another ~40s of proving.
     //    `implied` — forwarded + dust — is what the contract ACTUALLY delivered.
     let implied = |obs: &ExitObservation| U256::from(obs.delivered) + obs.sender_dust;
@@ -970,7 +1048,7 @@ async fn run_e2e() {
         observations.push((value, obs));
     }
 
-    // 9. Rotation: no two exits may share a sender or an index, or every exit clusters under one
+    // 10. Rotation: no two exits may share a sender or an index, or every exit clusters under one
     //    address again. (That each sender is *derivable* — the property recovery depends on — is
     //    asserted per-exit inside `run_exit`.)
     for (i, (v1, o1)) in observations.iter().enumerate() {
@@ -988,7 +1066,7 @@ async fn run_e2e() {
         }
     }
 
-    // 10. Calibration. The dust is the fee-prediction error: `delivered_lower_bound` is
+    // 11. Calibration. The dust is the fee-prediction error: `delivered_lower_bound` is
     //     deliberately a LOWER bound, so what stays behind is `actual_delivery - forwarded`.
     //     `paymasterSpent` is the sponsored gas cost, read off the paymaster's EntryPoint deposit.
     let mut line = format!("FEE CALIBRATION: epsilon={DELIVERY_EPSILON_WEI} wei");

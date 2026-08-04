@@ -47,6 +47,19 @@ final class RailgunExitStatusTests: XCTestCase {
         XCTAssertTrue(text.lowercased().contains("gas"), "must explain the gas reserve: \(text)")
     }
 
+    /// `WeiFormatter.ethDisplayString` already appends the " ETH" unit suffix, so the
+    /// breakdown template must NOT append its own " ETH" after each interpolated value —
+    /// caught by hand-inspecting the actual rendered string, since the substring assertions
+    /// above pass either way ("0 ETH" is a substring of "0 ETH ETH" too).
+    func testBreakdownDoesNotDoubleTheEthUnit() {
+        let text = ChatDashboardModel.unshieldBreakdown(
+            requestedWei: "0x2710",
+            receivableWei: "0x230F",
+            reserveWei: "0x64"
+        )
+        XCTAssertFalse(text.contains("ETH ETH"), "must not double the ETH unit: \(text)")
+    }
+
     /// The brief is explicit that BOTH deductions must be visible, not just named in prose —
     /// a user who sees only the fee percentage (or only the word "gas") with no numbers to
     /// match against their balance will think the figures don't add up. Pin that the actual

@@ -2752,13 +2752,15 @@ final class ChatDashboardModel: ObservableObject {
         receivableWei: String,
         reserveWei: String
     ) -> String {
+        // `ethDisplayString` already appends the " ETH" unit suffix — do NOT append it again
+        // here, or every amount reads as "0.01 ETH ETH".
         let requested = WeiFormatter.ethDisplayString(fromHexWei: requestedWei)
         let receivable = WeiFormatter.ethDisplayString(fromHexWei: receivableWei)
         let reserve = WeiFormatter.ethDisplayString(fromHexWei: reserveWei)
         return """
-        Unshielding \(requested) ETH — the recipient receives \(receivable) ETH after \
+        Unshielding \(requested) — the recipient receives \(receivable) after \
         RAILGUN's 0.25% unshield fee. Gas is paid from your shielded balance \
-        (about \(reserve) ETH held back), so you can't unshield your full balance.
+        (about \(reserve) held back), so you can't unshield your full balance.
         """
     }
 

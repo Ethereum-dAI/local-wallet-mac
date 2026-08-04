@@ -170,6 +170,123 @@ async fn within<T>(what: &str, fut: impl std::future::Future<Output = T>) -> T {
         .unwrap_or_else(|_| panic!("operation timed out after {OP_TIMEOUT_SECS}s: {what}"))
 }
 
+// --- Rate-limit classification -------------------------------------------------------------
+//
+// A real run of this fixture panicked at "fund alto key: ErrorResp(ErrorPayload { code:
+// -32603, message: \"failed to get account for 0x… : Max retries exceeded HTTP error 429 with
+// body: {\\\"code\\\":-32005,\\\"message\\\":\\\"Too Many Requests\\\", …} \" })" and read, to
+// the human running it, as "the fixture (or RAILGUN) is broken". It was not: the identical
+// fixture passed 3/3 on a non-throttled RPC key. The anvil spawn below already throttles the
+// fork backend itself (`--compute-units-per-second`, `--retries`, `--fork-retry-backoff`) —
+// that mitigates a slow provider, but nothing mitigates a provider that has run out of quota
+// for the hour. What was missing was not a fix, only classification: telling the reader which
+// kind of failure they are looking at.
+//
+// Every RPC-touching site below that can surface a throttled fork backend — the anvil setup
+// calls, the anvil readiness wait, and the sidecar's own on-chain reads/writes — routes its
+// error through `rpc_fail`/`rpc_expect` so the panic says so plainly instead of reading like a
+// protocol bug.
+
+/// Substrings that mark an RPC-touching failure as the upstream provider throttling anvil's
+/// fork backend, rather than a bug in this fixture or in RAILGUN. `429` and "Too Many Requests"
+/// are the HTTP-layer signal; `-32005` is the JSON-RPC error code Infura (and others) use for
+/// the same thing. Matching any one is enough — they show up in different combinations
+/// depending on which layer (anvil, the provider's HTTP client, or the upstream RPC) rendered
+/// the error.
+const RATE_LIMIT_MARKERS: [&str; 3] = ["429", "Too Many Requests", "-32005"];
+
+/// True if `rendered` — an error's own text — carries a rate-limit marker.
+fn is_rate_limited(rendered: &str) -> bool {
+    RATE_LIMIT_MARKERS
+        .iter()
+        .any(|marker| rendered.contains(marker))
+}
+
+/// Panic at `context`, classifying the error first.
+///
+/// If `err`'s rendered text carries a rate-limit marker, the panic states PLAINLY that the
+/// upstream RPC provider is throttling anvil's fork backend, that this is an infrastructure
+/// failure and NOT a RAILGUN or fixture failure, and that the fix is to retry later or use a
+/// less-throttled `RPC_URL_SEPOLIA` — while still preserving the original error text, so nothing
+/// is lost. Anything else panics exactly as the call site always did: `context: err`.
+fn rpc_fail(context: &str, err: impl std::fmt::Display) -> ! {
+    let rendered = err.to_string();
+    if is_rate_limited(&rendered) {
+        panic!(
+            "{context}: the RPC provider behind RPC_URL_SEPOLIA is RATE-LIMITING anvil's fork \
+             backend (matched a 429 / \"Too Many Requests\" / -32005 marker). This is an \
+             INFRASTRUCTURE failure of that provider's quota — it is NOT a RAILGUN or fixture \
+             failure. Retry later, or point RPC_URL_SEPOLIA at a less-throttled key. Original \
+             error: {rendered}"
+        );
+    }
+    panic!("{context}: {rendered}");
+}
+
+/// Same classification as [`rpc_fail`], for a call site whose message already stands alone
+/// (nothing to prefix it with).
+fn rpc_fail_bare(err: impl std::fmt::Display) -> ! {
+    let rendered = err.to_string();
+    if is_rate_limited(&rendered) {
+        panic!(
+            "the RPC provider behind RPC_URL_SEPOLIA is RATE-LIMITING anvil's fork backend \
+             (matched a 429 / \"Too Many Requests\" / -32005 marker). This is an \
+             INFRASTRUCTURE failure of that provider's quota — it is NOT a RAILGUN or fixture \
+             failure. Retry later, or point RPC_URL_SEPOLIA at a less-throttled key. Original \
+             error: {rendered}"
+        );
+    }
+    panic!("{rendered}");
+}
+
+/// `.expect`-style sugar for [`rpc_fail`]: identical message on an ordinary failure, classified
+/// first when the underlying error is a throttled fork backend.
+trait RpcResultExt<T> {
+    fn rpc_expect(self, context: &str) -> T;
+}
+
+impl<T, E: std::fmt::Display> RpcResultExt<T> for Result<T, E> {
+    fn rpc_expect(self, context: &str) -> T {
+        match self {
+            Ok(v) => v,
+            Err(e) => rpc_fail(context, e),
+        }
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_classifier_tests {
+    use super::is_rate_limited;
+
+    /// The exact rendering from the real panic this fix responds to (trimmed to the relevant
+    /// clause) must classify as a rate limit.
+    #[test]
+    fn matches_the_real_infura_429() {
+        let rendered = "ErrorResp(ErrorPayload { code: -32603, message: \"failed to get account \
+             for 0xe567a07c…: Max retries exceeded HTTP error 429 with body: \
+             {\\\"code\\\":-32005,\\\"message\\\":\\\"Too Many Requests\\\",\\\"data\\\":{\\\"see\\\":\\\"https://infura.io/dashboard\\\"}}\" })";
+        assert!(is_rate_limited(rendered));
+    }
+
+    #[test]
+    fn matches_each_marker_in_isolation() {
+        assert!(is_rate_limited("HTTP error 429 with body: {}"));
+        assert!(is_rate_limited("blah blah Too Many Requests blah"));
+        assert!(is_rate_limited("{\"code\":-32005,\"message\":\"nope\"}"));
+    }
+
+    /// An ordinary protocol/assertion failure must NOT be misclassified as an infra issue —
+    /// that would be just as misleading in the other direction.
+    #[test]
+    fn does_not_match_an_unrelated_failure() {
+        assert!(!is_rate_limited(
+            "exit of 5000 wei: the contract delivered 4987, but the measured convention says 4988"
+        ));
+        assert!(!is_rate_limited("insufficientShieldedBalance (error)"));
+        assert!(!is_rate_limited(""));
+    }
+}
+
 /// Kills its child on drop so a panicking assertion never leaks anvil.
 struct Killer(Child);
 impl Drop for Killer {
@@ -234,16 +351,23 @@ fn anvil_url() -> String {
 async fn wait_for_rpc(url: &str, secs: u64) {
     let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
-        if let Ok(p) = ProviderBuilder::new()
+        // Captured fresh each pass so a timeout can say WHY the last attempt failed, not just
+        // that it did — a fork-backend 429 answering anvil's own `eth_chainId` reads exactly
+        // like anvil never starting unless that reason is surfaced.
+        let attempt_err = match ProviderBuilder::new()
             .network::<Ethereum>()
             .connect(url)
             .await
         {
-            if p.get_chain_id().await.is_ok() {
-                return;
-            }
+            Ok(p) => match p.get_chain_id().await {
+                Ok(_) => return,
+                Err(e) => e.to_string(),
+            },
+            Err(e) => e.to_string(),
+        };
+        if Instant::now() >= deadline {
+            rpc_fail(&format!("anvil not ready after {secs}s"), attempt_err);
         }
-        assert!(Instant::now() < deadline, "anvil not ready after {secs}s");
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 }
@@ -320,8 +444,11 @@ async fn snapshot_derived_senders(
                     .balanceOf(address)
                     .call()
                     .await
-                    .expect("read derived sender WETH"),
-                native: provider.get_balance(address).await.unwrap(),
+                    .rpc_expect("read derived sender WETH"),
+                native: provider
+                    .get_balance(address)
+                    .await
+                    .rpc_expect("read derived sender native balance"),
             },
         );
     }
@@ -366,14 +493,17 @@ async fn run_exit(ctx: &ExitCtx<'_>, amount: u128) -> ExitObservation {
 
     // A fork inherits real Sepolia state, so the recipient may already hold ETH. Assert on the
     // DELTA; an absolute assertion would be wrong for reasons that have nothing to do with us.
-    let before = provider.get_balance(RECIPIENT).await.unwrap();
+    let before = provider
+        .get_balance(RECIPIENT)
+        .await
+        .rpc_expect("read recipient balance (before exit)");
     // Snapshot the paymaster's EntryPoint deposit and the whole derived-sender window BEFORE the
     // op, so sponsorship and dust are both measured as deltas.
     let paymaster_before = entry_point
         .balanceOf(ctx.paymaster)
         .call()
         .await
-        .expect("read paymaster EntryPoint deposit");
+        .rpc_expect("read paymaster EntryPoint deposit (before exit)");
     let senders_before = snapshot_derived_senders(provider, ctx.weth, ctx.entropy).await;
     let iterations_before = ctx.log.fee_iterations();
     let started_at = Instant::now();
@@ -388,7 +518,7 @@ async fn run_exit(ctx: &ExitCtx<'_>, amount: u128) -> ExitObservation {
         ),
     )
     .await
-    .unwrap_or_else(|e| panic!("unshield of {amount} wei was refused: {e}"));
+    .unwrap_or_else(|e| rpc_fail(&format!("unshield of {amount} wei was refused"), e));
     let job_id = started["jobId"]
         .as_str()
         .expect("unshield must return a jobId")
@@ -404,7 +534,7 @@ async fn run_exit(ctx: &ExitCtx<'_>, amount: u128) -> ExitObservation {
             rpc::call(socket, token, "unshieldStatus", json!({"jobId": &job_id})),
         )
         .await
-        .expect("unshieldStatus must answer");
+        .rpc_expect("unshieldStatus must answer");
         match st["status"].as_str() {
             // NOTE: `deliveredAsset` is deliberately NOT asserted here. The sidecar hardcodes
             // that string literal in `exit_status`, so it is not derived from anything on-chain
@@ -425,7 +555,10 @@ async fn run_exit(ctx: &ExitCtx<'_>, amount: u128) -> ExitObservation {
     };
     let elapsed = started_at.elapsed();
 
-    let after = provider.get_balance(RECIPIENT).await.unwrap();
+    let after = provider
+        .get_balance(RECIPIENT)
+        .await
+        .rpc_expect("read recipient balance (after exit)");
     let sender: Address = outcome["sender"]
         .as_str()
         .expect("outcome must name the sender")
@@ -463,17 +596,20 @@ async fn run_exit(ctx: &ExitCtx<'_>, amount: u128) -> ExitObservation {
          sender would mean the exit was not purely paymaster-sponsored"
     );
 
-    let sender_native_after = provider.get_balance(sender).await.unwrap();
+    let sender_native_after = provider
+        .get_balance(sender)
+        .await
+        .rpc_expect("read sender native balance (after exit)");
     let sender_weth_after = WETHTest::new(ctx.weth, provider.clone())
         .balanceOf(sender)
         .call()
         .await
-        .expect("read sender WETH");
+        .rpc_expect("read sender WETH (after exit)");
     let paymaster_after = entry_point
         .balanceOf(ctx.paymaster)
         .call()
         .await
-        .expect("read paymaster EntryPoint deposit");
+        .rpc_expect("read paymaster EntryPoint deposit (after exit)");
     // The feature, asserted: a sponsored op is paid out of the paymaster's EntryPoint deposit,
     // so that deposit MUST fall. Every other measurement in this fixture would hold identically
     // if the gas had come from somewhere else.
@@ -619,14 +755,14 @@ async fn run_e2e() {
                 ),
             )
             .await
-            .expect("fund alto key");
+            .rpc_expect("fund alto key");
     }
 
     // 3. Local Alto: a public bundler cannot see the fork. Required, never skipped.
     let alto_log = dir.path().join("alto.log");
     let _alto = alto::spawn(&anvil_url(), ALTO_PORT, &alto_log)
         .await
-        .unwrap_or_else(|e| panic!("{e}"));
+        .unwrap_or_else(|e| rpc_fail_bare(e));
     let bundler_url = format!("http://127.0.0.1:{ALTO_PORT}");
 
     // 4. Spawn ONLY the sidecar (entropy over fd 5 — this dogfoods the fd-5 spawn contract).
@@ -685,7 +821,7 @@ async fn run_e2e() {
         ),
     )
     .await
-    .expect("prepareShield");
+    .rpc_expect("prepareShield");
     let txs: Vec<TxData> = serde_json::from_value(shield_txs).expect("shield tx list");
     assert!(!txs.is_empty(), "expected >=1 shield tx");
     for tx in txs {
@@ -693,10 +829,10 @@ async fn run_e2e() {
             owner_provider
                 .send_transaction(tx.into())
                 .await
-                .expect("send shield")
+                .rpc_expect("send shield")
                 .get_receipt()
                 .await
-                .expect("shield receipt")
+                .rpc_expect("shield receipt")
         })
         .await;
         assert!(receipt.status(), "shield tx must succeed: {receipt:?}");
@@ -712,7 +848,7 @@ async fn run_e2e() {
         rpc::call(&helper_sock, token, "balance", json!(null)),
     )
     .await
-    .expect("balance");
+    .rpc_expect("balance");
     let total = hex_wei(&bal["total"], "balance.total");
     eprintln!("[e2e] shielded balance total = {total} wei ({bal})");
     assert!(
@@ -728,7 +864,7 @@ async fn run_e2e() {
         rpc::call(&helper_sock, token, "maxUnshieldable", json!(null)),
     )
     .await
-    .expect("maxUnshieldable");
+    .rpc_expect("maxUnshieldable");
     let max_value = hex_wei(&ceiling["maxValueWei"], "maxValueWei");
     let reserve = hex_wei(&ceiling["reserveWei"], "reserveWei");
     eprintln!(

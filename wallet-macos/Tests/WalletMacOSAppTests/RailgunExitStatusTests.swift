@@ -11,7 +11,7 @@ final class RailgunExitStatusTests: XCTestCase {
         // below) — this fixture uses a real hex string rather than a bare number so the test
         // cannot pass against a Double/Int-backed decode by accident.
         let json = """
-        {"status":"submitted","deliveredAsset":"ETH","result":{"userOpHash":"0xabc","sender":"0xdef","deliveredWei":"0x2317","exitIndex":3,"included":false}}
+        {"status":"submitted","deliveredAsset":"ETH","result":{"userOpHash":"0xabc","sender":"0xdef","deliveredWei":"0x230F","exitIndex":3,"included":false}}
         """.data(using: .utf8)!
         let st = try JSONDecoder().decode(RailgunHelperClient.UnshieldStatus.self, from: json)
         XCTAssertEqual(st.status, "submitted")
@@ -25,6 +25,44 @@ final class RailgunExitStatusTests: XCTestCase {
         """.data(using: .utf8)!
         let st = try JSONDecoder().decode(RailgunHelperClient.UnshieldStatus.self, from: json)
         XCTAssertEqual(st.code, "feeDidNotConverge")
+        XCTAssertNil(st.submitted, "codes with an unambiguous meaning carry no submitted bit")
+    }
+
+    /// `bundlerRejected` is the one code that spans both sides of `eth_sendUserOperation`, so the
+    /// sidecar sends a `submitted` bit alongside it (`error_status` in `railgun-helper.rs`). Losing
+    /// it in the decoder would collapse the two situations back into one and re-introduce the
+    /// false "Reverted" this pair of fields exists to prevent.
+    func testDecodesTheSubmittedBitOnBothBundlerRejections() throws {
+        func decode(_ submitted: Bool) throws -> RailgunHelperClient.UnshieldStatus {
+            let json = """
+            {"status":"error","code":"bundlerRejected","submitted":\(submitted),"error":"whatever"}
+            """.data(using: .utf8)!
+            return try JSONDecoder().decode(RailgunHelperClient.UnshieldStatus.self, from: json)
+        }
+        XCTAssertEqual(try decode(false).submitted, false)
+        XCTAssertEqual(try decode(true).submitted, true)
+    }
+
+    /// `deliveredAsset` is not merely decoded — it is CHECKED, because the card renders
+    /// `deliveredWei` with an " ETH" suffix. If the exit's tail call ever stopped unwrapping WETH,
+    /// a silently ignored field would show the user a WETH amount labelled as ETH.
+    func testATerminalResultRefusesADeliveredAssetTheAppCannotRender() throws {
+        func status(asset: String?) throws -> RailgunHelperClient.UnshieldStatus {
+            let assetField = asset.map { "\"deliveredAsset\":\"\($0)\"," } ?? ""
+            let json = """
+            {"status":"done",\(assetField)"result":{"deliveredWei":"0x230F","included":true}}
+            """.data(using: .utf8)!
+            return try JSONDecoder().decode(RailgunHelperClient.UnshieldStatus.self, from: json)
+        }
+        XCTAssertNoThrow(try status(asset: "ETH").exitResult())
+        // Absent is tolerated (the field is optional on the wire); a WRONG value is not.
+        XCTAssertNoThrow(try status(asset: nil).exitResult())
+        XCTAssertThrowsError(try status(asset: "WETH").exitResult()) { error in
+            guard case RailgunHelperClient.ClientError.decodeFailed(let m) = error else {
+                return XCTFail("expected decodeFailed, got \(error)")
+            }
+            XCTAssertTrue(m.contains("WETH"), "must name what it got: \(m)")
+        }
     }
 
     func testDecodesMaxUnshieldable() throws {
@@ -222,9 +260,11 @@ final class RailgunExitStatusTests: XCTestCase {
     func testFailureCopyIsSelectedByCodeFromBothErrorCases() {
         XCTAssertEqual(
             RailgunExitCopy.failureCopy(
-                for: RailgunHelperClient.ClientError.exitFailed(code: "bundlerRejected", message: "raw")
+                for: RailgunHelperClient.ClientError.exitFailed(
+                    code: "bundlerRejected", message: "raw", submitted: true
+                )
             ),
-            RailgunExitCopy.exitFailureMessage(code: "bundlerRejected", message: "raw")
+            RailgunExitCopy.exitFailureMessage(code: "bundlerRejected", message: "raw", submitted: true)
         )
         XCTAssertEqual(
             RailgunExitCopy.failureCopy(
@@ -246,14 +286,18 @@ final class RailgunExitStatusTests: XCTestCase {
     func testOnlyASidecarReportedFailureRevertsTheCard() {
         XCTAssertTrue(
             RailgunExitCopy.shouldRevertCard(
-                for: RailgunHelperClient.ClientError.exitFailed(code: "deliveryReverted", message: "index 7")
+                for: RailgunHelperClient.ClientError.exitFailed(
+                    code: "deliveryReverted", message: "index 7", submitted: nil
+                )
             ),
             "a terminal job failure is the one thing that justifies Reverted"
         )
         // An exitFailed with no code is still the sidecar reporting `status: error`.
         XCTAssertTrue(
             RailgunExitCopy.shouldRevertCard(
-                for: RailgunHelperClient.ClientError.exitFailed(code: nil, message: "unshield failed")
+                for: RailgunHelperClient.ClientError.exitFailed(
+                    code: nil, message: "unshield failed", submitted: nil
+                )
             )
         )
 
@@ -290,6 +334,137 @@ final class RailgunExitStatusTests: XCTestCase {
             )
         )
         XCTAssertFalse(RailgunExitCopy.shouldRevertCard(for: URLError(.timedOut)))
+    }
+
+    /// The branch's only outcome misreport, pinned from both sides.
+    ///
+    /// `bundlerRejected` covers two situations the sidecar can tell apart but one wire code
+    /// cannot: refused during gas estimation (nothing sent, nothing moved) and a lost response to
+    /// `eth_sendUserOperation` (the op may be in the mempool and the unshield may execute). The
+    /// card must revert for the first and must NOT for the second, so the decision reads
+    /// `submitted`.
+    func testBundlerRejectionRevertsOnlyWhenNothingWasSubmitted() {
+        func error(_ submitted: Bool?) -> RailgunHelperClient.ClientError {
+            .exitFailed(code: "bundlerRejected", message: "recoverable at index 11 (sender 0xs)", submitted: submitted)
+        }
+        // Pre-send: nothing moved, so Reverted is the accurate card.
+        XCTAssertTrue(
+            RailgunExitCopy.shouldRevertCard(for: error(false)),
+            "a rejection during gas estimation moved nothing — Reverted is correct"
+        )
+        // Possibly submitted: the unshield may still execute, so reverting would be a false report.
+        XCTAssertFalse(
+            RailgunExitCopy.shouldRevertCard(for: error(true)),
+            "the op may be in the mempool — must not claim it reverted"
+        )
+        // A missing bit takes the hedged branch: a card left Submitted for a failed exit is
+        // recoverable by looking at the chain; telling a user their landed exit reverted is not.
+        XCTAssertFalse(RailgunExitCopy.shouldRevertCard(for: error(nil)))
+
+        // Every OTHER coded exit failure still reverts — the refinement is scoped to this one code.
+        XCTAssertTrue(
+            RailgunExitCopy.shouldRevertCard(
+                for: RailgunHelperClient.ClientError.exitFailed(
+                    code: "feeDidNotConverge", message: "raw", submitted: nil
+                )
+            )
+        )
+    }
+
+    /// Both halves of `bundlerRejected` must read correctly, and they are opposites: the pre-send
+    /// half is the ONLY one allowed to reassure, and the possibly-submitted half is the only one
+    /// that must carry the recovery pointer.
+    func testBundlerRejectionCopySplitsOnWhetherAnythingWasSubmitted() {
+        let preSend = RailgunExitCopy.exitFailureMessage(
+            code: "bundlerRejected", message: "rejected during gas estimation: AA33 reverted",
+            submitted: false
+        )
+        XCTAssertTrue(
+            preSend.lowercased().contains("untouched"),
+            "nothing was submitted, so this must reassure: \(preSend)"
+        )
+        XCTAssertTrue(preSend.contains("AA33"), "must keep the cause for a bug report: \(preSend)")
+
+        let maybeSubmitted = RailgunExitCopy.exitFailureMessage(
+            code: "bundlerRejected", message: "recoverable at index 11 (sender 0xsender)",
+            submitted: true
+        )
+        XCTAssertFalse(
+            maybeSubmitted.lowercased().contains("untouched"),
+            "the op may have landed — must not claim the funds are safe: \(maybeSubmitted)"
+        )
+        XCTAssertTrue(
+            maybeSubmitted.contains("recoverable at index 11 (sender 0xsender)"),
+            "the recovery pointer must survive: \(maybeSubmitted)"
+        )
+        XCTAssertNotEqual(preSend, maybeSubmitted, "the two situations must not share one sentence")
+    }
+
+    /// The note shown when the wallet stops waiting but does NOT revert the card. For a
+    /// possibly-submitted `bundlerRejected` the generic sentence would silently drop the exit index
+    /// and sender that locate already-spent notes, which is the whole reason the sidecar sends them.
+    func testTheInFlightNoticeKeepsARecoveryPointerWhenThereIsOne() {
+        let hedged = RailgunExitCopy.inFlightNotice(
+            for: RailgunHelperClient.ClientError.exitFailed(
+                code: "bundlerRejected", message: "recoverable at index 11 (sender 0xsender)",
+                submitted: true
+            )
+        )
+        XCTAssertTrue(hedged.contains("index 11"), "must keep the recovery pointer: \(hedged)")
+
+        // A transport failure has no domain code, so it falls back to the generic note.
+        XCTAssertEqual(
+            RailgunExitCopy.inFlightNotice(for: RailgunHelperClient.ClientError.ioFailed("read: errno 60")),
+            RailgunExitCopy.exitStillInFlightMessage
+        )
+    }
+
+    /// The sidecar's `insufficientShieldedBalance` sentence is deliberately number-free (naming the
+    /// ceiling and the reserve would write the user's shielded balance — exactly their sum — into
+    /// the macOS unified log), so the app's copy must carry the explanation itself and must not
+    /// echo raw wei integers at the user.
+    func testInsufficientBalanceCopyIsSelfContainedAndShowsNoRawWei() {
+        let copy = RailgunExitCopy.exitFailureMessage(
+            code: "insufficientShieldedBalance",
+            message: "that amount is more than can currently leave the pool: gas for the exit is paid by a fee note inside the pool, so some of the shielded balance has to stay behind"
+        )
+        XCTAssertTrue(copy.lowercased().contains("gas"), "must explain why: \(copy)")
+        XCTAssertTrue(copy.lowercased().contains("max"), "must point at the Max affordance: \(copy)")
+        XCTAssertFalse(copy.contains("wei"), "must not surface raw wei to the user: \(copy)")
+        XCTAssertFalse(
+            copy.contains(" more than can currently leave the pool"),
+            "must not append the sidecar's sentence verbatim: \(copy)"
+        )
+    }
+
+    /// Max must never fill `/unshield 0 to <recipient>`: with an empty pool — or gas high enough
+    /// that the in-pool fee reserve exceeds the whole balance — the ceiling saturates to zero, and
+    /// a "receives 0 ETH" breakdown looks like a working affordance right up until the send fails.
+    func testMaxIsGuardedWhenNothingIsUnshieldable() {
+        // Zero wei in each of the forms the sidecar could plausibly emit.
+        for hex in ["0x0", "0x00000", "0", "0X0"] {
+            XCTAssertTrue(
+                RailgunExitCopy.hasNothingToUnshield(maxValueWei: hex, renderedAmount: "0"),
+                "\(hex) is zero and must be guarded"
+            )
+        }
+        // Non-zero wei that still RENDERS as zero: the composer scaffold takes a decimal ETH
+        // string, so this fills the same useless command.
+        XCTAssertTrue(
+            RailgunExitCopy.hasNothingToUnshield(maxValueWei: "0x1", renderedAmount: "0.000000")
+        )
+        // A real ceiling must not be guarded away.
+        XCTAssertFalse(
+            RailgunExitCopy.hasNothingToUnshield(maxValueWei: "0x2386f26fc10000", renderedAmount: "0.01")
+        )
+        // An unparseable rendering is left alone rather than guessed at.
+        XCTAssertFalse(
+            RailgunExitCopy.hasNothingToUnshield(maxValueWei: "0x2710", renderedAmount: "—")
+        )
+        // The copy has to say BOTH that nothing is unshieldable and why; a bare "0" reads as a bug.
+        let copy = RailgunExitCopy.nothingUnshieldableMessage
+        XCTAssertTrue(copy.lowercased().contains("nothing can be unshielded"), copy)
+        XCTAssertTrue(copy.lowercased().contains("gas"), "must say why: \(copy)")
     }
 
     /// The copy for a give-up must not read as a failure, and must steer away from a retry that

@@ -12,13 +12,13 @@ import Foundation
 struct RailgunHelperClient: Sendable {
     let socketPath: String
     let bearerToken: String
-    /// Overall connect+read budget for a plain (fast) call — reads like `balance` and
-    /// `unshieldStatus` that touch no external network beyond the app's own RPC.
+    /// Overall connect+read budget for a plain (fast) call — `unshieldStatus`, which reads an
+    /// in-memory job map and touches no network at all.
     var timeout: TimeInterval = 30
 
-    /// `unshield` and `maxUnshieldable` both perform a full RAILGUN UTXO sync PLUS a bundler
-    /// gas probe before returning — proving itself is asynchronous (see
-    /// `awaitUnshieldSubmitted`), so this covers sync + one gas-price round trip only, not
+    /// `balance`, `unshield` and `maxUnshieldable` all perform a full RAILGUN UTXO sync (and the
+    /// latter two a bundler gas probe) before returning — proving itself is asynchronous (see
+    /// `awaitUnshieldSubmitted`), so this covers sync + at most one gas-price round trip, not
     /// proving. The sidecar's RPC server handles one connection to completion (no
     /// keep-alive), so the socket is held open for the whole call.
     ///
@@ -26,6 +26,10 @@ struct RailgunHelperClient: Sendable {
     /// round trip without creeping toward the 300s PROVING deadline `awaitUnshieldSubmitted`
     /// waits on separately — conflating the two would make a slow sync look like a timed-out
     /// proof, or mask a genuinely wedged sync inside the proving budget.
+    ///
+    /// `balance` gets it too, and must: it runs the SAME `balance_split` sync as its neighbours,
+    /// so at the plain 30s timeout a cold sync those two survive would leave the balance card
+    /// reading "unavailable" while a Max probe issued seconds later succeeds.
     private static let syncCallTimeout: TimeInterval = 60
 
     enum ClientError: LocalizedError {
@@ -41,7 +45,12 @@ struct RailgunHelperClient: Sendable {
         /// deliberately stripped of its prefix so that becomes impossible.
         case rpcError(code: String?, message: String)
         /// A failed exit, carrying the sidecar's stable code so the view layer can pick copy.
-        case exitFailed(code: String?, message: String)
+        ///
+        /// `submitted` mirrors the sidecar's `submitted` field (see `error_status` in
+        /// `railgun-helper.rs`) and is present only where the code alone cannot say whether a
+        /// UserOperation reached the bundler's mempool — today only `bundlerRejected`. It is
+        /// `nil` for every other code, and for failures this client raised locally.
+        case exitFailed(code: String?, message: String, submitted: Bool?)
 
         var errorDescription: String? {
             switch self {
@@ -50,9 +59,27 @@ struct RailgunHelperClient: Sendable {
             case .httpError(let m): return "railgun-helper HTTP error: \(m)"
             case .decodeFailed(let m): return "railgun-helper decode failed: \(m)"
             case .rpcError(_, let m): return "railgun-helper error: \(m)"
-            case .exitFailed(_, let m): return m
+            case .exitFailed(_, let m, _): return m
             }
         }
+
+        /// Whether this is the SIDECAR's own report that the exit job reached a terminal failure,
+        /// as opposed to something that went wrong with the poll that asked.
+        ///
+        /// The one thing that ends a wait early — every other error describes the transport, and
+        /// each has a routine cause that coexists with a perfectly successful exit (see
+        /// `awaitUnshieldSubmitted`). Also the first half of the card-revert decision in
+        /// `RailgunExitCopy.shouldRevertCard`, which refines it further with `submitted`.
+        var isTerminalExitFailure: Bool {
+            if case .exitFailed = self { return true }
+            return false
+        }
+    }
+
+    /// Whether `error` is the sidecar reporting a terminally failed exit. Anything else — a
+    /// dropped socket, a timed-out read, a re-spawned helper — is evidence about the poll only.
+    static func isTerminalExitFailure(_ error: Error) -> Bool {
+        (error as? ClientError)?.isTerminalExitFailure ?? false
     }
 
     // MARK: Typed API
@@ -80,10 +107,31 @@ struct RailgunHelperClient: Sendable {
         /// Stable failure code when `status == "error"`: feeDidNotConverge,
         /// bundlerRejected, paymasterNotConfigured, deliveryReverted, error.
         let code: String?
+        /// Present only on `status == "error"`, and only for codes that span both sides of
+        /// `eth_sendUserOperation` (today: `bundlerRejected`). `false` = nothing was sent and
+        /// nothing moved; `true` = the op may be in the mempool and the unshield may still
+        /// execute. `nil` = the code's meaning is already unambiguous.
+        let submitted: Bool?
         /// Always "ETH" for the paymaster exit — the tail call unwraps WETH before forwarding.
         let deliveredAsset: String?
         let result: JSONValue?
         let error: String?
+
+        /// The asset the sidecar says it delivered. Anything but native ETH would make the card's
+        /// `deliveredWei` → " … ETH" rendering a MISLABEL, so this is checked rather than merely
+        /// decoded: the exit's tail call is what unwraps WETH, and if that ever stopped happening
+        /// the wrong unit is the symptom the user would see.
+        static let expectedDeliveredAsset = "ETH"
+
+        /// The terminal result, refusing a delivered asset the app cannot render.
+        func exitResult() throws -> JSONValue {
+            if let asset = deliveredAsset, asset != Self.expectedDeliveredAsset {
+                throw ClientError.decodeFailed(
+                    "unshieldStatus reported deliveredAsset \(asset), expected \(Self.expectedDeliveredAsset)"
+                )
+            }
+            return result ?? .null
+        }
     }
 
     /// Headroom-aware limits for an exit. Two numbers because there is no gross-up: the
@@ -96,8 +144,10 @@ struct RailgunHelperClient: Sendable {
         let reserveWei: String
     }
 
+    /// Shielded balance, split by POI status. Performs a full RAILGUN UTXO sync, so it gets the
+    /// same extended timeout as `unshield` / `maxUnshieldable` — see `syncCallTimeout`.
     func balance() async throws -> BalanceSplit {
-        try decode(try await call(method: "balance", params: .null))
+        try decode(try await call(method: "balance", params: .null, timeout: Self.syncCallTimeout))
     }
 
     /// The largest `amountWei` the sidecar will currently accept for `unshield`, plus what the
@@ -151,16 +201,13 @@ struct RailgunHelperClient: Sendable {
         deadline: Date = Date().addingTimeInterval(300),
         poll: TimeInterval = 3
     ) async throws -> JSONValue {
-        while Date() < deadline {
-            let st = try await unshieldStatus(jobId: jobId)
-            switch st.status {
-            case "submitted", "done": return st.result ?? .null
-            case "error": throw ClientError.exitFailed(code: st.code, message: st.error ?? "unshield failed")
-            default: break // "pending" — still proving.
-            }
-            try await Task.sleep(nanoseconds: UInt64(poll * 1_000_000_000))
+        guard let result = try await Self.poll(
+            until: ["submitted", "done"], deadline: deadline, every: poll,
+            fetch: { try await unshieldStatus(jobId: jobId) }
+        ) else {
+            throw ClientError.ioFailed("unshield job \(jobId) was not submitted before the deadline")
         }
-        throw ClientError.ioFailed("unshield job \(jobId) was not submitted before the deadline")
+        return result
     }
 
     /// Poll a submitted job until it is included. Inclusion is the bundler's schedule, not
@@ -172,16 +219,74 @@ struct RailgunHelperClient: Sendable {
         deadline: Date = Date().addingTimeInterval(900),
         poll: TimeInterval = 6
     ) async throws -> JSONValue? {
+        try await Self.poll(
+            until: ["done"], deadline: deadline, every: poll,
+            fetch: { try await unshieldStatus(jobId: jobId) }
+        )
+    }
+
+    /// The shared poll loop behind both waits. Returns the terminal `result`, or `nil` when the
+    /// deadline passes without one.
+    ///
+    /// **A single failed poll must not end the wait, and this is the EXPECTED case, not an edge
+    /// case.** The sidecar's RPC server serves one connection to completion (`rpc.rs`) and holds
+    /// the helper mutex for the whole of phase-1 proving (`railgun-helper.rs`), which `balance`
+    /// also needs. So the realistic sequence — `/shield` schedules a repeating balance refresh,
+    /// then `/unshield` starts proving — has a `balance` request occupying the sole connection
+    /// slot blocked on that mutex, every `unshieldStatus` poll queued behind it, and each one
+    /// hitting this client's socket timeout as `ioFailed`. Aborting on the first of those meant
+    /// the deadline bounded only the happy path: the exit would prove, submit, land and deliver
+    /// while the card sat permanently on "Submitted".
+    ///
+    /// So every error except the sidecar's own terminal-failure report is retried until the
+    /// deadline, which stays the single bound. This deliberately mirrors what the Rust side does
+    /// in `exit::await_exit`, where EVERY receipt-poll error is retryable and only an on-chain
+    /// verdict is terminal.
+    ///
+    /// `Task.sleep` is OUTSIDE the retry-swallowing `catch` on purpose: a cancellation must
+    /// propagate immediately rather than be mistaken for a transient poll failure.
+    /// Internal, not private, so `RailgunPollRetryTests` can drive the retry behaviour with an
+    /// injected `fetch` instead of a live socket — the retry policy is the load-bearing part here,
+    /// not the socket plumbing around it.
+    static func poll(
+        until terminalStatuses: Set<String>,
+        deadline: Date,
+        every interval: TimeInterval,
+        fetch: () async throws -> UnshieldStatus
+    ) async throws -> JSONValue? {
         while Date() < deadline {
-            let st = try await unshieldStatus(jobId: jobId)
-            switch st.status {
-            case "done": return st.result ?? .null
-            case "error": throw ClientError.exitFailed(code: st.code, message: st.error ?? "unshield failed")
-            default: break
+            var terminal: UnshieldStatus?
+            do {
+                let st = try await fetch()
+                if terminalStatuses.contains(st.status) {
+                    terminal = st
+                } else if st.status == "error" {
+                    throw ClientError.exitFailed(
+                        code: st.code, message: st.error ?? "unshield failed", submitted: st.submitted
+                    )
+                }
+                // Anything else ("pending", or a status a newer sidecar grows) → keep waiting.
+            } catch {
+                // The sidecar's verdict is the one thing that ends the wait early.
+                if isTerminalExitFailure(error) { throw error }
+                logTransientPollFailure(error)
             }
-            try await Task.sleep(nanoseconds: UInt64(poll * 1_000_000_000))
+            // Outside the `do`: a terminal status must surface its own decode failure (a
+            // mislabelled delivered asset) rather than being retried as if it were transport.
+            if let terminal { return try terminal.exitResult() }
+            try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
         }
-        return nil // Still pending — not an error.
+        return nil
+    }
+
+    /// Note a swallowed poll failure on stderr. Silence here would make a genuinely wedged
+    /// sidecar indistinguishable from a slow one; the deadline still bounds the wait either way.
+    /// Deliberately carries no exit identifiers (op hash, sender) — the app's stderr is captured
+    /// into the macOS unified log.
+    private static func logTransientPollFailure(_ error: Error) {
+        let line = "railgun-helper: unshieldStatus poll failed, still waiting: "
+            + ((error as? LocalizedError)?.errorDescription ?? "\(error)") + "\n"
+        FileHandle.standardError.write(Data(line.utf8))
     }
 
     // MARK: Transport

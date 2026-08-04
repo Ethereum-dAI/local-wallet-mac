@@ -501,8 +501,12 @@ enum RailgunExitCopy {
     /// (`exitFailed`) carry a stable code, and they share one code space.
     static func failureCopy(for error: Error) -> String? {
         switch error as? RailgunHelperClient.ClientError {
-        case let .exitFailed(code, message), let .rpcError(code, message):
-            return exitFailureMessage(code: code, message: message)
+        case let .exitFailed(code, message, submitted):
+            return exitFailureMessage(code: code, message: message, submitted: submitted)
+        case let .rpcError(code, message):
+            // A synchronous rejection is by construction pre-send — the sidecar never reached
+            // `eth_sendUserOperation` — so it carries no `submitted` bit and needs none.
+            return exitFailureMessage(code: code, message: message, submitted: nil)
         default:
             return nil
         }
@@ -531,16 +535,38 @@ enum RailgunExitCopy {
     /// which is the worst outcome in this feature. It is the same invariant the sidecar keeps
     /// on its side, where `await_exit` reports a budget overrun as `included: false` rather
     /// than as an error, for exactly this reason.
+    ///
+    /// `exitFailed` is then refined by ONE code: `bundlerRejected` spans both sides of
+    /// `eth_sendUserOperation` (see `ExitError::BundlerRejected`). With `submitted == false` the
+    /// bundler refused during gas estimation, nothing was sent and nothing moved — Reverted is
+    /// correct. With `submitted == true` the send POST may have landed and the op may be in the
+    /// mempool, where it can still execute the unshield — Reverted would be the branch's only
+    /// outcome misreport. A MISSING bit (`nil`, e.g. an older sidecar) takes the hedged branch
+    /// too: leaving a card Submitted for a failed exit is recoverable by looking at the chain,
+    /// whereas telling a user their landed exit reverted is not.
     static func shouldRevertCard(for error: Error) -> Bool {
-        guard let client = error as? RailgunHelperClient.ClientError else { return false }
-        if case .exitFailed = client { return true }
-        return false
+        guard let client = error as? RailgunHelperClient.ClientError,
+              case let .exitFailed(code, _, submitted) = client else { return false }
+        if code == "bundlerRejected", submitted != false { return false }
+        return true
     }
 
     /// Copy for a poll that gave up without learning anything about the exit. It must not read
     /// as a failure — the exit is probably still in flight — and must steer the user away from
     /// retrying, because a second exit would spend more notes.
     static let exitStillInFlightMessage = "This exit is still in progress — the wallet stopped waiting for it, which is not the same as the exit stopping. Proving a first exit can take several minutes. Check the recipient's balance before trying again, so you don't exit twice."
+
+    /// The note for a wait that ended WITHOUT the card being reverted.
+    ///
+    /// Prefers the coded copy when the error carries one, and that is the point: a
+    /// `bundlerRejected` with `submitted == true` leaves the card Submitted (see
+    /// `shouldRevertCard`) but must still reach the user with the exit index + sender that locate
+    /// the notes if the op does land. The generic still-in-flight sentence would drop exactly that
+    /// recovery pointer. `unknownJobId` likewise has better copy of its own. Anything with no
+    /// domain code — a dropped socket, a timed-out read — falls back to the generic note.
+    static func inFlightNotice(for error: Error) -> String {
+        failureCopy(for: error) ?? exitStillInFlightMessage
+    }
 
     /// Names the third parties an exit actually involves, honestly. The privacy paymaster is an
     /// on-chain contract and sponsorship is permissionless, so no off-chain service sees the
@@ -580,6 +606,32 @@ enum RailgunExitCopy {
         """
     }
 
+    /// Whether the Max affordance has nothing useful to offer right now.
+    ///
+    /// Two ways that happens, both ordinary: the pool is empty, or gas is expensive enough that
+    /// the in-pool fee reserve exceeds the whole shielded balance (`max_unshieldable` saturates to
+    /// 0 rather than going negative). Without this guard Max fills the composer with
+    /// `/unshield 0 to <recipient>` and the breakdown reads "Unshielding 0 ETH — the recipient
+    /// receives 0 ETH", never once saying that nothing can be unshielded; sending it then earns a
+    /// raw Rust sentence about the delivery guard.
+    ///
+    /// `renderedAmount` is checked as well as the raw wei because the composer scaffold takes a
+    /// DECIMAL ETH string: a non-zero dust ceiling that formats to a bare `0` fills exactly the
+    /// same useless command. Both inputs are passed in so this stays a pure, testable predicate.
+    static func hasNothingToUnshield(maxValueWei: String, renderedAmount: String) -> Bool {
+        let digits = maxValueWei.hasPrefix("0x") || maxValueWei.hasPrefix("0X")
+            ? String(maxValueWei.dropFirst(2))
+            : maxValueWei
+        if digits.isEmpty || digits.allSatisfy({ $0 == "0" }) { return true }
+        // A value that renders as zero is just as unsendable. A rendering this cannot parse is
+        // left alone rather than guessed at.
+        return Double(renderedAmount) == 0
+    }
+
+    /// Copy for `hasNothingToUnshield`. Says plainly that nothing is unshieldable AND why, since
+    /// "0" on its own reads as a bug rather than as a gas-vs-balance fact.
+    static let nothingUnshieldableMessage = "Nothing can be unshielded right now: gas for an exit is paid from a fee note inside the pool, and your shielded balance doesn't cover it yet. Shield a little more, or try again when gas is cheaper."
+
     /// The Max affordance fills the composer with — and validates against — `maxValueWei`,
     /// the largest `amountWei` the sidecar will accept for `unshield`. It deliberately does
     /// NOT use `receivableAtMaxWei`, which is only what the recipient would net at that amount
@@ -612,17 +664,26 @@ enum RailgunExitCopy {
     /// prefixes so that nobody substring-matches them. Unknown codes fall through to the raw
     /// message rather than being swallowed into something generic — a code the sidecar grows
     /// later must still say *something* true, and a generic string would hide it instead.
-    static func exitFailureMessage(code: String?, message: String) -> String {
+    ///
+    /// `submitted` refines exactly one code — see `shouldRevertCard`. Every other code ignores it.
+    static func exitFailureMessage(code: String?, message: String, submitted: Bool? = nil) -> String {
         switch code {
         case "feeDidNotConverge":
             return "Gas prices are moving too quickly to price this exit. Your shielded funds are untouched — please try again shortly."
+        case "bundlerRejected" where submitted == false:
+            // The pre-send half: the bundler refused during gas estimation, so
+            // `eth_sendUserOperation` was never called and no operation exists anywhere. This is
+            // the ONE branch of this code that may reassure — and it must, because the card is
+            // being reverted and an unexplained revert reads as lost funds.
+            return "No public bundler would take this exit, so nothing was submitted. Your shielded funds are untouched — please try again shortly.\n\(message)"
         case "bundlerRejected":
-            // Deliberately NOT worded as "rejected", matching `ExitError::BundlerRejected`: if
+            // The possibly-submitted half (`submitted == true`, or absent). Deliberately NOT
+            // worded as "rejected", matching `ExitError::BundlerRejected`: if
             // `eth_sendUserOperation` reached the bundler but the response was lost, the op is
             // already in the mempool and may still land, pass validation and execute the
             // unshield. So this must never claim the funds are untouched, and it must keep the
             // sidecar's message, which carries the recoverable exit index and sender for
-            // exactly that case (`bundler_rejection_names_the_recoverable_index_and_sender`).
+            // exactly that case (`a_submitted_bundler_rejection_names_the_recoverable_index_and_sender`).
             return "The bundler didn't confirm this exit, so it may or may not have been submitted. Check the recipient's balance before trying again — and keep the details below, which locate the funds if it did go through.\n\(message)"
         case "bundlerUnavailable":
             // Distinct from bundlerRejected: nothing was submitted, so nothing can be in flight.
@@ -634,9 +695,11 @@ enum RailgunExitCopy {
             // is what makes stranded funds re-derivable. Keep it verbatim for a bug report.
             return "The exit landed on-chain but delivery to the recipient failed. Your funds are recoverable — please report this with the details below.\n\(message)"
         case "insufficientShieldedBalance":
-            // Keep the numbers: the exact ceiling tells the user what WOULD fit, and the gas-fee
-            // headroom that must stay in the pool is why it is below their balance.
-            return "That's more than this exit can move out of the pool right now.\n\(message)"
+            // The sidecar's own sentence is deliberately NUMBER-FREE (naming the ceiling and the
+            // reserve would write the user's shielded balance — exactly their sum — into the
+            // macOS unified log via its handler-error `warn!`), so this copy has to carry the
+            // explanation itself and point at Max, which fetches the live ceiling.
+            return "That's more than this exit can move out of the pool right now. Gas is paid from a fee note inside the pool, so a little has to stay behind — use Max to fill in the largest amount that currently fits."
         case "unknownJobId":
             // The helper restarted mid-job, so its outcome is unknown to us. Never imply it did
             // not happen — a user who assumes that may exit twice.
@@ -2820,15 +2883,26 @@ private final class ChatDashboardModel: ObservableObject {
             do {
                 let client = try await self.railgunHelperClient()
                 let max = try await client.maxUnshieldable()
+                let amountText = ChatDashboardModel.decimalETHAmount(
+                    fromHexWei: RailgunExitCopy.maxUnshieldFillAmountWei(max)
+                )
+                // Nothing to offer (empty pool, or gas high enough that the fee reserve exceeds
+                // the balance): say so and leave the composer alone. Filling it with
+                // `/unshield 0 to <recipient>` plus a "receives 0 ETH" breakdown would look like
+                // a working affordance and fail on send with a raw sidecar sentence.
+                guard !RailgunExitCopy.hasNothingToUnshield(
+                    maxValueWei: max.maxValueWei, renderedAmount: amountText
+                ) else {
+                    self.maxUnshieldableBreakdown = nil
+                    self.maxUnshieldableError = RailgunExitCopy.nothingUnshieldableMessage
+                    return
+                }
                 self.maxUnshieldableBreakdown = RailgunExitCopy.unshieldBreakdown(
                     requestedWei: max.maxValueWei,
                     receivableWei: max.receivableAtMaxWei,
                     reserveWei: max.reserveWei
                 )
                 self.maxUnshieldableError = nil
-                let amountText = ChatDashboardModel.decimalETHAmount(
-                    fromHexWei: RailgunExitCopy.maxUnshieldFillAmountWei(max)
-                )
                 // The Max affordance is the only writer that must NOT invalidate the breakdown
                 // it just computed — `inputText`'s `didSet` clears `maxUnshieldableBreakdown`
                 // on every OTHER edit (typing, a different slash command), because a stale
@@ -3041,7 +3115,12 @@ private final class ChatDashboardModel: ObservableObject {
             guard RailgunExitCopy.shouldRevertCard(for: error) else {
                 // The exit is probably still running. Leave the card submitted, say so, and do
                 // NOT throw — this is not an execution failure and must not be reported as one.
-                appendUnshieldStillInFlightNotice(for: intent, in: cardConversationID)
+                // `inFlightNotice` keeps a coded error's own copy, which for a possibly-submitted
+                // `bundlerRejected` is the only thing carrying the recoverable index and sender.
+                appendUnshieldStillInFlightNotice(
+                    for: intent, in: cardConversationID,
+                    text: RailgunExitCopy.inFlightNotice(for: error)
+                )
                 // The notes may already have left the pool, so still reconcile the balance.
                 refreshShieldedBalanceUntilSettled()
                 return
@@ -3088,6 +3167,16 @@ private final class ChatDashboardModel: ObservableObject {
                     // read). The card's current state — Submitted, or already Done — is still
                     // the most accurate thing we know, so say nothing and change nothing; only
                     // reconcile the balance, since the exit may well have landed.
+                    //
+                    // The exception: when the SIDECAR reported a failure we deliberately do not
+                    // revert on (a `bundlerRejected` whose op may be in the mempool), silence
+                    // would swallow the recovery pointer. Surface it as a note, not an error.
+                    if RailgunHelperClient.isTerminalExitFailure(error) {
+                        self.appendUnshieldStillInFlightNotice(
+                            for: intent, in: cardConversationID,
+                            text: RailgunExitCopy.inFlightNotice(for: error)
+                        )
+                    }
                     self.refreshShieldedBalanceUntilSettled()
                     return
                 }
@@ -3221,7 +3310,14 @@ private final class ChatDashboardModel: ObservableObject {
     /// The wallet stopped waiting for an exit that is probably still running. Deliberately an
     /// assistant note rather than an error: nothing failed, and the user must not be nudged
     /// into retrying and exiting twice.
-    private func appendUnshieldStillInFlightNotice(for intent: ToolIntent, in conversationID: UUID?) {
+    ///
+    /// `text` lets a caller substitute copy that carries a recovery pointer — see
+    /// `RailgunExitCopy.inFlightNotice(for:)`.
+    private func appendUnshieldStillInFlightNotice(
+        for intent: ToolIntent,
+        in conversationID: UUID?,
+        text: String = RailgunExitCopy.exitStillInFlightMessage
+    ) {
         guard let conversationID else { return }
         appendMessage(
             ChatMessage(
@@ -3241,7 +3337,7 @@ private final class ChatDashboardModel: ObservableObject {
                 // `.assistantText`, not `.assistantError`: nothing failed here.
                 kind: .assistantText,
                 role: .assistant,
-                text: RailgunExitCopy.exitStillInFlightMessage
+                text: text
             ),
             to: conversationID
         )

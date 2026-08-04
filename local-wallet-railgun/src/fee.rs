@@ -18,10 +18,10 @@ pub const DELIVERY_EPSILON_WEI: u128 = 1000;
 /// Conservative 4337 gas units for a sponsored RAILGUN unshield, used ONLY to reserve
 /// headroom for the fee note. The SDK still estimates the real fee at broadcast time.
 ///
-/// Seeded from kohaku-cli `src/utils/railgun-unshield-max.ts:12-20`. These are a starting
-/// upper bound, not a measurement: on the pinned rev the paymaster performs the on-chain
-/// Groth16 verification during *validation*, so cost concentrates in
-/// `paymaster_verification_gas_limit`. Recalibrate from the fork fixture and the live run.
+/// These are a deliberately conservative starting upper bound, NOT a measurement: on the
+/// pinned rev the paymaster performs the on-chain Groth16 verification during *validation*,
+/// so cost concentrates in `paymaster_verification_gas_limit`. Recalibrate from the fork
+/// fixture and the live run — see the measured figures below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GasUnits {
     pub pre_verification_gas: u128,
@@ -63,16 +63,23 @@ pub const RAILGUN_UNSHIELD_GAS_UNITS: GasUnits = GasUnits {
     paymaster_post_op_gas_limit: 120_000,
 };
 
-/// Safety margin on the reserve, as a percentage. Matches kohaku-cli's 1.2x.
+/// Safety margin on the reserve: 1.2x. The reserve only bounds how much of the shielded
+/// balance stays spendable, and an under-sized one strands an exit, so it errs high.
 const RESERVE_MARGIN_NUM: u128 = 12;
 const RESERVE_MARGIN_DEN: u128 = 10;
 
 /// A LOWER BOUND on the wei RailgunSmartWallet delivers when `value` leaves the pool.
 ///
-/// Uses kohaku-cli's formula (`railgun-unshield-max.ts:68`): `floor(value * (10000 - bps) /
-/// 10000)`. If the contract instead applies an "inclusive" fee
-/// (`base = value * 10000 / 10025`) it delivers slightly MORE, which is safe — the surplus
-/// becomes dust in the single-use sender. The fork fixture asserts the real figure.
+/// Computes `floor(value * (10000 - bps) / 10000)`.
+///
+/// The contract's real rule is now MEASURED, not assumed: `tests/e2e_fork.rs` pins it at three
+/// discriminating amounts (10000, 5000 and 5001 wei — 5000 alone lands on a rounding tie and
+/// cannot separate floor from round-to-nearest) and RailgunSmartWallet computes
+/// `value - floor(value * bps / 10000)`. That equals this bound when `value * bps` is a
+/// multiple of 10000, and exceeds it by exactly 1 wei otherwise — so it is always at or above
+/// this figure, never below. That direction is the whole point: `forward_amount` must never
+/// over-claim, because `WETH.withdraw` reverting would strand funds whose unshield has already
+/// executed during paymaster validation. Any surplus becomes dust in the single-use sender.
 pub fn delivered_lower_bound(value: u128, fee_bps: u16) -> u128 {
     let bps = fee_bps as u128;
     if bps >= BPS_DENOMINATOR {

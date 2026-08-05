@@ -63,6 +63,27 @@ enum GasPricing {
         return (minWei(priority, maxFee), maxFee) // priority never above maxFee
     }
 
+    /// True when the quote is the daemon's cap fallback rather than a live price.
+    ///
+    /// `gas_price.rs` does not fail closed when its chain reads fail: it logs and
+    /// returns `(max_fee_cap, priority_cap)` for *all three* tiers. That is
+    /// indistinguishable from a real quote by magnitude, but not by shape — the
+    /// success path runs `derive_fee_tiers`, which spreads slow/standard/fast
+    /// around the chain value, so a live quote never arrives with all three
+    /// identical.
+    ///
+    /// Callers use this to avoid presenting a fee-driven prefund floor as
+    /// something a top-up can fix: the fee is the pathology, and the next quote
+    /// will return the same cap until the daemon's reads recover. Zeroed tiers are
+    /// excluded — degenerate, but a different bug from this one.
+    static func isUniformCapFallbackQuote(_ gasPrice: WalletNodeClient.UserOperationGasPrice) -> Bool {
+        let standard = gasPrice.standard
+        guard weiUInt64(standard.maxFeePerGas) > 0 else {
+            return false
+        }
+        return gasPrice.slow == standard && gasPrice.fast == standard
+    }
+
     /// Multiplier applied to the base fee when computing maxFeePerGas headroom. 2× base
     /// fee survives ~6 blocks of maximum (12.5%/block) base-fee growth before stranding.
     private static let baseFeeHeadroomMultiplier: UInt64 = 2

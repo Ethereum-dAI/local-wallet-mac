@@ -507,21 +507,30 @@ struct ToolIntentCardView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
-                    Text("Not enough ETH to cover the gas headroom up front.")
+                    Text(report.gasPricingUnavailable
+                         ? "Gas pricing is unavailable, so this send was not signed."
+                         : "Not enough ETH to cover the gas headroom up front.")
                         .font(.caption.bold())
                         .foregroundStyle(.orange)
                 }
                 Text("""
                 EntryPoint requires \(WeiFormatter.ethDisplayString(fromHexWei: report.requiredPrefundWeiHex)) \
-                held up front to cover \(report.effectiveCallGasLimit.formatted()) call gas, whatever \
-                the transaction actually spends. This account has \
+                held up front to cover \(report.effectiveCallGasLimit.formatted()) call gas at \
+                \(GasPricing.gweiText(fromWei: (try? Data.quantityString(report.maxFeePerGasWeiHex)) ?? Data())) gwei, \
+                whatever the transaction actually spends. This account has \
                 \(WeiFormatter.ethDisplayString(fromHexWei: report.availableWeiHex)) available, counting its \
                 EntryPoint deposit.
                 """)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Top up at least \(WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)), then try again.")
+                // Only ask for money when a top-up can actually fix it. On the
+                // cap-fallback path the fee is a placeholder, not a price, so the
+                // floor moves when the daemon's reads recover — not when the
+                // account is funded.
+                Text(report.gasPricingUnavailable
+                     ? "That fee is wallet-node's safety ceiling, not a live price — its gas-price read failed. Retrying once reads recover will quote a real fee."
+                     : "Top up at least \(WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)), then try again.")
                     .font(.caption2.bold())
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -530,7 +539,7 @@ struct ToolIntentCardView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("Re-reads the account balance and re-estimates before asking for a signature.")
+                .help("Re-quotes the fee, re-reads the account balance, and re-estimates before asking for a signature.")
             }
             .padding(.vertical, 4)
         case .idle:

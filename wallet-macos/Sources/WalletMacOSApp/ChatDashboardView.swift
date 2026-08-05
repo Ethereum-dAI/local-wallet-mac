@@ -442,6 +442,7 @@ enum ChatIntentExecutionStatus: Equatable {
             guard let required = object["required_prefund"] as? String,
                   let available = object["available"] as? String,
                   let deficit = object["deficit"] as? String,
+                  let maxFee = object["max_fee_per_gas"] as? String,
                   let limit = object["effective_call_gas_limit"] as? UInt64
                     ?? (object["effective_call_gas_limit"] as? Int).flatMap(UInt64.init(exactly:))
             else {
@@ -452,6 +453,10 @@ enum ChatIntentExecutionStatus: Equatable {
                     requiredPrefundWeiHex: required,
                     availableWeiHex: available,
                     deficitWeiHex: deficit,
+                    maxFeePerGasWeiHex: maxFee,
+                    // Absent in rows written before this field existed: treat as a
+                    // live price, which only costs the extra explanation.
+                    gasPricingUnavailable: object["gas_pricing_unavailable"] as? Bool ?? false,
                     effectiveCallGasLimit: limit
                 )
             )
@@ -3897,6 +3902,8 @@ private final class ChatDashboardModel: ObservableObject {
                         "required_prefund": report.requiredPrefundWeiHex,
                         "available": report.availableWeiHex,
                         "deficit": report.deficitWeiHex,
+                        "max_fee_per_gas": report.maxFeePerGasWeiHex,
+                        "gas_pricing_unavailable": report.gasPricingUnavailable,
                         "effective_call_gas_limit": report.effectiveCallGasLimit,
                     ]),
                     toolCallId: intent.id.uuidString

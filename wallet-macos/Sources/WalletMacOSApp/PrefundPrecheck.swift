@@ -43,6 +43,12 @@ enum PrefundPrecheck {
         let requiredPrefundWeiHex: String
         let availableWeiHex: String
         let deficitWeiHex: String
+        /// The fee the floor was computed at. The deficit is fee-dominated, so
+        /// naming it is what makes an outsized floor legible.
+        let maxFeePerGasWeiHex: String
+        /// The fee above is the daemon's cap placeholder rather than a live price,
+        /// so no top-up can satisfy this floor until the daemon's reads recover.
+        let gasPricingUnavailable: Bool
         let effectiveCallGasLimit: UInt64
     }
 
@@ -70,6 +76,8 @@ enum PrefundPrecheck {
         acknowledgedCallGasLimit: UInt64?,
         requiredPrefund: Data,
         callGasLimit: Data,
+        maxFeePerGas: Data,
+        gasPricingUnavailable: Bool,
         isolation: isolated (any Actor)? = #isolation,
         readWalletStatus: () async throws -> WalletNodeClient.WalletStatus
     ) async -> Outcome {
@@ -97,6 +105,8 @@ enum PrefundPrecheck {
                 requiredPrefundWeiHex: "0x" + shortfall.requiredPrefund.hexEncodedString,
                 availableWeiHex: "0x" + shortfall.available.hexEncodedString,
                 deficitWeiHex: "0x" + shortfall.deficit.hexEncodedString,
+                maxFeePerGasWeiHex: "0x" + maxFeePerGas.leftPadded(to: 32).hexEncodedString,
+                gasPricingUnavailable: gasPricingUnavailable,
                 effectiveCallGasLimit: narrowed(callGasLimit)
                     ?? acknowledgedCallGasLimit
             )

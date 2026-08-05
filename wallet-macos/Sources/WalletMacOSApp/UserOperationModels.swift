@@ -185,6 +185,11 @@ struct UserOperationGasPlan: Equatable {
 struct EnrichedUserOperation: Equatable {
     let draft: UserOperationDraft
     let requiredPrefund: Data
+    /// The fee baked into `draft` came from the daemon's uniform cap fallback, not
+    /// a live quote (`GasPricing.isUniformCapFallbackQuote`). A prefund floor
+    /// derived from it is arithmetically right but economically meaningless, so
+    /// surfaces must not present it as a top-up the user can make.
+    let gasPricingUnavailable: Bool
 }
 
 struct UserOperationDraft: Equatable {

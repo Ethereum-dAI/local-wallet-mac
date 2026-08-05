@@ -26,6 +26,8 @@ import Testing
             acknowledgedCallGasLimit: nil,
             requiredPrefund: wei(1_000),
             callGasLimit: wei(600_000),
+            maxFeePerGas: wei(30_000_000_000),
+            gasPricingUnavailable: false,
             readWalletStatus: {
                 readCount += 1
                 return try self.status(balance: 1, deposit: 0)
@@ -44,6 +46,8 @@ import Testing
             acknowledgedCallGasLimit: 600_000,
             requiredPrefund: wei(1_000),
             callGasLimit: wei(600_000),
+            maxFeePerGas: wei(30_000_000_000),
+            gasPricingUnavailable: false,
             readWalletStatus: { try self.status(balance: 600, deposit: 400) }
         )
 
@@ -58,6 +62,8 @@ import Testing
             acknowledgedCallGasLimit: 600_000,
             requiredPrefund: wei(48_000_000_000_000_000),
             callGasLimit: wei(720_000),
+            maxFeePerGas: wei(30_000_000_000),
+            gasPricingUnavailable: false,
             readWalletStatus: {
                 try self.status(balance: 10_000_000_000_000_000, deposit: 3_000_000_000_000_000)
             }
@@ -70,6 +76,8 @@ import Testing
         #expect(report.requiredPrefundWeiHex == "0x" + wei(48_000_000_000_000_000).hexEncodedString)
         #expect(report.availableWeiHex == "0x" + wei(13_000_000_000_000_000).hexEncodedString)
         #expect(report.deficitWeiHex == "0x" + wei(35_000_000_000_000_000).hexEncodedString)
+        #expect(report.maxFeePerGasWeiHex == "0x" + wei(30_000_000_000).hexEncodedString)
+        #expect(report.gasPricingUnavailable == false)
         // Reported from the draft's (daemon-floored) limit, not the pressed one.
         #expect(report.effectiveCallGasLimit == 720_000)
     }
@@ -80,6 +88,8 @@ import Testing
             acknowledgedCallGasLimit: 600_000,
             requiredPrefund: wei(48_000_000_000_000_000),
             callGasLimit: wei(600_000),
+            maxFeePerGas: wei(30_000_000_000),
+            gasPricingUnavailable: false,
             readWalletStatus: { throw Boom() }
         )
 
@@ -99,6 +109,8 @@ import Testing
             acknowledgedCallGasLimit: 600_000,
             requiredPrefund: wei(48_000_000_000_000_000),
             callGasLimit: wide,
+            maxFeePerGas: wei(30_000_000_000),
+            gasPricingUnavailable: false,
             readWalletStatus: { try self.status(balance: 1, deposit: 0) }
         )
 
@@ -107,6 +119,26 @@ import Testing
             return
         }
         #expect(report.effectiveCallGasLimit == 600_000)
+    }
+
+    @Test func decisionCarriesTheGasPricingUnavailableFlag() async throws {
+        // The floor is arithmetically right but economically meaningless, so the
+        // card needs to know not to ask for a top-up.
+        let outcome = await PrefundPrecheck.decision(
+            acknowledgedCallGasLimit: 600_000,
+            requiredPrefund: wei(2_400_000_000_000_000_000),
+            callGasLimit: wei(600_000),
+            maxFeePerGas: wei(1_500_000_000_000),
+            gasPricingUnavailable: true,
+            readWalletStatus: { try self.status(balance: 10_000_000_000_000_000, deposit: 0) }
+        )
+
+        guard case let .decline(report) = outcome else {
+            Issue.record("expected .decline, got \(outcome)")
+            return
+        }
+        #expect(report.gasPricingUnavailable)
+        #expect(report.maxFeePerGasWeiHex == "0x" + wei(1_500_000_000_000).hexEncodedString)
     }
 
     @Test func reportsDeficitWhenBalancePlusDepositFallsShort() throws {

@@ -15,6 +15,16 @@ import Foundation
 /// - A zero `requiredPrefund` — an older daemon omitting the field — never
 ///   declines.
 ///
+/// One caveat the "strictly weaker" claim rests on: the estimate returns
+/// `estimated.required_prefund().max(simulation.validation.prefund)`
+/// (`estimate_user_operation_gas.rs:129-134`), while the send path checks only
+/// `op.required_prefund()`. Were `validation.prefund` ever to win that `max`,
+/// this would compare a *larger* floor than the daemon enforces and could
+/// decline an affordable send. It cannot today — `simulation_attempts` floors
+/// verification gas to the same `DAIMO_VERIFICATION_GAS_FLOOR` the estimate uses
+/// and the estimate adds call + preVerification gas on top — but the invariant
+/// is the daemon's to keep, not this file's.
+///
 /// Arithmetic is byte-wise on big-endian `Data` rather than on `UInt64`: a real
 /// account balance can exceed `UInt64.max` wei (≈18.4 ETH).
 enum PrefundPrecheck {
@@ -27,18 +37,91 @@ enum PrefundPrecheck {
         let deficit: Data
     }
 
-    /// Returns `nil` when the send should proceed to signing — either because no
-    /// limit was acknowledged (this gate is scoped to the headroom retry) or
-    /// because the floor is covered.
-    static func evaluate(
+    /// Everything the chat card and the thrown `AppError` need, so the numbers
+    /// have one origin rather than being re-derived per surface.
+    struct Report: Equatable {
+        let requiredPrefundWeiHex: String
+        let availableWeiHex: String
+        let deficitWeiHex: String
+        let effectiveCallGasLimit: UInt64
+    }
+
+    enum Outcome {
+        /// Proceed to the Secure Enclave.
+        case proceed
+        /// Decline before signing, with the numbers to explain why.
+        case decline(Report)
+        /// The balance read failed. Callers fail open (and log) — the send path's
+        /// own funding check is still the real gate, and failing closed would
+        /// turn a transient read failure into a refused send the user could
+        /// afford.
+        case statusUnavailable(Error)
+    }
+
+    /// The whole gate: skip unless a limit was acknowledged, read balance +
+    /// EntryPoint deposit, and decide. Takes the read as a closure so the
+    /// decision — including the fail-open branch — is testable without a
+    /// wallet-node.
+    /// `isolation` lets the read closure stay non-`Sendable` and run on the
+    /// caller's actor — `AppModel` is `@MainActor` and its client accessor is
+    /// too, so sending the closure across an isolation boundary would not
+    /// compile under Swift 6.
+    static func decision(
         acknowledgedCallGasLimit: UInt64?,
+        requiredPrefund: Data,
+        callGasLimit: Data,
+        isolation: isolated (any Actor)? = #isolation,
+        readWalletStatus: () async throws -> WalletNodeClient.WalletStatus
+    ) async -> Outcome {
+        // Scoped to the gas-headroom retry: an ordinary send must not pay for an
+        // extra round trip. Checked here rather than by the caller so the scope
+        // is part of the tested unit.
+        guard let acknowledgedCallGasLimit else {
+            return .proceed
+        }
+        let status: WalletNodeClient.WalletStatus
+        do {
+            status = try await readWalletStatus()
+        } catch {
+            return .statusUnavailable(error)
+        }
+        guard let shortfall = evaluate(
+            requiredPrefund: requiredPrefund,
+            accountBalance: status.accountBalance,
+            entryPointDeposit: status.entryPointDeposit
+        ) else {
+            return .proceed
+        }
+        return .decline(
+            Report(
+                requiredPrefundWeiHex: "0x" + shortfall.requiredPrefund.hexEncodedString,
+                availableWeiHex: "0x" + shortfall.available.hexEncodedString,
+                deficitWeiHex: "0x" + shortfall.deficit.hexEncodedString,
+                effectiveCallGasLimit: narrowed(callGasLimit)
+                    ?? acknowledgedCallGasLimit
+            )
+        )
+    }
+
+    /// Low 64 bits of a big-endian value, or `nil` if anything above them is set.
+    /// The daemon clamps every limit that reaches here to
+    /// `policy.max_call_gas_limit`, far below 2^64, so `nil` is unreachable in
+    /// practice — but a wider value must fall back to a caller-supplied number
+    /// rather than silently truncate.
+    private static func narrowed(_ value: Data) -> UInt64? {
+        let padded = value.leftPadded(to: 32)
+        guard padded.prefix(24).allSatisfy({ $0 == 0 }) else {
+            return nil
+        }
+        return Data(padded.suffix(8)).reduce(0) { ($0 << 8) | UInt64($1) }
+    }
+
+    /// The arithmetic alone: `nil` when the floor is covered.
+    static func evaluate(
         requiredPrefund: Data,
         accountBalance: Data,
         entryPointDeposit: Data
     ) -> Shortfall? {
-        guard acknowledgedCallGasLimit != nil else {
-            return nil
-        }
         let required = requiredPrefund.leftPadded(to: 32)
         let available = add(
             accountBalance.leftPadded(to: 32),

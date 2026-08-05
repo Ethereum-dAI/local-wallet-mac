@@ -2070,55 +2070,28 @@ final class AppModel: ObservableObject {
         // This is the only point where it helps: callGasLimit is inside the
         // UserOperation hash, so nothing downstream can change it without
         // invalidating the signature we are about to request.
-        if acknowledgedCallGasLimit != nil {
-            var walletStatus: WalletNodeClient.WalletStatus?
-            do {
-                walletStatus = try await withWalletNodeClient(
-                    operation: "\(logContext) wallet status"
-                ) { client in
+        switch await PrefundPrecheck.decision(
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit,
+            requiredPrefund: enriched.requiredPrefund,
+            callGasLimit: enrichedDraft.gasPlan.callGasLimit,
+            readWalletStatus: {
+                try await withWalletNodeClient(operation: "\(logContext) wallet status") { client in
                     try await client.walletStatus(smartAccount: enrichedDraft.sender)
                 }
-            } catch {
-                // Fail open. The send path's own funding check still stands, so
-                // the worst case is today's behaviour: one wasted signature.
-                // Failing closed would turn a transient read failure into a
-                // refused send the user could afford.
-                appendLog(
-                    "\(logContext): wallet status unavailable (\(error.localizedDescription)); skipping prefund precheck"
-                )
             }
-            if let walletStatus,
-               let shortfall = PrefundPrecheck.evaluate(
-                   acknowledgedCallGasLimit: acknowledgedCallGasLimit,
-                   requiredPrefund: enriched.requiredPrefund,
-                   accountBalance: walletStatus.accountBalance,
-                   entryPointDeposit: walletStatus.entryPointDeposit
-               ) {
-                appendLog(
-                    "\(logContext): declining before signature — requiredPrefund=\(shortfall.requiredPrefund.shortHex) available=\(shortfall.available.shortHex) deficit=\(shortfall.deficit.shortHex)"
-                )
-                clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
-                // The daemon clamps every path that produces this limit to
-                // policy.max_call_gas_limit, far below 2^64, so the high bytes
-                // are zero in practice. Guard anyway rather than truncate
-                // silently: a wider value falls back to the number the user
-                // actually pressed, which the daemon re-floors on retry.
-                let effectiveLimitData = enrichedDraft.gasPlan.callGasLimit.leftPadded(to: 32)
-                let effectiveCallGasLimit: UInt64
-                if effectiveLimitData.prefix(24).allSatisfy({ $0 == 0 }) {
-                    effectiveCallGasLimit = Data(effectiveLimitData.suffix(8)).reduce(0) {
-                        ($0 << 8) | UInt64($1)
-                    }
-                } else {
-                    effectiveCallGasLimit = acknowledgedCallGasLimit ?? 0
-                }
-                throw AppError.prefundShortfall(
-                    requiredPrefundWeiHex: "0x" + shortfall.requiredPrefund.hexEncodedString,
-                    availableWeiHex: "0x" + shortfall.available.hexEncodedString,
-                    deficitWeiHex: "0x" + shortfall.deficit.hexEncodedString,
-                    effectiveCallGasLimit: effectiveCallGasLimit
-                )
-            }
+        ) {
+        case .proceed:
+            break
+        case let .statusUnavailable(error):
+            appendLog(
+                "\(logContext): wallet status unavailable (\(error.localizedDescription)); skipping prefund precheck"
+            )
+        case let .decline(report):
+            appendLog(
+                "\(logContext): declining before signature — requiredPrefund=\(report.requiredPrefundWeiHex) available=\(report.availableWeiHex) deficit=\(report.deficitWeiHex)"
+            )
+            clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+            throw AppError.prefundShortfall(report)
         }
 
         let signatureResult: UserOperationSignatureResult

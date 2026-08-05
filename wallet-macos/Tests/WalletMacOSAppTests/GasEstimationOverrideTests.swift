@@ -61,10 +61,12 @@ import Testing
         let status = ChatIntentExecutionStatus.fromToolResponse(json)
 
         #expect(status == .prefundShortfall(
-            requiredPrefundWeiHex: "0xaa87bee538000",
-            availableWeiHex: "0x2386f26fc10000",
-            deficitWeiHex: "0x71afd498d0000",
-            effectiveCallGasLimit: 600_000
+            PrefundPrecheck.Report(
+                requiredPrefundWeiHex: "0xaa87bee538000",
+                availableWeiHex: "0x2386f26fc10000",
+                deficitWeiHex: "0x71afd498d0000",
+                effectiveCallGasLimit: 600_000
+            )
         ))
     }
 
@@ -81,19 +83,15 @@ import Testing
     }
 
     @Test func buildsPrefundShortfallStatusFromAppError() throws {
-        let error = AppError.prefundShortfall(
+        let report = PrefundPrecheck.Report(
             requiredPrefundWeiHex: "0xaa87bee538000",
             availableWeiHex: "0x2386f26fc10000",
             deficitWeiHex: "0x71afd498d0000",
             effectiveCallGasLimit: 600_000
         )
+        let error = AppError.prefundShortfall(report)
 
-        #expect(ChatIntentExecutionStatus.prefundShortfall(from: error) == .prefundShortfall(
-            requiredPrefundWeiHex: "0xaa87bee538000",
-            availableWeiHex: "0x2386f26fc10000",
-            deficitWeiHex: "0x71afd498d0000",
-            effectiveCallGasLimit: 600_000
-        ))
+        #expect(ChatIntentExecutionStatus.prefundShortfall(from: error) == .prefundShortfall(report))
         #expect(ChatIntentExecutionStatus.prefundShortfall(from: AppError.invalidAmount) == nil)
     }
 }

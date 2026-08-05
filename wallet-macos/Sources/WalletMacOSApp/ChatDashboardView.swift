@@ -407,12 +407,7 @@ enum ChatIntentExecutionStatus: Equatable {
     /// The account cannot cover EntryPoint's prefund floor for the consented
     /// `callGasLimit`. Recoverable like `.gasEstimationUnavailable`, not terminal
     /// like `.failed`: topping up and pressing again is the way forward.
-    case prefundShortfall(
-        requiredPrefundWeiHex: String,
-        availableWeiHex: String,
-        deficitWeiHex: String,
-        effectiveCallGasLimit: UInt64
-    )
+    case prefundShortfall(PrefundPrecheck.Report)
 
     static func fromToolResponse(_ text: String) -> ChatIntentExecutionStatus? {
         guard let data = text.data(using: .utf8),
@@ -453,10 +448,12 @@ enum ChatIntentExecutionStatus: Equatable {
                 return .failed("Insufficient balance for the gas headroom")
             }
             return .prefundShortfall(
-                requiredPrefundWeiHex: required,
-                availableWeiHex: available,
-                deficitWeiHex: deficit,
-                effectiveCallGasLimit: limit
+                PrefundPrecheck.Report(
+                    requiredPrefundWeiHex: required,
+                    availableWeiHex: available,
+                    deficitWeiHex: deficit,
+                    effectiveCallGasLimit: limit
+                )
             )
         default:
             return nil
@@ -477,15 +474,10 @@ enum ChatIntentExecutionStatus: Equatable {
     }
 
     static func prefundShortfall(from error: Error) -> ChatIntentExecutionStatus? {
-        guard case let AppError.prefundShortfall(required, available, deficit, limit) = error else {
+        guard case let AppError.prefundShortfall(report) = error else {
             return nil
         }
-        return .prefundShortfall(
-            requiredPrefundWeiHex: required,
-            availableWeiHex: available,
-            deficitWeiHex: deficit,
-            effectiveCallGasLimit: limit
-        )
+        return .prefundShortfall(report)
     }
 }
 
@@ -3893,7 +3885,7 @@ private final class ChatDashboardModel: ObservableObject {
             return
         }
 
-        if case let .prefundShortfall(required, available, deficit, limit)? =
+        if case let .prefundShortfall(report)? =
             ChatIntentExecutionStatus.prefundShortfall(from: error) {
             appendMessage(
                 ChatMessage(
@@ -3902,10 +3894,10 @@ private final class ChatDashboardModel: ObservableObject {
                     text: jsonString([
                         "status": "prefund_shortfall",
                         "intent_id": intent.id.uuidString,
-                        "required_prefund": required,
-                        "available": available,
-                        "deficit": deficit,
-                        "effective_call_gas_limit": limit,
+                        "required_prefund": report.requiredPrefundWeiHex,
+                        "available": report.availableWeiHex,
+                        "deficit": report.deficitWeiHex,
+                        "effective_call_gas_limit": report.effectiveCallGasLimit,
                     ]),
                     toolCallId: intent.id.uuidString
                 ),

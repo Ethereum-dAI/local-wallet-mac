@@ -502,7 +502,7 @@ struct ToolIntentCardView: View {
                 .controlSize(.small)
             }
             .padding(.vertical, 4)
-        case let .prefundShortfall(required, available, deficit, effectiveCallGasLimit):
+        case let .prefundShortfall(report):
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -512,21 +512,21 @@ struct ToolIntentCardView: View {
                         .foregroundStyle(.orange)
                 }
                 Text("""
-                EntryPoint requires \(WeiFormatter.ethDisplayString(fromHexWei: required)) \
-                held up front to cover \(effectiveCallGasLimit.formatted()) call gas, whatever \
+                EntryPoint requires \(WeiFormatter.ethDisplayString(fromHexWei: report.requiredPrefundWeiHex)) \
+                held up front to cover \(report.effectiveCallGasLimit.formatted()) call gas, whatever \
                 the transaction actually spends. This account has \
-                \(WeiFormatter.ethDisplayString(fromHexWei: available)) available, counting its \
+                \(WeiFormatter.ethDisplayString(fromHexWei: report.availableWeiHex)) available, counting its \
                 EntryPoint deposit.
                 """)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Top up at least \(WeiFormatter.ethDisplayString(fromHexWei: deficit)), then try again.")
+                Text("Top up at least \(WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)), then try again.")
                     .font(.caption2.bold())
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Button("Try again") {
-                    onSubmitWithGasHeadroom(effectiveCallGasLimit)
+                    onSubmitWithGasHeadroom(report.effectiveCallGasLimit)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)

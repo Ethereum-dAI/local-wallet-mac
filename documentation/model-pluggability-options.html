@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pluggable models — UI directions</title>
+<title>Pluggable models — design</title>
 <style>
   :root {
     --ground: #f6f6f8;
@@ -16,6 +16,7 @@
     --accent-soft: #eceffd;
     --warn: #b06a12;
     --ok: #1d7a4c;
+    --bad: #b03a2c;
 
     /* app chrome — fixed in both themes: the wallet is dark-only */
     --app-bg: #0b0f1a;
@@ -25,8 +26,10 @@
     --app-text: #e7ebf5;
     --app-muted: #8b96ae;
     --app-accent: #5b76f7;
+    --app-cyan: #46b6d4;
     --app-green: #46d489;
     --app-amber: #e2a33c;
+    --app-red: #e2685a;
     --app-mono: #c6d2ef;
 
     --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
@@ -34,51 +37,26 @@
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --ground: #0e1014;
-      --panel: #15181f;
-      --ink: #eceef4;
-      --ink-2: #b6bcca;
-      --muted: #838b9c;
-      --rule: #262a34;
-      --accent: #8b9dff;
-      --accent-soft: #1c2137;
-      --warn: #e0a94c;
-      --ok: #58c98e;
+      --ground: #0e1014; --panel: #15181f; --ink: #eceef4; --ink-2: #b6bcca;
+      --muted: #838b9c; --rule: #262a34; --accent: #8b9dff; --accent-soft: #1c2137;
+      --warn: #e0a94c; --ok: #58c98e; --bad: #e3796a;
     }
   }
   :root[data-theme="dark"] {
-    --ground: #0e1014;
-    --panel: #15181f;
-    --ink: #eceef4;
-    --ink-2: #b6bcca;
-    --muted: #838b9c;
-    --rule: #262a34;
-    --accent: #8b9dff;
-    --accent-soft: #1c2137;
-    --warn: #e0a94c;
-    --ok: #58c98e;
+    --ground: #0e1014; --panel: #15181f; --ink: #eceef4; --ink-2: #b6bcca;
+    --muted: #838b9c; --rule: #262a34; --accent: #8b9dff; --accent-soft: #1c2137;
+    --warn: #e0a94c; --ok: #58c98e; --bad: #e3796a;
   }
   :root[data-theme="light"] {
-    --ground: #f6f6f8;
-    --panel: #ffffff;
-    --ink: #14161c;
-    --ink-2: #454b5a;
-    --muted: #767d8f;
-    --rule: #e2e3ea;
-    --accent: #4b62e8;
-    --accent-soft: #eceffd;
-    --warn: #b06a12;
-    --ok: #1d7a4c;
+    --ground: #f6f6f8; --panel: #ffffff; --ink: #14161c; --ink-2: #454b5a;
+    --muted: #767d8f; --rule: #e2e3ea; --accent: #4b62e8; --accent-soft: #eceffd;
+    --warn: #b06a12; --ok: #1d7a4c; --bad: #b03a2c;
   }
 
   * { box-sizing: border-box; }
   body {
-    margin: 0;
-    background: var(--ground);
-    color: var(--ink);
-    font-family: var(--sans);
-    font-size: 15px;
-    line-height: 1.5;
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: 15px; line-height: 1.5;
     -webkit-font-smoothing: antialiased;
   }
   .wrap { max-width: 1120px; margin: 0 auto; padding: 44px 24px 96px; display: flex; flex-direction: column; gap: 56px; }
@@ -89,30 +67,22 @@
   .lede { margin: 0; color: var(--ink-2); max-width: 64ch; }
 
   section { display: flex; flex-direction: column; gap: 18px; }
-  .opt-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
-  .opt-key {
-    font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: .1em;
-    color: var(--accent); background: var(--accent-soft); border-radius: 4px; padding: 4px 8px;
-  }
+  .head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .step { font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: .1em; color: var(--accent); background: var(--accent-soft); border-radius: 4px; padding: 4px 8px; }
   h2 { margin: 0; font-size: 22px; letter-spacing: -.015em; font-weight: 660; }
-  .opt-sub { color: var(--muted); font-size: 14px; }
-  .rec { font-size: 11px; font-family: var(--mono); text-transform: uppercase; letter-spacing: .1em; color: var(--ok); border: 1px solid currentColor; border-radius: 4px; padding: 3px 7px; }
+  .sub { color: var(--muted); font-size: 14px; }
 
   .notes { display: flex; flex-wrap: wrap; gap: 8px; }
   .note { font-size: 12.5px; color: var(--ink-2); background: var(--panel); border: 1px solid var(--rule); border-radius: 999px; padding: 5px 12px; }
   .note b { font-weight: 620; color: var(--ink); }
-  .note.minus b { color: var(--warn); }
 
   /* ---------- app mockup ---------- */
-  .mk {
-    background: var(--app-bg); border: 1px solid var(--app-line); border-radius: 12px;
-    overflow: hidden; box-shadow: 0 18px 40px -28px rgba(6, 10, 24, .8);
-    color: var(--app-text);
-  }
+  .mk { background: var(--app-bg); border: 1px solid var(--app-line); border-radius: 12px; overflow: hidden;
+        box-shadow: 0 18px 40px -28px rgba(6, 10, 24, .8); color: var(--app-text); position: relative; }
   .mk-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--app-line); background: #0d1220; }
   .dot { width: 10px; height: 10px; border-radius: 50%; }
-  .mk-title { font-size: 12px; color: var(--app-muted); margin-left: 8px; letter-spacing: .02em; }
-  .mk-body { display: grid; grid-template-columns: 168px 1fr; min-height: 380px; }
+  .mk-title { font-size: 12px; color: var(--app-muted); margin-left: 8px; }
+  .mk-body { display: grid; grid-template-columns: 168px 1fr; min-height: 360px; }
   .mk-nav { border-right: 1px solid var(--app-line); padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; background: #0c1120; }
   .mk-nav div { font-size: 12.5px; color: var(--app-muted); padding: 6px 10px; border-radius: 6px; }
   .mk-nav div.on { background: rgba(91, 118, 247, .16); color: #dfe6ff; font-weight: 600; }
@@ -124,19 +94,21 @@
   .row { display: flex; align-items: center; gap: 12px; }
   .row.pad { padding: 10px; border: 1px solid var(--app-line); border-radius: 8px; background: var(--app-card-2); }
   .row.pick { border-color: rgba(91, 118, 247, .55); box-shadow: inset 0 0 0 1px rgba(91, 118, 247, .25); }
+  .row.dim { opacity: .62; }
   .radio { width: 15px; height: 15px; border-radius: 50%; border: 1.5px solid #4a5877; flex: none; }
   .radio.on { border-color: var(--app-accent); background: radial-gradient(circle, var(--app-accent) 0 4.5px, transparent 5px); }
   .grow { flex: 1; min-width: 0; }
   .nm { font-size: 13.5px; font-weight: 640; letter-spacing: -.005em; }
   .meta { font-family: var(--mono); font-size: 11px; color: var(--app-muted); margin-top: 2px; }
-  .kv { display: grid; grid-template-columns: 128px 1fr; gap: 6px 14px; font-size: 12px; }
+  .kv { display: grid; grid-template-columns: 150px 1fr; gap: 6px 14px; font-size: 12px; margin: 0; }
   .kv dt { color: var(--app-muted); font-weight: 600; }
   .kv dd { margin: 0; font-family: var(--mono); color: var(--app-mono); }
 
   .chip { font-size: 10px; font-family: var(--mono); text-transform: uppercase; letter-spacing: .08em; padding: 3px 7px; border-radius: 999px; border: 1px solid var(--app-line); color: var(--app-muted); white-space: nowrap; }
-  .chip.dev { color: var(--app-green); border-color: rgba(70, 212, 137, .4); background: rgba(70, 212, 137, .08); }
-  .chip.net { color: var(--app-amber); border-color: rgba(226, 163, 60, .4); background: rgba(226, 163, 60, .08); }
   .chip.def { color: #c3cdf5; border-color: rgba(91, 118, 247, .45); background: rgba(91, 118, 247, .12); }
+  .chip.ok { color: var(--app-green); border-color: rgba(70, 212, 137, .4); background: rgba(70, 212, 137, .08); }
+  .chip.tight { color: var(--app-amber); border-color: rgba(226, 163, 60, .42); background: rgba(226, 163, 60, .08); }
+  .chip.no { color: var(--app-red); border-color: rgba(226, 104, 90, .42); background: rgba(226, 104, 90, .08); }
 
   .btn { font-size: 12px; font-weight: 640; padding: 6px 12px; border-radius: 7px; border: 1px solid var(--app-line); color: #d7deef; background: #1b2234; white-space: nowrap; }
   .btn.pri { background: var(--app-accent); border-color: var(--app-accent); color: #fff; }
@@ -146,34 +118,48 @@
   .field { display: flex; flex-direction: column; gap: 5px; }
   .field label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .12em; color: var(--app-muted); font-weight: 700; }
   .input { font-family: var(--mono); font-size: 12px; color: var(--app-mono); background: #0d1220; border: 1px solid var(--app-line); border-radius: 7px; padding: 8px 10px; }
-  .input.ph { color: #5c6884; }
-  .seg { display: inline-flex; padding: 3px; gap: 3px; background: #0d1220; border: 1px solid var(--app-line); border-radius: 8px; }
-  .seg span { font-size: 12px; font-weight: 620; padding: 5px 14px; border-radius: 6px; color: var(--app-muted); }
-  .seg span.on { background: var(--app-accent); color: #fff; }
 
   .bar { height: 5px; border-radius: 3px; background: #1d2437; overflow: hidden; }
   .bar i { display: block; height: 100%; background: var(--app-accent); }
   .hint { font-size: 11.5px; color: var(--app-muted); }
   .hint.ok { color: var(--app-green); }
   .hint.warn { color: var(--app-amber); }
+  .hint.bad { color: var(--app-red); }
+  .mono { font-family: var(--mono); }
 
-  .anchor { position: relative; }
-  .popover { position: absolute; right: 0; top: calc(100% + 6px); width: 260px; background: #151d30; border: 1px solid #2f3a55; border-radius: 9px; padding: 6px; box-shadow: 0 20px 40px -20px #000; z-index: 3; }
-  .popover div { display: flex; gap: 9px; align-items: center; font-size: 12.5px; padding: 8px 9px; border-radius: 6px; color: #dbe2f2; }
-  .popover div.hl { background: rgba(91, 118, 247, .18); }
-  .popover small { display: block; color: var(--app-muted); font-size: 11px; font-weight: 400; }
+  /* stacked memory budget bar */
+  .budget { display: flex; flex-direction: column; gap: 7px; }
+  .stack { display: flex; height: 22px; border-radius: 6px; background: #101728; border: 1px solid var(--app-line); position: relative; }
+  .stack span.seg { display: block; height: 100%; }
+  .s-w { background: var(--app-accent); }
+  .s-kv { background: var(--app-cyan); }
+  .s-o { background: #4a5877; }
+  .stack span.seg:first-child { border-radius: 5px 0 0 5px; }
+  .cap { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--app-red); }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--app-muted); }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+  /* modal sheet */
+  .sheetwrap { position: relative; }
+  .scrim { position: absolute; inset: 0; background: rgba(4, 7, 14, .55); }
+  .sheet { position: absolute; left: 50%; top: 40px; transform: translateX(-50%); width: min(430px, 88%); background: #141b2c;
+           border: 1px solid #2f3a55; border-radius: 12px; padding: 18px; display: flex; flex-direction: column; gap: 12px;
+           box-shadow: 0 30px 60px -24px #000; }
 
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   @media (max-width: 860px) { .two, .mk-body { grid-template-columns: 1fr; } .mk-nav { flex-direction: row; overflow-x: auto; } }
 
-  /* ---------- comparison ---------- */
+  /* ---------- tables ---------- */
   .tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--panel); }
-  table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 640px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 620px; }
   th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; }
   thead th { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
   tbody tr:last-child td { border-bottom: none; }
-  td.y { color: var(--ok); font-weight: 620; }
-  td.n { color: var(--muted); }
+  td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  code { font-family: var(--mono); font-size: 12.5px; background: var(--accent-soft); color: var(--accent); padding: 1px 5px; border-radius: 4px; }
+  .formula { font-family: var(--mono); font-size: 13px; background: var(--panel); border: 1px solid var(--rule); border-left: 3px solid var(--accent);
+             border-radius: 8px; padding: 14px 16px; overflow-x: auto; line-height: 1.75; color: var(--ink-2); white-space: pre; }
+  .formula b { color: var(--ink); font-weight: 640; }
 
   /* ---------- questions ---------- */
   .qs { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; }
@@ -183,22 +169,21 @@
   .q em { font-style: normal; color: var(--accent); font-weight: 620; }
   footer { color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--rule); padding-top: 18px; }
 </style>
-
 </head>
 <body>
 <div class="wrap">
   <header class="top">
     <div class="eyebrow">Issue #74 · Settings › Models</div>
     <h1>Pluggable models</h1>
-    <p class="lede">Three directions for choosing the local model, adding one from Hugging Face, and (optionally) talking to Ollama. Gemma 4 E4B stays the default in all three. Mockups are dark because the app is.</p>
+    <p class="lede">A curated list plus any GGUF repo from Hugging Face — with a hardware check that flags what this Mac can actually run, tests it after download, and still lets you override. Gemma 4 E4B stays the default. Mockups are dark because the app is; every number below is measured on an M3 Pro / 36 GB.</p>
   </header>
 
-  <!-- ============ OPTION A ============ -->
+  <!-- ============ 1 · THE LIST ============ -->
   <section>
-    <div class="opt-head">
-      <span class="opt-key">A</span>
-      <h2>Curated list + paste a repo</h2>
-      <span class="opt-sub">Extends today's screen. GGUF only, all on-device.</span>
+    <div class="head">
+      <span class="step">1</span>
+      <h2>The list, flagged for this Mac</h2>
+      <span class="sub">Every row carries a verdict before you spend the download.</span>
     </div>
 
     <div class="mk">
@@ -212,48 +197,67 @@
         </nav>
         <div class="mk-pane">
           <div class="mk-sec">
+            <div class="row">
+              <h4 style="margin:0">This Mac</h4>
+              <span class="grow"></span>
+              <span class="hint mono">MacBook Pro · Apple M3 Pro</span>
+            </div>
+            <dl class="kv">
+              <dt>Memory</dt><dd>36.0 GB unified</dd>
+              <dt>Metal budget</dt><dd>28.1 GB <span style="color:#8b96ae">· recommendedMaxWorkingSetSize</span></dd>
+              <dt>Free disk</dt><dd>211 GB</dd>
+            </dl>
+          </div>
+
+          <div class="mk-sec">
             <h4>Text model</h4>
             <div class="row pad pick">
               <span class="radio on"></span>
               <div class="grow">
                 <div class="nm">Gemma 4 E4B</div>
-                <div class="meta">ggml-org/gemma-4-E4B-it-GGUF · Q4_0 · 4.59 GB · 32k ctx</div>
+                <div class="meta">Q4_0 · 4.59 GB · 8k context → 6.9 GB in memory</div>
               </div>
               <span class="chip def">Default</span>
+              <span class="chip ok">✓ Fits</span>
               <span class="chip">Loaded</span>
             </div>
             <div class="row pad">
               <span class="radio"></span>
               <div class="grow">
                 <div class="nm">Qwen3 4B Instruct</div>
-                <div class="meta">Qwen/Qwen3-4B-Instruct-GGUF · Q4_K_M · 2.50 GB · 32k ctx</div>
+                <div class="meta">Q4_K_M · 2.50 GB · 8k context → 4.3 GB in memory</div>
               </div>
+              <span class="chip ok">✓ Fits</span>
               <span class="btn sm">Download</span>
             </div>
             <div class="row pad">
               <span class="radio"></span>
               <div class="grow">
-                <div class="nm">Llama 3.2 3B Instruct</div>
-                <div class="meta">bartowski/Llama-3.2-3B-Instruct-GGUF · Q4_K_M · 2.02 GB · 8k ctx</div>
+                <div class="nm">Gemma 4 E4B</div>
+                <div class="meta">BF16 · 15.05 GB · 32k context → 23.8 GB in memory</div>
               </div>
+              <span class="chip tight">Tight</span>
               <span class="btn sm">Download</span>
+            </div>
+            <div class="row pad dim">
+              <span class="radio"></span>
+              <div class="grow">
+                <div class="nm">Qwen3 32B Instruct</div>
+                <div class="meta">Q8_0 · 34.8 GB · needs ~42.5 GB, budget is 28.1 GB</div>
+              </div>
+              <span class="chip no">Won't fit</span>
+              <span class="btn sm ghost">Download anyway…</span>
             </div>
           </div>
 
           <div class="mk-sec">
             <h4>Add from Hugging Face</h4>
             <div class="two">
-              <div class="field">
-                <label>Repository</label>
-                <div class="input">unsloth/gemma-4-E2B-it-GGUF</div>
-              </div>
-              <div class="field">
-                <label>File</label>
-                <div class="input">gemma-4-E2B-it-Q4_K_M.gguf ⌄</div>
-              </div>
+              <div class="field"><label>Repository</label><div class="input">unsloth/gemma-4-E2B-it-GGUF</div></div>
+              <div class="field"><label>File</label><div class="input">gemma-4-E2B-it-Q4_K_M.gguf ⌄</div></div>
             </div>
             <div class="row">
-              <span class="hint ok">3 GGUF files found · 1.71 GB · checksum from repo metadata</span>
+              <span class="hint ok">1.71 GB · 26 layers · 2 KV heads · trained to 32k · checksum from repo metadata · ✓ Fits at 8k</span>
               <span class="grow"></span>
               <span class="btn pri">Download &amp; add</span>
             </div>
@@ -263,177 +267,213 @@
     </div>
 
     <div class="notes">
-      <span class="note"><b>Smallest change</b> — reuses the existing downloader &amp; SHA-256 gate</span>
-      <span class="note"><b>Nothing leaves the Mac</b></span>
-      <span class="note minus"><b>No Ollama</b>, no models you already have locally</span>
+      <span class="note">The verdict is <b>per model</b>, replacing today's single global 16 GB gate</span>
+      <span class="note">Computed <b>before</b> downloading — sizes and layer counts come from the Hub</span>
+      <span class="note">It <b>never blocks</b> — "Won't fit" still offers the download</span>
     </div>
   </section>
 
-  <!-- ============ OPTION B ============ -->
+  <!-- ============ 2 · THE MATH ============ -->
   <section>
-    <div class="opt-head">
-      <span class="opt-key">B</span>
-      <h2>Two runtimes, one switch</h2>
-      <span class="opt-sub">On-device llama.cpp or an Ollama server you point at.</span>
+    <div class="head">
+      <span class="step">2</span>
+      <h2>What "fits" means</h2>
+      <span class="sub">Weights are the small half. Context is what blows the budget.</span>
     </div>
 
-    <div class="mk">
-      <div class="mk-bar">
-        <span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span>
-        <span class="mk-title">Local Wallet — Settings</span>
+    <div class="two">
+      <div class="mk">
+        <div class="mk-bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="mk-title">Gemma 4 E4B · Q4_0 · 8 192 tokens</span></div>
+        <div class="mk-pane">
+          <div class="mk-sec budget">
+            <div class="stack">
+              <span class="seg s-w" style="width:16.3%"></span>
+              <span class="seg s-kv" style="width:5.0%"></span>
+              <span class="seg s-o" style="width:3.2%"></span>
+              <span class="cap" style="left:80%"></span>
+            </div>
+            <div class="legend">
+              <span><i class="s-w"></i>Weights 4.59 GB</span>
+              <span><i class="s-kv"></i>KV cache 1.41 GB</span>
+              <span><i class="s-o"></i>Overhead 0.9 GB</span>
+              <span style="color:var(--app-red)">│ 80% of budget</span>
+            </div>
+            <div class="hint ok">6.9 GB of 28.1 GB — comfortable</div>
+          </div>
+        </div>
       </div>
-      <div class="mk-body">
-        <nav class="mk-nav">
-          <div>Info</div><div class="on">Models</div><div>Network</div><div>Transactions</div><div>Diagnostics</div><div>Data</div><div>Security</div>
-        </nav>
+
+      <div class="mk">
+        <div class="mk-bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="mk-title">Gemma 4 E4B · BF16 · 32 768 tokens</span></div>
+        <div class="mk-pane">
+          <div class="mk-sec budget">
+            <div class="stack">
+              <span class="seg s-w" style="width:53.6%"></span>
+              <span class="seg s-kv" style="width:20.1%"></span>
+              <span class="seg s-o" style="width:11.0%"></span>
+              <span class="cap" style="left:80%"></span>
+            </div>
+            <div class="legend">
+              <span><i class="s-w"></i>Weights 15.05 GB</span>
+              <span><i class="s-kv"></i>KV cache 5.64 GB</span>
+              <span><i class="s-o"></i>Overhead 3.1 GB</span>
+              <span style="color:var(--app-red)">│ 80% of budget</span>
+            </div>
+            <div class="hint warn">23.8 GB of 28.1 GB — tight; drop to 8k for headroom</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="formula"><b>budget</b> = min(MTLDevice.recommendedMaxWorkingSetSize, hw.memsize − 8 GB)      → 28.1 GB here
+<b>kv(ctx)</b> = ctx × block_count × head_count_kv × (key_length + value_length) × 2 B
+<b>need</b>   = weights + kv(ctx) + 15% overhead
+
+need ≤ 80% of budget → <b>Fits</b>       need ≤ budget → <b>Tight</b>       else → <b>Won't fit</b></div>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Gemma 4 E4B Q4_0 · context</th><th>KV cache</th><th>Total in memory</th><th>36 GB Mac</th><th>16 GB Mac</th></tr></thead>
+        <tbody>
+          <tr><td class="num">4 096</td><td class="num">0.71 GB</td><td class="num">6.1 GB</td><td style="color:var(--ok)">Fits</td><td style="color:var(--ok)">Fits</td></tr>
+          <tr><td class="num">8 192</td><td class="num">1.41 GB</td><td class="num">6.9 GB</td><td style="color:var(--ok)">Fits</td><td style="color:var(--warn)">Tight</td></tr>
+          <tr><td class="num">16 384</td><td class="num">2.82 GB</td><td class="num">8.5 GB</td><td style="color:var(--ok)">Fits</td><td style="color:var(--bad)">Won't fit</td></tr>
+          <tr><td class="num">32 768</td><td class="num">5.64 GB</td><td class="num">11.8 GB</td><td style="color:var(--ok)">Fits</td><td style="color:var(--bad)">Won't fit</td></tr>
+          <tr><td class="num">131 072</td><td class="num">22.6 GB</td><td class="num">31.2 GB</td><td style="color:var(--bad)">Won't fit</td><td style="color:var(--bad)">Won't fit</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="notes"><span class="note">Read from the GGUF header: <b>42 layers · 2 KV heads · key/value length 512</b> = 168 KiB per token</span></div>
+  </section>
+
+  <!-- ============ 3 · OVERRIDE ============ -->
+  <section>
+    <div class="head">
+      <span class="step">3</span>
+      <h2>Download anyway</h2>
+      <span class="sub">The check advises. It never decides.</span>
+    </div>
+
+    <div class="mk sheetwrap">
+      <div class="mk-bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="mk-title">Local Wallet — Settings</span></div>
+      <div class="mk-body" style="min-height:320px">
+        <nav class="mk-nav"><div>Info</div><div class="on">Models</div><div>Network</div><div>Transactions</div><div>Diagnostics</div><div>Data</div><div>Security</div></nav>
+        <div class="mk-pane">
+          <div class="mk-sec" style="opacity:.45">
+            <h4>Text model</h4>
+            <div class="row pad"><span class="radio"></span><div class="grow"><div class="nm">Qwen3 32B Instruct</div><div class="meta">Q8_0 · 34.8 GB</div></div><span class="chip no">Won't fit</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="scrim"></div>
+      <div class="sheet">
+        <div class="nm" style="font-size:16px">Larger than this Mac's Metal budget</div>
+        <dl class="kv" style="grid-template-columns:110px 1fr">
+          <dt>Needs</dt><dd style="color:var(--app-red)">~42.5 GB at 8k context</dd>
+          <dt>Budget</dt><dd>28.1 GB of 36.0 GB unified</dd>
+          <dt>Download</dt><dd>34.8 GB · 211 GB free</dd>
+        </dl>
+        <div class="hint">Expect swapping, very slow replies, or a load that fails outright. Nothing on-chain is at risk: if it can't start, the wallet keeps the model you have now.</div>
+        <div class="row" style="margin-top:2px">
+          <span class="grow"></span>
+          <span class="btn ghost">Cancel</span>
+          <span class="btn">Download anyway</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="two">
+      <div class="mk">
+        <div class="mk-bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="mk-title">Tight — offer the cheap fix</span></div>
+        <div class="mk-pane"><div class="mk-sec">
+          <div class="nm">Gemma 4 E4B · BF16</div>
+          <div class="hint warn">23.8 GB at 32k context — 85% of budget.</div>
+          <div class="row"><span class="btn pri">Use 8k context (6.9 GB)</span><span class="btn">Keep 32k</span></div>
+        </div></div>
+      </div>
+      <div class="mk">
+        <div class="mk-bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="mk-title">Context picker, memory-aware</span></div>
+        <div class="mk-pane"><div class="mk-sec">
+          <div class="row"><span class="hint">Context window</span><span class="grow"></span><span class="input" style="width:150px">8192 tokens ⌄</span></div>
+          <div class="row"><span class="chip ok">4096 · 6.1 GB</span><span class="chip ok">8192 · 6.9 GB</span><span class="chip ok">16384 · 8.5 GB</span><span class="chip tight">32768 · 11.8 GB</span></div>
+          <div class="hint">Trained to 131 072. Presets are clamped by memory, not only by the model.</div>
+        </div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 4 · TEST ============ -->
+  <section>
+    <div class="head">
+      <span class="step">4</span>
+      <h2>Then actually test it</h2>
+      <span class="sub">Arithmetic proposes; a real load disposes.</span>
+    </div>
+
+    <div class="two">
+      <div class="mk">
+        <div class="mk-bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="mk-title">After download</span></div>
+        <div class="mk-pane"><div class="mk-sec">
+          <h4>Verifying</h4>
+          <div class="row"><span class="hint">SHA-256</span><span class="grow"></span><span class="hint ok">✓ matches repo metadata</span></div>
+          <div class="row"><span class="hint">Load at 8 192 tokens</span><span class="grow"></span><span class="hint">running…</span></div>
+          <div class="bar"><i style="width:64%"></i></div>
+          <div class="row"><span class="hint">Tool-call round trip</span><span class="grow"></span><span class="hint">queued</span></div>
+        </div></div>
+      </div>
+
+      <div class="mk">
+        <div class="mk-bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="mk-title">Three ways it ends</span></div>
         <div class="mk-pane">
           <div class="mk-sec">
-            <h4>Runtime</h4>
-            <div class="row">
-              <div class="seg"><span>On-device</span><span class="on">Ollama</span></div>
-              <span class="grow"></span>
-              <span class="chip net">Prompts leave the app</span>
-            </div>
-            <div class="hint warn">Ollama runs outside the wallet's sandbox. Balances, addresses and intents in the prompt go to that host.</div>
+            <div class="row"><span class="chip ok">✓ Ready</span><span class="grow"></span><span class="hint mono">loaded in 3.1 s · 6.6 GB resident</span></div>
+            <div class="hint ok">Test prompt returned a valid <span class="mono">transfer</span> tool call.</div>
           </div>
-
           <div class="mk-sec">
-            <h4>Ollama server</h4>
-            <div class="two">
-              <div class="field"><label>Host</label><div class="input">127.0.0.1</div></div>
-              <div class="field"><label>Port</label><div class="input">11434</div></div>
-            </div>
-            <div class="row">
-              <span class="hint ok">Connected · ollama 0.6.2 · 3 models</span>
-              <span class="grow"></span>
-              <span class="btn">Test connection</span>
-            </div>
-            <div class="field">
-              <label>Model</label>
-              <div class="input">qwen3:8b ⌄</div>
-            </div>
-            <div class="hint">Tool calling required. <span class="hint warn">llama3.2:1b — no tool support</span></div>
+            <div class="row"><span class="chip tight">Stepped down</span><span class="grow"></span><span class="hint mono">32 768 → 8 192</span></div>
+            <div class="hint warn">Out of memory at 32k. Retried at 8k and loaded — raise it again in Context window.</div>
           </div>
-
-          <div class="mk-sec" style="opacity:.62">
-            <h4>On-device (inactive)</h4>
-            <dl class="kv">
-              <dt>Model</dt><dd>Gemma 4 E4B · Q4_0</dd>
-              <dt>Path</dt><dd>~/Library/…/Models/gemma-4-E4B-it-Q4_0.gguf</dd>
-            </dl>
+          <div class="mk-sec">
+            <div class="row"><span class="chip no">✗ Unusable</span><span class="grow"></span><span class="hint mono">kept Gemma 4 E4B</span></div>
+            <div class="hint bad">No chat template with tool support, so it can't drive wallet actions. Keep it chat-only, or remove it.</div>
           </div>
         </div>
       </div>
     </div>
 
     <div class="notes">
-      <span class="note"><b>Any Ollama model</b>, zero download UI</span>
-      <span class="note"><b>Clean split</b> — one runtime protocol, two implementations</span>
-      <span class="note minus"><b>Two mental models</b> — the HF flow still has to live somewhere</span>
+      <span class="note">A failed test is <b>never fatal</b> — the working model stays selected</span>
+      <span class="note">For a wallet, the <b>tool-call round trip</b> matters more than tokens/sec</span>
     </div>
   </section>
 
-  <!-- ============ OPTION C ============ -->
+  <!-- ============ 5 · PROVENANCE ============ -->
   <section>
-    <div class="opt-head">
-      <span class="opt-key">C</span>
-      <h2>One shelf, tagged by source</h2>
-      <span class="rec">Recommended</span>
-      <span class="opt-sub">Bundled, downloaded, Hugging Face and Ollama models in a single list.</span>
+    <div class="head">
+      <span class="step">5</span>
+      <h2>Where each number comes from</h2>
+      <span class="sub">All verified against <span class="mono">ggml-org/gemma-4-E4B-it-GGUF</span>.</span>
     </div>
-
-    <div class="mk">
-      <div class="mk-bar">
-        <span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span>
-        <span class="mk-title">Local Wallet — Settings</span>
-      </div>
-      <div class="mk-body">
-        <nav class="mk-nav">
-          <div>Info</div><div class="on">Models</div><div>Network</div><div>Transactions</div><div>Diagnostics</div><div>Data</div><div>Security</div>
-        </nav>
-        <div class="mk-pane">
-          <div class="mk-sec anchor">
-            <div class="row">
-              <h4 style="margin:0">Models</h4>
-              <span class="grow"></span>
-              <span class="btn sm">＋ Add model</span>
-            </div>
-
-            <div class="popover">
-              <div class="hl">🤗 <span><b>Hugging Face repo</b><small>Paste owner/name, pick a GGUF</small></span></div>
-              <div>🖥️ <span><b>Ollama server</b><small>host : port</small></span></div>
-              <div>📁 <span><b>Local GGUF file…</b><small>Choose from disk</small></span></div>
-            </div>
-
-            <div class="row pad pick">
-              <span class="radio on"></span>
-              <div class="grow">
-                <div class="nm">Gemma 4 E4B</div>
-                <div class="meta">Q4_0 · 4.59 GB · 32k ctx · loaded</div>
-              </div>
-              <span class="chip dev">On-device</span>
-              <span class="chip def">Default</span>
-            </div>
-
-            <div class="row pad">
-              <span class="radio"></span>
-              <div class="grow">
-                <div class="nm">Qwen3 4B Instruct</div>
-                <div class="meta">Qwen/Qwen3-4B-Instruct-GGUF · Q4_K_M</div>
-                <div class="bar" style="margin-top:7px;width:230px"><i style="width:41%"></i></div>
-              </div>
-              <span class="chip dev">On-device</span>
-              <span class="hint">41% · 1.0/2.5 GB</span>
-              <span class="btn sm ghost">Cancel</span>
-            </div>
-
-            <div class="row pad">
-              <span class="radio"></span>
-              <div class="grow">
-                <div class="nm">qwen3:8b</div>
-                <div class="meta">ollama · 127.0.0.1:11434 · tools ✓</div>
-              </div>
-              <span class="chip net">Network</span>
-              <span class="btn sm ghost">Remove</span>
-            </div>
-
-            <div class="row pad" style="opacity:.55">
-              <span class="radio"></span>
-              <div class="grow">
-                <div class="nm">llama3.2:1b</div>
-                <div class="meta">ollama · 127.0.0.1:11434 · no tool support</div>
-              </div>
-              <span class="chip net">Network</span>
-              <span class="chip">Unsupported</span>
-            </div>
-          </div>
-
-          <div class="mk-sec">
-            <h4>Active model</h4>
-            <dl class="kv">
-              <dt>Runtime</dt><dd>llama.cpp · Metal</dd>
-              <dt>Context window</dt><dd>8192 tokens ⌄ (max 32768)</dd>
-              <dt>Path</dt><dd>~/Library/…/Models/gemma-4-E4B-it-Q4_0.gguf</dd>
-            </dl>
-            <div class="row"><span class="hint">Switching reloads the runtime; the current chat keeps its history.</span></div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="notes">
-      <span class="note"><b>One list to scan</b> — source and privacy read at a glance</span>
-      <span class="note"><b>Grows</b> — MLX or a remote endpoint is one more badge</span>
-      <span class="note minus"><b>Most work</b> — needs a real model registry behind it</span>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Number</th><th>Source</th><th>Cost</th></tr></thead>
+        <tbody>
+          <tr><td>File size, SHA-256</td><td><code>GET /api/models/{repo}/tree/main</code> — <code>lfs.oid</code> <i>is</i> the SHA-256</td><td>1 request</td></tr>
+          <tr><td>Architecture, trained context, chat template</td><td><code>GET /api/models/{repo}</code> — the <code>gguf</code> block</td><td>1 request</td></tr>
+          <tr><td>Layers, KV heads, key/value length</td><td>GGUF header via <code>Range: bytes=0-16000000</code></td><td>≤16 MB · 0.3% of the file</td></tr>
+          <tr><td>Exact size, <code>n_ctx_train</code>, <code>n_head_kv</code></td><td><code>llama_model_*</code> through CLlamaBridge, after download</td><td>local</td></tr>
+          <tr><td>Memory, Metal budget, free disk</td><td><code>hw.memsize</code> · <code>recommendedMaxWorkingSetSize</code> · <code>volumeAvailableCapacityForImportantUsage</code></td><td>local</td></tr>
+        </tbody>
+      </table>
     </div>
   </section>
 
-  <!-- ============ ONBOARDING ============ -->
+  <!-- ============ 6 · ONBOARDING ============ -->
   <section>
-    <div class="opt-head">
-      <span class="opt-key">＋</span>
+    <div class="head">
+      <span class="step">6</span>
       <h2>At first launch</h2>
-      <span class="opt-sub">Same choice, folded away. Default path stays two clicks.</span>
+      <span class="sub">Same check, folded away. The default path stays two clicks.</span>
     </div>
 
     <div class="two">
@@ -441,14 +481,14 @@
         <div class="mk-bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="mk-title">Setup — Step 3 of 5</span></div>
         <div class="mk-pane" style="padding:20px">
           <div class="nm" style="font-size:19px">Choose your local model</div>
-          <div class="hint">Runs on this Mac. Nothing is sent anywhere.</div>
+          <div class="hint">Runs on this Mac. Nothing is sent anywhere. <span class="mono">M3 Pro · 36 GB · 28.1 GB usable</span></div>
           <div class="row pad pick" style="margin-top:6px">
             <span class="radio on"></span>
             <div class="grow"><div class="nm">Gemma 4 E4B</div><div class="meta">4.59 GB · recommended</div></div>
-            <span class="chip dev">On-device</span>
+            <span class="chip ok">✓ Fits</span>
           </div>
-          <div class="row pad"><span class="radio"></span><div class="grow"><div class="nm">Qwen3 4B Instruct</div><div class="meta">2.50 GB · lighter, faster</div></div><span class="chip dev">On-device</span></div>
-          <div class="row" style="margin-top:2px"><span class="hint">› Use another model (Hugging Face or Ollama)</span></div>
+          <div class="row pad"><span class="radio"></span><div class="grow"><div class="nm">Qwen3 4B Instruct</div><div class="meta">2.50 GB · lighter, faster</div></div><span class="chip ok">✓ Fits</span></div>
+          <div class="row" style="margin-top:2px"><span class="hint">› Use a model from Hugging Face</span></div>
           <div class="row" style="margin-top:10px"><span class="grow"></span><span class="btn">Back</span><span class="btn pri">Download &amp; continue</span></div>
         </div>
       </div>
@@ -456,11 +496,10 @@
       <div class="mk">
         <div class="mk-bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="mk-title">Setup — Step 3 of 5 · expanded</span></div>
         <div class="mk-pane" style="padding:20px">
-          <div class="nm" style="font-size:19px">Use another model</div>
-          <div class="seg" style="align-self:flex-start"><span class="on">Hugging Face</span><span>Ollama</span></div>
+          <div class="nm" style="font-size:19px">Use a model from Hugging Face</div>
           <div class="field"><label>Repository</label><div class="input">unsloth/gemma-4-E2B-it-GGUF</div></div>
           <div class="field"><label>File</label><div class="input">gemma-4-E2B-it-Q4_K_M.gguf ⌄</div></div>
-          <div class="hint ok">1.71 GB · 8k ctx detected · chat template found</div>
+          <div class="hint ok">1.71 GB · 26 layers · trained to 32k · ✓ Fits at 8k (2.8 GB)</div>
           <div class="hint warn">Unverified model. Tool calls may be wrong — review every transaction.</div>
           <div class="row" style="margin-top:6px"><span class="grow"></span><span class="btn">Cancel</span><span class="btn pri">Download &amp; continue</span></div>
         </div>
@@ -468,58 +507,38 @@
     </div>
   </section>
 
-  <!-- ============ COMPARE ============ -->
+  <!-- ============ 7 · QUESTIONS ============ -->
   <section>
-    <h2>Trade-offs</h2>
-    <div class="tablewrap">
-      <table>
-        <thead>
-          <tr><th>&nbsp;</th><th>A · Curated + repo</th><th>B · Runtime switch</th><th>C · One shelf</th></tr>
-        </thead>
-        <tbody>
-          <tr><td><b>Gemma stays default</b></td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
-          <tr><td><b>Hugging Face repo</b></td><td class="y">Yes</td><td>Only in the on-device pane</td><td class="y">Yes</td></tr>
-          <tr><td><b>Ollama</b></td><td class="n">No</td><td class="y">Yes</td><td class="y">Yes</td></tr>
-          <tr><td><b>Privacy is visible</b></td><td>n/a — always local</td><td>Per runtime</td><td class="y">Per model row</td></tr>
-          <tr><td><b>New code</b></td><td>HF file listing, model registry entry</td><td>Runtime protocol + Ollama client</td><td>Registry + both clients + swap</td></tr>
-          <tr><td><b>Rough size</b></td><td>~1 PR</td><td>~2 PRs</td><td>~3 PRs (A → B → merge UI)</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
-
-  <!-- ============ QUESTIONS ============ -->
-  <section>
-    <h2>Your call</h2>
+    <h2>Open decisions</h2>
     <div class="qs">
       <div class="q">
-        <h3>1 · Which direction?</h3>
-        <ul><li>A now, C later</li><li><em>C directly</em>, shipped in A → B order</li><li>B — Ollama is the point</li></ul>
+        <h3>Fit thresholds</h3>
+        <ul><li><em>80% of budget = Fits</em>, over budget = Won't fit</li><li>Stricter 70%, matching the common Mac rule of thumb</li></ul>
       </div>
       <div class="q">
-        <h3>2 · Ollama scope</h3>
-        <ul><li><em>Loopback only</em> (127.0.0.1)</li><li>Any host, with a warning</li><li>Any host + optional API key</li></ul>
+        <h3>Test depth</h3>
+        <ul><li>Load only</li><li><em>Load + one tool-call round trip</em></li><li>Load + tool call + tokens/sec</li></ul>
       </div>
       <div class="q">
-        <h3>3 · Unverified GGUFs</h3>
-        <ul><li><em>Warn once</em>, allow anything public</li><li>Checksum must come from repo metadata, else block</li><li>Allowlist of repos</li></ul>
+        <h3>On out of memory</h3>
+        <ul><li><em>Step the context down automatically</em>, then say so</li><li>Ask before retrying</li></ul>
       </div>
       <div class="q">
-        <h3>4 · Switching models</h3>
-        <ul><li><em>Hot swap</em> — unload, reload, keep the chat</li><li>Restart required (like the context window today)</li></ul>
+        <h3>Curated extras</h3>
+        <ul><li>Gemma only; everything else is custom</li><li><em>Gemma + 2 pinned alternatives</em> we've tested for tool calls</li></ul>
       </div>
       <div class="q">
-        <h3>5 · Curated extras</h3>
-        <ul><li>Gemma only, everything else is custom</li><li><em>Gemma + 2 pinned alternatives</em> we've tested for tool calls</li></ul>
+        <h3>Gated / private repos</h3>
+        <ul><li><em>Out of scope</em> — public repos only</li><li>Optional Hugging Face token in the Keychain</li></ul>
       </div>
       <div class="q">
-        <h3>6 · Gated / private repos</h3>
-        <ul><li><em>Out of scope</em> — public repos only</li><li>Optional HF token in Keychain</li></ul>
+        <h3>Found en route</h3>
+        <ul><li>Gemma's <code>maxContextTokens</code> is pinned at 32 768; the GGUF and the Hub both say <em>131 072</em></li><li>Fix here, or separately?</li></ul>
       </div>
     </div>
   </section>
 
-  <footer>Reference: <code>OnboardingSettingsStore.LocalAIModel</code>, <code>LocalAIModelDownloadManager</code>, <code>EmbeddedLlamaInferenceService</code>, <code>LocalWalletSettingsView.modelsTab</code>.</footer>
+  <footer>Touches <code>LocalAIModel</code>, <code>LocalAIModelDownloadManager</code>, <code>LocalHardwareInspector</code>, <code>EmbeddedLlamaInferenceService</code>, <code>ContextWindowPresets</code>, <code>LocalWalletSettingsView.modelsTab</code>.</footer>
 </div>
 </body>
 </html>

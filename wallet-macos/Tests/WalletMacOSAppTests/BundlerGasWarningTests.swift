@@ -117,7 +117,8 @@ import WalletToolLayer
             )
         }
 
-        // Unshield is relayed by the RAILGUN sidecar's own broadcaster, not the bundler.
+        // An unshield exit is paymaster-sponsored and publicly bundled, so the local bundler
+        // EOA's gas balance cannot block it.
         #expect(BundlerGasPolicy.block(tool: .unshield, disposition: .pending, status: blocked) == nil)
 
         // History is not re-decorated: an already-confirmed card keeps its execution result.

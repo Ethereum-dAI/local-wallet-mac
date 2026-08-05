@@ -35,7 +35,7 @@ public enum ToolDefinitions {
     public static let unshield = ToolDefinition(
         name: "unshield",
         description: """
-        Withdraw ETH from the user's RAILGUN shielded (private) pool to a recipient as         native ETH. Use this whenever the user expresses intent to unshield, withdraw from         privacy, or make funds public again. The withdrawal is relayed by the wallet's own         local broadcaster. If the amount or recipient is missing or ambiguous, ask a         clarifying question in natural language instead of calling the tool.
+        Withdraw ETH from the user's RAILGUN shielded (private) pool to a recipient as         native ETH. Use this whenever the user expresses intent to unshield, withdraw from         privacy, or make funds public again. The withdrawal is submitted as a sponsored         transaction, so the user does not need to hold gas to make it. If the amount or recipient is missing or ambiguous, ask a         clarifying question in natural language instead of calling the tool.
         """,
         parametersJSONSchema: #"""
         {"type":"object","properties":{"amount":{"type":"string","description":"Amount of ETH to unshield, in human units as a decimal string (e.g. \"0.01\")."},"to":{"type":"string","description":"Recipient, as a 0x-prefixed 40-hex Ethereum address. ENS names and contact names are NOT yet supported for unshield - if the user gives one, ask them for the 0x address."},"token":{"type":"string","description":"Token to unshield. Only ETH is supported; default to ETH."}},"required":["amount","to"]}

@@ -5,8 +5,9 @@
 #
 #   1. build-ffi.sh                              (wallet-ffi + cbindgen -> swift-bridge)
 #   2. cargo build -p wallet-node --release      (the daemon the app spawns)
-#   3. cargo build --release --bins              (railgun-helper + railgun-broadcaster;
-#                                                  the app spawns these on first /shield)
+#   3. cargo build --release --bins              (railgun-helper — one binary, no child
+#                                                  process; the app spawns it on first
+#                                                  /shield or /unshield)
 #   4. xcodegen generate                         (regenerate LocalWallet.xcodeproj)
 #   5. open LocalWallet.xcodeproj                (you hit Run — signing/Secure Enclave
 #                                                  needs the signed Xcode bundle)
@@ -128,7 +129,10 @@ step "1/4  Building wallet-ffi (build-ffi.sh)"
 step "2/4  Building the wallet-node daemon (release)"
 ( cd "$REPO_ROOT/local-wallet-daemon" && cargo build -p wallet-node --release )
 
-step "3/4  Building the railgun sidecars (release: railgun-helper + railgun-broadcaster)"
+step "3/4  Building the railgun sidecar (release: railgun-helper)"
+# One binary now: railgun-helper exits through RAILGUN's privacy paymaster as an ERC-4337
+# UserOperation submitted by a public bundler, so there is no broadcaster child to build,
+# spawn, or fund — `--bins` still works, it just resolves to one target.
 ( cd "$REPO_ROOT/local-wallet-railgun" && cargo build --release --bins )
 
 PBXPROJ=LocalWallet.xcodeproj/project.pbxproj
@@ -234,7 +238,7 @@ fi
 step "Done"
 cat <<'NEXT'
 Next:
-  - The app resolves the sidecars from local-wallet-railgun/target/release and the daemon
+  - The app resolves the sidecar from local-wallet-railgun/target/release and the daemon
     from local-wallet-daemon/target/release automatically (via the Xcode scheme + source
     paths) — nothing else to set.
   - In Xcode: select the LocalWalletApp scheme, choose your Apple Development team, Run.

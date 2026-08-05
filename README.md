@@ -6,7 +6,7 @@ This is the macOS app repo. The current release line is **v0.1 alpha**: pre-1.0,
 
 - **Protocol SDK** (`wallet-signature`, `wallet-kernel`, `wallet-addresses`): `local-wallet-protocol/`
 - **Daemon** (`wallet-node` and supporting crates): `local-wallet-daemon/`
-- **Privacy sidecar** (`railgun-helper`, `railgun-broadcaster`): `local-wallet-railgun/` — experimental RAILGUN shield/unshield, **testnet only**
+- **Privacy sidecar** (`railgun-helper`): `local-wallet-railgun/` — experimental RAILGUN shield/unshield, **testnet only**
 
 The mac app handles key custody (Secure Enclave + Keychain), session-key policy state, and local transaction construction. It delegates verified chain reads, ERC-4337 bundling, and receipt tracking to the daemon process. The FFI bridge in `rust-core/crates/ffi/` connects them in-process for deterministic crypto and Kernel permission operations.
 
@@ -18,7 +18,7 @@ This is not the final product wallet UX. Treat it as an experimental working imp
 |---|---|
 | `local-wallet-protocol` | `wallet-signature`, `wallet-kernel`, `wallet-addresses` — pre-1.0 (0.1.0) SDK crates, consumed via in-repo `path` dependency |
 | `local-wallet-daemon` | `wallet-node`, `wallet-bundler`, `wallet-chain`, `wallet-node-api`, `wallet-node-store` — daemon binary and supporting libraries |
-| `local-wallet-railgun` | `railgun-helper` sidecar + `railgun-broadcaster` local broadcaster — experimental RAILGUN shield/unshield, **Sepolia testnet only, unaudited** |
+| `local-wallet-railgun` | `railgun-helper` sidecar — experimental RAILGUN shield/unshield with paymaster-sponsored exits, **Sepolia testnet only, unaudited** |
 | (repo root) `local-wallet-mac` | macOS app, `wallet-ffi`, `swift-bridge`, Xcode project, scripts |
 
 ## Requirements
@@ -147,18 +147,21 @@ The v0.1 alpha zip targets macOS 15+ on Apple Silicon and does not embed the rec
 
 `local-wallet-railgun/` adds **RAILGUN shield + unshield** to Local Wallet, wrapping Kohaku's RAILGUN Rust SDK. It is **alpha, unaudited, and Sepolia testnet only — no mainnet funds.** The app spawns and owns the sidecar itself (`RailgunHelperDaemon`, mirroring the `wallet-node` daemon's spawn contract), pointed at the active chain's RPC; setting `LOCAL_WALLET_PRIVACY_SOCKET` / `LOCAL_WALLET_PRIVACY_TOKEN` instead attaches to a manually-run sidecar (e.g. an anvil fork). The one integration still pending is **ENS/contact resolution for unshield recipients** — they must currently be `0x` addresses.
 
-The crate is one library plus two bins:
+The crate is one library plus **one** bin:
 
-- **`railgun-helper`** — the sidecar. Serves `balance` / `prepareShield` / `unshield` / `unshieldStatus` / `broadcasterStatus` over a bearer-authenticated Unix-socket JSON-RPC API. Derives the shielded account from entropy, syncs (Subsquid + RPC), builds shield txs, and **proves** unshield txs (Groth16). Unshield proving runs as an **async job** — `unshield {amountWei, to}` returns a `jobId` immediately and the proving + relay run in the background, polled via `unshieldStatus {jobId}`.
-- **`railgun-broadcaster`** — the **local broadcaster**. Owns its **own EOA** and submits the proved unshield on-chain. The helper spawns and owns it over the same **fd-5 secret-spawn contract** the daemon uses (secrets travel on fd 5, never argv/env), so the app talks to a single socket.
+- **`railgun-helper`** — the sidecar, and the only process. Serves `balance` / `maxUnshieldable` / `prepareShield` / `unshield` / `unshieldStatus` over a bearer-authenticated Unix-socket JSON-RPC API. Derives the shielded account from entropy (delivered on **fd 5**, never argv/env), syncs (Subsquid + RPC), builds shield txs, and **proves + submits** unshield exits (Groth16). Unshield runs as an **async job** — `unshield {amountWei, to}` returns a `jobId` immediately while proving + submission run in the background, polled via `unshieldStatus {jobId}`. It spawns no child of its own, so the app talks to this one socket and that is the whole surface.
 
-**The local-broadcaster model (and its tradeoff).** RAILGUN's classic privacy relies on a *shared* broadcaster network (Waku) so the submitter is an unrelated third party. This wallet deliberately runs its **own** broadcaster instead — self-sufficiency over maximal anonymity, mirroring how the daemon already self-relays ERC-4337 UserOps through its on-device bundler EOA. Stated plainly, a per-wallet broadcaster is an **anonymity-set-of-one**: its EOA submits only your unshields and is funded by you, so it is linkable to you. The property kept is separation of keys — the broadcaster EOA is distinct from your Kernel/main account and from the RAILGUN account (three distinct keys: RAILGUN spend+view · shield submitter · broadcaster).
+**Paymaster-sponsored exits — nothing to fund.** RAILGUN's classic privacy relies on a *shared* broadcaster network (Waku) so the tx submitter is an unrelated third party. This wallet takes a third path, distinct both from that model and from running a broadcaster of its own: each exit is an ERC-4337 **UserOperation sponsored by RAILGUN's privacy paymaster** — an on-chain contract, so sponsorship is permissionless and no off-chain party approves or sees the request — with gas paid from a **fee note inside the shielded pool** and the operation **submitted by a public bundler**. The user needs no ETH of their own to exit, there is nothing to top up, and there is no persistent broadcaster EOA whose address would link every exit together.
 
-Unshield delivers **native ETH** to the recipient (the broadcaster unshields WETH to itself, unwraps, and forwards), minus RAILGUN's unshield fee.
+Each exit's UserOperation is sent from a fresh **single-use** EIP-7702 sender derived from the same entropy root at `m/44'/60'/0'/1/{index}` — BIP-44's *internal* branch, deliberately disjoint from the external `change = 0` chain any ordinary account on this mnemonic would use. Because the sender is derived rather than random, a stranded exit stays recoverable at its reported index.
 
-**From the app:** `/shield 0.01` and `/unshield 0.01 to 0x…` are available as slash commands (with autocomplete) and as LLM-callable tools in the chat layer via `WalletToolLayer`. Shield builds a Kernel `execute` UserOp signed with the Secure Enclave passkey; unshield requires device-owner authentication, then calls the sidecar's async job and shows a submitted→confirmed card while polling the shielded balance until it settles. The account UI surfaces the shielded (confirmed/pending) balance and the local broadcaster's address + gas balance, with a privacy on/off toggle; a wallet reset also wipes the RAILGUN secrets.
+Unshield delivers **native ETH** to the recipient, minus RAILGUN's 0.25% unshield fee: the same sponsored UserOperation unshields WETH to the ephemeral sender, `WETH.withdraw()`s it, and forwards the native ETH — one atomic transaction, no separate forwarding tx.
 
-The end-to-end acceptance check shields native ETH then unshields it on an **anvil fork of Sepolia**, relayed by the local broadcaster, asserting both txs confirm on-chain (from `local-wallet-railgun/`):
+**The residual disclosure (what a third party still sees).** The paymaster is a contract, so sponsorship leaks nothing off-chain — but the **public bundler that submits the operation sees your IP address** alongside the recipient and the amount. Both of those become public on-chain moments later anyway; the IP address does not. Traffic is **not** routed over Tor, and Tor is out of scope for this alpha.
+
+**From the app:** `/shield 0.01` and `/unshield 0.01 to 0x…` are available as slash commands (with autocomplete) and as LLM-callable tools in the chat layer via `WalletToolLayer`. Shield builds a Kernel `execute` UserOp signed with the Secure Enclave passkey; unshield requires device-owner authentication, then calls the sidecar's async job and shows a submitted→confirmed card while polling the shielded balance until it settles. A **Max** control fills the composer with the largest currently-exitable amount and shows the "you will receive" breakdown (treasury fee + the in-pool gas reserve, which is why 100% of a shielded balance is never unshieldable). The account UI surfaces the shielded (confirmed/pending) balance with a privacy on/off toggle — there is no broadcaster address or gas balance to show, because there is no broadcaster; a wallet reset also wipes the RAILGUN secrets.
+
+The end-to-end acceptance check shields native ETH then runs several exits at different amounts on an **anvil fork of Sepolia**, each sponsored by the privacy paymaster and submitted by a local Alto bundler (a public bundler cannot see a fork). It asserts the recipient's native-ETH delta per exit, that the paymaster's own EntryPoint deposit strictly falls while the ephemeral sender holds zero ETH at both ends, and that senders and indices rotate (from `local-wallet-railgun/`):
 
 ```bash
 RPC_URL_SEPOLIA="https://sepolia.infura.io/v3/<key>" ./scripts/e2e-fork.sh
@@ -200,7 +203,7 @@ cargo run -p wallet-node -- --http 127.0.0.1:0 --print-ready --debug
 - `swift-bridge/README.md` — Swift FFI wrapper and local dev setup
 - `wallet-macos/README.md` — macOS demo app and signing
 - `wallet-macos/Sources/Spawn/README.md` — daemon spawn shim and fd contract
-- `local-wallet-railgun/README.md` — experimental RAILGUN privacy sidecar (shield/unshield, local broadcaster)
+- `local-wallet-railgun/README.md` — experimental RAILGUN privacy sidecar (shield/unshield, paymaster-sponsored exits)
 - `rust-core/crates/ffi/README.md` — internal C ABI bridge
 - `scripts/README.md` — build and packaging scripts
 - `tools/keychain-spike/README.md` — Keychain entitlement spike

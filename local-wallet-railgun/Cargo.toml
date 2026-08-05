@@ -24,16 +24,14 @@ path = "src/lib.rs"
 name = "railgun-helper"
 path = "src/bin/railgun-helper.rs"
 
-[[bin]]
-name = "railgun-broadcaster"
-path = "src/bin/railgun-broadcaster.rs"
-
 [dependencies]
 # Kohaku RAILGUN Rust SDK. NEVER enable the `js` feature (drags wasm-bindgen).
 railgun = { git = "https://github.com/ethereum/kohaku.git", rev = "877026e1775a333c556c6fea54dc270009aac978", default-features = false }
 # TxData ({to,data,value}) crosses the RPC boundary; name it directly. `alloy` feature
 # gives the `From<TxData> for TransactionRequest` conversion. `js` stays off.
 eip-1193-provider = { git = "https://github.com/ethereum/kohaku.git", rev = "877026e1775a333c556c6fea54dc270009aac978", default-features = false, features = ["alloy"] }
+# 4337 bundler client + EIP-7702 SimpleSmartAccount, same pinned Kohaku rev. `js` stays off.
+userop-kit = { git = "https://github.com/ethereum/kohaku.git", rev = "877026e1775a333c556c6fea54dc270009aac978", default-features = false }
 
 alloy = { version = "1.8", features = [
     "std", "providers", "network", "signer-local", "contract",
@@ -59,8 +57,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Distribution impls line up.
 rand = "0.9"
 
-# BIP-39 mnemonic/seed + standard secp256k1 BIP-32 (broadcaster EOA). The RAILGUN
-# account uses a CUSTOM HMAC-SHA512 walk (see derivation.rs), hence hmac/sha2 too.
+# Direct HTTP for the bundler gas-price probe: PimlicoBundler computes the gas price inside
+# estimate_gas and does not expose it, so we call pimlico_getUserOperationGasPrice ourselves.
+reqwest = { version = "0.13", features = ["json"] }
+
+# BIP-39 mnemonic/seed + standard secp256k1 BIP-32 (the ephemeral exit senders). The
+# RAILGUN account uses a CUSTOM HMAC-SHA512 walk (see derivation.rs), hence hmac/sha2 too.
 bip39 = "2"
 bip32 = "0.5"
 hmac = "0.12"

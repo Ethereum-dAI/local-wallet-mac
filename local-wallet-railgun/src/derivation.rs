@@ -1,7 +1,7 @@
 //! Standard RAILGUN key derivation, byte-compatible with RAILGUN-Community `engine`
 //! (`src/key-derivation`, commit e2913b3). One BIP-39 mnemonic → the RAILGUN account
 //! (custom HMAC-SHA512 HD walk, curve seed "babyjubjub seed", hardened-only) and the
-//! local broadcaster EOA (standard secp256k1 BIP-32). Pure bytes in/out; no I/O.
+//! ephemeral exit senders (standard secp256k1 BIP-32). Pure bytes in/out; no I/O.
 
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
@@ -84,9 +84,9 @@ pub fn railgun_node_key(seed: &[u8], path: &[u32]) -> [u8; 32] {
     node.key
 }
 
-/// Standard secp256k1 BIP-32: seed → private key at m/44'/60'/0'/0/0 (the broadcaster EOA).
-pub fn broadcaster_secp256k1_from_seed(seed: &[u8]) -> Result<[u8; 32], DerivationError> {
-    let path: bip32::DerivationPath = "m/44'/60'/0'/0/0"
+/// Standard secp256k1 BIP-32 walk of `path` from `seed`.
+fn secp256k1_at_path(seed: &[u8], path: &str) -> Result<[u8; 32], DerivationError> {
+    let path: bip32::DerivationPath = path
         .parse()
         .map_err(|e: bip32::Error| DerivationError::Bip32(e.to_string()))?;
     let xprv = bip32::XPrv::derive_from_path(seed, &path)
@@ -96,6 +96,30 @@ pub fn broadcaster_secp256k1_from_seed(seed: &[u8]) -> Result<[u8; 32], Derivati
     Ok(out)
 }
 
+/// Standard secp256k1 BIP-32: seed → exit-sender private key at `m/44'/60'/0'/1/{index}`.
+///
+/// `index` is the per-exit counter, so every exit gets a fresh, never-funded 7702 sender —
+/// rotation is free because the sender never holds a balance. Deriving (rather than using a
+/// random key) is what makes a stuck exit recoverable from the seed alone.
+///
+/// **`change = 1` is load-bearing, not cosmetic.** It is BIP-44's internal branch, which gives
+/// exit senders a keyspace DISJOINT from the external `change = 0` chain — where the standard
+/// first account (`m/44'/60'/0'/0/0`) that any wallet derives from this mnemonic lives, an
+/// address liable to be funded and to have transacted publicly. On `change = 0`, exit index 0
+/// would be byte-identical to it, so the first "single-use, never-funded" exit sender would in
+/// fact be an already-published on-chain identity, voiding the unlinkability the ephemeral
+/// sender exists to provide.
+///
+/// A separate branch rather than an offset on the counter is deliberate: an offset would desync
+/// the on-disk index from the derivation index, whereas this keeps them 1:1 so recovery from
+/// the seed is a direct lookup.
+pub fn exit_secp256k1_from_seed_at_index(
+    seed: &[u8],
+    index: u32,
+) -> Result<[u8; 32], DerivationError> {
+    secp256k1_at_path(seed, &format!("m/44'/60'/0'/1/{index}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +127,22 @@ mod tests {
     const HARDHAT: &str = "test test test test test test test test test test test junk";
     const SPENDING: &str = "b0958f8bc286ae0832fa83b01b719a225a07ce7b861ff311323f221667b3bd50";
     const VIEWING: &str = "9da4b4f0b5493a6ba3f7df0611c3e0842f7e2bb3d640f313b235f1b75c1d80b9";
+
+    /// Address of a derived key, so a failing assertion prints an address rather than key bytes.
+    fn eoa_address(key: &[u8; 32]) -> String {
+        let signer: alloy::signers::local::PrivateKeySigner =
+            format!("0x{}", hex::encode(key)).parse().unwrap();
+        format!("{}", signer.address())
+    }
+
+    /// A key on the EXTERNAL (`change = 0`) chain, which the exit path must never touch.
+    ///
+    /// Calls the private path helper directly rather than reintroducing a `pub`
+    /// `change = 0` derivation just to test against: nothing outside this module has any
+    /// business deriving on that branch.
+    fn external_key(seed: &[u8], index: u32) -> [u8; 32] {
+        secp256k1_at_path(seed, &format!("m/44'/60'/0'/0/{index}")).unwrap()
+    }
 
     #[test]
     fn railgun_walk_matches_engine_vector() {
@@ -124,17 +164,67 @@ mod tests {
     }
 
     #[test]
-    fn broadcaster_key_matches_hardhat_account_zero() {
+    fn distinct_indices_give_distinct_keys_and_are_deterministic() {
         let seed = mnemonic_to_seed(HARDHAT).unwrap();
-        let key = broadcaster_secp256k1_from_seed(&seed).unwrap();
-        // Feed the derived key to alloy's signer and check the address (hardhat account #0).
-        let hex_key = format!("0x{}", hex::encode(key));
-        let signer: alloy::signers::local::PrivateKeySigner = hex_key.parse().unwrap();
-        // `{:?}` on alloy's `Address` renders plain lowercase hex; `{}` (Display) renders
-        // the EIP-55 checksummed form, which is what the expected vector uses.
+        let a = exit_secp256k1_from_seed_at_index(&seed, 7).unwrap();
+        let b = exit_secp256k1_from_seed_at_index(&seed, 8).unwrap();
+        assert_ne!(a, b, "different indices must not collide");
         assert_eq!(
-            format!("{}", signer.address()),
-            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+            a,
+            exit_secp256k1_from_seed_at_index(&seed, 7).unwrap(),
+            "derivation must be deterministic so a stuck exit is recoverable"
         );
+    }
+
+    /// Frozen vector for the exit branch: `m/44'/60'/0'/1/0` on the hardhat mnemonic. Pins the
+    /// path so a silent change of `change` or `account` cannot go unnoticed — that would make
+    /// every previously-derived exit sender unrecoverable from the seed.
+    ///
+    /// Cross-checked against an independent BIP-32 implementation, which reproduces the
+    /// published hardhat accounts #0/#1 for `m/44'/60'/0'/0/{0,1}`, so this is a parity vector
+    /// rather than a self-pin.
+    const HARDHAT_EXIT_0: &str = "0x4b39F7b0624b9dB86AD293686bc38B903142dbBc";
+
+    /// Hardhat account #0 — `m/44'/60'/0'/0/0`, the EXTERNAL branch. Exit senders must never
+    /// land here: it is the address any wallet derives first from this mnemonic, so it is
+    /// liable to be funded and to have transacted publicly.
+    const HARDHAT_EXTERNAL_0: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+
+    #[test]
+    fn exit_path_is_pinned_to_the_internal_branch() {
+        let seed = mnemonic_to_seed(HARDHAT).unwrap();
+        let addr = eoa_address(&exit_secp256k1_from_seed_at_index(&seed, 0).unwrap());
+        assert_eq!(addr, HARDHAT_EXIT_0);
+        // The whole point of `change = 1`: index 0 is NOT the external first account. Asserted
+        // against the published literal, so the pin holds even with no `change = 0` derivation
+        // in the crate to compare against.
+        assert_ne!(
+            addr, HARDHAT_EXTERNAL_0,
+            "exit index 0 must not be the external first account"
+        );
+        // Parity anchor for `external_key` itself: it must really reproduce hardhat #0, or the
+        // cross-product test below would be comparing against the wrong branch and pass
+        // vacuously.
+        assert_eq!(eoa_address(&external_key(&seed, 0)), HARDHAT_EXTERNAL_0);
+    }
+
+    #[test]
+    fn no_exit_index_lands_anywhere_on_the_external_chain() {
+        // A CROSS-PRODUCT, not a single pair. Checking only exit 0 vs external 0 would miss a
+        // regression that made the branch index-dependent — `m/44'/60'/0'/{index % 2}/{index}`
+        // keeps index 0 correct while dropping every odd sender onto the funded, publicly
+        // transacted external chain. This guards the index-collision defect found in Task 5
+        // round 2, so it is deliberately over- rather than under-covered.
+        let seed = mnemonic_to_seed(HARDHAT).unwrap();
+        for i in 0..8u32 {
+            let exit = eoa_address(&exit_secp256k1_from_seed_at_index(&seed, i).unwrap());
+            for j in 0..8u32 {
+                assert_ne!(
+                    exit,
+                    eoa_address(&external_key(&seed, j)),
+                    "exit index {i} collided with external index {j}"
+                );
+            }
+        }
     }
 }

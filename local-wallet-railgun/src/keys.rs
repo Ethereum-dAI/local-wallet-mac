@@ -34,15 +34,28 @@ pub fn derive_railgun_signer(
     Ok(PrivateKeySigner::new_evm(spending, viewing, chain_id))
 }
 
-/// Derive the local broadcaster EOA private key (0x-hex) from the same 32-byte entropy,
-/// at standard Ethereum path m/44'/60'/0'/0/0. Distinct from the RAILGUN account.
-pub fn derive_broadcaster_key(entropy_hex: &str) -> Result<String, SecretError> {
+/// entropy hex → BIP-39 mnemonic → 64-byte BIP-39 seed. The shared prefix of every
+/// secp256k1 derivation below.
+fn seed_from_entropy(entropy_hex: &str) -> Result<[u8; 64], SecretError> {
     let entropy = parse_entropy_32(entropy_hex)?;
     let mnemonic = derivation::entropy_to_mnemonic(&entropy)
         .map_err(|e| SecretError::Derivation(e.to_string()))?;
-    let seed = derivation::mnemonic_to_seed(&mnemonic)
-        .map_err(|e| SecretError::Derivation(e.to_string()))?;
-    let key = derivation::broadcaster_secp256k1_from_seed(&seed)
+    derivation::mnemonic_to_seed(&mnemonic).map_err(|e| SecretError::Derivation(e.to_string()))
+}
+
+/// Derive the ephemeral EIP-7702 exit-sender private key (0x-hex) for exit `index`, from the
+/// same 32-byte entropy as the RAILGUN account, at `m/44'/60'/0'/1/{index}`.
+///
+/// **`change = 1`, the BIP-44 internal branch, is deliberate**: it keeps exit senders in a
+/// keyspace disjoint from the external `m/44'/60'/0'/0/*` chain, where a wallet's ordinary
+/// (funded, already-published) EOAs live. See `derivation::exit_secp256k1_from_seed_at_index`.
+///
+/// This key signs the UserOperation and its 7702 authorization. It is never funded, never
+/// logged, and never returned over RPC. A seed leak gains an attacker nothing here: that
+/// same seed already controls the shielded funds.
+pub fn derive_exit_key(entropy_hex: &str, index: u32) -> Result<String, SecretError> {
+    let seed = seed_from_entropy(entropy_hex)?;
+    let key = derivation::exit_secp256k1_from_seed_at_index(&seed, index)
         .map_err(|e| SecretError::Derivation(e.to_string()))?;
     Ok(format!("0x{}", hex::encode(key)))
 }
@@ -129,26 +142,34 @@ mod tests {
         assert_eq!(actual, E1_SEPOLIA_ADDRESS);
     }
 
-    #[test]
-    fn broadcaster_key_matches_hardhat_when_derived_from_matching_entropy() {
-        // 12-word hardhat = 16-byte entropy; derive_broadcaster_key takes 32-byte entropy,
-        // so test the shared seed-based core directly for the published address, and assert
-        // derive_broadcaster_key returns a well-formed 0x-key for the 32-byte runtime path.
-        use crate::derivation::{broadcaster_secp256k1_from_seed, mnemonic_to_seed};
-        let seed = mnemonic_to_seed(HARDHAT).unwrap();
-        let key = broadcaster_secp256k1_from_seed(&seed).unwrap();
-        let signer: alloy::signers::local::PrivateKeySigner =
-            format!("0x{}", hex::encode(key)).parse().unwrap();
-        // `{:?}` on alloy's `Address` renders plain lowercase hex; `{}` (Display) renders
-        // the EIP-55 checksummed form, which is what the published hardhat vector uses.
-        assert_eq!(
-            format!("{}", signer.address()),
-            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-        );
+    /// Address of an EOA key, so assertions never print key material on failure.
+    fn eoa_address(key_hex: &str) -> String {
+        let signer: alloy::signers::local::PrivateKeySigner = key_hex.parse().unwrap();
+        format!("{}", signer.address())
+    }
 
-        // Runtime path (32-byte entropy) returns a valid, parseable key.
-        let k = derive_broadcaster_key(E1).unwrap();
+    #[test]
+    fn exit_keys_are_well_formed_0x_secp256k1_keys() {
+        let k = derive_exit_key(E1, 0).unwrap();
         assert!(k.starts_with("0x") && k.len() == 66);
         let _: alloy::signers::local::PrivateKeySigner = k.parse().unwrap();
+    }
+
+    #[test]
+    fn exit_keys_are_deterministic_and_index_unique() {
+        // Determinism is what makes a stranded exit recoverable from the seed alone.
+        assert_eq!(
+            derive_exit_key(E1, 5).unwrap(),
+            derive_exit_key(E1, 5).unwrap()
+        );
+        assert_ne!(
+            eoa_address(&derive_exit_key(E1, 5).unwrap()),
+            eoa_address(&derive_exit_key(E1, 6).unwrap())
+        );
+        assert_ne!(
+            eoa_address(&derive_exit_key(E1, 5).unwrap()),
+            eoa_address(&derive_exit_key(E2, 5).unwrap()),
+            "different wallets must not share an exit sender"
+        );
     }
 }

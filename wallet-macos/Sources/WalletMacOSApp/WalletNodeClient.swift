@@ -391,11 +391,16 @@ struct WalletNodeClient {
             draft: draft,
             signature: dummySignature,
             overrides: RPCOverrides(
+                // The daemon resolves these itself; a client-invented limit
+                // would be measured by the estimate-time funding check, which
+                // runs before that resolution.
                 callGasLimit: "0x0",
                 verificationGasLimit: "0x0",
                 preVerificationGas: "0x0",
-                maxFeePerGas: "0x0",
-                maxPriorityFeePerGas: "0x0"
+                // Real fees, so the response's requiredPrefund is a real number
+                // rather than (limits × 0). AppModel quotes fees before calling.
+                maxFeePerGas: "0x" + draft.gasPlan.maxFeePerGas.hexEncodedString,
+                maxPriorityFeePerGas: "0x" + draft.gasPlan.maxPriorityFeePerGas.hexEncodedString
             )
         )
         let result = try await call(

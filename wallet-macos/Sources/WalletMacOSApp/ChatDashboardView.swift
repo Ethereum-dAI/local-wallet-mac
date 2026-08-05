@@ -404,6 +404,15 @@ enum ChatIntentExecutionStatus: Equatable {
     /// recoverable: the daemon told us what limit would work if the user
     /// consents to submitting without a real estimate.
     case gasEstimationUnavailable(detail: String, suggestedCallGasLimit: UInt64)
+    /// The account cannot cover EntryPoint's prefund floor for the consented
+    /// `callGasLimit`. Recoverable like `.gasEstimationUnavailable`, not terminal
+    /// like `.failed`: topping up and pressing again is the way forward.
+    case prefundShortfall(
+        requiredPrefundWeiHex: String,
+        availableWeiHex: String,
+        deficitWeiHex: String,
+        effectiveCallGasLimit: UInt64
+    )
 
     static func fromToolResponse(_ text: String) -> ChatIntentExecutionStatus? {
         guard let data = text.data(using: .utf8),
@@ -434,6 +443,21 @@ enum ChatIntentExecutionStatus: Equatable {
                 detail: object["detail"] as? String ?? "Gas estimation unavailable",
                 suggestedCallGasLimit: suggested
             )
+        case "prefund_shortfall":
+            guard let required = object["required_prefund"] as? String,
+                  let available = object["available"] as? String,
+                  let deficit = object["deficit"] as? String,
+                  let limit = object["effective_call_gas_limit"] as? UInt64
+                    ?? (object["effective_call_gas_limit"] as? Int).flatMap(UInt64.init(exactly:))
+            else {
+                return .failed("Insufficient balance for the gas headroom")
+            }
+            return .prefundShortfall(
+                requiredPrefundWeiHex: required,
+                availableWeiHex: available,
+                deficitWeiHex: deficit,
+                effectiveCallGasLimit: limit
+            )
         default:
             return nil
         }
@@ -449,6 +473,18 @@ enum ChatIntentExecutionStatus: Equatable {
         return .gasEstimationUnavailable(
             detail: detail ?? "Gas estimation unavailable",
             suggestedCallGasLimit: suggested
+        )
+    }
+
+    static func prefundShortfall(from error: Error) -> ChatIntentExecutionStatus? {
+        guard case let AppError.prefundShortfall(required, available, deficit, limit) = error else {
+            return nil
+        }
+        return .prefundShortfall(
+            requiredPrefundWeiHex: required,
+            availableWeiHex: available,
+            deficitWeiHex: deficit,
+            effectiveCallGasLimit: limit
         )
     }
 }
@@ -3854,6 +3890,27 @@ private final class ChatDashboardModel: ObservableObject {
         _ error: Error, for intent: ToolIntent, in conversationID: UUID? = nil
     ) {
         guard let conversationID = conversationID ?? activeConversationIDIfPresent else {
+            return
+        }
+
+        if case let .prefundShortfall(required, available, deficit, limit)? =
+            ChatIntentExecutionStatus.prefundShortfall(from: error) {
+            appendMessage(
+                ChatMessage(
+                    kind: .toolResponse,
+                    role: .tool,
+                    text: jsonString([
+                        "status": "prefund_shortfall",
+                        "intent_id": intent.id.uuidString,
+                        "required_prefund": required,
+                        "available": available,
+                        "deficit": deficit,
+                        "effective_call_gas_limit": limit,
+                    ]),
+                    toolCallId: intent.id.uuidString
+                ),
+                to: conversationID
+            )
             return
         }
 

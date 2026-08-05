@@ -224,7 +224,7 @@ struct ToolIntentCardView: View {
             return "paperplane.circle.fill"
         case .failed:
             return "exclamationmark.triangle.fill"
-        case .gasEstimationUnavailable:
+        case .gasEstimationUnavailable, .prefundShortfall:
             return "exclamationmark.triangle.fill"
         case .idle:
             return "checkmark.circle.fill"
@@ -239,7 +239,7 @@ struct ToolIntentCardView: View {
             return success == false ? .red : .green
         case .failed:
             return .orange
-        case .gasEstimationUnavailable:
+        case .gasEstimationUnavailable, .prefundShortfall:
             return .orange
         case .idle:
             return .green
@@ -262,6 +262,8 @@ struct ToolIntentCardView: View {
             return message
         case .gasEstimationUnavailable:
             return "Gas estimation unavailable — action required above."
+        case .prefundShortfall:
+            return "Not enough ETH for the gas headroom — action required above."
         case .idle:
             return "Confirmed at \(Self.timeFormatter.string(from: intent.updatedAt))"
         }
@@ -500,6 +502,8 @@ struct ToolIntentCardView: View {
                 .controlSize(.small)
             }
             .padding(.vertical, 4)
+        case .prefundShortfall:
+            EmptyView()
         case .idle:
             // Nothing to promise while blocked — the bundler-gas row above already says the
             // send is refused, and this line would contradict it.

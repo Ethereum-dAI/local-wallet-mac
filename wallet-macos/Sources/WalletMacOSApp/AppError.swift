@@ -27,6 +27,16 @@ enum AppError: LocalizedError {
     case userOperationTerminal(String)
     case userOperationReceiptReverted(String)
     case userAuthorizationCancelled
+    /// The account cannot cover EntryPoint's prefund floor for a consented
+    /// gas-headroom `callGasLimit`. Thrown before the Secure Enclave is asked to
+    /// sign; `ChatIntentExecutionStatus.prefundShortfall(from:)` turns it into a
+    /// recoverable card rather than a terminal failure.
+    case prefundShortfall(
+        requiredPrefundWeiHex: String,
+        availableWeiHex: String,
+        deficitWeiHex: String,
+        effectiveCallGasLimit: UInt64
+    )
 
     var errorDescription: String? {
         switch self {
@@ -82,6 +92,17 @@ enum AppError: LocalizedError {
             return reason
         case .userAuthorizationCancelled:
             return "Local authorization was cancelled or failed, so the action was not performed."
+        case let .prefundShortfall(required, available, deficit, limit):
+            // States the exact deficit rather than the daemon's
+            // displayed_topup_minimum x1.2 figure (funding.rs:15): only one of the
+            // two surfaces can be showing at a time, and duplicating that rule
+            // here would be a second place to drift.
+            return """
+            This send needs \(WeiFormatter.ethDisplayString(fromHexWei: required)) \
+            held up front to cover \(limit.formatted()) gas, and the account has \
+            \(WeiFormatter.ethDisplayString(fromHexWei: available)) available. \
+            Top up at least \(WeiFormatter.ethDisplayString(fromHexWei: deficit)) and try again.
+            """
         }
     }
 }

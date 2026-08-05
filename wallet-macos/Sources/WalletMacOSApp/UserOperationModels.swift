@@ -185,11 +185,11 @@ struct UserOperationGasPlan: Equatable {
 struct EnrichedUserOperation: Equatable {
     let draft: UserOperationDraft
     let requiredPrefund: Data
-    /// The fee baked into `draft` came from the daemon's uniform cap fallback, not
-    /// a live quote (`GasPricing.isUniformCapFallbackQuote`). A prefund floor
-    /// derived from it is arithmetically right but economically meaningless, so
-    /// surfaces must not present it as a top-up the user can make.
-    let gasPricingUnavailable: Bool
+    /// The fee baked into `draft` is the configured policy ceiling rather than a
+    /// live spread (`GasPricing.isPolicyCeilingQuote`) — the live price is at or
+    /// above the cap. A prefund floor derived from it is cap-driven, so surfaces
+    /// should point at the cap before pointing at the balance.
+    let feeQuoteAtPolicyCeiling: Bool
 }
 
 struct UserOperationDraft: Equatable {

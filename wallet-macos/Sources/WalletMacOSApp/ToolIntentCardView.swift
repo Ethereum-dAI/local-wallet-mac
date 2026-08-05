@@ -507,8 +507,8 @@ struct ToolIntentCardView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
-                    Text(report.gasPricingUnavailable
-                         ? "Gas pricing is unavailable, so this send was not signed."
+                    Text(report.feeQuoteAtPolicyCeiling
+                         ? "Gas is priced at your cap, so this send was not signed."
                          : "Not enough ETH to cover the gas headroom up front.")
                         .font(.caption.bold())
                         .foregroundStyle(.orange)
@@ -524,12 +524,12 @@ struct ToolIntentCardView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                // Only ask for money when a top-up can actually fix it. On the
-                // cap-fallback path the fee is a placeholder, not a price, so the
-                // floor moves when the daemon's reads recover — not when the
-                // account is funded.
-                Text(report.gasPricingUnavailable
-                     ? "That fee is wallet-node's safety ceiling, not a live price — its gas-price read failed. Retrying once reads recover will quote a real fee."
+                // When the fee is pinned at the ceiling, the floor is large because
+                // of the cap, not the account — so lead with the lever that moves
+                // it. A top-up is still valid, just not the first thing to reach
+                // for, and a bare "top up 0.8 ETH" would read as the only option.
+                Text(report.feeQuoteAtPolicyCeiling
+                     ? "That fee is your configured gas cap — the live price is at or above it, so wallet-node quoted the ceiling. Raising the cap in Settings or waiting for gas to fall lowers this floor; funding the account does not. Topping up at least \(WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)) would let it send at the cap."
                      : "Top up at least \(WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)), then try again.")
                     .font(.caption2.bold())
                     .foregroundStyle(.secondary)

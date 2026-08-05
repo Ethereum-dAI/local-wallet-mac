@@ -2075,7 +2075,7 @@ final class AppModel: ObservableObject {
             requiredPrefund: enriched.requiredPrefund,
             callGasLimit: enrichedDraft.gasPlan.callGasLimit,
             maxFeePerGas: enrichedDraft.gasPlan.maxFeePerGas,
-            gasPricingUnavailable: enriched.gasPricingUnavailable,
+            feeQuoteAtPolicyCeiling: enriched.feeQuoteAtPolicyCeiling,
             readWalletStatus: {
                 try await withWalletNodeClient(operation: "\(logContext) wallet status") { client in
                     try await client.walletStatus(smartAccount: enrichedDraft.sender)
@@ -2590,7 +2590,7 @@ final class AppModel: ObservableObject {
                 )
             ),
             requiredPrefund: estimate.requiredPrefund,
-            gasPricingUnavailable: feeQuote.pricingUnavailable
+            feeQuoteAtPolicyCeiling: feeQuote.atPolicyCeiling
         )
     }
 
@@ -3114,7 +3114,7 @@ final class AppModel: ObservableObject {
 
     private func suggestedUserOperationFees(
         logContext: String
-    ) async throws -> (maxPriorityFeePerGas: Data, maxFeePerGas: Data, pricingUnavailable: Bool) {
+    ) async throws -> (maxPriorityFeePerGas: Data, maxFeePerGas: Data, atPolicyCeiling: Bool) {
         let gasPrice = try await withWalletNodeWarmupRetry(operation: "\(logContext) gas price") {
             try await withWalletNodeClient(operation: "\(logContext) gas price") { client in
                 try await client.userOperationGasPrice()
@@ -3128,15 +3128,15 @@ final class AppModel: ObservableObject {
             manualCap: settings.activeGasPolicy
         )
         appendLog("\(logContext): gas fee mode \(settings.autoGasModeEnabled ? "auto/\(settings.autoGasTier.rawValue)" : "manual(capped to \(settings.activeMaxFeePerGasGwei)/\(settings.activeMaxPriorityFeePerGasGwei) gwei)")")
-        // The daemon returns the uniform policy cap instead of erroring when its
-        // gas-price reads fail, so a "quote" can be a placeholder. Flagged rather
-        // than rejected: the fee is still the one we will sign with, but a prefund
-        // floor derived from it must not be presented as a top-up the user can make.
-        let pricingUnavailable = GasPricing.isUniformCapFallbackQuote(gasPrice)
-        if pricingUnavailable {
-            appendLog("\(logContext): gas price looks like the daemon's uniform cap fallback, not a live quote")
+        // Every tier at the configured ceiling means the live price is at or above
+        // the cap (`gas_price.rs` clamps there). The fee is still the one we will
+        // sign with, but a prefund floor derived from it is cap-driven, so the card
+        // must not present funding as the only lever.
+        let atPolicyCeiling = GasPricing.isPolicyCeilingQuote(gasPrice)
+        if atPolicyCeiling {
+            appendLog("\(logContext): every gas tier came back at the policy ceiling; live price is at or above the cap")
         }
-        return (resolved.maxPriorityFeePerGas, resolved.maxFeePerGas, pricingUnavailable)
+        return (resolved.maxPriorityFeePerGas, resolved.maxFeePerGas, atPolicyCeiling)
     }
 
     /// Fetch the current live gas tiers + base fee for the chat indicator.

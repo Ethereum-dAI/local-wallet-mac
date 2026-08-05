@@ -57,7 +57,7 @@ import Testing
         {"status":"prefund_shortfall","intent_id":"ABC",\
         "required_prefund":"0xaa87bee538000","available":"0x2386f26fc10000",\
         "deficit":"0x71afd498d0000","max_fee_per_gas":"0x6fc23ac00",\
-        "gas_pricing_unavailable":true,"effective_call_gas_limit":600000}
+        "fee_quote_at_policy_ceiling":true,"effective_call_gas_limit":600000}
         """
         let status = ChatIntentExecutionStatus.fromToolResponse(json)
 
@@ -67,7 +67,7 @@ import Testing
                 availableWeiHex: "0x2386f26fc10000",
                 deficitWeiHex: "0x71afd498d0000",
                 maxFeePerGasWeiHex: "0x6fc23ac00",
-                gasPricingUnavailable: true,
+                feeQuoteAtPolicyCeiling: true,
                 effectiveCallGasLimit: 600_000
             )
         ))
@@ -86,7 +86,7 @@ import Testing
             Issue.record("expected prefundShortfall")
             return
         }
-        #expect(report.gasPricingUnavailable == false)
+        #expect(report.feeQuoteAtPolicyCeiling == false)
     }
 
     @Test func prefundShortfallWithoutAFeeDegradesToFailed() throws {
@@ -120,7 +120,7 @@ import Testing
             availableWeiHex: "0x2386f26fc10000",
             deficitWeiHex: "0x71afd498d0000",
             maxFeePerGasWeiHex: "0x6fc23ac00",
-            gasPricingUnavailable: false,
+            feeQuoteAtPolicyCeiling: false,
             effectiveCallGasLimit: 600_000
         )
         let error = AppError.prefundShortfall(report)

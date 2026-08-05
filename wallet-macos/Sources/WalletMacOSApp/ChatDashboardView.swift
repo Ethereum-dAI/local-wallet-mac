@@ -456,7 +456,7 @@ enum ChatIntentExecutionStatus: Equatable {
                     maxFeePerGasWeiHex: maxFee,
                     // Absent in rows written before this field existed: treat as a
                     // live price, which only costs the extra explanation.
-                    gasPricingUnavailable: object["gas_pricing_unavailable"] as? Bool ?? false,
+                    feeQuoteAtPolicyCeiling: object["fee_quote_at_policy_ceiling"] as? Bool ?? false,
                     effectiveCallGasLimit: limit
                 )
             )
@@ -3903,7 +3903,7 @@ private final class ChatDashboardModel: ObservableObject {
                         "available": report.availableWeiHex,
                         "deficit": report.deficitWeiHex,
                         "max_fee_per_gas": report.maxFeePerGasWeiHex,
-                        "gas_pricing_unavailable": report.gasPricingUnavailable,
+                        "fee_quote_at_policy_ceiling": report.feeQuoteAtPolicyCeiling,
                         "effective_call_gas_limit": report.effectiveCallGasLimit,
                     ]),
                     toolCallId: intent.id.uuidString

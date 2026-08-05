@@ -63,20 +63,26 @@ enum GasPricing {
         return (minWei(priority, maxFee), maxFee) // priority never above maxFee
     }
 
-    /// True when the quote is the daemon's cap fallback rather than a live price.
+    /// True when every tier came back at the configured policy ceiling instead of
+    /// a live spread.
     ///
-    /// `gas_price.rs` does not fail closed when its chain reads fail: it logs and
-    /// returns `(max_fee_cap, priority_cap)` for *all three* tiers. That is
-    /// indistinguishable from a real quote by magnitude, but not by shape — the
-    /// success path runs `derive_fee_tiers`, which spreads slow/standard/fast
-    /// around the chain value, so a live quote never arrives with all three
-    /// identical.
+    /// Detected by *shape*, not magnitude: the daemon's success path runs
+    /// `derive_fee_tiers`, which spreads slow/standard/fast around the chain
+    /// value, so a live quote never arrives with all three identical. The daemon
+    /// returns that uniform shape when the chain price is **above**
+    /// `policy.max_fee_per_gas` (`gas_price.rs`) — a deliberate clamp, since the
+    /// price was read and the cap is the operator's ceiling.
     ///
-    /// Callers use this to avoid presenting a fee-driven prefund floor as
-    /// something a top-up can fix: the fee is the pathology, and the next quote
-    /// will return the same cap until the daemon's reads recover. Zeroed tiers are
-    /// excluded — degenerate, but a different bug from this one.
-    static func isUniformCapFallbackQuote(_ gasPrice: WalletNodeClient.UserOperationGasPrice) -> Bool {
+    /// Callers use it to explain a fee-dominated prefund floor correctly: the
+    /// floor is large because the fee is pinned at the ceiling, so raising the cap
+    /// or waiting for gas to fall moves it, and funding alone does not.
+    ///
+    /// A failed price read no longer produces this shape — the daemon fails closed
+    /// on that path — but the check is kept as a backstop, because
+    /// `LOCAL_WALLET_NODE_BIN` can point at an older binary that still
+    /// substitutes the cap for an unreadable price. Zeroed tiers are excluded:
+    /// degenerate, and a different bug.
+    static func isPolicyCeilingQuote(_ gasPrice: WalletNodeClient.UserOperationGasPrice) -> Bool {
         let standard = gasPrice.standard
         guard weiUInt64(standard.maxFeePerGas) > 0 else {
             return false

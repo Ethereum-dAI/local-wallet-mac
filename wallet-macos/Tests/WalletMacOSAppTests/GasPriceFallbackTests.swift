@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import WalletMacOSApp
 
-/// `gas_price.rs` does not error when its chain reads fail — it returns the
-/// uniform policy cap for all three tiers. The app cannot tell that apart from a
+/// `gas_price.rs` clamps to `(max_fee_cap, priority_cap)` on all three tiers when
+/// the chain price is above the cap. The app cannot tell that apart from a live
 /// quote by magnitude, but it can by *shape*.
 @Suite struct GasPriceFallbackTests {
     private func tier(maxFee: UInt64, priority: UInt64) -> WalletNodeClient.UserOperationGasPriceTier {
@@ -13,9 +13,9 @@ import Testing
         )
     }
 
-    @Test func detectsTheUniformCapFallback() {
-        // What the daemon returns on a failed read: (max_fee_cap, priority_cap)
-        // repeated across slow/standard/fast.
+    @Test func detectsTheUniformCeilingQuote() {
+        // What the daemon returns when the price is above the cap:
+        // (max_fee_cap, priority_cap) repeated across slow/standard/fast.
         let capped = tier(maxFee: 1_500_000_000_000, priority: 100_000_000_000)
         let quote = WalletNodeClient.UserOperationGasPrice(
             slow: capped,
@@ -23,10 +23,10 @@ import Testing
             fast: capped
         )
 
-        #expect(GasPricing.isUniformCapFallbackQuote(quote))
+        #expect(GasPricing.isPolicyCeilingQuote(quote))
     }
 
-    @Test func aLiveQuoteIsNotMistakenForTheFallback() {
+    @Test func aLiveQuoteIsNotMistakenForACeilingQuote() {
         // derive_fee_tiers spreads slow/standard/fast around the chain value, so a
         // real quote never arrives with all three identical.
         let quote = WalletNodeClient.UserOperationGasPrice(
@@ -35,7 +35,7 @@ import Testing
             fast: tier(maxFee: 24_000_000_000, priority: 1_200_000_000)
         )
 
-        #expect(GasPricing.isUniformCapFallbackQuote(quote) == false)
+        #expect(GasPricing.isPolicyCeilingQuote(quote) == false)
     }
 
     @Test func aSingleDifferingFieldIsEnoughToLookLive() {
@@ -46,15 +46,15 @@ import Testing
             fast: tier(maxFee: 20_000_000_000, priority: 1_000_000_001)
         )
 
-        #expect(GasPricing.isUniformCapFallbackQuote(quote) == false)
+        #expect(GasPricing.isPolicyCeilingQuote(quote) == false)
     }
 
-    @Test func anAllZeroQuoteIsNotTreatedAsTheFallback() {
-        // Zeroed tiers are degenerate but they are not the cap fallback, and
-        // calling them "gas pricing unavailable" would mislabel a different bug.
+    @Test func anAllZeroQuoteIsNotTreatedAsACeilingQuote() {
+        // Zeroed tiers are degenerate but they are not a ceiling clamp, and
+        // labelling them as one would mislabel a different bug.
         let zero = tier(maxFee: 0, priority: 0)
         let quote = WalletNodeClient.UserOperationGasPrice(slow: zero, standard: zero, fast: zero)
 
-        #expect(GasPricing.isUniformCapFallbackQuote(quote) == false)
+        #expect(GasPricing.isPolicyCeilingQuote(quote) == false)
     }
 }

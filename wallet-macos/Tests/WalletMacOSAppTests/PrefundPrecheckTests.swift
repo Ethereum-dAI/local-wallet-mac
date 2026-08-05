@@ -27,7 +27,7 @@ import Testing
             requiredPrefund: wei(1_000),
             callGasLimit: wei(600_000),
             maxFeePerGas: wei(30_000_000_000),
-            gasPricingUnavailable: false,
+            feeQuoteAtPolicyCeiling: false,
             readWalletStatus: {
                 readCount += 1
                 return try self.status(balance: 1, deposit: 0)
@@ -47,7 +47,7 @@ import Testing
             requiredPrefund: wei(1_000),
             callGasLimit: wei(600_000),
             maxFeePerGas: wei(30_000_000_000),
-            gasPricingUnavailable: false,
+            feeQuoteAtPolicyCeiling: false,
             readWalletStatus: { try self.status(balance: 600, deposit: 400) }
         )
 
@@ -63,7 +63,7 @@ import Testing
             requiredPrefund: wei(48_000_000_000_000_000),
             callGasLimit: wei(720_000),
             maxFeePerGas: wei(30_000_000_000),
-            gasPricingUnavailable: false,
+            feeQuoteAtPolicyCeiling: false,
             readWalletStatus: {
                 try self.status(balance: 10_000_000_000_000_000, deposit: 3_000_000_000_000_000)
             }
@@ -77,7 +77,7 @@ import Testing
         #expect(report.availableWeiHex == "0x" + wei(13_000_000_000_000_000).hexEncodedString)
         #expect(report.deficitWeiHex == "0x" + wei(35_000_000_000_000_000).hexEncodedString)
         #expect(report.maxFeePerGasWeiHex == "0x" + wei(30_000_000_000).hexEncodedString)
-        #expect(report.gasPricingUnavailable == false)
+        #expect(report.feeQuoteAtPolicyCeiling == false)
         // Reported from the draft's (daemon-floored) limit, not the pressed one.
         #expect(report.effectiveCallGasLimit == 720_000)
     }
@@ -89,7 +89,7 @@ import Testing
             requiredPrefund: wei(48_000_000_000_000_000),
             callGasLimit: wei(600_000),
             maxFeePerGas: wei(30_000_000_000),
-            gasPricingUnavailable: false,
+            feeQuoteAtPolicyCeiling: false,
             readWalletStatus: { throw Boom() }
         )
 
@@ -110,7 +110,7 @@ import Testing
             requiredPrefund: wei(48_000_000_000_000_000),
             callGasLimit: wide,
             maxFeePerGas: wei(30_000_000_000),
-            gasPricingUnavailable: false,
+            feeQuoteAtPolicyCeiling: false,
             readWalletStatus: { try self.status(balance: 1, deposit: 0) }
         )
 
@@ -129,7 +129,7 @@ import Testing
             requiredPrefund: wei(2_400_000_000_000_000_000),
             callGasLimit: wei(600_000),
             maxFeePerGas: wei(1_500_000_000_000),
-            gasPricingUnavailable: true,
+            feeQuoteAtPolicyCeiling: true,
             readWalletStatus: { try self.status(balance: 10_000_000_000_000_000, deposit: 0) }
         )
 
@@ -137,7 +137,7 @@ import Testing
             Issue.record("expected .decline, got \(outcome)")
             return
         }
-        #expect(report.gasPricingUnavailable)
+        #expect(report.feeQuoteAtPolicyCeiling)
         #expect(report.maxFeePerGasWeiHex == "0x" + wei(1_500_000_000_000).hexEncodedString)
     }
 

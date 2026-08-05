@@ -179,6 +179,14 @@ struct UserOperationGasPlan: Equatable {
     )
 }
 
+/// A draft whose gas plan is complete, plus EntryPoint's prefund floor for it as
+/// the daemon computed it. Kept together because the number is only meaningful
+/// for the exact limits and fees in this draft.
+struct EnrichedUserOperation: Equatable {
+    let draft: UserOperationDraft
+    let requiredPrefund: Data
+}
+
 struct UserOperationDraft: Equatable {
     let sender: String
     let nonce: Data

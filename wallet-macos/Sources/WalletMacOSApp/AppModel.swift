@@ -1434,7 +1434,7 @@ final class AppModel: ObservableObject {
                     draft,
                     logContext: "build",
                     usePrecompiled: usePrecompiled
-                )
+                ).draft
                 builtUserOperationDraft = enrichedDraft
 
                 let initCodeMode = enrichedDraft.initCode.isEmpty ? "existing account path" : "deployment path included"
@@ -2050,9 +2050,9 @@ final class AppModel: ObservableObject {
 
         let usePrecompiled = await resolveUsePrecompiled(logContext: logContext)
 
-        let enrichedDraft: UserOperationDraft
+        let enriched: EnrichedUserOperation
         do {
-            enrichedDraft = try await enrichDraftWithLocalBundlerEstimation(
+            enriched = try await enrichDraftWithLocalBundlerEstimation(
                 draft,
                 logContext: logContext,
                 usePrecompiled: usePrecompiled,
@@ -2063,6 +2063,7 @@ final class AppModel: ObservableObject {
             clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
             throw error
         }
+        let enrichedDraft = enriched.draft
         builtUserOperationDraft = enrichedDraft
 
         let signatureResult: UserOperationSignatureResult
@@ -2489,7 +2490,7 @@ final class AppModel: ObservableObject {
         usePrecompiled: Bool,
         sessionPlan: SessionUserOperationPlan? = nil,
         acknowledgedCallGasLimit: UInt64? = nil
-    ) async throws -> UserOperationDraft {
+    ) async throws -> EnrichedUserOperation {
         appendLog("\(logContext): checking local wallet-node entry point support")
         try await withWalletNodeClient(operation: "\(logContext) entry point check") { client in
             try await client.assertEntryPointSupport(activeChain.entryPoint)
@@ -2510,39 +2511,55 @@ final class AppModel: ObservableObject {
             appendLog("\(logContext): generated dummy signature for estimation (\(dummySignature.count) bytes)")
         }
 
+        let feeQuote = try await suggestedUserOperationFees(logContext: logContext)
+        appendLog(
+            "\(logContext): fee quote maxPriority=\(feeQuote.maxPriorityFeePerGas.shortHex) maxFee=\(feeQuote.maxFeePerGas.shortHex)"
+        )
+
+        // Quoted *before* estimating so the submitted draft carries real fees and
+        // the daemon's requiredPrefund comes back as a real number rather than
+        // (limits x 0). Do not move this back below the estimate.
+        let gasFees = pack128(
+            high: feeQuote.maxPriorityFeePerGas,
+            low: feeQuote.maxFeePerGas
+        )
+        let pricedDraft = draft.updatingGasPlan(
+            UserOperationGasPlan(
+                accountGasLimits: draft.gasPlan.accountGasLimits,
+                preVerificationGas: draft.gasPlan.preVerificationGas,
+                gasFees: gasFees,
+                paymasterAndData: draft.gasPlan.paymasterAndData
+            )
+        )
+
         let estimate = try await withWalletNodeWarmupRetry(operation: "\(logContext) gas estimate") {
             try await withWalletNodeClient(operation: "\(logContext) gas estimate") { client in
                 try await client.estimateUserOperationGas(
-                    draft: draft,
+                    draft: pricedDraft,
                     dummySignature: dummySignature,
                     acknowledgedCallGasLimit: acknowledgedCallGasLimit
                 )
             }
         }
         appendLog(
-            "\(logContext): gas estimate call=\(estimate.callGasLimit.shortHex) verification=\(estimate.verificationGasLimit.shortHex) preVerification=\(estimate.preVerificationGas.shortHex)"
-        )
-
-        let feeQuote = try await suggestedUserOperationFees(logContext: logContext)
-        appendLog(
-            "\(logContext): fee quote maxPriority=\(feeQuote.maxPriorityFeePerGas.shortHex) maxFee=\(feeQuote.maxFeePerGas.shortHex)"
+            "\(logContext): gas estimate call=\(estimate.callGasLimit.shortHex) verification=\(estimate.verificationGasLimit.shortHex) preVerification=\(estimate.preVerificationGas.shortHex) requiredPrefund=\(estimate.requiredPrefund.shortHex)"
         )
 
         activeBundlerStatus = "Local wallet-node ready on \(activeChain.name)"
 
-        return draft.updatingGasPlan(
-            UserOperationGasPlan(
-                accountGasLimits: pack128(
-                    high: estimate.verificationGasLimit,
-                    low: estimate.callGasLimit
-                ),
-                preVerificationGas: estimate.preVerificationGas,
-                gasFees: pack128(
-                    high: feeQuote.maxPriorityFeePerGas,
-                    low: feeQuote.maxFeePerGas
-                ),
-                paymasterAndData: Data()
-            )
+        return EnrichedUserOperation(
+            draft: pricedDraft.updatingGasPlan(
+                UserOperationGasPlan(
+                    accountGasLimits: pack128(
+                        high: estimate.verificationGasLimit,
+                        low: estimate.callGasLimit
+                    ),
+                    preVerificationGas: estimate.preVerificationGas,
+                    gasFees: gasFees,
+                    paymasterAndData: Data()
+                )
+            ),
+            requiredPrefund: estimate.requiredPrefund
         )
     }
 

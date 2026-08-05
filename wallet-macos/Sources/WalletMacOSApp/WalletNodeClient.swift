@@ -146,6 +146,11 @@ struct WalletNodeClient {
         let callGasLimit: Data
         let verificationGasLimit: Data
         let preVerificationGas: Data
+        /// EntryPoint v0.7's balance floor for this op, as the daemon computed it
+        /// from the limits it resolved times the `maxFeePerGas` we submitted
+        /// (`wallet-bundler/src/user_operation.rs:178`). Zero when the daemon
+        /// omitted the field, or when we submitted zero fees.
+        let requiredPrefund: Data
     }
 
     struct UserOperationGasPriceTier: Equatable {
@@ -299,6 +304,35 @@ struct WalletNodeClient {
         }
     }
 
+    static func decodeGasEstimate(_ object: [String: Any]) throws -> UserOperationGasEstimate {
+        func quantity(_ value: String, _ field: String) throws -> Data {
+            do {
+                return try Data.quantityString(value).leftPadded(to: 32)
+            } catch {
+                throw ClientError.transport("wallet-node returned invalid \(field): \(value)")
+            }
+        }
+
+        guard let callGasLimit = object["callGasLimit"] as? String,
+              let verificationGasLimit = object["verificationGasLimit"] as? String,
+              let preVerificationGas = object["preVerificationGas"] as? String
+        else {
+            throw ClientError.invalidResponse
+        }
+
+        var requiredPrefund = Data(repeating: 0, count: 32)
+        if let raw = object["requiredPrefund"] as? String {
+            requiredPrefund = try quantity(raw, "requiredPrefund")
+        }
+
+        return UserOperationGasEstimate(
+            callGasLimit: try quantity(callGasLimit, "callGasLimit"),
+            verificationGasLimit: try quantity(verificationGasLimit, "verificationGasLimit"),
+            preVerificationGas: try quantity(preVerificationGas, "preVerificationGas"),
+            requiredPrefund: requiredPrefund
+        )
+    }
+
     static func estimateGasParams(
         userOperation: Any,
         entryPoint: String,
@@ -343,19 +377,10 @@ struct WalletNodeClient {
                 acknowledgedCallGasLimit: acknowledgedCallGasLimit
             )
         )
-        guard let object = result as? [String: Any],
-              let callGasLimit = object["callGasLimit"] as? String,
-              let verificationGasLimit = object["verificationGasLimit"] as? String,
-              let preVerificationGas = object["preVerificationGas"] as? String
-        else {
+        guard let object = result as? [String: Any] else {
             throw ClientError.invalidResponse
         }
-
-        return UserOperationGasEstimate(
-            callGasLimit: try parseQuantity(callGasLimit, field: "callGasLimit").leftPadded(to: 32),
-            verificationGasLimit: try parseQuantity(verificationGasLimit, field: "verificationGasLimit").leftPadded(to: 32),
-            preVerificationGas: try parseQuantity(preVerificationGas, field: "preVerificationGas").leftPadded(to: 32)
-        )
+        return try Self.decodeGasEstimate(object)
     }
 
     func sendUserOperation(

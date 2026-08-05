@@ -502,8 +502,37 @@ struct ToolIntentCardView: View {
                 .controlSize(.small)
             }
             .padding(.vertical, 4)
-        case .prefundShortfall:
-            EmptyView()
+        case let .prefundShortfall(required, available, deficit, effectiveCallGasLimit):
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("Not enough ETH to cover the gas headroom up front.")
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                }
+                Text("""
+                EntryPoint requires \(WeiFormatter.ethDisplayString(fromHexWei: required)) \
+                held up front to cover \(effectiveCallGasLimit.formatted()) call gas, whatever \
+                the transaction actually spends. This account has \
+                \(WeiFormatter.ethDisplayString(fromHexWei: available)) available, counting its \
+                EntryPoint deposit.
+                """)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Top up at least \(WeiFormatter.ethDisplayString(fromHexWei: deficit)), then try again.")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Try again") {
+                    onSubmitWithGasHeadroom(effectiveCallGasLimit)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Re-reads the account balance and re-estimates before asking for a signature.")
+            }
+            .padding(.vertical, 4)
         case .idle:
             // Nothing to promise while blocked — the bundler-gas row above already says the
             // send is refused, and this line would contradict it.

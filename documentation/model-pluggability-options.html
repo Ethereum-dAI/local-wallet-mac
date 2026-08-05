@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pluggable models — UI directions</title>
+<style>
+  :root {
+    --ground: #f6f6f8;
+    --panel: #ffffff;
+    --ink: #14161c;
+    --ink-2: #454b5a;
+    --muted: #767d8f;
+    --rule: #e2e3ea;
+    --accent: #4b62e8;
+    --accent-soft: #eceffd;
+    --warn: #b06a12;
+    --ok: #1d7a4c;
+
+    /* app chrome — fixed in both themes: the wallet is dark-only */
+    --app-bg: #0b0f1a;
+    --app-card: #121827;
+    --app-card-2: #171e2f;
+    --app-line: #232c40;
+    --app-text: #e7ebf5;
+    --app-muted: #8b96ae;
+    --app-accent: #5b76f7;
+    --app-green: #46d489;
+    --app-amber: #e2a33c;
+    --app-mono: #c6d2ef;
+
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0e1014;
+      --panel: #15181f;
+      --ink: #eceef4;
+      --ink-2: #b6bcca;
+      --muted: #838b9c;
+      --rule: #262a34;
+      --accent: #8b9dff;
+      --accent-soft: #1c2137;
+      --warn: #e0a94c;
+      --ok: #58c98e;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0e1014;
+    --panel: #15181f;
+    --ink: #eceef4;
+    --ink-2: #b6bcca;
+    --muted: #838b9c;
+    --rule: #262a34;
+    --accent: #8b9dff;
+    --accent-soft: #1c2137;
+    --warn: #e0a94c;
+    --ok: #58c98e;
+  }
+  :root[data-theme="light"] {
+    --ground: #f6f6f8;
+    --panel: #ffffff;
+    --ink: #14161c;
+    --ink-2: #454b5a;
+    --muted: #767d8f;
+    --rule: #e2e3ea;
+    --accent: #4b62e8;
+    --accent-soft: #eceffd;
+    --warn: #b06a12;
+    --ok: #1d7a4c;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 44px 24px 96px; display: flex; flex-direction: column; gap: 56px; }
+
+  header.top { display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--rule); padding-bottom: 22px; }
+  .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  h1 { margin: 0; font-size: 34px; line-height: 1.1; letter-spacing: -.025em; text-wrap: balance; font-weight: 680; }
+  .lede { margin: 0; color: var(--ink-2); max-width: 64ch; }
+
+  section { display: flex; flex-direction: column; gap: 18px; }
+  .opt-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .opt-key {
+    font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: .1em;
+    color: var(--accent); background: var(--accent-soft); border-radius: 4px; padding: 4px 8px;
+  }
+  h2 { margin: 0; font-size: 22px; letter-spacing: -.015em; font-weight: 660; }
+  .opt-sub { color: var(--muted); font-size: 14px; }
+  .rec { font-size: 11px; font-family: var(--mono); text-transform: uppercase; letter-spacing: .1em; color: var(--ok); border: 1px solid currentColor; border-radius: 4px; padding: 3px 7px; }
+
+  .notes { display: flex; flex-wrap: wrap; gap: 8px; }
+  .note { font-size: 12.5px; color: var(--ink-2); background: var(--panel); border: 1px solid var(--rule); border-radius: 999px; padding: 5px 12px; }
+  .note b { font-weight: 620; color: var(--ink); }
+  .note.minus b { color: var(--warn); }
+
+  /* ---------- app mockup ---------- */
+  .mk {
+    background: var(--app-bg); border: 1px solid var(--app-line); border-radius: 12px;
+    overflow: hidden; box-shadow: 0 18px 40px -28px rgba(6, 10, 24, .8);
+    color: var(--app-text);
+  }
+  .mk-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--app-line); background: #0d1220; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .mk-title { font-size: 12px; color: var(--app-muted); margin-left: 8px; letter-spacing: .02em; }
+  .mk-body { display: grid; grid-template-columns: 168px 1fr; min-height: 380px; }
+  .mk-nav { border-right: 1px solid var(--app-line); padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; background: #0c1120; }
+  .mk-nav div { font-size: 12.5px; color: var(--app-muted); padding: 6px 10px; border-radius: 6px; }
+  .mk-nav div.on { background: rgba(91, 118, 247, .16); color: #dfe6ff; font-weight: 600; }
+  .mk-pane { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; overflow-x: auto; }
+
+  .mk-sec { background: var(--app-card); border: 1px solid var(--app-line); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+  .mk-sec > h4 { margin: 0; font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--app-muted); font-weight: 700; }
+
+  .row { display: flex; align-items: center; gap: 12px; }
+  .row.pad { padding: 10px; border: 1px solid var(--app-line); border-radius: 8px; background: var(--app-card-2); }
+  .row.pick { border-color: rgba(91, 118, 247, .55); box-shadow: inset 0 0 0 1px rgba(91, 118, 247, .25); }
+  .radio { width: 15px; height: 15px; border-radius: 50%; border: 1.5px solid #4a5877; flex: none; }
+  .radio.on { border-color: var(--app-accent); background: radial-gradient(circle, var(--app-accent) 0 4.5px, transparent 5px); }
+  .grow { flex: 1; min-width: 0; }
+  .nm { font-size: 13.5px; font-weight: 640; letter-spacing: -.005em; }
+  .meta { font-family: var(--mono); font-size: 11px; color: var(--app-muted); margin-top: 2px; }
+  .kv { display: grid; grid-template-columns: 128px 1fr; gap: 6px 14px; font-size: 12px; }
+  .kv dt { color: var(--app-muted); font-weight: 600; }
+  .kv dd { margin: 0; font-family: var(--mono); color: var(--app-mono); }
+
+  .chip { font-size: 10px; font-family: var(--mono); text-transform: uppercase; letter-spacing: .08em; padding: 3px 7px; border-radius: 999px; border: 1px solid var(--app-line); color: var(--app-muted); white-space: nowrap; }
+  .chip.dev { color: var(--app-green); border-color: rgba(70, 212, 137, .4); background: rgba(70, 212, 137, .08); }
+  .chip.net { color: var(--app-amber); border-color: rgba(226, 163, 60, .4); background: rgba(226, 163, 60, .08); }
+  .chip.def { color: #c3cdf5; border-color: rgba(91, 118, 247, .45); background: rgba(91, 118, 247, .12); }
+
+  .btn { font-size: 12px; font-weight: 640; padding: 6px 12px; border-radius: 7px; border: 1px solid var(--app-line); color: #d7deef; background: #1b2234; white-space: nowrap; }
+  .btn.pri { background: var(--app-accent); border-color: var(--app-accent); color: #fff; }
+  .btn.ghost { background: transparent; }
+  .btn.sm { padding: 4px 9px; font-size: 11px; }
+
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .12em; color: var(--app-muted); font-weight: 700; }
+  .input { font-family: var(--mono); font-size: 12px; color: var(--app-mono); background: #0d1220; border: 1px solid var(--app-line); border-radius: 7px; padding: 8px 10px; }
+  .input.ph { color: #5c6884; }
+  .seg { display: inline-flex; padding: 3px; gap: 3px; background: #0d1220; border: 1px solid var(--app-line); border-radius: 8px; }
+  .seg span { font-size: 12px; font-weight: 620; padding: 5px 14px; border-radius: 6px; color: var(--app-muted); }
+  .seg span.on { background: var(--app-accent); color: #fff; }
+
+  .bar { height: 5px; border-radius: 3px; background: #1d2437; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--app-accent); }
+  .hint { font-size: 11.5px; color: var(--app-muted); }
+  .hint.ok { color: var(--app-green); }
+  .hint.warn { color: var(--app-amber); }
+
+  .anchor { position: relative; }
+  .popover { position: absolute; right: 0; top: calc(100% + 6px); width: 260px; background: #151d30; border: 1px solid #2f3a55; border-radius: 9px; padding: 6px; box-shadow: 0 20px 40px -20px #000; z-index: 3; }
+  .popover div { display: flex; gap: 9px; align-items: center; font-size: 12.5px; padding: 8px 9px; border-radius: 6px; color: #dbe2f2; }
+  .popover div.hl { background: rgba(91, 118, 247, .18); }
+  .popover small { display: block; color: var(--app-muted); font-size: 11px; font-weight: 400; }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 860px) { .two, .mk-body { grid-template-columns: 1fr; } .mk-nav { flex-direction: row; overflow-x: auto; } }
+
+  /* ---------- comparison ---------- */
+  .tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 640px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  thead th { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+  tbody tr:last-child td { border-bottom: none; }
+  td.y { color: var(--ok); font-weight: 620; }
+  td.n { color: var(--muted); }
+
+  /* ---------- questions ---------- */
+  .qs { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; }
+  .q { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .q h3 { margin: 0; font-size: 14.5px; font-weight: 640; letter-spacing: -.01em; }
+  .q ul { margin: 0; padding-left: 18px; color: var(--ink-2); font-size: 13px; display: flex; flex-direction: column; gap: 3px; }
+  .q em { font-style: normal; color: var(--accent); font-weight: 620; }
+  footer { color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--rule); padding-top: 18px; }
+</style>
+
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">Issue #74 · Settings › Models</div>
+    <h1>Pluggable models</h1>
+    <p class="lede">Three directions for choosing the local model, adding one from Hugging Face, and (optionally) talking to Ollama. Gemma 4 E4B stays the default in all three. Mockups are dark because the app is.</p>
+  </header>
+
+  <!-- ============ OPTION A ============ -->
+  <section>
+    <div class="opt-head">
+      <span class="opt-key">A</span>
+      <h2>Curated list + paste a repo</h2>
+      <span class="opt-sub">Extends today's screen. GGUF only, all on-device.</span>
+    </div>
+
+    <div class="mk">
+      <div class="mk-bar">
+        <span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span>
+        <span class="mk-title">Local Wallet — Settings</span>
+      </div>
+      <div class="mk-body">
+        <nav class="mk-nav">
+          <div>Info</div><div class="on">Models</div><div>Network</div><div>Transactions</div><div>Diagnostics</div><div>Data</div><div>Security</div>
+        </nav>
+        <div class="mk-pane">
+          <div class="mk-sec">
+            <h4>Text model</h4>
+            <div class="row pad pick">
+              <span class="radio on"></span>
+              <div class="grow">
+                <div class="nm">Gemma 4 E4B</div>
+                <div class="meta">ggml-org/gemma-4-E4B-it-GGUF · Q4_0 · 4.59 GB · 32k ctx</div>
+              </div>
+              <span class="chip def">Default</span>
+              <span class="chip">Loaded</span>
+            </div>
+            <div class="row pad">
+              <span class="radio"></span>
+              <div class="grow">
+                <div class="nm">Qwen3 4B Instruct</div>
+                <div class="meta">Qwen/Qwen3-4B-Instruct-GGUF · Q4_K_M · 2.50 GB · 32k ctx</div>
+              </div>
+              <span class="btn sm">Download</span>
+            </div>
+            <div class="row pad">
+              <span class="radio"></span>
+              <div class="grow">
+                <div class="nm">Llama 3.2 3B Instruct</div>
+                <div class="meta">bartowski/Llama-3.2-3B-Instruct-GGUF · Q4_K_M · 2.02 GB · 8k ctx</div>
+              </div>
+              <span class="btn sm">Download</span>
+            </div>
+          </div>
+
+          <div class="mk-sec">
+            <h4>Add from Hugging Face</h4>
+            <div class="two">
+              <div class="field">
+                <label>Repository</label>
+                <div class="input">unsloth/gemma-4-E2B-it-GGUF</div>
+              </div>
+              <div class="field">
+                <label>File</label>
+                <div class="input">gemma-4-E2B-it-Q4_K_M.gguf ⌄</div>
+              </div>
+            </div>
+            <div class="row">
+              <span class="hint ok">3 GGUF files found · 1.71 GB · checksum from repo metadata</span>
+              <span class="grow"></span>
+              <span class="btn pri">Download &amp; add</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="notes">
+      <span class="note"><b>Smallest change</b> — reuses the existing downloader &amp; SHA-256 gate</span>
+      <span class="note"><b>Nothing leaves the Mac</b></span>
+      <span class="note minus"><b>No Ollama</b>, no models you already have locally</span>
+    </div>
+  </section>
+
+  <!-- ============ OPTION B ============ -->
+  <section>
+    <div class="opt-head">
+      <span class="opt-key">B</span>
+      <h2>Two runtimes, one switch</h2>
+      <span class="opt-sub">On-device llama.cpp or an Ollama server you point at.</span>
+    </div>
+
+    <div class="mk">
+      <div class="mk-bar">
+        <span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span>
+        <span class="mk-title">Local Wallet — Settings</span>
+      </div>
+      <div class="mk-body">
+        <nav class="mk-nav">
+          <div>Info</div><div class="on">Models</div><div>Network</div><div>Transactions</div><div>Diagnostics</div><div>Data</div><div>Security</div>
+        </nav>
+        <div class="mk-pane">
+          <div class="mk-sec">
+            <h4>Runtime</h4>
+            <div class="row">
+              <div class="seg"><span>On-device</span><span class="on">Ollama</span></div>
+              <span class="grow"></span>
+              <span class="chip net">Prompts leave the app</span>
+            </div>
+            <div class="hint warn">Ollama runs outside the wallet's sandbox. Balances, addresses and intents in the prompt go to that host.</div>
+          </div>
+
+          <div class="mk-sec">
+            <h4>Ollama server</h4>
+            <div class="two">
+              <div class="field"><label>Host</label><div class="input">127.0.0.1</div></div>
+              <div class="field"><label>Port</label><div class="input">11434</div></div>
+            </div>
+            <div class="row">
+              <span class="hint ok">Connected · ollama 0.6.2 · 3 models</span>
+              <span class="grow"></span>
+              <span class="btn">Test connection</span>
+            </div>
+            <div class="field">
+              <label>Model</label>
+              <div class="input">qwen3:8b ⌄</div>
+            </div>
+            <div class="hint">Tool calling required. <span class="hint warn">llama3.2:1b — no tool support</span></div>
+          </div>
+
+          <div class="mk-sec" style="opacity:.62">
+            <h4>On-device (inactive)</h4>
+            <dl class="kv">
+              <dt>Model</dt><dd>Gemma 4 E4B · Q4_0</dd>
+              <dt>Path</dt><dd>~/Library/…/Models/gemma-4-E4B-it-Q4_0.gguf</dd>
+            </dl>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="notes">
+      <span class="note"><b>Any Ollama model</b>, zero download UI</span>
+      <span class="note"><b>Clean split</b> — one runtime protocol, two implementations</span>
+      <span class="note minus"><b>Two mental models</b> — the HF flow still has to live somewhere</span>
+    </div>
+  </section>
+
+  <!-- ============ OPTION C ============ -->
+  <section>
+    <div class="opt-head">
+      <span class="opt-key">C</span>
+      <h2>One shelf, tagged by source</h2>
+      <span class="rec">Recommended</span>
+      <span class="opt-sub">Bundled, downloaded, Hugging Face and Ollama models in a single list.</span>
+    </div>
+
+    <div class="mk">
+      <div class="mk-bar">
+        <span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span>
+        <span class="mk-title">Local Wallet — Settings</span>
+      </div>
+      <div class="mk-body">
+        <nav class="mk-nav">
+          <div>Info</div><div class="on">Models</div><div>Network</div><div>Transactions</div><div>Diagnostics</div><div>Data</div><div>Security</div>
+        </nav>
+        <div class="mk-pane">
+          <div class="mk-sec anchor">
+            <div class="row">
+              <h4 style="margin:0">Models</h4>
+              <span class="grow"></span>
+              <span class="btn sm">＋ Add model</span>
+            </div>
+
+            <div class="popover">
+              <div class="hl">🤗 <span><b>Hugging Face repo</b><small>Paste owner/name, pick a GGUF</small></span></div>
+              <div>🖥️ <span><b>Ollama server</b><small>host : port</small></span></div>
+              <div>📁 <span><b>Local GGUF file…</b><small>Choose from disk</small></span></div>
+            </div>
+
+            <div class="row pad pick">
+              <span class="radio on"></span>
+              <div class="grow">
+                <div class="nm">Gemma 4 E4B</div>
+                <div class="meta">Q4_0 · 4.59 GB · 32k ctx · loaded</div>
+              </div>
+              <span class="chip dev">On-device</span>
+              <span class="chip def">Default</span>
+            </div>
+
+            <div class="row pad">
+              <span class="radio"></span>
+              <div class="grow">
+                <div class="nm">Qwen3 4B Instruct</div>
+                <div class="meta">Qwen/Qwen3-4B-Instruct-GGUF · Q4_K_M</div>
+                <div class="bar" style="margin-top:7px;width:230px"><i style="width:41%"></i></div>
+              </div>
+              <span class="chip dev">On-device</span>
+              <span class="hint">41% · 1.0/2.5 GB</span>
+              <span class="btn sm ghost">Cancel</span>
+            </div>
+
+            <div class="row pad">
+              <span class="radio"></span>
+              <div class="grow">
+                <div class="nm">qwen3:8b</div>
+                <div class="meta">ollama · 127.0.0.1:11434 · tools ✓</div>
+              </div>
+              <span class="chip net">Network</span>
+              <span class="btn sm ghost">Remove</span>
+            </div>
+
+            <div class="row pad" style="opacity:.55">
+              <span class="radio"></span>
+              <div class="grow">
+                <div class="nm">llama3.2:1b</div>
+                <div class="meta">ollama · 127.0.0.1:11434 · no tool support</div>
+              </div>
+              <span class="chip net">Network</span>
+              <span class="chip">Unsupported</span>
+            </div>
+          </div>
+
+          <div class="mk-sec">
+            <h4>Active model</h4>
+            <dl class="kv">
+              <dt>Runtime</dt><dd>llama.cpp · Metal</dd>
+              <dt>Context window</dt><dd>8192 tokens ⌄ (max 32768)</dd>
+              <dt>Path</dt><dd>~/Library/…/Models/gemma-4-E4B-it-Q4_0.gguf</dd>
+            </dl>
+            <div class="row"><span class="hint">Switching reloads the runtime; the current chat keeps its history.</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="notes">
+      <span class="note"><b>One list to scan</b> — source and privacy read at a glance</span>
+      <span class="note"><b>Grows</b> — MLX or a remote endpoint is one more badge</span>
+      <span class="note minus"><b>Most work</b> — needs a real model registry behind it</span>
+    </div>
+  </section>
+
+  <!-- ============ ONBOARDING ============ -->
+  <section>
+    <div class="opt-head">
+      <span class="opt-key">＋</span>
+      <h2>At first launch</h2>
+      <span class="opt-sub">Same choice, folded away. Default path stays two clicks.</span>
+    </div>
+
+    <div class="two">
+      <div class="mk">
+        <div class="mk-bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="mk-title">Setup — Step 3 of 5</span></div>
+        <div class="mk-pane" style="padding:20px">
+          <div class="nm" style="font-size:19px">Choose your local model</div>
+          <div class="hint">Runs on this Mac. Nothing is sent anywhere.</div>
+          <div class="row pad pick" style="margin-top:6px">
+            <span class="radio on"></span>
+            <div class="grow"><div class="nm">Gemma 4 E4B</div><div class="meta">4.59 GB · recommended</div></div>
+            <span class="chip dev">On-device</span>
+          </div>
+          <div class="row pad"><span class="radio"></span><div class="grow"><div class="nm">Qwen3 4B Instruct</div><div class="meta">2.50 GB · lighter, faster</div></div><span class="chip dev">On-device</span></div>
+          <div class="row" style="margin-top:2px"><span class="hint">› Use another model (Hugging Face or Ollama)</span></div>
+          <div class="row" style="margin-top:10px"><span class="grow"></span><span class="btn">Back</span><span class="btn pri">Download &amp; continue</span></div>
+        </div>
+      </div>
+
+      <div class="mk">
+        <div class="mk-bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="mk-title">Setup — Step 3 of 5 · expanded</span></div>
+        <div class="mk-pane" style="padding:20px">
+          <div class="nm" style="font-size:19px">Use another model</div>
+          <div class="seg" style="align-self:flex-start"><span class="on">Hugging Face</span><span>Ollama</span></div>
+          <div class="field"><label>Repository</label><div class="input">unsloth/gemma-4-E2B-it-GGUF</div></div>
+          <div class="field"><label>File</label><div class="input">gemma-4-E2B-it-Q4_K_M.gguf ⌄</div></div>
+          <div class="hint ok">1.71 GB · 8k ctx detected · chat template found</div>
+          <div class="hint warn">Unverified model. Tool calls may be wrong — review every transaction.</div>
+          <div class="row" style="margin-top:6px"><span class="grow"></span><span class="btn">Cancel</span><span class="btn pri">Download &amp; continue</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ COMPARE ============ -->
+  <section>
+    <h2>Trade-offs</h2>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>&nbsp;</th><th>A · Curated + repo</th><th>B · Runtime switch</th><th>C · One shelf</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><b>Gemma stays default</b></td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+          <tr><td><b>Hugging Face repo</b></td><td class="y">Yes</td><td>Only in the on-device pane</td><td class="y">Yes</td></tr>
+          <tr><td><b>Ollama</b></td><td class="n">No</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+          <tr><td><b>Privacy is visible</b></td><td>n/a — always local</td><td>Per runtime</td><td class="y">Per model row</td></tr>
+          <tr><td><b>New code</b></td><td>HF file listing, model registry entry</td><td>Runtime protocol + Ollama client</td><td>Registry + both clients + swap</td></tr>
+          <tr><td><b>Rough size</b></td><td>~1 PR</td><td>~2 PRs</td><td>~3 PRs (A → B → merge UI)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ QUESTIONS ============ -->
+  <section>
+    <h2>Your call</h2>
+    <div class="qs">
+      <div class="q">
+        <h3>1 · Which direction?</h3>
+        <ul><li>A now, C later</li><li><em>C directly</em>, shipped in A → B order</li><li>B — Ollama is the point</li></ul>
+      </div>
+      <div class="q">
+        <h3>2 · Ollama scope</h3>
+        <ul><li><em>Loopback only</em> (127.0.0.1)</li><li>Any host, with a warning</li><li>Any host + optional API key</li></ul>
+      </div>
+      <div class="q">
+        <h3>3 · Unverified GGUFs</h3>
+        <ul><li><em>Warn once</em>, allow anything public</li><li>Checksum must come from repo metadata, else block</li><li>Allowlist of repos</li></ul>
+      </div>
+      <div class="q">
+        <h3>4 · Switching models</h3>
+        <ul><li><em>Hot swap</em> — unload, reload, keep the chat</li><li>Restart required (like the context window today)</li></ul>
+      </div>
+      <div class="q">
+        <h3>5 · Curated extras</h3>
+        <ul><li>Gemma only, everything else is custom</li><li><em>Gemma + 2 pinned alternatives</em> we've tested for tool calls</li></ul>
+      </div>
+      <div class="q">
+        <h3>6 · Gated / private repos</h3>
+        <ul><li><em>Out of scope</em> — public repos only</li><li>Optional HF token in Keychain</li></ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>Reference: <code>OnboardingSettingsStore.LocalAIModel</code>, <code>LocalAIModelDownloadManager</code>, <code>EmbeddedLlamaInferenceService</code>, <code>LocalWalletSettingsView.modelsTab</code>.</footer>
+</div>
+</body>
+</html>

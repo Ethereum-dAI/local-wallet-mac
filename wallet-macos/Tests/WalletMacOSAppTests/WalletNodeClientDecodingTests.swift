@@ -47,4 +47,36 @@ import Testing
             try WalletNodeClient.decodeGasEstimate(["callGasLimit": "0x927c0"])
         }
     }
+
+    @Test func decodesWalletStatusBalances() throws {
+        let status = try WalletNodeClient.WalletStatus(json: [
+            "smartAccount": "0xabc",
+            "accountBalance": "0x2386f26fc10000",
+            "entryPointDeposit": "0x38d7ea4c68000",
+            "readyToSend": true,
+        ])
+
+        // Asserted as bytes, not trimmed hex: an odd-digit quantity like
+        // 0x38d7ea4c68000 normalises to a leading 0x03 nibble-pair, which is not
+        // a zero byte to trim.
+        #expect(status.accountBalance  // 0.01 ETH
+            == Data(repeating: 0, count: 25) + Data([0x23, 0x86, 0xf2, 0x6f, 0xc1, 0x00, 0x00]))
+        #expect(status.entryPointDeposit  // 0.001 ETH
+            == Data(repeating: 0, count: 25) + Data([0x03, 0x8d, 0x7e, 0xa4, 0xc6, 0x80, 0x00]))
+    }
+
+    @Test func walletStatusMissingEitherFieldThrows() {
+        #expect(throws: (any Error).self) {
+            try WalletNodeClient.WalletStatus(json: ["accountBalance": "0x1"])
+        }
+        #expect(throws: (any Error).self) {
+            try WalletNodeClient.WalletStatus(json: ["entryPointDeposit": "0x1"])
+        }
+        #expect(throws: (any Error).self) {
+            try WalletNodeClient.WalletStatus(json: [
+                "accountBalance": "0x1",
+                "entryPointDeposit": "nope",
+            ])
+        }
+    }
 }

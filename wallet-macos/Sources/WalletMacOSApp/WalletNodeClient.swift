@@ -142,6 +142,27 @@ struct WalletNodeClient {
         let p256Precompile: P256Precompile?
     }
 
+    /// The two numbers EntryPoint v0.7 measures a UserOperation's prefund
+    /// against: the account's own balance and its EntryPoint deposit. Read
+    /// together from one `wallet_walletStatus` call so they come from the same
+    /// verified head.
+    struct WalletStatus: Equatable {
+        let accountBalance: Data
+        let entryPointDeposit: Data
+
+        init(json: [String: Any]) throws {
+            guard let balance = json["accountBalance"] as? String,
+                  let deposit = json["entryPointDeposit"] as? String,
+                  let balanceData = try? Data.quantityString(balance).leftPadded(to: 32),
+                  let depositData = try? Data.quantityString(deposit).leftPadded(to: 32)
+            else {
+                throw ClientError.invalidResponse
+            }
+            self.accountBalance = balanceData
+            self.entryPointDeposit = depositData
+        }
+    }
+
     struct UserOperationGasEstimate: Equatable {
         let callGasLimit: Data
         let verificationGasLimit: Data
@@ -287,6 +308,14 @@ struct WalletNodeClient {
             throw ClientError.invalidResponse
         }
         return try NetworkStatus(json: object)
+    }
+
+    func walletStatus(smartAccount: String) async throws -> WalletStatus {
+        let result = try await call(method: "wallet_walletStatus", params: [smartAccount])
+        guard let object = result as? [String: Any] else {
+            throw ClientError.invalidResponse
+        }
+        return try WalletStatus(json: object)
     }
 
     func supportedEntryPoints() async throws -> [String] {

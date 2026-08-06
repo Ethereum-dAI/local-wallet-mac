@@ -76,7 +76,16 @@ enum GGUFHeaderReader {
         var offset: Int = 0
 
         mutating func take(_ count: Int) throws -> Data {
-            guard count >= 0, offset + count <= data.count else { throw GGUFHeaderError.truncated }
+            // `offset + count` is not safe to compute directly: `count` is
+            // attacker-controlled (it flows from a length field in untrusted,
+            // network-fetched bytes) and can be large enough that the addition
+            // itself overflows `Int` and traps before the bounds check runs.
+            // Compare against the remaining budget instead, which never overflows
+            // because `offset <= data.count` is an invariant this function
+            // maintains.
+            guard count >= 0 else { throw GGUFHeaderError.truncated }
+            let remaining = data.count - offset
+            guard count <= remaining else { throw GGUFHeaderError.truncated }
             defer { offset += count }
             return data.subdata(in: (data.startIndex + offset)..<(data.startIndex + offset + count))
         }
@@ -90,7 +99,12 @@ enum GGUFHeaderReader {
         }
 
         mutating func string() throws -> String {
-            let length = Int(try u64())
+            // `Int(UInt64)` traps for any value above `Int.max`, and this length
+            // is attacker-controlled — a crafted or corrupted header must not be
+            // able to abort the process. `Int(exactly:)` turns an out-of-range
+            // length into `nil`, which we reject as `.truncated` (no buffer we
+            // read is ever big enough to hold such a string anyway).
+            guard let length = Int(exactly: try u64()) else { throw GGUFHeaderError.truncated }
             return String(decoding: try take(length), as: UTF8.self)
         }
 
@@ -99,8 +113,12 @@ enum GGUFHeaderReader {
         /// skipped, not stored.
         mutating func scalarInteger(type: UInt32) throws -> Int? {
             switch type {
-            case 0, 1, 7: return Int(try take(1)[0])
-            case 2, 3: return Int(try take(2).withUnsafeBytes { $0.loadUnaligned(as: UInt16.self).littleEndian })
+            case 0, 7: return Int(try take(1)[0])
+            case 1: return Int(Int8(bitPattern: try take(1)[0]))
+            case 2: return Int(try take(2).withUnsafeBytes { $0.loadUnaligned(as: UInt16.self).littleEndian })
+            case 3:
+                let bits = try take(2).withUnsafeBytes { $0.loadUnaligned(as: UInt16.self).littleEndian }
+                return Int(Int16(bitPattern: bits))
             case 4: return Int(try u32())
             case 5: return Int(Int32(bitPattern: try u32()))
             case 6: _ = try take(4); return nil
@@ -108,6 +126,12 @@ enum GGUFHeaderReader {
             case 9:
                 let elementType = try u32()
                 let count = try u64()
+                // Same attacker-controlled-length concern as `string()`: a
+                // declared element count that vastly exceeds what's left in the
+                // buffer must throw immediately rather than spin the loop (each
+                // element needs at least one byte, so this is a sound lower
+                // bound, not just a heuristic).
+                guard count <= UInt64(data.count - offset) else { throw GGUFHeaderError.truncated }
                 for _ in 0..<count { _ = try scalarInteger(type: elementType) }
                 return nil
             case 10: return Int(try u64())

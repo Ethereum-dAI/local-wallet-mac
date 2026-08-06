@@ -67,4 +67,69 @@ struct GGUFHeaderReaderTests {
         let header = try GGUFHeaderReader.parse(data)
         #expect(header.memoryProfile(weightBytes: 1000) == nil)
     }
+
+    // MARK: - Malicious/corrupted length fields (attacker-controlled bytes must
+    // never trap the process; they must throw GGUFHeaderError.truncated).
+
+    @Test func stringLengthOfUInt64MaxThrowsRatherThanTraps() {
+        var data = Data("GGUF".utf8)
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func u64(_ v: UInt64) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        u32(3)                  // version
+        u64(1)                  // tensor count
+        u64(1)                  // kv count
+        u64(UInt64.max)         // key length -- Int(UInt64.max) traps if not guarded
+
+        #expect(throws: GGUFHeaderError.self) {
+            try GGUFHeaderReader.parse(data)
+        }
+    }
+
+    @Test func plausibleButTooLargeLengthThrowsRatherThanTraps() {
+        var data = Data("GGUF".utf8)
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func u64(_ v: UInt64) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        u32(3)                              // version
+        u64(1)                              // tensor count
+        u64(1)                              // kv count
+        u64(UInt64(Int.max - 5))            // fits as Int, but offset + count overflows Int
+
+        #expect(throws: GGUFHeaderError.self) {
+            try GGUFHeaderReader.parse(data)
+        }
+    }
+
+    @Test func arrayCountVastlyExceedingBufferThrowsTruncated() {
+        var data = Data("GGUF".utf8)
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func u64(_ v: UInt64) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func str(_ s: String) { let b = Array(s.utf8); u64(UInt64(b.count)); data.append(contentsOf: b) }
+        u32(3)                       // version
+        u64(1)                       // tensor count
+        u64(1)                       // kv count
+        str("bogus.array")
+        u32(9)                       // value type: array
+        u32(4)                       // element type: u32 (4 bytes each)
+        u64(UInt64(Int64.max))       // declared count vastly exceeds the remaining buffer
+
+        #expect(throws: GGUFHeaderError.self) {
+            try GGUFHeaderReader.parse(data)
+        }
+    }
+
+    @Test func signedNarrowIntegersSignExtendCorrectly() throws {
+        var data = Data("GGUF".utf8)
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func u64(_ v: UInt64) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func str(_ s: String) { let b = Array(s.utf8); u64(UInt64(b.count)); data.append(contentsOf: b) }
+        u32(3); u64(1); u64(3)
+        str("general.architecture"); u32(8); str("gemma4")
+        str("gemma4.some_i8"); u32(1); data.append(UInt8(bitPattern: -1))                // i8 = -1
+        str("gemma4.some_i16"); u32(3)
+        withUnsafeBytes(of: Int16(-1).littleEndian) { data.append(contentsOf: $0) }        // i16 = -1
+
+        let header = try GGUFHeaderReader.parse(data)
+        #expect(header.integer("gemma4.some_i8") == -1)
+        #expect(header.integer("gemma4.some_i16") == -1)
+    }
 }

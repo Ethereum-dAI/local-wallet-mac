@@ -23,6 +23,7 @@
 - Memory reserve **scales**: `reserve = min(8 GB, 40% of RAM)`. Budget is `min(metalBudgetBytes, totalMemoryBytes − reserve)`, saturating at 0. A flat 8 GB reserve would give an 8 GB Mac a budget of zero and fail every model, including tiny ones.
 - **There is no RAM threshold anywhere.** The `LocalHardwareProfile.minimumModelMemoryBytes = 16 GB` gate is deleted, along with the four onboarding strings and the `README.md` line that quote it. An 8 GB Mac is told what the chosen model needs and what it has, and may proceed.
 - Fit thresholds: `need ≤ 80% of budget` → `.fits`; `need ≤ budget` → `.tight`; else `.wontFit`. Missing profile data → `.unknown`.
+- **The context-window picker only offers presets that can actually run** (verdict `.fits`, `.tight`, or `.unknown`). A `.wontFit` preset is never listed — the app does not suggest a setting that will hang it. This does not soften the advisory stance on *models*: a won't-fit model is still installable and selectable behind a confirmation. Decided by the human on 2026-08-06, overriding the plan's earlier "every preset is offered".
 - Overhead factor on top of weights + KV cache is **1.15**.
 
 ## File Structure
@@ -2294,7 +2295,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `ModelCatalog`, `ModelFitVerdict`, `AppModel.selectModel/downloadModel/removeModel/resolveHuggingFaceRepo` (Task 8).
-- Produces: snapshot fields `modelEntries: [SettingsModelRow]`, `hardwareSummary: SettingsHardwareSummary`; callbacks `onSelectModel: (String) throws -> Void`, `onDownloadModel: (ModelDownloadRequest) async throws -> Void`, `onRemoveModel: (String) throws -> Void`, `onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo`.
+- Produces: `ModelFitEvaluator.selectableContexts(profile:budget:)`; snapshot fields `modelEntries: [SettingsModelRow]`, `hardwareSummary: SettingsHardwareSummary`, `selectableContextTokens: [Int]`; callbacks `onSelectModel: (String) throws -> Void`, `onDownloadModel: (ModelDownloadRequest) async throws -> Void`, `onRemoveModel: (String) throws -> Void`, `onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2359,7 +2360,58 @@ cd wallet-macos && swift test --filter ModelsTabSnapshotTests
 ```
 Expected: FAIL — `cannot find 'SettingsModelRow' in scope`.
 
-- [ ] **Step 3: Add the view models**
+- [ ] **Step 3: Offer only presets that can run**
+
+Append to `wallet-macos/Sources/WalletMacOSApp/ModelMemoryProfile.swift`:
+
+```swift
+extension ModelFitEvaluator {
+    /// The presets worth offering: everything the model's trained context allows,
+    /// minus the sizes this Mac cannot hold. The app does not list a setting that
+    /// would hang it — a `.wontFit` context is not a choice, it is a failure.
+    /// Always returns at least one preset so the picker is never empty.
+    static func selectableContexts(
+        profile: ModelMemoryProfile?,
+        budget: HardwareBudget?
+    ) -> [Int] {
+        let all = ContextWindowPresets.options(
+            maxTokens: profile?.trainedContextTokens ?? ContextWindowPresets.fallback
+        )
+        guard let profile, let budget else { return all }
+        let runnable = all.filter {
+            verdict(profile: profile, contextTokens: $0, budget: budget) != .wontFit
+        }
+        return runnable.isEmpty ? [all.first ?? ContextWindowPresets.fallback] : runnable
+    }
+}
+```
+
+Add to `wallet-macos/Tests/WalletMacOSAppTests/ModelFitEvaluatorTests.swift`:
+
+```swift
+    @Test func selectableContextsDropTheSizesThisMacCannotHold() {
+        let big = budget(ram: 36 * gb, metal: 30_182_211_584)
+        let offered = ModelFitEvaluator.selectableContexts(profile: gemma, budget: big)
+        // Gemma trains to 131072, but 131072 needs ~31 GB against a 28 GB budget.
+        #expect(offered.contains(32768))
+        #expect(!offered.contains(131_072))
+    }
+
+    @Test func selectableContextsNeverReturnAnEmptyPicker() {
+        let tiny = budget(ram: 8 * gb, metal: 6 * gb)
+        let offered = ModelFitEvaluator.selectableContexts(profile: gemma, budget: tiny)
+        #expect(offered.count == 1)
+        #expect(offered.first == ContextWindowPresets.ladder.first)
+    }
+
+    @Test func selectableContextsFallBackToTheLadderWithoutAProfile() {
+        let big = budget(ram: 36 * gb, metal: 30_182_211_584)
+        #expect(ModelFitEvaluator.selectableContexts(profile: nil, budget: big)
+                == ContextWindowPresets.options(maxTokens: ContextWindowPresets.fallback))
+    }
+```
+
+- [ ] **Step 4: Add the view models**
 
 Append to `wallet-macos/Sources/WalletMacOSApp/ModelCatalog.swift`:
 
@@ -2408,6 +2460,9 @@ In `wallet-macos/Sources/WalletMacOSApp/LocalWalletSettingsView.swift`, add to `
 ```swift
     let modelRows: [SettingsModelRow]
     let hardwareSummary: SettingsHardwareSummary?
+    /// Context presets worth offering on this Mac; never empty. See
+    /// ModelFitEvaluator.selectableContexts.
+    let selectableContextTokens: [Int]
 ```
 
 Add to the callback block beside `onRevealModelFile` (line ~269) and to the initializer parameter list and assignments in the same order:
@@ -2484,13 +2539,13 @@ Replace the body of `private var modelsTab: some View` (lines 765-852) with:
                         )
                     }
                 )) {
-                    ForEach(ContextWindowPresets.options(maxTokens: snapshot.contextWindowMaxTokens), id: \.self) { tokens in
+                    ForEach(snapshot.selectableContextTokens, id: \.self) { tokens in
                         Text("\(tokens) tokens").tag(tokens)
                     }
                 }
                 .pickerStyle(.menu)
                 .frame(width: 200)
-                Text("Active: \(snapshot.contextWindow). Larger windows use more memory — the verdicts above are computed at this size.")
+                Text("Active: \(snapshot.contextWindow). Larger windows use more memory — the verdicts above are computed at this size. Sizes this Mac cannot hold are not listed.")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(SettingsPalette.secondaryText)
                 Divider().overlay(SettingsPalette.border).padding(.vertical, 4)
@@ -2682,6 +2737,10 @@ pass them into the snapshot initializer:
 ```swift
             modelRows: modelRows,
             hardwareSummary: budget.map(SettingsHardwareSummary.init),
+            selectableContextTokens: ModelFitEvaluator.selectableContexts(
+                profile: walletModel.modelCatalog.entries.first { $0.id == activeModelID }?.profile,
+                budget: budget
+            ),
 ```
 
 and add the four callbacks in `settingsBody` after `onRevealModelFile`:

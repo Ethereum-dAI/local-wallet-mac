@@ -114,7 +114,11 @@ enum GemmaChannelFallback {
 final class EmbeddedLlamaInferenceService: @unchecked Sendable {
     private let settingsStore: OnboardingSettingsStore
     private let downloadManager: LocalAIModelDownloadManager
-    private let runtime: LlamaRuntime
+    private let stateLock = NSLock()
+    private var runtime: LlamaRuntime
+    private var loadedModelURL: URL?
+    private var desiredModelURL: URL?
+    private var desiredContextTokens: Int
 
     init(
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
@@ -123,21 +127,39 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
     ) {
         self.settingsStore = settingsStore
         self.downloadManager = downloadManager
-        if let runtime {
-            self.runtime = runtime
-        } else {
-            let model = LocalAIModel.available.first { $0.id == settingsStore.selectedModelID } ?? .recommended
-            let tokens = ContextWindowPresets.clamp(settingsStore.contextWindowTokens, maxTokens: model.maxContextTokens)
-            self.runtime = LlamaRuntime(configuration: LocalLLMConfiguration(contextSize: Int32(tokens)))
-        }
+        let model = LocalAIModel.available.first { $0.id == settingsStore.selectedModelID } ?? .recommended
+        let tokens = ContextWindowPresets.clamp(settingsStore.contextWindowTokens, maxTokens: model.maxContextTokens)
+        self.desiredContextTokens = tokens
+        self.runtime = runtime ?? LlamaRuntime(configuration: LocalLLMConfiguration(contextSize: Int32(tokens)))
+    }
+
+    /// Point the service at a different GGUF. The swap happens lazily, at the start
+    /// of the next generation, so an in-flight stream is never pulled out from under
+    /// its caller.
+    func setActiveModel(url: URL, contextTokens: Int) {
+        stateLock.lock()
+        desiredModelURL = url
+        desiredContextTokens = contextTokens
+        stateLock.unlock()
+    }
+
+    var activeModelURL: URL? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return desiredModelURL ?? loadedModelURL
     }
 
     var runtimeStatus: String {
-        runtime.isLoaded ? "Local model loaded" : "Local runtime ready"
+        stateLock.lock()
+        let current = runtime
+        stateLock.unlock()
+        return current.isLoaded ? "Local model loaded" : "Local runtime ready"
     }
 
     var contextSize: Int {
-        runtime.configuredContextSize
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return desiredContextTokens
     }
 
     func stream(
@@ -148,10 +170,7 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
         AsyncThrowingStream { continuation in
             let task = Task { [self] in
                 do {
-                    let modelURL = try installedModelURL()
-                    if !runtime.isLoaded {
-                        try runtime.loadModel(at: modelURL)
-                    }
+                    let activeRuntime = try prepareRuntime()
 
                     var messages: [LocalLLM.ChatMessage] = [
                         LocalLLM.ChatMessage(
@@ -176,7 +195,7 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
 
                     var accumulated = ""
                     var stats: GenerationStats?
-                    for try await event in runtime.chat(messages: messages, tools: ToolDefinitions.phase1, options: options) {
+                    for try await event in activeRuntime.chat(messages: messages, tools: ToolDefinitions.phase1, options: options) {
                         try Task.checkCancellation()
                         switch event {
                         case .textToken(let token):
@@ -189,7 +208,7 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
 
                     let extracted: ParsedAssistantTurnFlat
                     do {
-                        extracted = try BridgePEGExtractor(runtime: runtime).extract(from: accumulated)
+                        extracted = try BridgePEGExtractor(runtime: activeRuntime).extract(from: accumulated)
                     } catch {
                         extracted = ParsedAssistantTurnFlat(content: accumulated, reasoning: nil, toolCalls: [])
                     }
@@ -197,7 +216,7 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
                     let generationStats = stats ?? GenerationStats(
                         promptTokens: 0,
                         generatedTokens: 0,
-                        contextSize: runtime.configuredContextSize,
+                        contextSize: activeRuntime.configuredContextSize,
                         duration: 0
                     )
 
@@ -220,6 +239,51 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
                 task.cancel()
             }
         }
+    }
+
+    /// Loads the desired model, tearing down the previous runtime first when the
+    /// selection or the context window changed. Returns the runtime this call's
+    /// generation must use — callers hold onto that value rather than re-reading
+    /// `runtime` later in the stream, so a concurrent swap triggered by another
+    /// `stream()` call cannot switch the model out from under an in-flight
+    /// generation.
+    ///
+    /// Every `stateLock` critical section here is a plain snapshot/assignment with
+    /// no throwing call inside it: `installedModelURL()` can throw (e.g. no model
+    /// installed yet), and `loadModel` can take seconds — neither may run while the
+    /// lock is held, or a throw would leak the lock and deadlock every later caller.
+    private func prepareRuntime() throws -> LlamaRuntime {
+        stateLock.lock()
+        let desired = desiredModelURL
+        let tokens = desiredContextTokens
+        let loaded = loadedModelURL
+        let current = runtime
+        stateLock.unlock()
+
+        let target = try desired ?? installedModelURL()
+        let needsSwap = loaded != target || Int(current.configuredContextSize) != tokens
+
+        if needsSwap {
+            current.unload()
+
+            let replacement = LlamaRuntime(configuration: LocalLLMConfiguration(contextSize: Int32(tokens)))
+            try replacement.loadModel(at: target)
+
+            stateLock.lock()
+            runtime = replacement
+            loadedModelURL = target
+            desiredModelURL = target
+            stateLock.unlock()
+            return replacement
+        }
+
+        if !current.isLoaded {
+            try current.loadModel(at: target)
+            stateLock.lock()
+            loadedModelURL = target
+            stateLock.unlock()
+        }
+        return current
     }
 
     private func installedModelURL() throws -> URL {

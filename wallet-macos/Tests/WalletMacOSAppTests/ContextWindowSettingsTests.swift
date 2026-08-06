@@ -30,4 +30,13 @@ struct ContextWindowSettingsTests {
         let service = EmbeddedLlamaInferenceService(settingsStore: store)
         #expect(service.contextSize == 8192)
     }
+
+    @Test func activeModelURLTracksTheLastSetModel() {
+        let suite = UserDefaults(suiteName: "active-model-\(UUID().uuidString)")!
+        let service = EmbeddedLlamaInferenceService(settingsStore: OnboardingSettingsStore(defaults: suite))
+        #expect(service.activeModelURL == nil)
+        service.setActiveModel(url: URL(fileURLWithPath: "/tmp/other.gguf"), contextTokens: 8192)
+        #expect(service.activeModelURL?.path == "/tmp/other.gguf")
+        #expect(service.contextSize == 8192)
+    }
 }

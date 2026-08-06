@@ -47,6 +47,7 @@ enum LocalAIModelDownloadError: LocalizedError {
     case checksumMismatch(expected: String, actual: String)
     case missingDownload
     case insufficientDisk(neededBytes: UInt64, availableBytes: UInt64)
+    case downloadAlreadyInProgress
 
     var errorDescription: String? {
         switch self {
@@ -62,7 +63,46 @@ enum LocalAIModelDownloadError: LocalizedError {
             let neededText = ByteCountFormatter.string(fromByteCount: Int64(needed), countStyle: .file)
             let availableText = ByteCountFormatter.string(fromByteCount: Int64(available), countStyle: .file)
             return "This model needs \(neededText) but only \(availableText) is free."
+        case .downloadAlreadyInProgress:
+            return "Another model is already downloading. Wait for it to finish, or cancel it first."
         }
+    }
+}
+
+/// Bookkeeping for the one in-flight download a `LocalAIModelDownloadManager`
+/// allows at a time. `claim`, `current`, and `release` each execute under a single
+/// lock acquisition, so an overlapping caller can be refused atomically instead of
+/// silently overwriting the in-flight download's bookkeeping — which would
+/// otherwise cross-wire one download's bytes/checksum onto another's destination,
+/// or abandon a continuation that never resumes.
+final class DownloadSlot<Occupant>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var occupant: Occupant?
+
+    /// Claims the slot if it is empty. Returns `false`, leaving the existing
+    /// occupant untouched, if a download is already in flight.
+    func claim(_ download: Occupant) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard occupant == nil else { return false }
+        occupant = download
+        return true
+    }
+
+    func current() -> Occupant? {
+        lock.lock()
+        defer { lock.unlock() }
+        return occupant
+    }
+
+    /// Empties the slot and returns whatever occupied it, or `nil` if it was
+    /// already empty.
+    func release() -> Occupant? {
+        lock.lock()
+        defer { lock.unlock() }
+        let download = occupant
+        occupant = nil
+        return download
     }
 }
 
@@ -76,8 +116,7 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
         let continuation: CheckedContinuation<URL, Error>
     }
 
-    private let lock = NSLock()
-    private var activeDownload: ActiveDownload?
+    private let slot = DownloadSlot<ActiveDownload>()
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.default
         configuration.allowsExpensiveNetworkAccess = true
@@ -155,7 +194,10 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
                 progressHandler: progress,
                 continuation: continuation
             )
-            store(activeDownload)
+            guard slot.claim(activeDownload) else {
+                continuation.resume(throwing: LocalAIModelDownloadError.downloadAlreadyInProgress)
+                return
+            }
             session.downloadTask(with: model.artifactURL).resume()
         }
     }
@@ -173,12 +215,16 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
             withIntermediateDirectories: true
         )
         return try await withCheckedThrowingContinuation { continuation in
-            store(ActiveDownload(
+            let activeDownload = ActiveDownload(
                 expectedSHA256: request.expectedSHA256,
                 destinationURL: destinationURL,
                 progressHandler: progress,
                 continuation: continuation
-            ))
+            )
+            guard slot.claim(activeDownload) else {
+                continuation.resume(throwing: LocalAIModelDownloadError.downloadAlreadyInProgress)
+                return
+            }
             session.downloadTask(with: request.url).resume()
         }
     }
@@ -256,24 +302,12 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
         activeDownload.continuation.resume(throwing: error)
     }
 
-    private func store(_ download: ActiveDownload) {
-        lock.lock()
-        activeDownload = download
-        lock.unlock()
-    }
-
     private func currentDownload() -> ActiveDownload? {
-        lock.lock()
-        defer { lock.unlock() }
-        return activeDownload
+        slot.current()
     }
 
     private func takeDownload() -> ActiveDownload? {
-        lock.lock()
-        defer { lock.unlock() }
-        let download = activeDownload
-        activeDownload = nil
-        return download
+        slot.release()
     }
 
     private static func modelsDirectory() throws -> URL {

@@ -1434,7 +1434,7 @@ final class AppModel: ObservableObject {
                     draft,
                     logContext: "build",
                     usePrecompiled: usePrecompiled
-                )
+                ).draft
                 builtUserOperationDraft = enrichedDraft
 
                 let initCodeMode = enrichedDraft.initCode.isEmpty ? "existing account path" : "deployment path included"
@@ -2050,9 +2050,9 @@ final class AppModel: ObservableObject {
 
         let usePrecompiled = await resolveUsePrecompiled(logContext: logContext)
 
-        let enrichedDraft: UserOperationDraft
+        let enriched: EnrichedUserOperation
         do {
-            enrichedDraft = try await enrichDraftWithLocalBundlerEstimation(
+            enriched = try await enrichDraftWithLocalBundlerEstimation(
                 draft,
                 logContext: logContext,
                 usePrecompiled: usePrecompiled,
@@ -2063,7 +2063,38 @@ final class AppModel: ObservableObject {
             clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
             throw error
         }
+        let enrichedDraft = enriched.draft
         builtUserOperationDraft = enrichedDraft
+
+        // Pre-signature affordability check, scoped to the gas-headroom retry.
+        // This is the only point where it helps: callGasLimit is inside the
+        // UserOperation hash, so nothing downstream can change it without
+        // invalidating the signature we are about to request.
+        switch await PrefundPrecheck.decision(
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit,
+            requiredPrefund: enriched.requiredPrefund,
+            callGasLimit: enrichedDraft.gasPlan.callGasLimit,
+            maxFeePerGas: enrichedDraft.gasPlan.maxFeePerGas,
+            feeQuoteAtPolicyCeiling: enriched.feeQuoteAtPolicyCeiling,
+            readWalletStatus: {
+                try await withWalletNodeClient(operation: "\(logContext) wallet status") { client in
+                    try await client.walletStatus(smartAccount: enrichedDraft.sender)
+                }
+            }
+        ) {
+        case .proceed:
+            break
+        case let .statusUnavailable(error):
+            appendLog(
+                "\(logContext): wallet status unavailable (\(error.localizedDescription)); skipping prefund precheck"
+            )
+        case let .decline(report):
+            appendLog(
+                "\(logContext): declining before signature — requiredPrefund=\(report.requiredPrefundWeiHex) available=\(report.availableWeiHex) deficit=\(report.deficitWeiHex)"
+            )
+            clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+            throw AppError.prefundShortfall(report)
+        }
 
         let signatureResult: UserOperationSignatureResult
         do {
@@ -2489,7 +2520,7 @@ final class AppModel: ObservableObject {
         usePrecompiled: Bool,
         sessionPlan: SessionUserOperationPlan? = nil,
         acknowledgedCallGasLimit: UInt64? = nil
-    ) async throws -> UserOperationDraft {
+    ) async throws -> EnrichedUserOperation {
         appendLog("\(logContext): checking local wallet-node entry point support")
         try await withWalletNodeClient(operation: "\(logContext) entry point check") { client in
             try await client.assertEntryPointSupport(activeChain.entryPoint)
@@ -2510,39 +2541,56 @@ final class AppModel: ObservableObject {
             appendLog("\(logContext): generated dummy signature for estimation (\(dummySignature.count) bytes)")
         }
 
+        let feeQuote = try await suggestedUserOperationFees(logContext: logContext)
+        appendLog(
+            "\(logContext): fee quote maxPriority=\(feeQuote.maxPriorityFeePerGas.shortHex) maxFee=\(feeQuote.maxFeePerGas.shortHex)"
+        )
+
+        // Quoted *before* estimating so the submitted draft carries real fees and
+        // the daemon's requiredPrefund comes back as a real number rather than
+        // (limits x 0). Do not move this back below the estimate.
+        let gasFees = pack128(
+            high: feeQuote.maxPriorityFeePerGas,
+            low: feeQuote.maxFeePerGas
+        )
+        let pricedDraft = draft.updatingGasPlan(
+            UserOperationGasPlan(
+                accountGasLimits: draft.gasPlan.accountGasLimits,
+                preVerificationGas: draft.gasPlan.preVerificationGas,
+                gasFees: gasFees,
+                paymasterAndData: draft.gasPlan.paymasterAndData
+            )
+        )
+
         let estimate = try await withWalletNodeWarmupRetry(operation: "\(logContext) gas estimate") {
             try await withWalletNodeClient(operation: "\(logContext) gas estimate") { client in
                 try await client.estimateUserOperationGas(
-                    draft: draft,
+                    draft: pricedDraft,
                     dummySignature: dummySignature,
                     acknowledgedCallGasLimit: acknowledgedCallGasLimit
                 )
             }
         }
         appendLog(
-            "\(logContext): gas estimate call=\(estimate.callGasLimit.shortHex) verification=\(estimate.verificationGasLimit.shortHex) preVerification=\(estimate.preVerificationGas.shortHex)"
-        )
-
-        let feeQuote = try await suggestedUserOperationFees(logContext: logContext)
-        appendLog(
-            "\(logContext): fee quote maxPriority=\(feeQuote.maxPriorityFeePerGas.shortHex) maxFee=\(feeQuote.maxFeePerGas.shortHex)"
+            "\(logContext): gas estimate call=\(estimate.callGasLimit.shortHex) verification=\(estimate.verificationGasLimit.shortHex) preVerification=\(estimate.preVerificationGas.shortHex) requiredPrefund=\(estimate.requiredPrefund.shortHex)"
         )
 
         activeBundlerStatus = "Local wallet-node ready on \(activeChain.name)"
 
-        return draft.updatingGasPlan(
-            UserOperationGasPlan(
-                accountGasLimits: pack128(
-                    high: estimate.verificationGasLimit,
-                    low: estimate.callGasLimit
-                ),
-                preVerificationGas: estimate.preVerificationGas,
-                gasFees: pack128(
-                    high: feeQuote.maxPriorityFeePerGas,
-                    low: feeQuote.maxFeePerGas
-                ),
-                paymasterAndData: Data()
-            )
+        return EnrichedUserOperation(
+            draft: pricedDraft.updatingGasPlan(
+                UserOperationGasPlan(
+                    accountGasLimits: pack128(
+                        high: estimate.verificationGasLimit,
+                        low: estimate.callGasLimit
+                    ),
+                    preVerificationGas: estimate.preVerificationGas,
+                    gasFees: gasFees,
+                    paymasterAndData: Data()
+                )
+            ),
+            requiredPrefund: estimate.requiredPrefund,
+            feeQuoteAtPolicyCeiling: feeQuote.atPolicyCeiling
         )
     }
 
@@ -3066,7 +3114,7 @@ final class AppModel: ObservableObject {
 
     private func suggestedUserOperationFees(
         logContext: String
-    ) async throws -> (maxPriorityFeePerGas: Data, maxFeePerGas: Data) {
+    ) async throws -> (maxPriorityFeePerGas: Data, maxFeePerGas: Data, atPolicyCeiling: Bool) {
         let gasPrice = try await withWalletNodeWarmupRetry(operation: "\(logContext) gas price") {
             try await withWalletNodeClient(operation: "\(logContext) gas price") { client in
                 try await client.userOperationGasPrice()
@@ -3080,7 +3128,15 @@ final class AppModel: ObservableObject {
             manualCap: settings.activeGasPolicy
         )
         appendLog("\(logContext): gas fee mode \(settings.autoGasModeEnabled ? "auto/\(settings.autoGasTier.rawValue)" : "manual(capped to \(settings.activeMaxFeePerGasGwei)/\(settings.activeMaxPriorityFeePerGasGwei) gwei)")")
-        return resolved
+        // Every tier at the configured ceiling means the live price is at or above
+        // the cap (`gas_price.rs` clamps there). The fee is still the one we will
+        // sign with, but a prefund floor derived from it is cap-driven, so the card
+        // must not present funding as the only lever.
+        let atPolicyCeiling = GasPricing.isPolicyCeilingQuote(gasPrice)
+        if atPolicyCeiling {
+            appendLog("\(logContext): every gas tier came back at the policy ceiling; live price is at or above the cap")
+        }
+        return (resolved.maxPriorityFeePerGas, resolved.maxFeePerGas, atPolicyCeiling)
     }
 
     /// Fetch the current live gas tiers + base fee for the chat indicator.

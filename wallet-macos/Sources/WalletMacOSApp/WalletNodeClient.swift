@@ -142,10 +142,36 @@ struct WalletNodeClient {
         let p256Precompile: P256Precompile?
     }
 
+    /// The two numbers EntryPoint v0.7 measures a UserOperation's prefund
+    /// against: the account's own balance and its EntryPoint deposit. Read
+    /// together from one `wallet_walletStatus` call so they come from the same
+    /// verified head.
+    struct WalletStatus: Equatable {
+        let accountBalance: Data
+        let entryPointDeposit: Data
+
+        init(json: [String: Any]) throws {
+            guard let balance = json["accountBalance"] as? String,
+                  let deposit = json["entryPointDeposit"] as? String,
+                  let balanceData = try? Data.quantityString(balance).leftPadded(to: 32),
+                  let depositData = try? Data.quantityString(deposit).leftPadded(to: 32)
+            else {
+                throw ClientError.invalidResponse
+            }
+            self.accountBalance = balanceData
+            self.entryPointDeposit = depositData
+        }
+    }
+
     struct UserOperationGasEstimate: Equatable {
         let callGasLimit: Data
         let verificationGasLimit: Data
         let preVerificationGas: Data
+        /// EntryPoint v0.7's balance floor for this op, as the daemon computed it
+        /// from the limits it resolved times the `maxFeePerGas` we submitted
+        /// (`wallet-bundler/src/user_operation.rs:178`). Zero when the daemon
+        /// omitted the field, or when we submitted zero fees.
+        let requiredPrefund: Data
     }
 
     struct UserOperationGasPriceTier: Equatable {
@@ -284,6 +310,14 @@ struct WalletNodeClient {
         return try NetworkStatus(json: object)
     }
 
+    func walletStatus(smartAccount: String) async throws -> WalletStatus {
+        let result = try await call(method: "wallet_walletStatus", params: [smartAccount])
+        guard let object = result as? [String: Any] else {
+            throw ClientError.invalidResponse
+        }
+        return try WalletStatus(json: object)
+    }
+
     func supportedEntryPoints() async throws -> [String] {
         let result = try await call(method: "localwallet_supportedEntryPoints", params: [])
         guard let entryPoints = result as? [String] else {
@@ -297,6 +331,35 @@ struct WalletNodeClient {
         guard supported.contains(entryPoint.lowercased()) else {
             throw AppError.unsupportedBundlerEntryPoint
         }
+    }
+
+    static func decodeGasEstimate(_ object: [String: Any]) throws -> UserOperationGasEstimate {
+        func quantity(_ value: String, _ field: String) throws -> Data {
+            do {
+                return try Data.quantityString(value).leftPadded(to: 32)
+            } catch {
+                throw ClientError.transport("wallet-node returned invalid \(field): \(value)")
+            }
+        }
+
+        guard let callGasLimit = object["callGasLimit"] as? String,
+              let verificationGasLimit = object["verificationGasLimit"] as? String,
+              let preVerificationGas = object["preVerificationGas"] as? String
+        else {
+            throw ClientError.invalidResponse
+        }
+
+        var requiredPrefund = Data(repeating: 0, count: 32)
+        if let raw = object["requiredPrefund"] as? String {
+            requiredPrefund = try quantity(raw, "requiredPrefund")
+        }
+
+        return UserOperationGasEstimate(
+            callGasLimit: try quantity(callGasLimit, "callGasLimit"),
+            verificationGasLimit: try quantity(verificationGasLimit, "verificationGasLimit"),
+            preVerificationGas: try quantity(preVerificationGas, "preVerificationGas"),
+            requiredPrefund: requiredPrefund
+        )
     }
 
     static func estimateGasParams(
@@ -328,11 +391,16 @@ struct WalletNodeClient {
             draft: draft,
             signature: dummySignature,
             overrides: RPCOverrides(
+                // The daemon resolves these itself; a client-invented limit
+                // would be measured by the estimate-time funding check, which
+                // runs before that resolution.
                 callGasLimit: "0x0",
                 verificationGasLimit: "0x0",
                 preVerificationGas: "0x0",
-                maxFeePerGas: "0x0",
-                maxPriorityFeePerGas: "0x0"
+                // Real fees, so the response's requiredPrefund is a real number
+                // rather than (limits × 0). AppModel quotes fees before calling.
+                maxFeePerGas: "0x" + draft.gasPlan.maxFeePerGas.hexEncodedString,
+                maxPriorityFeePerGas: "0x" + draft.gasPlan.maxPriorityFeePerGas.hexEncodedString
             )
         )
         let result = try await call(
@@ -343,19 +411,10 @@ struct WalletNodeClient {
                 acknowledgedCallGasLimit: acknowledgedCallGasLimit
             )
         )
-        guard let object = result as? [String: Any],
-              let callGasLimit = object["callGasLimit"] as? String,
-              let verificationGasLimit = object["verificationGasLimit"] as? String,
-              let preVerificationGas = object["preVerificationGas"] as? String
-        else {
+        guard let object = result as? [String: Any] else {
             throw ClientError.invalidResponse
         }
-
-        return UserOperationGasEstimate(
-            callGasLimit: try parseQuantity(callGasLimit, field: "callGasLimit").leftPadded(to: 32),
-            verificationGasLimit: try parseQuantity(verificationGasLimit, field: "verificationGasLimit").leftPadded(to: 32),
-            preVerificationGas: try parseQuantity(preVerificationGas, field: "preVerificationGas").leftPadded(to: 32)
-        )
+        return try Self.decodeGasEstimate(object)
     }
 
     func sendUserOperation(

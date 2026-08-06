@@ -51,4 +51,81 @@ import Testing
         )
         #expect(ChatIntentExecutionStatus.gasEstimationUnavailable(from: plain) == nil)
     }
+
+    @Test func derivesPrefundShortfallFromPersistedToolResponse() throws {
+        let json = """
+        {"status":"prefund_shortfall","intent_id":"ABC",\
+        "required_prefund":"0xaa87bee538000","available":"0x2386f26fc10000",\
+        "deficit":"0x71afd498d0000","max_fee_per_gas":"0x6fc23ac00",\
+        "fee_quote_at_policy_ceiling":true,"effective_call_gas_limit":600000}
+        """
+        let status = ChatIntentExecutionStatus.fromToolResponse(json)
+
+        #expect(status == .prefundShortfall(
+            PrefundPrecheck.Report(
+                requiredPrefundWeiHex: "0xaa87bee538000",
+                availableWeiHex: "0x2386f26fc10000",
+                deficitWeiHex: "0x71afd498d0000",
+                maxFeePerGasWeiHex: "0x6fc23ac00",
+                feeQuoteAtPolicyCeiling: true,
+                effectiveCallGasLimit: 600_000
+            )
+        ))
+    }
+
+    @Test func prefundShortfallDefaultsTheUnavailableFlagWhenAbsent() throws {
+        // A row persisted before the flag existed reads as a live price, which only
+        // costs the extra sentence of explanation.
+        let json = """
+        {"status":"prefund_shortfall","required_prefund":"0x1","available":"0x0",\
+        "deficit":"0x1","max_fee_per_gas":"0x6fc23ac00","effective_call_gas_limit":600000}
+        """
+        guard case let .prefundShortfall(report) = try #require(
+            ChatIntentExecutionStatus.fromToolResponse(json)
+        ) else {
+            Issue.record("expected prefundShortfall")
+            return
+        }
+        #expect(report.feeQuoteAtPolicyCeiling == false)
+    }
+
+    @Test func prefundShortfallWithoutAFeeDegradesToFailed() throws {
+        // Rather than render "0 gwei" and imply a free transaction.
+        let json = """
+        {"status":"prefund_shortfall","required_prefund":"0x1","available":"0x0",\
+        "deficit":"0x1","effective_call_gas_limit":600000}
+        """
+        guard case .failed = try #require(ChatIntentExecutionStatus.fromToolResponse(json)) else {
+            Issue.record("expected a degraded .failed")
+            return
+        }
+    }
+
+    @Test func prefundShortfallWithNegativeLimitDegradesToFailed() throws {
+        // chat.sqlite round trip: a negative Int must not trap on UInt64.init.
+        let json = """
+        {"status":"prefund_shortfall","required_prefund":"0x1",\
+        "available":"0x0","deficit":"0x1","max_fee_per_gas":"0x1",\
+        "effective_call_gas_limit":-3}
+        """
+        guard case .failed = try #require(ChatIntentExecutionStatus.fromToolResponse(json)) else {
+            Issue.record("expected a degraded .failed")
+            return
+        }
+    }
+
+    @Test func buildsPrefundShortfallStatusFromAppError() throws {
+        let report = PrefundPrecheck.Report(
+            requiredPrefundWeiHex: "0xaa87bee538000",
+            availableWeiHex: "0x2386f26fc10000",
+            deficitWeiHex: "0x71afd498d0000",
+            maxFeePerGasWeiHex: "0x6fc23ac00",
+            feeQuoteAtPolicyCeiling: false,
+            effectiveCallGasLimit: 600_000
+        )
+        let error = AppError.prefundShortfall(report)
+
+        #expect(ChatIntentExecutionStatus.prefundShortfall(from: error) == .prefundShortfall(report))
+        #expect(ChatIntentExecutionStatus.prefundShortfall(from: AppError.invalidAmount) == nil)
+    }
 }

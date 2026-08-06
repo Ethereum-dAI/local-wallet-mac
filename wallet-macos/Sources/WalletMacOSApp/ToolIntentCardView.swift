@@ -224,7 +224,7 @@ struct ToolIntentCardView: View {
             return "paperplane.circle.fill"
         case .failed:
             return "exclamationmark.triangle.fill"
-        case .gasEstimationUnavailable:
+        case .gasEstimationUnavailable, .prefundShortfall:
             return "exclamationmark.triangle.fill"
         case .idle:
             return "checkmark.circle.fill"
@@ -239,7 +239,7 @@ struct ToolIntentCardView: View {
             return success == false ? .red : .green
         case .failed:
             return .orange
-        case .gasEstimationUnavailable:
+        case .gasEstimationUnavailable, .prefundShortfall:
             return .orange
         case .idle:
             return .green
@@ -262,6 +262,8 @@ struct ToolIntentCardView: View {
             return message
         case .gasEstimationUnavailable:
             return "Gas estimation unavailable — action required above."
+        case .prefundShortfall:
+            return "Not enough ETH for the gas headroom — action required above."
         case .idle:
             return "Confirmed at \(Self.timeFormatter.string(from: intent.updatedAt))"
         }
@@ -498,6 +500,46 @@ struct ToolIntentCardView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+            }
+            .padding(.vertical, 4)
+        case let .prefundShortfall(report):
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(report.feeQuoteAtPolicyCeiling
+                         ? "Gas is priced at your cap, so this send was not signed."
+                         : "Not enough ETH to cover the gas headroom up front.")
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                }
+                Text("""
+                EntryPoint requires \(WeiFormatter.ethDisplayString(fromHexWei: report.requiredPrefundWeiHex)) \
+                held up front to cover \(report.effectiveCallGasLimit.formatted()) call gas at \
+                \(GasPricing.gweiText(fromWei: (try? Data.quantityString(report.maxFeePerGasWeiHex)) ?? Data())) gwei, \
+                whatever the transaction actually spends. This account has \
+                \(WeiFormatter.ethDisplayString(fromHexWei: report.availableWeiHex)) available, counting its \
+                EntryPoint deposit.
+                """)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                // When the fee is pinned at the ceiling, the floor is large because
+                // of the cap, not the account — so lead with the lever that moves
+                // it. A top-up is still valid, just not the first thing to reach
+                // for, and a bare "top up 0.8 ETH" would read as the only option.
+                Text(report.feeQuoteAtPolicyCeiling
+                     ? "That fee is your configured gas cap — the live price is at or above it, so wallet-node quoted the ceiling. Raising the cap in Settings or waiting for gas to fall lowers this floor; funding the account does not. Topping up at least \(WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)) would let it send at the cap."
+                     : "Top up at least \(WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)), then try again.")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Try again") {
+                    onSubmitWithGasHeadroom(report.effectiveCallGasLimit)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Re-quotes the fee, re-reads the account balance, and re-estimates before asking for a signature.")
             }
             .padding(.vertical, 4)
         case .idle:

@@ -7,49 +7,53 @@ pub async fn handle(
     let max_fee_cap = policy.max_fee_per_gas;
     let priority_cap = policy.max_priority_fee_per_gas;
 
-    let chain_max_fee = state.chain.current_gas_price().await;
-    let chain_priority = state.chain.current_max_priority_fee_per_gas().await;
+    // Fail closed when the chain reads fail. Answering an unreadable price with
+    // the policy cap is indistinguishable from a real quote by magnitude, and the
+    // caller prices a UserOperation with it: `required_prefund` multiplies by
+    // `maxFeePerGas`, so a placeholder fee becomes a placeholder balance floor
+    // that no amount of funding can satisfy. This is #49's failure mode -- a
+    // silently substituted gas number reaching the chain -- one layer up from the
+    // estimator #69 fixed.
+    //
+    // A value *above* the cap is a different case and still clamps below: the
+    // price was read successfully, and the cap is a policy ceiling the operator
+    // chose, not a number this handler invented.
+    let chain_max_fee = state
+        .chain
+        .current_gas_price()
+        .await
+        .map_err(wallet_bundler::BundlerError::from)
+        .map_err(super::map_bundler_error)?;
+    let chain_priority = state
+        .chain
+        .current_max_priority_fee_per_gas()
+        .await
+        .map_err(wallet_bundler::BundlerError::from)
+        .map_err(super::map_bundler_error)?;
 
-    let trusted = match (&chain_max_fee, &chain_priority) {
-        (Ok(max_fee), Ok(priority)) if *max_fee <= max_fee_cap && *priority <= priority_cap => {
-            Some((*max_fee, *priority))
-        }
-        _ => None,
-    };
-
-    let Some((standard_max_fee, standard_priority)) = trusted else {
-        match &chain_max_fee {
-            Ok(value) if *value > max_fee_cap => tracing::warn!(
-                chain_value = %value,
+    if chain_max_fee > max_fee_cap || chain_priority > priority_cap {
+        if chain_max_fee > max_fee_cap {
+            tracing::warn!(
+                chain_value = %chain_max_fee,
                 cap = %max_fee_cap,
                 "pimlico_getUserOperationGasPrice gas price chain value above safety cap; using uniform cap fallback"
-            ),
-            Err(error) => tracing::warn!(
-                error = %error,
-                cap = %max_fee_cap,
-                "pimlico_getUserOperationGasPrice gas price chain read failed; using uniform cap fallback"
-            ),
-            _ => {}
+            );
         }
-        match &chain_priority {
-            Ok(value) if *value > priority_cap => tracing::warn!(
-                chain_value = %value,
+        if chain_priority > priority_cap {
+            tracing::warn!(
+                chain_value = %chain_priority,
                 cap = %priority_cap,
                 "pimlico_getUserOperationGasPrice priority fee chain value above safety cap; using uniform cap fallback"
-            ),
-            Err(error) => tracing::warn!(
-                error = %error,
-                cap = %priority_cap,
-                "pimlico_getUserOperationGasPrice priority fee chain read failed; using uniform cap fallback"
-            ),
-            _ => {}
+            );
         }
         return Ok(wallet_bundler::pimlico_gas_price(
             (max_fee_cap, priority_cap),
             (max_fee_cap, priority_cap),
             (max_fee_cap, priority_cap),
         ));
-    };
+    }
+
+    let (standard_max_fee, standard_priority) = (chain_max_fee, chain_priority);
 
     let (slow_max_fee, _, fast_max_fee) = wallet_bundler::derive_fee_tiers(standard_max_fee);
     let (slow_priority, _, fast_priority) = wallet_bundler::derive_fee_tiers(standard_priority);
@@ -160,22 +164,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn falls_back_uniformly_when_both_calls_error() {
+    async fn fails_closed_when_both_calls_error() {
+        // Not the cap fallback: an unreadable price answered with the cap is a
+        // fabricated number the caller cannot tell apart from a quote, and it
+        // becomes a fabricated `required_prefund` one layer up.
         let chain = Arc::new(MockChainAdapter::new());
         chain.inject_error(Box::new(|| ChainError::RpcError("simulated".into())));
-        let value = handle(&state_with_chain(chain)).await.unwrap();
+        let error = handle(&state_with_chain(chain)).await.unwrap_err();
 
-        assert_uniform_cap_fallback(value);
+        assert_eq!(error.code, wallet_node_api::NOT_READY);
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data["reason"].as_str()),
+            Some("rpc_error")
+        );
     }
 
     #[tokio::test]
-    async fn falls_back_uniformly_when_gas_price_errors() {
+    async fn fails_closed_when_only_the_gas_price_read_errors() {
         let inner = MockChainAdapter::new();
         inner.set_current_max_priority_fee_per_gas(U256::from(500_000_000_u64));
         let chain = Arc::new(GasPriceErrorChain { inner });
-        let value = handle(&state_with_chain(chain)).await.unwrap();
+        let error = handle(&state_with_chain(chain)).await.unwrap_err();
 
-        assert_uniform_cap_fallback(value);
+        assert_eq!(error.code, wallet_node_api::NOT_READY);
     }
 
     fn assert_uniform_cap_fallback(value: serde_json::Value) {

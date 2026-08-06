@@ -179,6 +179,19 @@ struct UserOperationGasPlan: Equatable {
     )
 }
 
+/// A draft whose gas plan is complete, plus EntryPoint's prefund floor for it as
+/// the daemon computed it. Kept together because the number is only meaningful
+/// for the exact limits and fees in this draft.
+struct EnrichedUserOperation: Equatable {
+    let draft: UserOperationDraft
+    let requiredPrefund: Data
+    /// The fee baked into `draft` is the configured policy ceiling rather than a
+    /// live spread (`GasPricing.isPolicyCeilingQuote`) — the live price is at or
+    /// above the cap. A prefund floor derived from it is cap-driven, so surfaces
+    /// should point at the cap before pointing at the balance.
+    let feeQuoteAtPolicyCeiling: Bool
+}
+
 struct UserOperationDraft: Equatable {
     let sender: String
     let nonce: Data

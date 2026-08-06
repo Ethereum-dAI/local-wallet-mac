@@ -63,6 +63,33 @@ enum GasPricing {
         return (minWei(priority, maxFee), maxFee) // priority never above maxFee
     }
 
+    /// True when every tier came back at the configured policy ceiling instead of
+    /// a live spread.
+    ///
+    /// Detected by *shape*, not magnitude: the daemon's success path runs
+    /// `derive_fee_tiers`, which spreads slow/standard/fast around the chain
+    /// value, so a live quote never arrives with all three identical. The daemon
+    /// returns that uniform shape when the chain price is **above**
+    /// `policy.max_fee_per_gas` (`gas_price.rs`) — a deliberate clamp, since the
+    /// price was read and the cap is the operator's ceiling.
+    ///
+    /// Callers use it to explain a fee-dominated prefund floor correctly: the
+    /// floor is large because the fee is pinned at the ceiling, so raising the cap
+    /// or waiting for gas to fall moves it, and funding alone does not.
+    ///
+    /// A failed price read no longer produces this shape — the daemon fails closed
+    /// on that path — but the check is kept as a backstop, because
+    /// `LOCAL_WALLET_NODE_BIN` can point at an older binary that still
+    /// substitutes the cap for an unreadable price. Zeroed tiers are excluded:
+    /// degenerate, and a different bug.
+    static func isPolicyCeilingQuote(_ gasPrice: WalletNodeClient.UserOperationGasPrice) -> Bool {
+        let standard = gasPrice.standard
+        guard weiUInt64(standard.maxFeePerGas) > 0 else {
+            return false
+        }
+        return gasPrice.slow == standard && gasPrice.fast == standard
+    }
+
     /// Multiplier applied to the base fee when computing maxFeePerGas headroom. 2× base
     /// fee survives ~6 blocks of maximum (12.5%/block) base-fee growth before stranding.
     private static let baseFeeHeadroomMultiplier: UInt64 = 2

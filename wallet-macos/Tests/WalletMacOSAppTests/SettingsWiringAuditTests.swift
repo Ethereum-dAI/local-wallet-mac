@@ -46,14 +46,14 @@ struct SettingsWiringAuditTests {
         #expect(settings.activeRPCURL == "https://primary.test/rpc")
     }
 
-    /// Suspicion B — model selection drives install, not runtime. The runtime model
-    /// path comes from `installedModelPath`, while `selectedModelID` only steers the
-    /// download/install pipeline. With a single-model catalog this is by design.
-    /// Asserting the catalog invariant guards that "single model" assumption: if a
-    /// second model is ever added, this test fails and forces a re-evaluation of the
-    /// selection-vs-runtime split documented in the matrix.
-    @Test func modelCatalogIsSingleModelSoSelectionDrivesInstallNotRuntime() {
-        #expect(LocalAIModel.available.count == 1)
+    /// Suspicion B, resolved. Selection used to drive install only, which was safe
+    /// while the catalog held exactly one model. It no longer does: the catalog is
+    /// user-extensible, so selection drives the runtime through
+    /// `InstalledModelStore` + `EmbeddedLlamaInferenceService.setActiveModel`.
+    /// What must stay true is that the shipped default is unchanged.
+    @Test func defaultModelIsStillGemmaQ4() {
+        #expect(LocalAIModel.recommended.id == "google/gemma-4-E4B-it")
+        #expect(LocalAIModel.recommended.artifactFileName == "gemma-4-E4B-it-Q4_0.gguf")
         #expect(LocalAIModel.available.first?.id == LocalAIModel.recommended.id)
     }
 }

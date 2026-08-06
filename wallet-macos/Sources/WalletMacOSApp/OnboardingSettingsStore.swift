@@ -168,7 +168,11 @@ struct LocalAIModel: Identifiable, Equatable {
     let artifactFileName: String
     let artifactURL: URL
     let sha256: String
-    let maxContextTokens: Int
+    let memoryProfile: ModelMemoryProfile
+
+    /// The context ceiling the model was trained for. Comes from the GGUF header,
+    /// not from a guess: `gemma4.context_length` is 131072.
+    var maxContextTokens: Int { memoryProfile.trainedContextTokens }
 
     static let recommended = LocalAIModel(
         id: "google/gemma-4-E4B-it",
@@ -183,9 +187,17 @@ struct LocalAIModel: Identifiable, Equatable {
         // the closest surviving quant.
         artifactURL: URL(string: "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf?download=true")!,
         sha256: "a555b900214b477d8880e7832e0b8925e139b0159640036b09fe472b6f2097f2",
-        // Trained context for Gemma 4 E4B. Confirm against the model card; presets are
-        // filtered to this value. Conservative cap keeps the KV cache bounded.
-        maxContextTokens: 32768
+        // Read from the GGUF header of the pinned artifact:
+        // gemma4.block_count=42, head_count_kv=2, key/value_length=512,
+        // context_length=131072 → 168 KiB of KV cache per token.
+        memoryProfile: ModelMemoryProfile(
+            weightBytes: 4_590_807_392,
+            blockCount: 42,
+            kvHeadCount: 2,
+            keyLength: 512,
+            valueLength: 512,
+            trainedContextTokens: 131_072
+        )
     )
 
     static let available: [LocalAIModel] = [

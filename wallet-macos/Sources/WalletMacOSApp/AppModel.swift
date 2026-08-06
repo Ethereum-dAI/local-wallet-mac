@@ -600,27 +600,26 @@ final class AppModel: ObservableObject {
     /// Persists the choice and returns what the dashboard should activate. Takes
     /// effect on the next message; the current conversation keeps its history.
     /// AppModel deliberately does not touch the runtime — see the ownership note.
+    ///
+    /// The disk-presence check is the one impure input; `ModelActivationPlanner`
+    /// makes the actual decision (installed-or-not, and what URL/context to
+    /// activate with) so that logic is unit-testable without a real file on disk.
     func selectModel(id: String) throws -> ActiveModelSelection {
-        guard let entry = modelCatalog.entries.first(where: { $0.id == id }),
-              let path = entry.installedPath,
-              FileManager.default.fileExists(atPath: path)
-        else {
+        let entry = modelCatalog.entries.first(where: { $0.id == id })
+        let fileExists = entry?.installedPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+        guard case let .activate(selection) = ModelActivationPlanner.decide(
+            entry: entry,
+            fileExists: fileExists,
+            currentContextTokens: onboardingSettingsStore.contextWindowTokens
+        ) else {
             throw AppError.modelNotInstalled
         }
         onboardingSettingsStore.selectedModelID = id
-        onboardingSettingsStore.installedModelPath = path
-        let tokens = ContextWindowPresets.clamp(
-            onboardingSettingsStore.contextWindowTokens,
-            maxTokens: entry.profile?.trainedContextTokens ?? LocalAIModel.recommended.maxContextTokens
-        )
-        onboardingSettingsStore.contextWindowTokens = tokens
-        modelActionMessage = "\(entry.displayName) is now active."
-        appendLog("models: active model set to \(entry.displayName) at \(tokens) tokens")
-        return ActiveModelSelection(
-            url: URL(fileURLWithPath: path),
-            contextTokens: tokens,
-            displayName: entry.displayName
-        )
+        onboardingSettingsStore.installedModelPath = selection.url.path
+        onboardingSettingsStore.contextWindowTokens = selection.contextTokens
+        modelActionMessage = "\(selection.displayName) is now active."
+        appendLog("models: active model set to \(selection.displayName) at \(selection.contextTokens) tokens")
+        return selection
     }
 
     func resolveHuggingFaceRepo(_ repoID: String) async throws -> HuggingFaceRepositoryInfo {
@@ -675,12 +674,41 @@ final class AppModel: ObservableObject {
 
     /// Removes a custom model's file and its catalog entry. The default model can be
     /// removed too, but selection falls back to it, so the UI keeps it non-removable.
+    ///
+    /// The store entry is only forgotten once the file is actually gone —
+    /// `ModelRemovalPlanner.mayForgetEntry` makes that call from the deletion
+    /// attempt's outcome. Swallowing a deletion failure here would leave a
+    /// multi-gigabyte file on disk with no remaining catalog row to find or
+    /// delete it from, so a real failure is surfaced and the entry kept.
     func removeModel(id: String) throws {
         guard let installed = installedModelStore.model(id: id) else { return }
-        if onboardingSettingsStore.selectedModelID == id {
+        guard !ModelRemovalPlanner.isBlockedBecauseActive(
+            id: id,
+            selectedModelID: onboardingSettingsStore.selectedModelID
+        ) else {
             throw AppError.localDaemonLaunchFailed("Switch to another model before removing this one.")
         }
-        try? FileManager.default.removeItem(atPath: installed.path)
+
+        let fileExistedBeforeAttempt = FileManager.default.fileExists(atPath: installed.path)
+        var deletionError: Error?
+        if fileExistedBeforeAttempt {
+            do {
+                try FileManager.default.removeItem(atPath: installed.path)
+            } catch {
+                deletionError = error
+            }
+        }
+
+        guard ModelRemovalPlanner.mayForgetEntry(
+            fileExistedBeforeAttempt: fileExistedBeforeAttempt,
+            deletionSucceeded: deletionError == nil
+        ) else {
+            throw AppError.localDaemonLaunchFailed(
+                "Could not delete \(installed.displayName) at \(installed.path): "
+                    + (deletionError?.localizedDescription ?? "unknown error")
+            )
+        }
+
         installedModelStore.remove(id: id)
         modelActionMessage = "\(installed.displayName) removed."
         appendLog("models: removed \(id)")

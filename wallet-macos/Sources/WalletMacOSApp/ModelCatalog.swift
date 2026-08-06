@@ -73,3 +73,32 @@ struct ModelCatalog {
         entries = curated + custom
     }
 }
+
+/// What `ChatDashboardModel` needs in order to point the runtime at a new model.
+struct ActiveModelSelection: Equatable {
+    let url: URL
+    let contextTokens: Int
+    let displayName: String
+}
+
+/// The one place that decides what a verdict means for the UI. Advisory by design:
+/// nothing here can prevent a download or a selection, it only decides whether the
+/// user is asked to confirm first.
+enum ModelSelectionPolicy {
+    static func verdict(
+        entry: ModelCatalogEntry,
+        contextTokens: Int,
+        budget: HardwareBudget
+    ) -> ModelFitVerdict {
+        ModelFitEvaluator.verdict(profile: entry.profile, contextTokens: contextTokens, budget: budget)
+    }
+
+    static func allowsSelection(verdict: ModelFitVerdict) -> Bool { true }
+
+    static func needsConfirmation(verdict: ModelFitVerdict) -> Bool {
+        switch verdict {
+        case .fits, .tight: return false
+        case .wontFit, .unknown: return true
+        }
+    }
+}

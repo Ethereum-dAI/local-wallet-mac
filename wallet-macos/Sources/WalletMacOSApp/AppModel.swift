@@ -76,6 +76,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveBaseFeeWei: Data?
     @Published private(set) var liveGasUpdatedAt: Date?
     @Published private(set) var reconcilerUpdatedAt: Date?
+    @Published var hardwareBudget: HardwareBudget?
+    @Published var modelActionMessage: String?
 
     var activeChain: ChainConfiguration {
         configuration.activeChain
@@ -135,6 +137,9 @@ final class AppModel: ObservableObject {
     private var suppressedBalanceReadFailure = false
     private let userOperationBuilder: UserOperationBuilder
     private let walletHistoryStore: WalletTransactionHistoryStore
+    let installedModelStore = InstalledModelStore()
+    private let huggingFaceRepository = HuggingFaceRepository()
+    private let modelDownloadManager = LocalAIModelDownloadManager()
     private static let startupInspectionRetryDelays: [UInt64] = [
         500_000_000,
         1_250_000_000,
@@ -573,6 +578,112 @@ final class AppModel: ObservableObject {
         guard onboardingSettingsStore.contextWindowTokens != clamped else { return }
         onboardingSettingsStore.contextWindowTokens = clamped
         appendLog("models: context window set to \(clamped) tokens (applies after restart)")
+    }
+
+    var modelCatalog: ModelCatalog {
+        ModelCatalog(installedStore: installedModelStore, downloadManager: modelDownloadManager)
+    }
+
+    func refreshHardwareBudget() async {
+        hardwareBudget = await LocalHardwareInspector().budget()
+    }
+
+    func fitVerdict(for entry: ModelCatalogEntry) -> ModelFitVerdict {
+        guard let hardwareBudget else { return .unknown }
+        return ModelSelectionPolicy.verdict(
+            entry: entry,
+            contextTokens: onboardingSettingsStore.contextWindowTokens,
+            budget: hardwareBudget
+        )
+    }
+
+    /// Persists the choice and returns what the dashboard should activate. Takes
+    /// effect on the next message; the current conversation keeps its history.
+    /// AppModel deliberately does not touch the runtime — see the ownership note.
+    func selectModel(id: String) throws -> ActiveModelSelection {
+        guard let entry = modelCatalog.entries.first(where: { $0.id == id }),
+              let path = entry.installedPath,
+              FileManager.default.fileExists(atPath: path)
+        else {
+            throw AppError.modelNotInstalled
+        }
+        onboardingSettingsStore.selectedModelID = id
+        onboardingSettingsStore.installedModelPath = path
+        let tokens = ContextWindowPresets.clamp(
+            onboardingSettingsStore.contextWindowTokens,
+            maxTokens: entry.profile?.trainedContextTokens ?? LocalAIModel.recommended.maxContextTokens
+        )
+        onboardingSettingsStore.contextWindowTokens = tokens
+        modelActionMessage = "\(entry.displayName) is now active."
+        appendLog("models: active model set to \(entry.displayName) at \(tokens) tokens")
+        return ActiveModelSelection(
+            url: URL(fileURLWithPath: path),
+            contextTokens: tokens,
+            displayName: entry.displayName
+        )
+    }
+
+    func resolveHuggingFaceRepo(_ repoID: String) async throws -> HuggingFaceRepositoryInfo {
+        try await huggingFaceRepository.info(repoID: repoID)
+    }
+
+    /// Downloads, verifies, reads the GGUF header from the downloaded file for a fit
+    /// profile, and records the install. Does not activate the model — that is a
+    /// separate, explicit step.
+    ///
+    /// Reads the header from the local file rather than re-fetching a ranged
+    /// request over the network: the download already pulled the whole file to
+    /// disk, so re-requesting up to `GGUFHeaderReader.headerProbeBytes` (24 MB)
+    /// from the remote host would be a wasted round trip for bytes already
+    /// sitting on disk. Failure behavior is unchanged: if the header can't be
+    /// read or parsed, `profile` is nil and the install still succeeds — a nil
+    /// profile surfaces later as the "Size unknown" verdict, by design.
+    func downloadModel(
+        _ request: ModelDownloadRequest,
+        progress: @escaping @MainActor (Double) -> Void
+    ) async throws {
+        if let hardwareBudget {
+            try LocalAIModelDownloadManager.assertDiskSpace(neededBytes: request.sizeBytes, budget: hardwareBudget)
+        }
+        let fileURL = try await modelDownloadManager.download(request, progress: progress)
+        let profile = Self.readMemoryProfile(fileURL: fileURL, weightBytes: request.sizeBytes)
+        installedModelStore.add(InstalledModel(
+            id: request.modelID,
+            displayName: request.displayName,
+            repoID: request.repoID,
+            fileName: request.fileName,
+            path: fileURL.path,
+            sizeBytes: request.sizeBytes,
+            sha256: request.expectedSHA256,
+            profile: profile
+        ))
+        modelActionMessage = "\(request.displayName) downloaded."
+        appendLog("models: installed \(request.modelID) at \(fileURL.path)")
+    }
+
+    /// Reads the leading `GGUFHeaderReader.headerProbeBytes` of an already-downloaded
+    /// file and parses it for a memory profile. Returns nil (never throws) on any
+    /// failure — a missing/unparsable header degrades to the "Size unknown" verdict
+    /// rather than blocking the install that already succeeded.
+    private static func readMemoryProfile(fileURL: URL, weightBytes: UInt64) -> ModelMemoryProfile? {
+        guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return nil }
+        defer { try? handle.close() }
+        guard let prefix = try? handle.read(upToCount: GGUFHeaderReader.headerProbeBytes) else { return nil }
+        guard let header = try? GGUFHeaderReader.parse(prefix) else { return nil }
+        return header.memoryProfile(weightBytes: weightBytes)
+    }
+
+    /// Removes a custom model's file and its catalog entry. The default model can be
+    /// removed too, but selection falls back to it, so the UI keeps it non-removable.
+    func removeModel(id: String) throws {
+        guard let installed = installedModelStore.model(id: id) else { return }
+        if onboardingSettingsStore.selectedModelID == id {
+            throw AppError.localDaemonLaunchFailed("Switch to another model before removing this one.")
+        }
+        try? FileManager.default.removeItem(atPath: installed.path)
+        installedModelStore.remove(id: id)
+        modelActionMessage = "\(installed.displayName) removed."
+        appendLog("models: removed \(id)")
     }
 
     func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {

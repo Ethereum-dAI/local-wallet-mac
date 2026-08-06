@@ -29,7 +29,10 @@ Runtime requirements for the v0.1 alpha app:
   `onScrollGeometryChange`, which is macOS 15+. No hardware is excluded — the app is Apple
   Silicon only, and every Apple Silicon Mac supports macOS 15.)
 - Apple Silicon Mac (`arm64`).
-- 16 GB RAM minimum for the local Gemma 4 E4B model setup.
+- 16 GB RAM for the default Gemma 4 E4B model. It needs about 6 GB of memory at a
+  4k context window, which a 16 GB Mac holds comfortably and an 8 GB Mac does not.
+  The app measures what your Mac can offer and reports, per model, whether it fits;
+  a smaller model added from Hugging Face can run on 8 GB.
 - Network access for Ethereum RPC/consensus endpoints and first-run model download.
 - A signed macOS app bundle for Secure Enclave and Keychain flows.
 

@@ -82,6 +82,7 @@ private final class OnboardingState: ObservableObject {
     @Published var chainReadinessElapsed: TimeInterval = 0
     @Published var chainReadinessLog: [String] = []
     @Published var hardwareProfile: LocalHardwareProfile?
+    @Published var hardwareBudget: HardwareBudget?
 
     private let settingsStore: OnboardingSettingsStore
     private let networkSettingsStore: DemoSettingsStore
@@ -132,6 +133,7 @@ private final class OnboardingState: ObservableObject {
 
         Task {
             hardwareProfile = await hardwareInspector.inspect()
+            hardwareBudget = await hardwareInspector.budget()
         }
     }
 
@@ -161,8 +163,24 @@ private final class OnboardingState: ObservableObject {
         installState == .installed && hardwareMeetsModelRequirement
     }
 
-    var hardwareMeetsModelRequirement: Bool {
-        hardwareProfile?.hasMinimumModelMemory == true
+    /// Advisory only. Setup is never blocked on memory — a Mac that cannot hold the
+    /// model is told so, with the numbers, and may install it anyway. See
+    /// `OnboardingModelGate`.
+    var hardwareMeetsModelRequirement: Bool { true }
+
+    func fitVerdict(for model: LocalAIModel) -> ModelFitVerdict {
+        guard let hardwareBudget else { return .unknown }
+        return ModelFitEvaluator.verdict(
+            profile: model.memoryProfile,
+            contextTokens: ContextWindowPresets.fallback,
+            budget: hardwareBudget
+        )
+    }
+
+    /// nil when the selected model fits comfortably; otherwise the sentence to show.
+    var hardwareWarning: String? {
+        guard let hardwareBudget else { return nil }
+        return OnboardingModelGate.warning(verdict: fitVerdict(for: selectedModel), budget: hardwareBudget)
     }
 
     var canComplete: Bool {
@@ -644,8 +662,8 @@ struct LocalWalletOnboardingView: View {
         guard let hardwareProfile = state.hardwareProfile else {
             return "Checking this Mac before enabling the local model download."
         }
-        guard hardwareProfile.hasMinimumModelMemory else {
-            return "\(hardwareProfile.displayName). Gemma 4 E4B requires at least 16 GB RAM."
+        if let warning = state.hardwareWarning, state.installState == .idle {
+            return "\(hardwareProfile.displayName). \(warning)"
         }
 
         switch state.installState {
@@ -668,9 +686,7 @@ struct LocalWalletOnboardingView: View {
         guard let hardwareProfile = state.hardwareProfile else {
             return "Checking Mac"
         }
-        guard hardwareProfile.hasMinimumModelMemory else {
-            return "Unsupported Hardware"
-        }
+        _ = hardwareProfile
 
         switch state.installState {
         case .idle:
@@ -899,6 +915,7 @@ private struct ModelStep: View {
                     ForEach(LocalAIModel.available) { model in
                         ModelCard(
                             model: model,
+                            verdict: state.fitVerdict(for: model),
                             isSelected: state.selectedModelID == model.id,
                             isInstalled: state.installState == .installed && state.selectedModelID == model.id
                         ) {
@@ -913,7 +930,7 @@ private struct ModelStep: View {
                 }
 
                 ModelInstallStatusCard(installState: state.installState, model: state.selectedModel)
-                HardwareRequirementCard(profile: state.hardwareProfile)
+                HardwareRequirementCard(profile: state.hardwareProfile, warning: state.hardwareWarning)
             }
         }
     }
@@ -1835,6 +1852,8 @@ private struct ModelInstallStatusCard: View {
 
 private struct HardwareRequirementCard: View {
     let profile: LocalHardwareProfile?
+    /// nil means the selected model fits comfortably on this Mac.
+    let warning: String?
 
     var body: some View {
         OnboardingGlassCard {
@@ -1864,9 +1883,9 @@ private struct HardwareRequirementCard: View {
     @ViewBuilder
     private var statusIcon: some View {
         if let profile {
-            Image(systemName: profile.hasMinimumModelMemory ? "memorychip.fill" : "exclamationmark.triangle.fill")
+            Image(systemName: warning == nil ? "memorychip.fill" : "exclamationmark.triangle.fill")
                 .font(.system(size: 20, weight: .bold))
-                .foregroundStyle(profile.hasMinimumModelMemory ? OnboardingPalette.success : OnboardingPalette.warning)
+                .foregroundStyle(warning == nil ? OnboardingPalette.success : OnboardingPalette.warning)
                 .frame(width: 24, height: 24)
         } else {
             ProgressView()
@@ -1877,36 +1896,40 @@ private struct HardwareRequirementCard: View {
 
     private var detailText: String {
         guard let profile else {
-            return "Checking this Mac. Gemma 4 E4B requires at least 16 GB RAM."
+            return "Checking this Mac."
         }
-
-        if profile.hasMinimumModelMemory {
-            return "\(profile.displayName). Meets the 16 GB RAM minimum."
+        guard let warning else {
+            return "\(profile.displayName). Ready for the local model."
         }
-
-        return "\(profile.displayName). Gemma 4 E4B requires at least 16 GB RAM, so local model setup is blocked on this Mac."
+        return "\(profile.displayName). \(warning)"
     }
 
     private var badgeText: String {
-        guard let profile else {
-            return "CHECKING"
-        }
-        return profile.hasMinimumModelMemory ? "READY" : "BLOCKED"
+        guard profile != nil else { return "CHECKING" }
+        return warning == nil ? "READY" : "TIGHT"
     }
 
     private var badgeColor: Color {
-        guard let profile else {
-            return OnboardingPalette.mutedText
-        }
-        return profile.hasMinimumModelMemory ? OnboardingPalette.success : OnboardingPalette.warning
+        guard profile != nil else { return OnboardingPalette.mutedText }
+        return warning == nil ? OnboardingPalette.success : OnboardingPalette.warning
     }
 }
 
 private struct ModelCard: View {
     let model: LocalAIModel
+    let verdict: ModelFitVerdict
     let isSelected: Bool
     let isInstalled: Bool
     let action: () -> Void
+
+    private var verdictTint: Color {
+        switch verdict {
+        case .fits: return OnboardingPalette.success
+        case .tight: return OnboardingPalette.warning
+        case .wontFit: return OnboardingPalette.warning
+        case .unknown: return OnboardingPalette.mutedText
+        }
+    }
 
     var body: some View {
         Button(action: action) {
@@ -1935,6 +1958,12 @@ private struct ModelCard: View {
                         Text(model.tag)
                             .font(.system(size: 13, weight: .bold))
                             .foregroundStyle(OnboardingPalette.mutedText)
+                        Text(verdict.label)
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundStyle(verdictTint)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(verdictTint.opacity(0.14)))
                     }
                     Text(model.detail)
                         .font(.system(size: 17, weight: .semibold))

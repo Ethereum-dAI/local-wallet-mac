@@ -710,7 +710,7 @@ struct LocalWalletSettingsView: View {
                         title: "Model memory",
                         value: hardwareMemoryStatus,
                         systemImage: "memorychip.fill",
-                        tint: hardwareProfile?.hasMinimumModelMemory == false ? SettingsPalette.orange : SettingsPalette.green
+                        tint: SettingsPalette.green
                     )
                     SettingsInfoItem(
                         title: "macOS",
@@ -2387,9 +2387,10 @@ struct LocalWalletSettingsView: View {
         guard let hardwareProfile else {
             return "Inspecting..."
         }
-        return hardwareProfile.hasMinimumModelMemory
-            ? "\(hardwareProfile.memoryText) available"
-            : "\(hardwareProfile.memoryText), below local model target"
+        guard let summary = snapshot.hardwareSummary else {
+            return hardwareProfile.memoryText
+        }
+        return "\(summary.memoryText) · \(summary.budgetText) for models"
     }
 
     private static let dateFormatter: DateFormatter = {

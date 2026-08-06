@@ -83,6 +83,25 @@ enum ModelFitEvaluator {
     }
 }
 
+/// Onboarding used to refuse to continue below 16 GB of RAM. It advises instead:
+/// the download is always permitted, and a Mac that cannot hold the model at the
+/// smallest preset gets a plain warning with the numbers behind it.
+enum OnboardingModelGate {
+    static func allowsDownload(verdict: ModelFitVerdict) -> Bool { true }
+
+    static func warning(verdict: ModelFitVerdict, budget: HardwareBudget) -> String? {
+        switch verdict {
+        case .fits, .unknown:
+            return nil
+        case .tight:
+            return "This model will use most of the memory available to it on this Mac. Replies may be slow."
+        case .wontFit:
+            let available = ByteCountFormatter.string(fromByteCount: Int64(budget.usableBytes), countStyle: .memory)
+            return "This Mac has \(available) available for the model, which is below what it needs. You can still install it, but expect swapping or a failed load."
+        }
+    }
+}
+
 extension ModelFitEvaluator {
     /// The presets worth offering: everything the model's trained context allows,
     /// minus the sizes this Mac cannot hold. The app does not list a setting that

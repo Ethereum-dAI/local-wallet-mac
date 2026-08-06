@@ -1,15 +1,13 @@
 import Foundation
 
+/// Descriptive only. What a model actually needs is decided per model by
+/// `ModelFitEvaluator` against `HardwareBudget` — there is deliberately no fixed
+/// RAM threshold here, because a fixed number cannot see the quantization, the
+/// context window, or which model was chosen.
 struct LocalHardwareProfile: Equatable {
-    static let minimumModelMemoryBytes: UInt64 = 16 * 1024 * 1024 * 1024
-
     let modelName: String
     let chipName: String
     let memoryBytes: UInt64
-
-    var hasMinimumModelMemory: Bool {
-        memoryBytes >= Self.minimumModelMemoryBytes
-    }
 
     var memoryText: String {
         let gib = Double(memoryBytes) / 1024 / 1024 / 1024

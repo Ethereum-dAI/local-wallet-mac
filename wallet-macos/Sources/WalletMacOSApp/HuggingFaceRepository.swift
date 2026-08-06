@@ -50,23 +50,56 @@ struct HuggingFaceRepository {
         self.session = session
     }
 
+    /// Hugging Face owner and repo names are restricted to ASCII letters, digits,
+    /// hyphen, underscore and period. Enforcing that as an allowlist — rather than
+    /// blocklisting individual characters like `#`, `?`, `:` — rejects URL
+    /// metacharacters, whitespace, Unicode and path-traversal segments in one rule.
+    private static let allowedSegmentCharacters = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_."
+    )
+
+    private static func isValidSegment(_ segment: Substring) -> Bool {
+        guard !segment.isEmpty, segment != ".", segment != ".." else { return false }
+        return segment.unicodeScalars.allSatisfy { allowedSegmentCharacters.contains($0) }
+    }
+
     static func validate(repoID: String) throws -> String {
         let trimmed = repoID.trimmingCharacters(in: .whitespacesAndNewlines)
-        let parts = trimmed.split(separator: "/", omittingEmptySubsequences: true)
-        guard parts.count == 2,
-              !trimmed.contains(":"),
-              !trimmed.hasPrefix("/"),
-              parts.allSatisfy({ !$0.isEmpty })
+        let parts = trimmed.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2, parts.allSatisfy(isValidSegment)
         else { throw HuggingFaceRepositoryError.malformedRepoID }
         return parts.joined(separator: "/")
     }
 
+    /// Builds a `https://huggingface.co` API URL via `URLComponents` rather than raw
+    /// string interpolation, so a `repoID` segment or query value can never spill
+    /// into the wrong URL component (e.g. a stray `#`/`?` truncating the request).
+    private static func apiURL(pathSuffix: String, query: [URLQueryItem] = []) throws -> URL {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "huggingface.co"
+        components.path = pathSuffix
+        if !query.isEmpty { components.queryItems = query }
+        guard let url = components.url else { throw HuggingFaceRepositoryError.malformedRepoID }
+        return url
+    }
+
+    /// The file `path` here comes from the (untrusted) tree API response, not from
+    /// `validate(repoID:)`, so it is percent-encoded via `URLComponents` rather than
+    /// trusted as already URL-safe.
+    private static func downloadURL(repoID: String, filePath: String) throws -> URL {
+        try apiURL(pathSuffix: "/\(repoID)/resolve/main/\(filePath)")
+    }
+
     func info(repoID rawRepoID: String) async throws -> HuggingFaceRepositoryInfo {
         let repoID = try Self.validate(repoID: rawRepoID)
-        let modelInfo = try await get(URL(string: "https://huggingface.co/api/models/\(repoID)")!)
+        let modelInfo = try await get(Self.apiURL(pathSuffix: "/api/models/\(repoID)"))
         var info = try Self.decodeModelInfo(modelInfo)
         guard !info.isGated else { throw HuggingFaceRepositoryError.gated }
-        let tree = try await get(URL(string: "https://huggingface.co/api/models/\(repoID)/tree/main?recursive=true")!)
+        let tree = try await get(Self.apiURL(
+            pathSuffix: "/api/models/\(repoID)/tree/main",
+            query: [URLQueryItem(name: "recursive", value: "true")]
+        ))
         info.files = try Self.decodeTree(tree, repoID: repoID)
         return info
     }
@@ -130,14 +163,14 @@ struct HuggingFaceRepository {
 
     static func decodeTree(_ data: Data, repoID: String) throws -> [HuggingFaceGGUFFile] {
         let entries = try JSONDecoder().decode([TreeEntry].self, from: data)
-        let files = entries
+        let files = try entries
             .filter { $0.type == "file" && $0.path.hasSuffix(".gguf") }
             .map { entry in
                 HuggingFaceGGUFFile(
                     path: entry.path,
                     sizeBytes: entry.size ?? 0,
                     sha256: entry.lfs?.oid,
-                    downloadURL: URL(string: "https://huggingface.co/\(repoID)/resolve/main/\(entry.path)")!
+                    downloadURL: try downloadURL(repoID: repoID, filePath: entry.path)
                 )
             }
             .sorted { $0.sizeBytes < $1.sizeBytes }

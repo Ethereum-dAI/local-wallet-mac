@@ -1,11 +1,52 @@
 import CryptoKit
 import Foundation
 
+/// A single downloadable GGUF, whether it came from the curated catalog or from a
+/// repository the user typed in.
+struct ModelDownloadRequest: Equatable {
+    let modelID: String
+    let displayName: String
+    let repoID: String
+    let fileName: String
+    /// Destination file name, namespaced so two repos publishing `model.gguf`
+    /// cannot overwrite each other. Curated models keep their historical name so
+    /// existing installs are found without a re-download.
+    let destinationFileName: String
+    let url: URL
+    let expectedSHA256: String?
+    let sizeBytes: UInt64
+
+    init(model: LocalAIModel) {
+        modelID = model.id
+        displayName = model.name
+        repoID = model.artifactRepo
+        fileName = model.artifactFileName
+        destinationFileName = model.artifactFileName
+        url = model.artifactURL
+        expectedSHA256 = model.sha256
+        sizeBytes = model.memoryProfile.weightBytes
+    }
+
+    init(repoID: String, file: HuggingFaceGGUFFile) {
+        let leaf = (file.path as NSString).lastPathComponent
+        modelID = "\(repoID)#\(file.path)"
+        displayName = (leaf as NSString).deletingPathExtension
+        self.repoID = repoID
+        fileName = file.path
+        let slug = repoID.replacingOccurrences(of: "/", with: "_")
+        destinationFileName = "\(slug)__\(leaf)"
+        url = file.downloadURL
+        expectedSHA256 = file.sha256
+        sizeBytes = file.sizeBytes
+    }
+}
+
 enum LocalAIModelDownloadError: LocalizedError {
     case invalidResponse
     case httpStatus(Int)
     case checksumMismatch(expected: String, actual: String)
     case missingDownload
+    case insufficientDisk(neededBytes: UInt64, availableBytes: UInt64)
 
     var errorDescription: String? {
         switch self {
@@ -17,6 +58,10 @@ enum LocalAIModelDownloadError: LocalizedError {
             return "The downloaded model did not pass verification. Try downloading it again."
         case .missingDownload:
             return "The downloaded model file could not be found."
+        case .insufficientDisk(let needed, let available):
+            let neededText = ByteCountFormatter.string(fromByteCount: Int64(needed), countStyle: .file)
+            let availableText = ByteCountFormatter.string(fromByteCount: Int64(available), countStyle: .file)
+            return "This model needs \(neededText) but only \(availableText) is free."
         }
     }
 }
@@ -25,7 +70,7 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
     typealias ProgressHandler = @MainActor (Double) -> Void
 
     private struct ActiveDownload {
-        let model: LocalAIModel
+        let expectedSHA256: String?
         let destinationURL: URL
         let progressHandler: ProgressHandler
         let continuation: CheckedContinuation<URL, Error>
@@ -45,6 +90,22 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
     func localFileURL(for model: LocalAIModel) throws -> URL {
         try Self.modelsDirectory()
             .appendingPathComponent(model.artifactFileName, isDirectory: false)
+    }
+
+    func localFileURL(for request: ModelDownloadRequest) throws -> URL {
+        try Self.modelsDirectory()
+            .appendingPathComponent(request.destinationFileName, isDirectory: false)
+    }
+
+    /// Leaves 2 GB of slack so a download cannot fill the volume.
+    static func assertDiskSpace(neededBytes: UInt64, budget: HardwareBudget) throws {
+        let slack: UInt64 = 2 * 1_073_741_824
+        guard budget.freeDiskBytes > neededBytes + slack else {
+            throw LocalAIModelDownloadError.insufficientDisk(
+                neededBytes: neededBytes,
+                availableBytes: budget.freeDiskBytes
+            )
+        }
     }
 
     func bundledFileURL(for model: LocalAIModel) -> URL? {
@@ -89,13 +150,36 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
 
         return try await withCheckedThrowingContinuation { continuation in
             let activeDownload = ActiveDownload(
-                model: model,
+                expectedSHA256: model.sha256,
                 destinationURL: destinationURL,
                 progressHandler: progress,
                 continuation: continuation
             )
             store(activeDownload)
             session.downloadTask(with: model.artifactURL).resume()
+        }
+    }
+
+    func download(
+        _ request: ModelDownloadRequest,
+        progress: @escaping ProgressHandler
+    ) async throws -> URL {
+        let destinationURL = try localFileURL(for: request)
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            return destinationURL
+        }
+        try FileManager.default.createDirectory(
+            at: destinationURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        return try await withCheckedThrowingContinuation { continuation in
+            store(ActiveDownload(
+                expectedSHA256: request.expectedSHA256,
+                destinationURL: destinationURL,
+                progressHandler: progress,
+                continuation: continuation
+            ))
+            session.downloadTask(with: request.url).resume()
         }
     }
 
@@ -141,13 +225,15 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
             }
             try FileManager.default.moveItem(at: location, to: activeDownload.destinationURL)
 
-            let actualChecksum = try Self.sha256Hex(of: activeDownload.destinationURL)
-            guard actualChecksum == activeDownload.model.sha256.lowercased() else {
-                try? FileManager.default.removeItem(at: activeDownload.destinationURL)
-                throw LocalAIModelDownloadError.checksumMismatch(
-                    expected: activeDownload.model.sha256,
-                    actual: actualChecksum
-                )
+            if let expected = activeDownload.expectedSHA256?.lowercased() {
+                let actualChecksum = try Self.sha256Hex(of: activeDownload.destinationURL)
+                guard actualChecksum == expected else {
+                    try? FileManager.default.removeItem(at: activeDownload.destinationURL)
+                    throw LocalAIModelDownloadError.checksumMismatch(
+                        expected: expected,
+                        actual: actualChecksum
+                    )
+                }
             }
 
             Task { @MainActor in

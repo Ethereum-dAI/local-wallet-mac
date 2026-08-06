@@ -2049,7 +2049,8 @@ EOF
 
 **Interfaces:**
 - Consumes: everything from Tasks 1-7.
-- Produces: on `AppModel` — `@Published var hardwareBudget: HardwareBudget?`, `@Published var modelCatalog: ModelCatalog`, `@Published var modelActionMessage: String?`, `func refreshHardwareBudget() async`, `func fitVerdict(for entry: ModelCatalogEntry) -> ModelFitVerdict`, `func selectModel(id: String) throws`, `func downloadModel(_ request: ModelDownloadRequest, progress:) async throws`, `func removeModel(id: String) throws`, `func resolveHuggingFaceRepo(_ repoID: String) async throws -> HuggingFaceRepositoryInfo`.
+- Produces: on `AppModel` — `@Published var hardwareBudget: HardwareBudget?`, `var modelCatalog: ModelCatalog`, `@Published var modelActionMessage: String?`, `func refreshHardwareBudget() async`, `func fitVerdict(for entry: ModelCatalogEntry) -> ModelFitVerdict`, `func selectModel(id: String) throws -> ActiveModelSelection`, `func downloadModel(_ request: ModelDownloadRequest, progress:) async throws`, `func removeModel(id: String) throws`, `func resolveHuggingFaceRepo(_ repoID: String) async throws -> HuggingFaceRepositoryInfo`, plus `struct ActiveModelSelection { let url: URL; let contextTokens: Int; let displayName: String }`.
+- **Ownership note (verified in the codebase, do not deviate):** `EmbeddedLlamaInferenceService` is a `private let` on `ChatDashboardModel` (`ChatDashboardView.swift:936`); `AppModel` has no reference to it and must not create one — a second instance would hold a second copy of the weights. `selectModel` therefore persists the choice and *returns* what to activate; `ChatDashboardModel` applies it (Task 9).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2176,9 +2177,10 @@ and these methods immediately after `setContextWindowTokens(_:)`:
         )
     }
 
-    /// Activates an already-installed model. Takes effect on the next message; the
-    /// current conversation keeps its history.
-    func selectModel(id: String) throws {
+    /// Persists the choice and returns what the dashboard should activate. Takes
+    /// effect on the next message; the current conversation keeps its history.
+    /// AppModel deliberately does not touch the runtime — see the ownership note.
+    func selectModel(id: String) throws -> ActiveModelSelection {
         guard let entry = modelCatalog.entries.first(where: { $0.id == id }),
               let path = entry.installedPath,
               FileManager.default.fileExists(atPath: path)
@@ -2192,9 +2194,13 @@ and these methods immediately after `setContextWindowTokens(_:)`:
             maxTokens: entry.profile?.trainedContextTokens ?? LocalAIModel.recommended.maxContextTokens
         )
         onboardingSettingsStore.contextWindowTokens = tokens
-        inferenceService.setActiveModel(url: URL(fileURLWithPath: path), contextTokens: tokens)
         modelActionMessage = "\(entry.displayName) is now active."
         appendLog("models: active model set to \(entry.displayName) at \(tokens) tokens")
+        return ActiveModelSelection(
+            url: URL(fileURLWithPath: path),
+            contextTokens: tokens,
+            displayName: entry.displayName
+        )
     }
 
     func resolveHuggingFaceRepo(_ repoID: String) async throws -> HuggingFaceRepositoryInfo {
@@ -2242,7 +2248,18 @@ and these methods immediately after `setContextWindowTokens(_:)`:
     }
 ```
 
-If `inferenceService` is not already a stored property on `AppModel`, thread the instance that `ChatDashboardModel` owns into these calls instead — do not create a second `EmbeddedLlamaInferenceService`, or two runtimes will hold the weights at once.
+Add the return type beside the other model types in `ModelCatalog.swift`:
+
+```swift
+/// What `ChatDashboardModel` needs in order to point the runtime at a new model.
+struct ActiveModelSelection: Equatable {
+    let url: URL
+    let contextTokens: Int
+    let displayName: String
+}
+```
+
+`AppModel` must not import or instantiate `EmbeddedLlamaInferenceService`. Task 9 wires the returned selection into the instance `ChatDashboardModel` already owns.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -2499,8 +2516,7 @@ Replace the body of `private var modelsTab: some View` (lines 765-852) with:
             SettingsSection(title: "Add From Hugging Face") {
                 AddHuggingFaceModelForm(
                     onResolveRepo: onResolveRepo,
-                    onDownloadModel: onDownloadModel,
-                    fitVerdict: { _ in .unknown }
+                    onDownloadModel: onDownloadModel
                 )
             }
 
@@ -2544,7 +2560,6 @@ Add at the end of `wallet-macos/Sources/WalletMacOSApp/LocalWalletSettingsView.s
 private struct AddHuggingFaceModelForm: View {
     let onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo
     let onDownloadModel: (ModelDownloadRequest, @escaping @MainActor (Double) -> Void) async throws -> Void
-    let fitVerdict: (ModelMemoryProfile?) -> ModelFitVerdict
 
     @State private var repoID: String = ""
     @State private var files: [HuggingFaceGGUFFile] = []
@@ -2673,7 +2688,8 @@ and add the four callbacks in `settingsBody` after `onRevealModelFile`:
 
 ```swift
             onSelectModel: { id in
-                try model.walletModel.selectModel(id: id)
+                let selection = try model.walletModel.selectModel(id: id)
+                model.applyActiveModel(selection)
             },
             onDownloadModel: { request, progress in
                 try await model.walletModel.downloadModel(request, progress: progress)
@@ -2684,6 +2700,17 @@ and add the four callbacks in `settingsBody` after `onRevealModelFile`:
             onResolveRepo: { repoID in
                 try await model.walletModel.resolveHuggingFaceRepo(repoID)
             },
+```
+
+Add the applier to `ChatDashboardModel`, next to the other `inferenceService` uses — this is the only place that may touch the runtime:
+
+```swift
+    /// Points the one runtime instance at the newly selected model. The swap itself
+    /// happens lazily inside the service, at the start of the next generation.
+    func applyActiveModel(_ selection: ActiveModelSelection) {
+        inferenceService.setActiveModel(url: selection.url, contextTokens: selection.contextTokens)
+        runtimeStatus = inferenceService.runtimeStatus
+    }
 ```
 
 Finally, refresh the budget when the dashboard appears — add to the existing `.task` / `onAppear` block that already runs at dashboard start:

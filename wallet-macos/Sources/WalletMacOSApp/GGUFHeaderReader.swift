@@ -134,7 +134,22 @@ enum GGUFHeaderReader {
                 guard count <= UInt64(data.count - offset) else { throw GGUFHeaderError.truncated }
                 for _ in 0..<count { _ = try scalarInteger(type: elementType) }
                 return nil
-            case 10: return Int(try u64())
+            case 10:
+                let value = try u64()
+                // Same attacker-controlled-value concern as everywhere else in
+                // this switch: `Int(UInt64)` traps above `Int.max`. Unlike case
+                // 11 (a genuinely *signed* i64, where reinterpreting the bits via
+                // `Int64(bitPattern:)` is the correct decode), this is an
+                // unsigned u64 — a value above `Int.max` is never a plausible
+                // block count, context length, or any other field this parser
+                // consumes, and reinterpreting its bits as a negative `Int`
+                // would let that garbage number reach `ModelMemoryProfile` /
+                // `ModelFitEvaluator`, which convert it straight back to
+                // `UInt64` and would trap on a negative value. So: consume the
+                // 8 bytes (cursor stays in sync) but don't store an implausible
+                // value — `nil` here means "skipped", exactly like the
+                // float/string/array arms below.
+                return Int(exactly: value)
             case 11: return Int(Int64(bitPattern: try u64()))
             case 12: _ = try take(8); return nil
             default: throw GGUFHeaderError.unsupportedValueType(type)

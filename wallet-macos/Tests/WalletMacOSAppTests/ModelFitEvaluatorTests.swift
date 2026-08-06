@@ -111,4 +111,25 @@ struct ModelFitEvaluatorTests {
         #expect(ContextWindowPresets.options(maxTokens: 131_072).contains(131_072))
         #expect(ContextWindowPresets.options(maxTokens: 8192).last == 8192)
     }
+
+    @Test func selectableContextsDropTheSizesThisMacCannotHold() {
+        let big = budget(ram: 36 * gb, metal: 30_182_211_584)
+        let offered = ModelFitEvaluator.selectableContexts(profile: gemma, budget: big)
+        // Gemma trains to 131072, but 131072 needs ~31 GB against a 28 GB budget.
+        #expect(offered.contains(32768))
+        #expect(!offered.contains(131_072))
+    }
+
+    @Test func selectableContextsNeverReturnAnEmptyPicker() {
+        let tiny = budget(ram: 8 * gb, metal: 6 * gb)
+        let offered = ModelFitEvaluator.selectableContexts(profile: gemma, budget: tiny)
+        #expect(offered.count == 1)
+        #expect(offered.first == ContextWindowPresets.ladder.first)
+    }
+
+    @Test func selectableContextsFallBackToTheLadderWithoutAProfile() {
+        let big = budget(ram: 36 * gb, metal: 30_182_211_584)
+        #expect(ModelFitEvaluator.selectableContexts(profile: nil, budget: big)
+                == ContextWindowPresets.options(maxTokens: ContextWindowPresets.fallback))
+    }
 }

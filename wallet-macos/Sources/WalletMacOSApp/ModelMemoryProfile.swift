@@ -82,3 +82,23 @@ enum ModelFitEvaluator {
             .max()
     }
 }
+
+extension ModelFitEvaluator {
+    /// The presets worth offering: everything the model's trained context allows,
+    /// minus the sizes this Mac cannot hold. The app does not list a setting that
+    /// would hang it — a `.wontFit` context is not a choice, it is a failure.
+    /// Always returns at least one preset so the picker is never empty.
+    static func selectableContexts(
+        profile: ModelMemoryProfile?,
+        budget: HardwareBudget?
+    ) -> [Int] {
+        let all = ContextWindowPresets.options(
+            maxTokens: profile?.trainedContextTokens ?? ContextWindowPresets.fallback
+        )
+        guard let profile, let budget else { return all }
+        let runnable = all.filter {
+            verdict(profile: profile, contextTokens: $0, budget: budget) != .wontFit
+        }
+        return runnable.isEmpty ? [all.first ?? ContextWindowPresets.fallback] : runnable
+    }
+}

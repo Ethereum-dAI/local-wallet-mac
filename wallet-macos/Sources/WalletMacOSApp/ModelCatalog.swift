@@ -102,3 +102,42 @@ enum ModelSelectionPolicy {
         }
     }
 }
+
+/// One row in Settings › Models. A flattened, already-formatted view of a catalog
+/// entry so the SwiftUI body stays declarative.
+struct SettingsModelRow: Identifiable, Equatable {
+    let id: String
+    let displayName: String
+    let detail: String
+    let source: ModelSource
+    let verdict: ModelFitVerdict
+    let estimatedBytes: UInt64
+    let isInstalled: Bool
+    let isActive: Bool
+    let isDefault: Bool
+
+    /// The shipped default is never removable, and neither is the running model.
+    var isRemovable: Bool { !isDefault && isInstalled && !isActive }
+
+    var estimatedText: String {
+        ByteCountFormatter.string(fromByteCount: Int64(estimatedBytes), countStyle: .file)
+    }
+}
+
+struct SettingsHardwareSummary: Equatable {
+    let memoryText: String
+    let budgetText: String
+    let diskText: String
+
+    init(budget: HardwareBudget) {
+        // `.memory`, not `.file`: these are RAM figures (binary GiB, as System
+        // Information reports them), not decimal file sizes — `.file`'s 1000-based
+        // divisor would show a 36 GiB Mac as "38.65 GB".
+        func format(_ bytes: UInt64) -> String {
+            ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .memory)
+        }
+        memoryText = format(budget.totalMemoryBytes)
+        budgetText = format(budget.usableBytes)
+        diskText = format(budget.freeDiskBytes)
+    }
+}

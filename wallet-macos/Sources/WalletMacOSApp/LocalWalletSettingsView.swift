@@ -175,6 +175,11 @@ struct LocalWalletSettingsSnapshot: Equatable {
     let textModelRuntimeStatus: String
     let textModelInstallStatus: String
     let textModelPath: String
+    let modelRows: [SettingsModelRow]
+    let hardwareSummary: SettingsHardwareSummary?
+    /// Context presets worth offering on this Mac; never empty. See
+    /// ModelFitEvaluator.selectableContexts.
+    let selectableContextTokens: [Int]
     let contextWindow: String
     let contextWindowTokens: Int
     let contextWindowMaxTokens: Int
@@ -267,6 +272,10 @@ struct LocalWalletSettingsView: View {
     let onClearChatHistory: () throws -> String
     let onClearRankings: () throws -> String
     let onRevealModelFile: () throws -> String
+    let onSelectModel: (String) throws -> String
+    let onDownloadModel: (ModelDownloadRequest, @escaping @MainActor (Double) -> Void) async throws -> String
+    let onRemoveModel: (String) throws -> String
+    let onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo
     let onSaveNetworkSettings: (DemoNetworkSettings) throws -> String
     let onTestNetworkSettings: (DemoNetworkSettings) async throws -> String
     let onRunDiagnostics: (DemoNetworkSettings) async -> SettingsDiagnosticsReport
@@ -329,6 +338,10 @@ struct LocalWalletSettingsView: View {
         onClearChatHistory: @escaping () throws -> String,
         onClearRankings: @escaping () throws -> String,
         onRevealModelFile: @escaping () throws -> String,
+        onSelectModel: @escaping (String) throws -> String,
+        onDownloadModel: @escaping (ModelDownloadRequest, @escaping @MainActor (Double) -> Void) async throws -> String,
+        onRemoveModel: @escaping (String) throws -> String,
+        onResolveRepo: @escaping (String) async throws -> HuggingFaceRepositoryInfo,
         onSaveNetworkSettings: @escaping (DemoNetworkSettings) throws -> String,
         onTestNetworkSettings: @escaping (DemoNetworkSettings) async throws -> String,
         onRunDiagnostics: @escaping (DemoNetworkSettings) async -> SettingsDiagnosticsReport,
@@ -357,6 +370,10 @@ struct LocalWalletSettingsView: View {
         self.onClearChatHistory = onClearChatHistory
         self.onClearRankings = onClearRankings
         self.onRevealModelFile = onRevealModelFile
+        self.onSelectModel = onSelectModel
+        self.onDownloadModel = onDownloadModel
+        self.onRemoveModel = onRemoveModel
+        self.onResolveRepo = onResolveRepo
         self.onSaveNetworkSettings = onSaveNetworkSettings
         self.onTestNetworkSettings = onTestNetworkSettings
         self.onRunDiagnostics = onRunDiagnostics
@@ -764,52 +781,78 @@ struct LocalWalletSettingsView: View {
 
     private var modelsTab: some View {
         VStack(alignment: .leading, spacing: 18) {
-            SettingsSection(title: "Text Runtime") {
-                SettingsKeyValueRows(rows: [
-                    SettingsKeyValue(title: "Selected", value: snapshot.textModelName),
-                    SettingsKeyValue(title: "Identifier", value: snapshot.textModelIdentifier),
-                    SettingsKeyValue(title: "Detail", value: snapshot.textModelDetail),
-                    SettingsKeyValue(title: "Repository", value: snapshot.textModelArtifactRepo),
-                    SettingsKeyValue(title: "Artifact", value: snapshot.textModelArtifactFileName),
-                    SettingsKeyValue(title: "Install status", value: snapshot.textModelInstallStatus),
-                    SettingsKeyValue(title: "Path", value: snapshot.textModelPath),
-                    SettingsKeyValue(title: "Runtime", value: snapshot.textModelRuntimeStatus),
-                ])
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("Context window")
-                            .font(.system(size: 12, weight: .heavy))
-                            .foregroundStyle(SettingsPalette.mutedText)
-                        Spacer()
-                        Picker("", selection: Binding(
-                            get: { contextWindowDraft },
-                            set: { newValue in
-                                contextWindowDraft = newValue
-                                onSetContextWindowTokens(newValue)
-                                modelMessage = SettingsMessage(
-                                    kind: .success,
-                                    text: "Context window set to \(newValue) tokens. Applies after you restart the app."
-                                )
-                            }
-                        )) {
-                            ForEach(ContextWindowPresets.options(maxTokens: snapshot.contextWindowMaxTokens), id: \.self) { tokens in
-                                Text("\(tokens) tokens").tag(tokens)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .frame(width: 160)
-                    }
-                    Text("Active: \(snapshot.contextWindow). Changes apply after restart. Larger windows use more memory.")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(SettingsPalette.secondaryText)
+            if let hardware = snapshot.hardwareSummary {
+                SettingsSection(title: "This Mac") {
+                    SettingsKeyValueRows(rows: [
+                        SettingsKeyValue(title: "Memory", value: hardware.memoryText),
+                        SettingsKeyValue(title: "Model budget", value: hardware.budgetText),
+                        SettingsKeyValue(title: "Free disk", value: hardware.diskText),
+                    ])
                 }
-                .padding(.top, 4)
+            }
+
+            SettingsSection(title: "Text Model") {
+                ForEach(snapshot.modelRows) { row in
+                    HStack(spacing: 12) {
+                        Image(systemName: row.isActive ? "largecircle.fill.circle" : "circle")
+                            .foregroundStyle(row.isActive ? SettingsPalette.blue : SettingsPalette.mutedText)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(row.displayName)
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(SettingsPalette.primaryText)
+                            Text("\(row.detail) · \(row.estimatedText) in memory")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(SettingsPalette.secondaryText)
+                        }
+                        Spacer()
+                        if row.isDefault {
+                            SettingsBadge(text: "Default", tint: SettingsPalette.blue)
+                        }
+                        SettingsBadge(text: row.verdict.label, tint: verdictTint(row.verdict))
+                        if row.isInstalled {
+                            Button("Use") { runModelAction { try onSelectModel(row.id) } }
+                                .buttonStyle(SettingsSecondaryButtonStyle())
+                                .disabled(row.isActive)
+                        }
+                        if row.isRemovable {
+                            Button("Remove") { runModelAction { try onRemoveModel(row.id) } }
+                                .buttonStyle(SettingsSecondaryButtonStyle())
+                        }
+                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(SettingsPalette.rowBackground))
+                }
+                if let modelMessage {
+                    SettingsMessageBanner(message: modelMessage)
+                }
+            }
+
+            SettingsSection(title: "Context Window") {
+                Picker("", selection: Binding(
+                    get: { contextWindowDraft },
+                    set: { newValue in
+                        contextWindowDraft = newValue
+                        onSetContextWindowTokens(newValue)
+                        modelMessage = SettingsMessage(
+                            kind: .success,
+                            text: "Context window set to \(newValue) tokens. Applies to the next message."
+                        )
+                    }
+                )) {
+                    ForEach(snapshot.selectableContextTokens, id: \.self) { tokens in
+                        Text("\(tokens) tokens").tag(tokens)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 200)
+                Text("Active: \(snapshot.contextWindow). Larger windows use more memory — the verdicts above are computed at this size. Sizes this Mac cannot hold are not listed.")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(SettingsPalette.secondaryText)
                 Divider().overlay(SettingsPalette.border).padding(.vertical, 4)
                 HStack(spacing: 12) {
                     Toggle("Show thinking", isOn: $thinkingEnabled)
                         .toggleStyle(.switch)
                         .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(SettingsPalette.primaryText)
                     Spacer()
                     Button {
                         do {
@@ -823,9 +866,13 @@ struct LocalWalletSettingsView: View {
                     }
                     .buttonStyle(SettingsSecondaryButtonStyle())
                 }
-                if let modelMessage {
-                    SettingsMessageBanner(message: modelMessage)
-                }
+            }
+
+            SettingsSection(title: "Add From Hugging Face") {
+                AddHuggingFaceModelForm(
+                    onResolveRepo: onResolveRepo,
+                    onDownloadModel: onDownloadModel
+                )
             }
 
             SettingsSection(title: "Multimodal Runtime") {
@@ -834,20 +881,26 @@ struct LocalWalletSettingsView: View {
                     SettingsKeyValue(title: "Status", value: snapshot.multimodalModelStatus),
                 ])
             }
+        }
+    }
 
-            SettingsSection(title: "Available Text Models") {
-                SettingsInfoGrid {
-                    ForEach(LocalAIModel.available) { model in
-                        SettingsInfoItem(
-                            title: model.name,
-                            value: model.size,
-                            detail: model.detail,
-                            systemImage: model.systemImage,
-                            tint: model.id == snapshot.textModelIdentifier ? SettingsPalette.green : SettingsPalette.blue
-                        )
-                    }
-                }
-            }
+    private func verdictTint(_ verdict: ModelFitVerdict) -> Color {
+        switch verdict {
+        case .fits: return SettingsPalette.green
+        case .tight: return SettingsPalette.orange
+        case .wontFit: return SettingsPalette.red
+        case .unknown: return SettingsPalette.mutedText
+        }
+    }
+
+    /// Runs a model action (select/remove) and surfaces the specific outcome
+    /// `AppModel` reports — never a generic "Done." — or the thrown error's
+    /// `localizedDescription` on failure.
+    private func runModelAction(_ action: () throws -> String) {
+        do {
+            modelMessage = SettingsMessage(kind: .success, text: try action())
+        } catch {
+            modelMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
         }
     }
 
@@ -3085,6 +3138,22 @@ private struct SettingsTransactionProgressBanner: View {
     }
 }
 
+/// A small pill label — a fit verdict, "Default", a health state — matching the
+/// capsule style already used inline by `SettingsHealthRow`.
+private struct SettingsBadge: View {
+    let text: String
+    let tint: Color
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10, weight: .heavy))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(tint.opacity(0.14)))
+    }
+}
+
 private struct SettingsMessageBanner: View {
     let message: SettingsMessage
 
@@ -3215,6 +3284,7 @@ private enum SettingsPalette {
     static let sidebar = Color(red: 0.035, green: 0.042, blue: 0.082)
     static let panel = Color(red: 0.066, green: 0.076, blue: 0.125)
     static let row = Color(red: 0.082, green: 0.094, blue: 0.150)
+    static let rowBackground = row
     static let selected = Color(red: 0.116, green: 0.135, blue: 0.215)
     static let control = Color(red: 0.105, green: 0.121, blue: 0.190)
     static let border = Color(red: 0.175, green: 0.205, blue: 0.315)
@@ -3226,4 +3296,101 @@ private enum SettingsPalette {
     static let cyan = Color(red: 0.250, green: 0.740, blue: 0.820)
     static let orange = Color(red: 0.930, green: 0.560, blue: 0.230)
     static let red = Color(red: 0.950, green: 0.280, blue: 0.260)
+}
+
+/// Repo → file → download. Resolution is explicit (a button, not on every keystroke)
+/// so a half-typed repo name never fires a request.
+private struct AddHuggingFaceModelForm: View {
+    let onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo
+    let onDownloadModel: (ModelDownloadRequest, @escaping @MainActor (Double) -> Void) async throws -> String
+
+    @State private var repoID: String = ""
+    @State private var files: [HuggingFaceGGUFFile] = []
+    @State private var selectedPath: String = ""
+    @State private var message: SettingsMessage?
+    @State private var progress: Double?
+    @State private var isResolving = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                SettingsEditableField(
+                    title: "Repository",
+                    placeholder: "unsloth/gemma-4-E2B-it-GGUF",
+                    text: $repoID
+                )
+                Button(isResolving ? "Checking…" : "Find models") { resolve() }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .disabled(repoID.isEmpty || isResolving)
+            }
+
+            if !files.isEmpty {
+                Picker("File", selection: $selectedPath) {
+                    ForEach(files.filter { !$0.isAuxiliary }) { file in
+                        Text("\(file.path) · \(ByteCountFormatter.string(fromByteCount: Int64(file.sizeBytes), countStyle: .file))")
+                            .tag(file.path)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                HStack {
+                    if let progress {
+                        ProgressView(value: progress).frame(width: 180)
+                        Text("\(Int(progress * 100))%").font(.system(size: 11, design: .monospaced))
+                    }
+                    Spacer()
+                    Button("Download & add") { download() }
+                        .buttonStyle(SettingsPrimaryButtonStyle())
+                        .disabled(selectedPath.isEmpty || progress != nil)
+                }
+            }
+
+            if let message {
+                SettingsMessageBanner(message: message)
+            }
+
+            Text("Public GGUF repositories only. Unverified models can get tool calls wrong — review every transaction.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func resolve() {
+        isResolving = true
+        message = nil
+        Task { @MainActor in
+            defer { isResolving = false }
+            do {
+                let info = try await onResolveRepo(repoID)
+                files = info.files
+                selectedPath = info.files.first { !$0.isAuxiliary }?.path ?? ""
+                let context = info.trainedContextTokens.map { " · trained to \($0)" } ?? ""
+                message = SettingsMessage(
+                    kind: info.hasChatTemplate ? .success : .error,
+                    text: info.hasChatTemplate
+                        ? "\(info.files.count) GGUF file(s)\(context)."
+                        : "This repo has no chat template, so it cannot make tool calls."
+                )
+            } catch {
+                files = []
+                message = SettingsMessage(kind: .error, text: error.localizedDescription)
+            }
+        }
+    }
+
+    private func download() {
+        guard let file = files.first(where: { $0.path == selectedPath }) else { return }
+        let request = ModelDownloadRequest(repoID: repoID.trimmingCharacters(in: .whitespaces), file: file)
+        progress = 0
+        Task { @MainActor in
+            do {
+                let resultMessage = try await onDownloadModel(request) { value in progress = value }
+                progress = nil
+                message = SettingsMessage(kind: .success, text: resultMessage)
+            } catch {
+                progress = nil
+                message = SettingsMessage(kind: .error, text: error.localizedDescription)
+            }
+        }
+    }
 }

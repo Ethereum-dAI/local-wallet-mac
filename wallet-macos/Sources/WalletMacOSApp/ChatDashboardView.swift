@@ -1194,6 +1194,28 @@ private final class ChatDashboardModel: ObservableObject {
         let databaseSize = Self.byteFormatter.string(fromByteCount: Int64(chatStore.databaseFileSizeBytes()))
         let rankingCount = (try? chatStore.loadToolIntentFeedbackExportRecords().count) ?? 0
 
+        // Built once here (not per-row in the view), per catalog walk: `modelCatalog`
+        // re-reads installed-model state and `entry.isInstalled` does a filesystem
+        // check, so both belong in this once-per-snapshot pass, not inside a ForEach.
+        let budget = walletModel.hardwareBudget
+        let activeModelID = onboardingSettingsStore.selectedModelID
+        let catalog = walletModel.modelCatalog
+        let modelRows = catalog.entries.map { entry in
+            SettingsModelRow(
+                id: entry.id,
+                displayName: entry.displayName,
+                detail: entry.source == .curated ? entry.sizeText : entry.repoID,
+                source: entry.source,
+                verdict: walletModel.fitVerdict(for: entry),
+                estimatedBytes: entry.profile.map {
+                    ModelFitEvaluator.requiredBytes(profile: $0, contextTokens: onboardingSettingsStore.contextWindowTokens)
+                } ?? 0,
+                isInstalled: entry.isInstalled,
+                isActive: entry.id == activeModelID,
+                isDefault: entry.isDefault
+            )
+        }
+
         return LocalWalletSettingsSnapshot(
             capturedAt: now,
             appVersion: appBuild.version,
@@ -1207,6 +1229,12 @@ private final class ChatDashboardModel: ObservableObject {
             textModelRuntimeStatus: runtimeStatus,
             textModelInstallStatus: installStatus,
             textModelPath: installedPath.isEmpty ? "Not set" : installedPath,
+            modelRows: modelRows,
+            hardwareSummary: budget.map(SettingsHardwareSummary.init),
+            selectableContextTokens: ModelFitEvaluator.selectableContexts(
+                profile: catalog.entries.first { $0.id == activeModelID }?.profile,
+                budget: budget
+            ),
             contextWindow: "\(inferenceService.contextSize) tokens",
             contextWindowTokens: onboardingSettingsStore.contextWindowTokens,
             contextWindowMaxTokens: selectedModel.maxContextTokens,
@@ -2421,6 +2449,51 @@ private final class ChatDashboardModel: ObservableObject {
         }
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
         return "Revealed model file."
+    }
+
+    /// Switches the active model. `AppModel.selectModel` only decides *what* to
+    /// activate and persists the choice — it never touches the runtime (see
+    /// `applyActiveModel`, the one place allowed to). Surfaces the specific message
+    /// `AppModel` set (e.g. "X is now active."), falling back only if that is nil.
+    @discardableResult
+    func selectModel(id: String) throws -> String {
+        let selection = try walletModel.selectModel(id: id)
+        applyActiveModel(selection)
+        return walletModel.modelActionMessage ?? "\(selection.displayName) is now active."
+    }
+
+    /// Points the one runtime instance at the newly selected model. The swap itself
+    /// happens lazily inside the service, at the start of the next generation. This
+    /// is the only place that may touch `inferenceService` on a model switch —
+    /// `AppModel` never gets a reference to it.
+    func applyActiveModel(_ selection: ActiveModelSelection) {
+        inferenceService.setActiveModel(url: selection.url, contextTokens: selection.contextTokens)
+        runtimeStatus = inferenceService.runtimeStatus
+    }
+
+    func downloadModel(
+        _ request: ModelDownloadRequest,
+        progress: @escaping @MainActor (Double) -> Void
+    ) async throws -> String {
+        try await walletModel.downloadModel(request, progress: progress)
+        return walletModel.modelActionMessage ?? "\(request.displayName) downloaded."
+    }
+
+    @discardableResult
+    func removeModel(id: String) throws -> String {
+        try walletModel.removeModel(id: id)
+        return walletModel.modelActionMessage ?? "Model removed."
+    }
+
+    func resolveHuggingFaceRepo(_ repoID: String) async throws -> HuggingFaceRepositoryInfo {
+        try await walletModel.resolveHuggingFaceRepo(repoID)
+    }
+
+    /// Refreshes this Mac's memory/disk budget so the fit verdicts and context
+    /// picker in Settings › Models reflect current conditions rather than whatever
+    /// was measured at launch.
+    func refreshHardwareBudget() async {
+        await walletModel.refreshHardwareBudget()
     }
 
     func saveNetworkSettings(_ settings: DemoNetworkSettings) throws -> String {
@@ -4243,6 +4316,7 @@ struct LocalWalletChatDashboardView: View {
         }
         .onAppear {
             model.startSessionActivityTracking()
+            Task { await model.refreshHardwareBudget() }
         }
         .onDisappear {
             model.stopSessionActivityTracking()
@@ -4455,6 +4529,18 @@ struct LocalWalletChatDashboardView: View {
             },
             onRevealModelFile: {
                 try model.revealModelFile()
+            },
+            onSelectModel: { id in
+                try model.selectModel(id: id)
+            },
+            onDownloadModel: { request, progress in
+                try await model.downloadModel(request, progress: progress)
+            },
+            onRemoveModel: { id in
+                try model.removeModel(id: id)
+            },
+            onResolveRepo: { repoID in
+                try await model.resolveHuggingFaceRepo(repoID)
             },
             onSaveNetworkSettings: { settings in
                 try model.saveNetworkSettings(settings)

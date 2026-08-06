@@ -117,20 +117,20 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
     private let stateLock = NSLock()
     private var runtime: LlamaRuntime
     private var loadedModelURL: URL?
+    private var loadedContextTokens: Int?
     private var desiredModelURL: URL?
     private var desiredContextTokens: Int
 
     init(
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
-        downloadManager: LocalAIModelDownloadManager = LocalAIModelDownloadManager(),
-        runtime: LlamaRuntime? = nil
+        downloadManager: LocalAIModelDownloadManager = LocalAIModelDownloadManager()
     ) {
         self.settingsStore = settingsStore
         self.downloadManager = downloadManager
         let model = LocalAIModel.available.first { $0.id == settingsStore.selectedModelID } ?? .recommended
         let tokens = ContextWindowPresets.clamp(settingsStore.contextWindowTokens, maxTokens: model.maxContextTokens)
         self.desiredContextTokens = tokens
-        self.runtime = runtime ?? LlamaRuntime(configuration: LocalLLMConfiguration(contextSize: Int32(tokens)))
+        self.runtime = LlamaRuntime(configuration: LocalLLMConfiguration(contextSize: Int32(tokens)))
     }
 
     /// Point the service at a different GGUF. The swap happens lazily, at the start
@@ -241,7 +241,7 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
         }
     }
 
-    /// Loads the desired model, tearing down the previous runtime first when the
+    /// Loads the desired model, swapping in a fresh runtime first when the
     /// selection or the context window changed. Returns the runtime this call's
     /// generation must use — callers hold onto that value rather than re-reading
     /// `runtime` later in the stream, so a concurrent swap triggered by another
@@ -254,36 +254,61 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
     /// lock is held, or a throw would leak the lock and deadlock every later caller.
     private func prepareRuntime() throws -> LlamaRuntime {
         stateLock.lock()
-        let desired = desiredModelURL
-        let tokens = desiredContextTokens
-        let loaded = loadedModelURL
+        let loaded = ModelLoadState(modelURL: loadedModelURL, contextTokens: loadedContextTokens)
+        let desiredAtStart = DesiredModel(modelURL: desiredModelURL, contextTokens: desiredContextTokens)
         let current = runtime
         stateLock.unlock()
 
-        let target = try desired ?? installedModelURL()
-        let needsSwap = loaded != target || Int(current.configuredContextSize) != tokens
+        let resolvedURL = try desiredAtStart.modelURL ?? installedModelURL()
+        let target = ModelSwapTarget(modelURL: resolvedURL, contextTokens: desiredAtStart.contextTokens)
 
-        if needsSwap {
-            current.unload()
+        guard ModelSwapPlanner.needsSwap(loaded: loaded, target: target) else {
+            if !current.isLoaded {
+                try current.loadModel(at: target.modelURL)
+                stateLock.lock()
+                loadedModelURL = target.modelURL
+                loadedContextTokens = target.contextTokens
+                stateLock.unlock()
+            }
+            return current
+        }
 
-            let replacement = LlamaRuntime(configuration: LocalLLMConfiguration(contextSize: Int32(tokens)))
-            try replacement.loadModel(at: target)
+        // Do NOT call `current.unload()` here. A second, concurrent `stream()`
+        // call may already be mid-generation on `current`'s native llama.cpp
+        // handle — `LlamaRuntime.chatBlocking` holds that handle and runs
+        // `lllm_runtime_generate_v2` on it for the whole generation, outside
+        // LlamaRuntime's own lock. Destroying the handle out from under that call
+        // would be a use-after-free in llama.cpp. Instead we just drop our
+        // reference to `current`; `LlamaRuntime.deinit` calls `unload()` itself,
+        // so the native handle is torn down only once every holder — including
+        // any in-flight generation's own `activeRuntime` snapshot — has released
+        // it. Trade-off: while an overlapping swap is in flight, two runtimes (two
+        // models' worth of memory) can be briefly resident at once; that costs
+        // memory, never correctness.
+        let replacement = LlamaRuntime(configuration: LocalLLMConfiguration(contextSize: Int32(target.contextTokens)))
+        try replacement.loadModel(at: target.modelURL)
 
-            stateLock.lock()
+        stateLock.lock()
+        let desiredNow = DesiredModel(modelURL: desiredModelURL, contextTokens: desiredContextTokens)
+        if let committed = ModelSwapPlanner.commit(
+            justLoaded: target,
+            desiredAtLoadStart: desiredAtStart,
+            desiredNow: desiredNow
+        ) {
+            // The desire has not moved on since this load started: adopt the
+            // replacement as the service's shared runtime.
             runtime = replacement
-            loadedModelURL = target
-            desiredModelURL = target
-            stateLock.unlock()
-            return replacement
+            loadedModelURL = committed.modelURL
+            loadedContextTokens = committed.contextTokens
         }
-
-        if !current.isLoaded {
-            try current.loadModel(at: target)
-            stateLock.lock()
-            loadedModelURL = target
-            stateLock.unlock()
-        }
-        return current
+        // Else: `setActiveModel` landed a new desire while we were loading.
+        // Leave `runtime`/`loadedModelURL`/`loadedContextTokens` untouched so the
+        // next `prepareRuntime()` call still sees a mismatch against the newer
+        // desire and swaps again — this load is not lost, it just isn't recorded
+        // as current. `replacement` is still returned below for this call's own
+        // generation to use.
+        stateLock.unlock()
+        return replacement
     }
 
     private func installedModelURL() throws -> URL {

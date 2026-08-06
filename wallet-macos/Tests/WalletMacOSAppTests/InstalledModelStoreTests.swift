@@ -73,4 +73,69 @@ struct InstalledModelStoreTests {
         let second = InstalledModelStore(defaults: defaults)
         #expect(second.installed.isEmpty)
     }
+
+    /// Reserializes an already-encoded `InstalledModel` into a loose JSON object
+    /// (`[String: Any]`), so tests can splice good and bad entries into the same
+    /// raw array the way a corrupted defaults blob would contain them.
+    private func jsonObject(for model: InstalledModel) throws -> Any {
+        let data = try JSONEncoder().encode(model)
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    private let installedKey = "com.localwallet.models.installed"
+    private let corruptBackupKey = "com.localwallet.models.installed.corrupt-backup"
+
+    /// A blob that isn't JSON at all — a truncated write, disk corruption, anything.
+    /// The whole list must not vanish into thin air: the raw bytes are recoverable
+    /// under a backup key, and a later `add` must not clobber that backup.
+    @Test func totallyUndecodableBlobIsBackedUpNotDestroyed() {
+        let defaults = suite()
+        let garbage = Data("not json at all {{{".utf8)
+        defaults.set(garbage, forKey: installedKey)
+
+        let store = InstalledModelStore(defaults: defaults)
+        #expect(store.installed.isEmpty)
+        #expect(defaults.data(forKey: corruptBackupKey) == garbage)
+
+        store.add(sample(id: "new"))
+        #expect(store.installed.count == 1)
+        #expect(defaults.data(forKey: corruptBackupKey) == garbage)
+    }
+
+    /// One malformed entry in an otherwise-valid array (a field missing, e.g. from a
+    /// future schema change) must not take the rest of the list down with it.
+    @Test func aBadEntryInTheMiddleIsSkippedNotFatal() throws {
+        let defaults = suite()
+        let good1 = try jsonObject(for: sample(id: "one"))
+        let good3 = try jsonObject(for: sample(id: "three"))
+        let bad: [String: Any] = ["id": "two"] // missing every other required field
+        let arrayData = try JSONSerialization.data(withJSONObject: [good1, bad, good3])
+        defaults.set(arrayData, forKey: installedKey)
+
+        let store = InstalledModelStore(defaults: defaults)
+        #expect(store.installed.count == 2)
+        #expect(store.model(id: "one") != nil)
+        #expect(store.model(id: "three") != nil)
+        #expect(store.model(id: "two") == nil)
+    }
+
+    /// After a partial-decode load, mutating and reloading must keep exactly the
+    /// survivors plus whatever was added — the skipped entry stays gone, but nothing
+    /// else is lost in the round trip.
+    @Test func roundTripAfterPartialDecodeKeepsSurvivorsPlusNew() throws {
+        let defaults = suite()
+        let good1 = try jsonObject(for: sample(id: "one"))
+        let bad: [String: Any] = ["id": "two"]
+        let arrayData = try JSONSerialization.data(withJSONObject: [good1, bad])
+        defaults.set(arrayData, forKey: installedKey)
+
+        let store = InstalledModelStore(defaults: defaults)
+        store.add(sample(id: "new"))
+
+        let reloaded = InstalledModelStore(defaults: defaults)
+        #expect(reloaded.installed.count == 2)
+        #expect(reloaded.model(id: "one") != nil)
+        #expect(reloaded.model(id: "new") != nil)
+        #expect(reloaded.model(id: "two") == nil)
+    }
 }

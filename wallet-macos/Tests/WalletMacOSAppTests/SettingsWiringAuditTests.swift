@@ -55,5 +55,10 @@ struct SettingsWiringAuditTests {
         #expect(LocalAIModel.recommended.id == "google/gemma-4-E4B-it")
         #expect(LocalAIModel.recommended.artifactFileName == "gemma-4-E4B-it-Q4_0.gguf")
         #expect(LocalAIModel.available.first?.id == LocalAIModel.recommended.id)
+        // The values that make an accidental default-model change dangerous rather
+        // than merely wrong: an edited checksum or URL would silently point the
+        // wallet at different bytes than the ones this build was pinned against.
+        #expect(LocalAIModel.recommended.sha256 == "a555b900214b477d8880e7832e0b8925e139b0159640036b09fe472b6f2097f2")
+        #expect(LocalAIModel.recommended.artifactURL == URL(string: "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf?download=true")!)
     }
 }

@@ -17,6 +17,7 @@ struct InstalledModel: Codable, Equatable, Identifiable {
 final class InstalledModelStore {
     private enum Keys {
         static let installed = "com.localwallet.models.installed"
+        static let corruptBackup = "com.localwallet.models.installed.corrupt-backup"
         static let migrated = "com.localwallet.models.legacy-migrated"
         static let legacyID = "com.localwallet.demo.onboarding.installed-model-id"
         static let legacyPath = "com.localwallet.demo.onboarding.installed-model-path"
@@ -46,11 +47,31 @@ final class InstalledModelStore {
         save()
     }
 
+    /// Decodes leniently so one bad entry (a truncated write, a field added by a
+    /// future schema change) cannot take the rest of the list down with it, and
+    /// so an undecodable blob is never silently replaced by an empty list.
     private func load() {
-        guard let data = defaults.data(forKey: Keys.installed),
-              let decoded = try? JSONDecoder().decode([InstalledModel].self, from: data)
-        else { return }
-        installed = decoded
+        guard let data = defaults.data(forKey: Keys.installed) else { return }
+
+        if let decoded = try? JSONDecoder().decode([InstalledModel].self, from: data) {
+            installed = decoded
+            return
+        }
+
+        guard let rawArray = (try? JSONSerialization.jsonObject(with: data)) as? [Any] else {
+            // Not JSON at all, or not a top-level array — there is nothing to
+            // salvage entry-by-entry. Back up the original bytes before any
+            // `save()` call can overwrite this key, so the data is recoverable
+            // by hand instead of silently gone.
+            defaults.set(data, forKey: Keys.corruptBackup)
+            return
+        }
+
+        let decoder = JSONDecoder()
+        installed = rawArray.compactMap { element -> InstalledModel? in
+            guard let elementData = try? JSONSerialization.data(withJSONObject: element) else { return nil }
+            return try? decoder.decode(InstalledModel.self, from: elementData)
+        }
     }
 
     private func save() {

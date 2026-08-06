@@ -47,9 +47,25 @@ final class InstalledModelStore {
         save()
     }
 
+    /// Decodes to nil instead of throwing, so one unreadable element cannot take
+    /// the rest of the list with it — and, unlike a `JSONSerialization` round trip
+    /// through `Any`, cannot crash on a non-object element (a bare string, number,
+    /// bool, or null): `Decodable` failures are ordinary Swift errors that `try?`
+    /// catches, not the uncatchable ObjC exception `JSONSerialization.data(
+    /// withJSONObject:)` raises when handed anything other than an array/dictionary.
+    private struct LenientEntry: Decodable {
+        let model: InstalledModel?
+        init(from decoder: Decoder) throws {
+            model = try? InstalledModel(from: decoder)
+        }
+    }
+
     /// Decodes leniently so one bad entry (a truncated write, a field added by a
-    /// future schema change) cannot take the rest of the list down with it, and
-    /// so an undecodable blob is never silently replaced by an empty list.
+    /// future schema change, a stray scalar in the array) cannot take the rest of
+    /// the list down with it, and so an undecodable blob is never silently
+    /// replaced by an empty list. Pure `Codable` end to end — no
+    /// `JSONSerialization` round trip, which is what let a scalar element crash
+    /// the process instead of just failing to decode.
     private func load() {
         guard let data = defaults.data(forKey: Keys.installed) else { return }
 
@@ -58,20 +74,16 @@ final class InstalledModelStore {
             return
         }
 
-        guard let rawArray = (try? JSONSerialization.jsonObject(with: data)) as? [Any] else {
-            // Not JSON at all, or not a top-level array — there is nothing to
-            // salvage entry-by-entry. Back up the original bytes before any
-            // `save()` call can overwrite this key, so the data is recoverable
-            // by hand instead of silently gone.
+        guard let lenient = try? JSONDecoder().decode([LenientEntry].self, from: data) else {
+            // Not a JSON array of entries at all (not JSON, or a JSON scalar/object
+            // at the top level) — there is nothing to salvage entry-by-entry. Back
+            // up the original bytes before any `save()` call can overwrite this
+            // key, so the data is recoverable by hand instead of silently gone.
             defaults.set(data, forKey: Keys.corruptBackup)
             return
         }
 
-        let decoder = JSONDecoder()
-        installed = rawArray.compactMap { element -> InstalledModel? in
-            guard let elementData = try? JSONSerialization.data(withJSONObject: element) else { return nil }
-            return try? decoder.decode(InstalledModel.self, from: elementData)
-        }
+        installed = lenient.compactMap(\.model)
     }
 
     private func save() {

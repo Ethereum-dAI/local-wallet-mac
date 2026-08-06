@@ -138,4 +138,36 @@ struct InstalledModelStoreTests {
         #expect(reloaded.model(id: "new") != nil)
         #expect(reloaded.model(id: "two") == nil)
     }
+
+    /// A bare scalar in the array (not an object) is a plausible corruption shape —
+    /// a truncated write, or any future producer putting a raw value in a slot.
+    /// `JSONSerialization.data(withJSONObject:)` requires a top-level array/dictionary,
+    /// so handing it a scalar element raises an uncatchable ObjC exception. This must
+    /// not reach that call at all: the two valid entries load, no crash.
+    @Test func aBareStringBetweenValidEntriesIsSkippedNotFatal() throws {
+        let defaults = suite()
+        let good1 = try jsonObject(for: sample(id: "one"))
+        let good3 = try jsonObject(for: sample(id: "three"))
+        let arrayData = try JSONSerialization.data(withJSONObject: [good1, "garbage", good3])
+        defaults.set(arrayData, forKey: installedKey)
+
+        let store = InstalledModelStore(defaults: defaults)
+        #expect(store.installed.count == 2)
+        #expect(store.model(id: "one") != nil)
+        #expect(store.model(id: "three") != nil)
+    }
+
+    /// Same hazard, different scalar shapes: `null` and a bare number.
+    @Test func nullAndNumberEntriesAreSkippedNotFatal() throws {
+        let defaults = suite()
+        let good1 = try jsonObject(for: sample(id: "one"))
+        let good3 = try jsonObject(for: sample(id: "three"))
+        let arrayData = try JSONSerialization.data(withJSONObject: [good1, NSNull(), 42, good3])
+        defaults.set(arrayData, forKey: installedKey)
+
+        let store = InstalledModelStore(defaults: defaults)
+        #expect(store.installed.count == 2)
+        #expect(store.model(id: "one") != nil)
+        #expect(store.model(id: "three") != nil)
+    }
 }

@@ -123,10 +123,10 @@ private final class OnboardingState: ObservableObject {
         self.sepoliaArchiveNodeURL = networkSettings.sepoliaArchiveNodeURL
         self.sepoliaConsensusRPCURL = networkSettings.sepoliaConsensusRPCURL
         let storedModelID = settingsStore.selectedModelID
-        self.selectedModelID = LocalAIModel.available.contains { $0.id == storedModelID }
+        self.selectedModelID = LocalAIModel.onboardingOptions.contains { $0.id == storedModelID }
             ? storedModelID
             : LocalAIModel.recommended.id
-        let selectedModel = LocalAIModel.available.first { $0.id == self.selectedModelID } ?? .recommended
+        let selectedModel = LocalAIModel.onboardingOptions.first { $0.id == self.selectedModelID } ?? .recommended
         if settingsStore.installedModelID == selectedModel.id && downloadManager.isInstalled(selectedModel) {
             self.installState = .installed
         }
@@ -143,7 +143,7 @@ private final class OnboardingState: ObservableObject {
     }
 
     var selectedModel: LocalAIModel {
-        LocalAIModel.available.first { $0.id == selectedModelID } ?? .recommended
+        LocalAIModel.onboardingOptions.first { $0.id == selectedModelID } ?? .recommended
     }
 
     var selectedNetwork: OnboardingNetwork {
@@ -917,7 +917,7 @@ private struct ModelStep: View {
                     .frame(height: 54)
 
                 VStack(spacing: 12) {
-                    ForEach(LocalAIModel.available) { model in
+                    ForEach(LocalAIModel.onboardingOptions) { model in
                         ModelCard(
                             model: model,
                             verdict: state.fitVerdict(for: model),
@@ -1887,7 +1887,9 @@ private struct HardwareRequirementCard: View {
 
     @ViewBuilder
     private var statusIcon: some View {
-        if let profile {
+        // The spinner stands for "this Mac has not been measured yet", so the test
+        // is presence, not the profile's contents.
+        if profile != nil {
             Image(systemName: warning == nil ? "memorychip.fill" : "exclamationmark.triangle.fill")
                 .font(.system(size: 20, weight: .bold))
                 .foregroundStyle(warning == nil ? OnboardingPalette.success : OnboardingPalette.warning)

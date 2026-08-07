@@ -54,11 +54,33 @@ struct SettingsWiringAuditTests {
     @Test func defaultModelIsStillGemmaQ4() {
         #expect(LocalAIModel.recommended.id == "google/gemma-4-E4B-it")
         #expect(LocalAIModel.recommended.artifactFileName == "gemma-4-E4B-it-Q4_0.gguf")
-        #expect(LocalAIModel.available.first?.id == LocalAIModel.recommended.id)
+        #expect(LocalAIModel.curated.first?.id == LocalAIModel.recommended.id)
         // The values that make an accidental default-model change dangerous rather
         // than merely wrong: an edited checksum or URL would silently point the
         // wallet at different bytes than the ones this build was pinned against.
         #expect(LocalAIModel.recommended.sha256 == "a555b900214b477d8880e7832e0b8925e139b0159640036b09fe472b6f2097f2")
         #expect(LocalAIModel.recommended.artifactURL == URL(string: "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf?download=true")!)
+    }
+
+    /// First-run setup offers the default and nothing else. The second curated
+    /// model is a Settings decision, made later by someone who has seen their own
+    /// hardware verdicts — not a fork in the road before the wallet works.
+    @Test func onboardingOffersTheDefaultAndNothingElse() {
+        #expect(LocalAIModel.onboardingOptions.map(\.id) == [LocalAIModel.recommended.id])
+        #expect(LocalAIModel.curated.count > LocalAIModel.onboardingOptions.count)
+    }
+
+    /// Same pin as the default model, for the same reason: an edited checksum or
+    /// URL would point the wallet at different bytes than this build was reviewed
+    /// against. Values read from Qwen's own repo on 2026-08-07.
+    @Test func curatedQwen3IsPinnedToQwensOwnBuild() {
+        let qwen = LocalAIModel.qwen3
+        #expect(qwen.id == "Qwen/Qwen3-8B")
+        #expect(qwen.artifactRepo == "Qwen/Qwen3-8B-GGUF")
+        #expect(qwen.artifactFileName == "Qwen3-8B-Q4_K_M.gguf")
+        #expect(qwen.sha256 == "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785")
+        #expect(qwen.artifactURL == URL(string: "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf?download=true")!)
+        #expect(LocalAIModel.curated.contains { $0.id == qwen.id })
+        #expect(qwen.id != LocalAIModel.recommended.id)
     }
 }

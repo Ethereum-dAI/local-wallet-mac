@@ -200,7 +200,45 @@ struct LocalAIModel: Identifiable, Equatable {
         )
     )
 
-    static let available: [LocalAIModel] = [
+    /// Qwen's own GGUF build, deliberately sized to sit next to Gemma 4 rather than
+    /// below it: 5.03 GB of weights and 144 KiB of KV per token means ~6.5 GB at
+    /// 4k against Gemma's ~6.1 GB, so a Mac that runs one runs the other.
+    static let qwen3 = LocalAIModel(
+        id: "Qwen/Qwen3-8B",
+        name: "Qwen3 8B",
+        size: "5.03 GB",
+        detail: "Qwen3 8B as a Q4_K_M GGUF, published by Qwen. Trained to 40,960 tokens, so it offers a shorter maximum context than Gemma 4.",
+        tag: "GGUF",
+        systemImage: "cube",
+        artifactRepo: "Qwen/Qwen3-8B-GGUF",
+        artifactFileName: "Qwen3-8B-Q4_K_M.gguf",
+        artifactURL: URL(string: "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf?download=true")!,
+        sha256: "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+        // Read from the GGUF header of the pinned artifact:
+        // qwen3.block_count=36, head_count_kv=8, key/value_length=128,
+        // context_length=40960 → 144 KiB of KV cache per token.
+        memoryProfile: ModelMemoryProfile(
+            weightBytes: 5_027_783_488,
+            blockCount: 36,
+            kvHeadCount: 8,
+            keyLength: 128,
+            valueLength: 128,
+            trainedContextTokens: 40_960
+        )
+    )
+
+    /// Every model the app ships knowledge of: the Settings catalog, and the lookup
+    /// table for resolving a persisted `selectedModelID` back to its pinned profile.
+    static let curated: [LocalAIModel] = [
+        recommended,
+        qwen3,
+    ]
+
+    /// What first-run setup offers — deliberately just the default. Onboarding is
+    /// not the place to make this choice: it is where you get a working wallet with
+    /// the model the app was tested against. Everything else is a Settings decision,
+    /// made later, by someone who has seen their own hardware verdicts.
+    static let onboardingOptions: [LocalAIModel] = [
         recommended,
     ]
 }

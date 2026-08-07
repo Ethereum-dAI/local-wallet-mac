@@ -30,7 +30,7 @@ struct ModelCatalog {
     let entries: [ModelCatalogEntry]
 
     init(installedStore: InstalledModelStore, downloadManager: LocalAIModelDownloadManager = LocalAIModelDownloadManager()) {
-        let curated = LocalAIModel.available.map { model -> ModelCatalogEntry in
+        let curated = LocalAIModel.curated.map { model -> ModelCatalogEntry in
             let installed = installedStore.model(id: model.id)?.path
                 ?? downloadManager.bundledFileURL(for: model)?.path
                 ?? (try? downloadManager.localFileURL(for: model))?.path
@@ -118,6 +118,11 @@ struct SettingsModelRow: Identifiable, Equatable {
 
     /// The shipped default is never removable, and neither is the running model.
     var isRemovable: Bool { !isDefault && isInstalled && !isActive }
+
+    /// Only curated rows offer a download button: the app knows their URL and
+    /// checksum. A Hugging Face row exists precisely because its file was already
+    /// downloaded, so there is nothing to fetch.
+    var isDownloadable: Bool { source == .curated && !isInstalled }
 
     var estimatedText: String {
         ByteCountFormatter.string(fromByteCount: Int64(estimatedBytes), countStyle: .file)

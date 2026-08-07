@@ -127,7 +127,7 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
     ) {
         self.settingsStore = settingsStore
         self.downloadManager = downloadManager
-        let model = LocalAIModel.available.first { $0.id == settingsStore.selectedModelID } ?? .recommended
+        let model = LocalAIModel.curated.first { $0.id == settingsStore.selectedModelID } ?? .recommended
         let tokens = ContextWindowPresets.clamp(settingsStore.contextWindowTokens, maxTokens: model.maxContextTokens)
         self.desiredContextTokens = tokens
         self.runtime = LlamaRuntime(configuration: LocalLLMConfiguration(contextSize: Int32(tokens)))

@@ -573,7 +573,7 @@ final class AppModel: ObservableObject {
     }
 
     func setContextWindowTokens(_ tokens: Int) {
-        let model = LocalAIModel.available.first { $0.id == onboardingSettingsStore.selectedModelID } ?? .recommended
+        let model = LocalAIModel.curated.first { $0.id == onboardingSettingsStore.selectedModelID } ?? .recommended
         let clamped = ContextWindowPresets.clamp(tokens, maxTokens: model.maxContextTokens)
         guard onboardingSettingsStore.contextWindowTokens != clamped else { return }
         onboardingSettingsStore.contextWindowTokens = clamped

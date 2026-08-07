@@ -101,7 +101,7 @@ final class InstalledModelStore {
               let legacyPath = defaults.string(forKey: Keys.legacyPath),
               !legacyPath.isEmpty,
               installed.contains(where: { $0.id == legacyID }) == false,
-              let curated = LocalAIModel.available.first(where: { $0.id == legacyID })
+              let curated = LocalAIModel.curated.first(where: { $0.id == legacyID })
         else { return }
 
         add(InstalledModel(

@@ -36,6 +36,29 @@ struct ModelsTabSnapshotTests {
         #expect(row.isRemovable == true)
     }
 
+    /// A curated model the user has not fetched yet is the only row with something
+    /// to download — the app knows its URL and checksum. A Hugging Face row exists
+    /// because its file is already on disk.
+    @Test func onlyAnUninstalledCuratedRowOffersADownload() {
+        func row(source: ModelSource, isInstalled: Bool) -> SettingsModelRow {
+            SettingsModelRow(
+                id: "x",
+                displayName: "x",
+                detail: "x",
+                source: source,
+                verdict: .fits,
+                estimatedBytes: 1,
+                isInstalled: isInstalled,
+                isActive: false,
+                isDefault: false
+            )
+        }
+        #expect(row(source: .curated, isInstalled: false).isDownloadable == true)
+        #expect(row(source: .curated, isInstalled: true).isDownloadable == false)
+        #expect(row(source: .huggingFace, isInstalled: false).isDownloadable == false)
+        #expect(row(source: .huggingFace, isInstalled: true).isDownloadable == false)
+    }
+
     @Test func hardwareSummaryFormatsBudgetForDisplay() {
         let summary = SettingsHardwareSummary(budget: HardwareBudget(
             totalMemoryBytes: 36 * gb,

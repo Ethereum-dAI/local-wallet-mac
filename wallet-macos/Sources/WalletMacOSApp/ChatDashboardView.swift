@@ -1167,7 +1167,7 @@ private final class ChatDashboardModel: ObservableObject {
 
     var settingsSnapshot: LocalWalletSettingsSnapshot {
         let chain = walletModel.activeChain
-        let selectedModel = LocalAIModel.available.first { $0.id == onboardingSettingsStore.selectedModelID } ?? .recommended
+        let selectedModel = LocalAIModel.curated.first { $0.id == onboardingSettingsStore.selectedModelID } ?? .recommended
         let storedInstalledPath = onboardingSettingsStore.installedModelPath ?? ""
         let bundledInstalledPath = LocalAIModelDownloadManager.bundledFileURL(for: selectedModel)?.path ?? ""
         let installedPath = storedInstalledPath.isEmpty ? bundledInstalledPath : storedInstalledPath
@@ -2521,6 +2521,20 @@ private final class ChatDashboardModel: ObservableObject {
 
     func inspectRemoteModel(_ file: HuggingFaceGGUFFile) async -> RemoteModelFit {
         await walletModel.inspectRemoteModel(file)
+    }
+
+    /// Fetches one of the models the app ships knowledge of, by id. The URL and
+    /// checksum come from `LocalAIModel`, not from the user, so there is no repo to
+    /// resolve first — otherwise this is the same path as a Hugging Face add, self
+    /// test included.
+    func downloadCuratedModel(
+        id: String,
+        progress: @escaping @MainActor (ModelInstallPhase) -> Void
+    ) async throws -> String {
+        guard let model = LocalAIModel.curated.first(where: { $0.id == id }) else {
+            throw AppError.modelNotInstalled
+        }
+        return try await downloadModel(ModelDownloadRequest(model: model), progress: progress)
     }
 
     @discardableResult
@@ -4588,6 +4602,9 @@ struct LocalWalletChatDashboardView: View {
             },
             onInspectRemoteFile: { file in
                 await model.inspectRemoteModel(file)
+            },
+            onDownloadCuratedModel: { id, progress in
+                try await model.downloadCuratedModel(id: id, progress: progress)
             },
             onSaveNetworkSettings: { settings in
                 try model.saveNetworkSettings(settings)

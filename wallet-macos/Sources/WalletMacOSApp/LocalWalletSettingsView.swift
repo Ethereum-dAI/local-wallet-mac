@@ -277,6 +277,7 @@ struct LocalWalletSettingsView: View {
     let onRemoveModel: (String) throws -> String
     let onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo
     let onInspectRemoteFile: (HuggingFaceGGUFFile) async -> RemoteModelFit
+    let onDownloadCuratedModel: (String, @escaping @MainActor (ModelInstallPhase) -> Void) async throws -> String
     let onSaveNetworkSettings: (DemoNetworkSettings) throws -> String
     let onTestNetworkSettings: (DemoNetworkSettings) async throws -> String
     let onRunDiagnostics: (DemoNetworkSettings) async -> SettingsDiagnosticsReport
@@ -309,6 +310,10 @@ struct LocalWalletSettingsView: View {
     @State private var diagnosticsMessage: SettingsMessage?
     @State private var dataMessage: SettingsMessage?
     @State private var modelMessage: SettingsMessage?
+    /// Which curated model is being fetched, and how far along. One at a time —
+    /// `LocalAIModelDownloadManager` refuses a second concurrent download anyway.
+    @State private var installingModelID: String?
+    @State private var installPhase: ModelInstallPhase?
     @State private var walletMessage: SettingsMessage?
     @State private var securityMessage: SettingsMessage?
     @State private var sessionMessage: SettingsMessage?
@@ -344,6 +349,7 @@ struct LocalWalletSettingsView: View {
         onRemoveModel: @escaping (String) throws -> String,
         onResolveRepo: @escaping (String) async throws -> HuggingFaceRepositoryInfo,
         onInspectRemoteFile: @escaping (HuggingFaceGGUFFile) async -> RemoteModelFit,
+        onDownloadCuratedModel: @escaping (String, @escaping @MainActor (ModelInstallPhase) -> Void) async throws -> String,
         onSaveNetworkSettings: @escaping (DemoNetworkSettings) throws -> String,
         onTestNetworkSettings: @escaping (DemoNetworkSettings) async throws -> String,
         onRunDiagnostics: @escaping (DemoNetworkSettings) async -> SettingsDiagnosticsReport,
@@ -377,6 +383,7 @@ struct LocalWalletSettingsView: View {
         self.onRemoveModel = onRemoveModel
         self.onResolveRepo = onResolveRepo
         self.onInspectRemoteFile = onInspectRemoteFile
+        self.onDownloadCuratedModel = onDownloadCuratedModel
         self.onSaveNetworkSettings = onSaveNetworkSettings
         self.onTestNetworkSettings = onTestNetworkSettings
         self.onRunDiagnostics = onRunDiagnostics
@@ -812,6 +819,14 @@ struct LocalWalletSettingsView: View {
                             SettingsBadge(text: "Default", tint: SettingsPalette.blue)
                         }
                         SettingsBadge(text: row.verdict.label, tint: settingsVerdictTint(row.verdict))
+                        if installingModelID == row.id {
+                            installProgressLabel
+                        }
+                        if row.isDownloadable {
+                            Button("Download") { install(row.id) }
+                                .buttonStyle(SettingsSecondaryButtonStyle())
+                                .disabled(installingModelID != nil)
+                        }
                         if row.isInstalled {
                             Button("Use") { runModelAction { try onSelectModel(row.id) } }
                                 .buttonStyle(SettingsSecondaryButtonStyle())
@@ -896,6 +911,46 @@ struct LocalWalletSettingsView: View {
             modelMessage = SettingsMessage(kind: .success, text: try action())
         } catch {
             modelMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
+        }
+    }
+
+    /// Multi-gigabyte download followed by a real load test, so the row says which
+    /// of the two it is doing rather than showing one bar that stalls at 100%.
+    @ViewBuilder
+    private var installProgressLabel: some View {
+        switch installPhase {
+        case .downloading(let value):
+            ProgressView(value: value).frame(width: 120)
+            Text("\(Int(value * 100))%")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(SettingsPalette.secondaryText)
+        case .testing:
+            ProgressView().controlSize(.small)
+            Text("Testing")
+                .font(.system(size: 11))
+                .foregroundStyle(SettingsPalette.secondaryText)
+        case nil:
+            EmptyView()
+        }
+    }
+
+    private func install(_ id: String) {
+        installingModelID = id
+        installPhase = .downloading(0)
+        modelMessage = nil
+        Task { @MainActor in
+            defer {
+                installingModelID = nil
+                installPhase = nil
+            }
+            do {
+                modelMessage = SettingsMessage(
+                    kind: .success,
+                    text: try await onDownloadCuratedModel(id) { phase in installPhase = phase }
+                )
+            } catch {
+                modelMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
+            }
         }
     }
 

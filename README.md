@@ -32,7 +32,8 @@ Runtime requirements for the v0.1 alpha app:
 - 16 GB RAM for the default Gemma 4 E4B model. It needs about 6 GB of memory at a
   4k context window, which a 16 GB Mac holds comfortably and an 8 GB Mac does not.
   The app measures what your Mac can offer and reports, per model, whether it fits;
-  a smaller model added from Hugging Face can run on 8 GB.
+  a smaller model added from Hugging Face can run on 8 GB. Qwen3 8B, the other model
+  offered in Settings, is in the same memory class as Gemma 4 (~6.5 GB at 4k).
 - Network access for Ethereum RPC/consensus endpoints and first-run model download.
 - A signed macOS app bundle for Secure Enclave and Keychain flows.
 
@@ -120,7 +121,8 @@ The current demo exercises two complementary layers — wallet plumbing and a lo
 
 **Local LLM and tool intent layer:**
 
-- On-device Gemma 4 E4B inference via `llama.cpp` (no network at inference time)
+- On-device Gemma 4 E4B inference via `llama.cpp` (no network at inference time), with
+  Qwen3 8B and any public Hugging Face GGUF selectable in Settings
 - Streaming chat with thinking/reasoning disclosure, copy / regenerate / edit-and-resend on bubbles, stop button, code-block copy, and a smart auto-scroll that does not yank the user when scrolled up
 - SQLite-backed conversation history (`chat.sqlite` in Application Support), with delete / rename / date-bucketed sidebar
 - Tool intent recognition (transfer, swap) — natural language and `/transfer` / `/swap` slash commands surface an in-chat review card. Supported transfers and exact-input swaps can be confirmed, signed with an active in-policy session key or with Secure Enclave passkey fallback, submitted through local `wallet-node`, and summarized with Etherscan links.

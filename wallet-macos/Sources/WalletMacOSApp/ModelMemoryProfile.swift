@@ -89,15 +89,34 @@ enum ModelFitEvaluator {
 enum OnboardingModelGate {
     static func allowsDownload(verdict: ModelFitVerdict) -> Bool { true }
 
-    static func warning(verdict: ModelFitVerdict, budget: HardwareBudget) -> String? {
+    /// `profile` and `contextTokens` are what the verdict was computed from; they
+    /// let the won't-fit sentence name the Mac this model actually wants instead
+    /// of leaving "below what it needs" unquantified.
+    static func warning(
+        verdict: ModelFitVerdict,
+        profile: ModelMemoryProfile?,
+        contextTokens: Int,
+        budget: HardwareBudget
+    ) -> String? {
         switch verdict {
         case .fits, .unknown:
             return nil
         case .tight:
             return "This model will use most of the memory available to it on this Mac. Replies may be slow."
         case .wontFit:
-            let available = ByteCountFormatter.string(fromByteCount: Int64(budget.usableBytes), countStyle: .memory)
-            return "This Mac has \(available) available for the model, which is below what it needs. You can still install it, but expect swapping or a failed load."
+            let available = RemoteModelFitDescriber.memoryText(budget.usableBytes)
+            guard let profile else {
+                return "This Mac has \(available) available for the model, which is below what it needs. You can still install it, but expect swapping or a failed load."
+            }
+            let needed = RemoteModelFitDescriber.memoryText(
+                ModelFitEvaluator.requiredBytes(profile: profile, contextTokens: contextTokens)
+            )
+            let minimum = RemoteModelFitDescriber.memoryText(ModelFitEvaluator.minimumMemoryBytes(
+                profile: profile,
+                contextTokens: contextTokens,
+                comfortable: true
+            ))
+            return "This Mac has \(available) available for the model, which is below the \(needed) it needs — it wants a Mac with about \(minimum). You can still install it, but expect swapping or a failed load."
         }
     }
 }

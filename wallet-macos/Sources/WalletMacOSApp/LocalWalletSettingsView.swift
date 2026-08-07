@@ -273,9 +273,10 @@ struct LocalWalletSettingsView: View {
     let onClearRankings: () throws -> String
     let onRevealModelFile: () throws -> String
     let onSelectModel: (String) throws -> String
-    let onDownloadModel: (ModelDownloadRequest, @escaping @MainActor (Double) -> Void) async throws -> String
+    let onDownloadModel: (ModelDownloadRequest, @escaping @MainActor (ModelInstallPhase) -> Void) async throws -> String
     let onRemoveModel: (String) throws -> String
     let onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo
+    let onInspectRemoteFile: (HuggingFaceGGUFFile) async -> RemoteModelFit
     let onSaveNetworkSettings: (DemoNetworkSettings) throws -> String
     let onTestNetworkSettings: (DemoNetworkSettings) async throws -> String
     let onRunDiagnostics: (DemoNetworkSettings) async -> SettingsDiagnosticsReport
@@ -339,9 +340,10 @@ struct LocalWalletSettingsView: View {
         onClearRankings: @escaping () throws -> String,
         onRevealModelFile: @escaping () throws -> String,
         onSelectModel: @escaping (String) throws -> String,
-        onDownloadModel: @escaping (ModelDownloadRequest, @escaping @MainActor (Double) -> Void) async throws -> String,
+        onDownloadModel: @escaping (ModelDownloadRequest, @escaping @MainActor (ModelInstallPhase) -> Void) async throws -> String,
         onRemoveModel: @escaping (String) throws -> String,
         onResolveRepo: @escaping (String) async throws -> HuggingFaceRepositoryInfo,
+        onInspectRemoteFile: @escaping (HuggingFaceGGUFFile) async -> RemoteModelFit,
         onSaveNetworkSettings: @escaping (DemoNetworkSettings) throws -> String,
         onTestNetworkSettings: @escaping (DemoNetworkSettings) async throws -> String,
         onRunDiagnostics: @escaping (DemoNetworkSettings) async -> SettingsDiagnosticsReport,
@@ -374,6 +376,7 @@ struct LocalWalletSettingsView: View {
         self.onDownloadModel = onDownloadModel
         self.onRemoveModel = onRemoveModel
         self.onResolveRepo = onResolveRepo
+        self.onInspectRemoteFile = onInspectRemoteFile
         self.onSaveNetworkSettings = onSaveNetworkSettings
         self.onTestNetworkSettings = onTestNetworkSettings
         self.onRunDiagnostics = onRunDiagnostics
@@ -808,7 +811,7 @@ struct LocalWalletSettingsView: View {
                         if row.isDefault {
                             SettingsBadge(text: "Default", tint: SettingsPalette.blue)
                         }
-                        SettingsBadge(text: row.verdict.label, tint: verdictTint(row.verdict))
+                        SettingsBadge(text: row.verdict.label, tint: settingsVerdictTint(row.verdict))
                         if row.isInstalled {
                             Button("Use") { runModelAction { try onSelectModel(row.id) } }
                                 .buttonStyle(SettingsSecondaryButtonStyle())
@@ -871,6 +874,7 @@ struct LocalWalletSettingsView: View {
             SettingsSection(title: "Add From Hugging Face") {
                 AddHuggingFaceModelForm(
                     onResolveRepo: onResolveRepo,
+                    onInspectRemoteFile: onInspectRemoteFile,
                     onDownloadModel: onDownloadModel
                 )
             }
@@ -881,15 +885,6 @@ struct LocalWalletSettingsView: View {
                     SettingsKeyValue(title: "Status", value: snapshot.multimodalModelStatus),
                 ])
             }
-        }
-    }
-
-    private func verdictTint(_ verdict: ModelFitVerdict) -> Color {
-        switch verdict {
-        case .fits: return SettingsPalette.green
-        case .tight: return SettingsPalette.orange
-        case .wontFit: return SettingsPalette.red
-        case .unknown: return SettingsPalette.mutedText
         }
     }
 
@@ -3299,18 +3294,34 @@ private enum SettingsPalette {
     static let red = Color(red: 0.950, green: 0.280, blue: 0.260)
 }
 
-/// Repo → file → download. Resolution is explicit (a button, not on every keystroke)
-/// so a half-typed repo name never fires a request.
+/// Maps a fit verdict to its badge colour. A free function rather than a method so
+/// the model list and the Hugging Face form colour the same verdict identically.
+private func settingsVerdictTint(_ verdict: ModelFitVerdict) -> Color {
+    switch verdict {
+    case .fits: return SettingsPalette.green
+    case .tight: return SettingsPalette.orange
+    case .wontFit: return SettingsPalette.red
+    case .unknown: return SettingsPalette.mutedText
+    }
+}
+
+/// Repo → file → verdict → download. Resolution is explicit (a button, not on every
+/// keystroke) so a half-typed repo name never fires a request; the fit verdict then
+/// follows the selected file automatically, since it is what decides whether the
+/// download is worth starting.
 private struct AddHuggingFaceModelForm: View {
     let onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo
-    let onDownloadModel: (ModelDownloadRequest, @escaping @MainActor (Double) -> Void) async throws -> String
+    let onInspectRemoteFile: (HuggingFaceGGUFFile) async -> RemoteModelFit
+    let onDownloadModel: (ModelDownloadRequest, @escaping @MainActor (ModelInstallPhase) -> Void) async throws -> String
 
     @State private var repoID: String = ""
     @State private var files: [HuggingFaceGGUFFile] = []
     @State private var selectedPath: String = ""
     @State private var message: SettingsMessage?
-    @State private var progress: Double?
+    @State private var phase: ModelInstallPhase?
     @State private var isResolving = false
+    @State private var fit: RemoteModelFit?
+    @State private var isInspecting = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -3334,15 +3345,25 @@ private struct AddHuggingFaceModelForm: View {
                 }
                 .pickerStyle(.menu)
 
+                fitLine
+
                 HStack {
-                    if let progress {
-                        ProgressView(value: progress).frame(width: 180)
-                        Text("\(Int(progress * 100))%").font(.system(size: 11, design: .monospaced))
+                    switch phase {
+                    case .downloading(let value):
+                        ProgressView(value: value).frame(width: 180)
+                        Text("\(Int(value * 100))%").font(.system(size: 11, design: .monospaced))
+                    case .testing:
+                        ProgressView().controlSize(.small)
+                        Text("Loading it for real and checking it can make a tool call — this can take a minute.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    case nil:
+                        EmptyView()
                     }
                     Spacer()
                     Button("Download & add") { download() }
                         .buttonStyle(SettingsPrimaryButtonStyle())
-                        .disabled(selectedPath.isEmpty || progress != nil)
+                        .disabled(selectedPath.isEmpty || phase != nil)
                 }
             }
 
@@ -3354,17 +3375,67 @@ private struct AddHuggingFaceModelForm: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
+        // On the container, not the Picker: the Picker only exists once `files`
+        // is non-empty, and an `onChange` that appears at the same moment its
+        // value is set does not fire for that first assignment.
+        .onChange(of: selectedPath) { _, _ in inspect() }
+    }
+
+    /// The pre-download verdict. Advisory: it never disables "Download & add".
+    @ViewBuilder
+    private var fitLine: some View {
+        if isInspecting {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Reading this file's header to size it against this Mac…")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        } else if let fit {
+            HStack(alignment: .top, spacing: 8) {
+                SettingsBadge(text: fit.verdict.label, tint: settingsVerdictTint(fit.verdict))
+                Text(fit.summary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Reads the selected file's GGUF header over a ranged request. `inspectionID`
+    /// discards a slow reply for a file the user has already navigated away from.
+    @State private var inspectionID = 0
+
+    private func inspect() {
+        guard let file = files.first(where: { $0.path == selectedPath }) else {
+            fit = nil
+            return
+        }
+        inspectionID += 1
+        let id = inspectionID
+        fit = nil
+        isInspecting = true
+        Task { @MainActor in
+            let result = await onInspectRemoteFile(file)
+            guard id == inspectionID else { return }
+            isInspecting = false
+            fit = result
+        }
     }
 
     private func resolve() {
         isResolving = true
         message = nil
+        fit = nil
         Task { @MainActor in
             defer { isResolving = false }
             do {
                 let info = try await onResolveRepo(repoID)
                 files = info.files
-                selectedPath = info.files.first { !$0.isAuxiliary }?.path ?? ""
+                let firstPath = info.files.first { !$0.isAuxiliary }?.path ?? ""
+                // Re-resolving the same repo leaves `selectedPath` unchanged, so
+                // `onChange` would not fire; inspect explicitly in that case.
+                if firstPath == selectedPath { inspect() } else { selectedPath = firstPath }
                 let context = info.trainedContextTokens.map { " · trained to \($0)" } ?? ""
                 message = SettingsMessage(
                     kind: info.hasChatTemplate ? .success : .error,
@@ -3374,6 +3445,8 @@ private struct AddHuggingFaceModelForm: View {
                 )
             } catch {
                 files = []
+                selectedPath = ""
+                fit = nil
                 message = SettingsMessage(kind: .error, text: error.localizedDescription)
             }
         }
@@ -3382,14 +3455,14 @@ private struct AddHuggingFaceModelForm: View {
     private func download() {
         guard let file = files.first(where: { $0.path == selectedPath }) else { return }
         let request = ModelDownloadRequest(repoID: repoID.trimmingCharacters(in: .whitespaces), file: file)
-        progress = 0
+        phase = .downloading(0)
         Task { @MainActor in
             do {
-                let resultMessage = try await onDownloadModel(request) { value in progress = value }
-                progress = nil
+                let resultMessage = try await onDownloadModel(request) { update in phase = update }
+                phase = nil
                 message = SettingsMessage(kind: .success, text: resultMessage)
             } catch {
-                progress = nil
+                phase = nil
                 message = SettingsMessage(kind: .error, text: error.localizedDescription)
             }
         }

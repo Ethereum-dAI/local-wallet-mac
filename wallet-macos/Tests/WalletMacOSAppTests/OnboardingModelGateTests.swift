@@ -12,36 +12,72 @@ struct OnboardingModelGateTests {
     /// A 16 GB Mac was refused outright by the deleted `hasMinimumModelMemory` gate
     /// even though the default model runs there comfortably at the smallest preset.
     @Test func sixteenGigMacIsNotWarnedAtAll() {
+        let sixteen = budget(ram: 16 * gb, metal: 12 * gb)
         let verdict = ModelFitEvaluator.verdict(
             profile: LocalAIModel.recommended.memoryProfile,
             contextTokens: ContextWindowPresets.fallback,
-            budget: budget(ram: 16 * gb, metal: 12 * gb)
+            budget: sixteen
         )
         #expect(verdict == .fits)
         #expect(OnboardingModelGate.allowsDownload(verdict: verdict) == true)
-        #expect(OnboardingModelGate.warning(verdict: verdict, budget: budget(ram: 16 * gb, metal: 12 * gb)) == nil)
+        #expect(OnboardingModelGate.warning(
+            verdict: verdict,
+            profile: LocalAIModel.recommended.memoryProfile,
+            contextTokens: ContextWindowPresets.fallback,
+            budget: sixteen
+        ) == nil)
     }
 
     /// An 8 GB Mac genuinely cannot hold the default model — it is told so, with the
     /// numbers, and may still install it.
     @Test func eightGigMacIsWarnedButStillAllowed() {
         let small = budget(ram: 8 * gb, metal: 6 * gb)
+        let profile = LocalAIModel.recommended.memoryProfile
         let verdict = ModelFitEvaluator.verdict(
-            profile: LocalAIModel.recommended.memoryProfile,
+            profile: profile,
             contextTokens: ContextWindowPresets.fallback,
             budget: small
         )
         #expect(verdict == .wontFit)
         #expect(OnboardingModelGate.allowsDownload(verdict: verdict) == true)
-        let warning = OnboardingModelGate.warning(verdict: verdict, budget: small)
+        let warning = OnboardingModelGate.warning(
+            verdict: verdict,
+            profile: profile,
+            contextTokens: ContextWindowPresets.fallback,
+            budget: small
+        )
         #expect(warning?.isEmpty == false)
         // The warning must quote what the Mac actually has, not a fixed threshold.
         #expect(warning?.contains("GB") == true)
         #expect(warning?.contains("16 GB RAM") == false)
+        // …and it must name the Mac this model does want, computed from the model.
+        let minimum = ModelFitEvaluator.minimumMemoryBytes(
+            profile: profile,
+            contextTokens: ContextWindowPresets.fallback,
+            comfortable: true
+        )
+        #expect(warning?.contains(RemoteModelFitDescriber.memoryText(minimum)) == true)
+    }
+
+    /// Without a profile there is no per-model number to quote, so the sentence
+    /// degrades to the available-memory-only form rather than inventing one.
+    @Test func aWontFitWarningWithoutAProfileStillWarns() {
+        let warning = OnboardingModelGate.warning(
+            verdict: .wontFit,
+            profile: nil,
+            contextTokens: ContextWindowPresets.fallback,
+            budget: budget(ram: 8 * gb, metal: 6 * gb)
+        )
+        #expect(warning?.contains("below what it needs") == true)
     }
 
     @Test func aTightFitWarnsAboutSpeedNotCapacity() {
-        let warning = OnboardingModelGate.warning(verdict: .tight, budget: budget(ram: 16 * gb, metal: 12 * gb))
+        let warning = OnboardingModelGate.warning(
+            verdict: .tight,
+            profile: LocalAIModel.recommended.memoryProfile,
+            contextTokens: ContextWindowPresets.fallback,
+            budget: budget(ram: 16 * gb, metal: 12 * gb)
+        )
         #expect(warning?.contains("slow") == true)
     }
 
@@ -52,6 +88,11 @@ struct OnboardingModelGateTests {
     }
 
     @Test func anUnknownProfileProducesNoWarning() {
-        #expect(OnboardingModelGate.warning(verdict: .unknown, budget: budget(ram: 8 * gb, metal: 6 * gb)) == nil)
+        #expect(OnboardingModelGate.warning(
+            verdict: .unknown,
+            profile: nil,
+            contextTokens: ContextWindowPresets.fallback,
+            budget: budget(ram: 8 * gb, metal: 6 * gb)
+        ) == nil)
     }
 }

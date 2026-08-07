@@ -2471,12 +2471,56 @@ private final class ChatDashboardModel: ObservableObject {
         runtimeStatus = inferenceService.runtimeStatus
     }
 
+    /// Downloads a model and then actually tries it: arithmetic proposes the fit,
+    /// a real load disposes. The test result is appended to the download message
+    /// rather than gating anything — the model is installed either way.
     func downloadModel(
         _ request: ModelDownloadRequest,
-        progress: @escaping @MainActor (Double) -> Void
+        progress: @escaping @MainActor (ModelInstallPhase) -> Void
     ) async throws -> String {
-        try await walletModel.downloadModel(request, progress: progress)
-        return walletModel.modelActionMessage ?? "\(request.displayName) downloaded."
+        try await walletModel.downloadModel(request) { fraction in
+            progress(.downloading(fraction))
+        }
+        let installed = walletModel.modelActionMessage ?? "\(request.displayName) downloaded."
+        progress(.testing)
+        guard let verdict = await runSelfTest(for: request) else { return installed }
+        return "\(installed) \(verdict)"
+    }
+
+    /// Loads the freshly downloaded model for real and asks it for one tool call —
+    /// the only capability the wallet actually needs from a model. Returns nil when
+    /// the test could not be attempted at all.
+    private func runSelfTest(for request: ModelDownloadRequest) async -> String? {
+        guard let installed = walletModel.installedModelStore.model(id: request.modelID) else { return nil }
+        guard !isGenerating else { return ModelSelfTestReport.skippedWhileGenerating }
+
+        let modelURL = URL(fileURLWithPath: installed.path)
+        let trained = installed.profile?.trainedContextTokens ?? ContextWindowPresets.fallback
+        let requested = min(onboardingSettingsStore.contextWindowTokens, trained)
+
+        // The probe loads a second copy of the weights. Free the live runtime
+        // first, or a Mac sized for exactly one model is asked to hold two — the
+        // failure the fit verdicts exist to prevent. Safe here because
+        // `isGenerating` is false, so nothing holds a runtime snapshot.
+        inferenceService.releaseLoadedRuntime()
+        runtimeStatus = inferenceService.runtimeStatus
+
+        // `Task.detached`, not a plain `await`: `LlamaProbeRuntime.load` blocks
+        // its thread inside llama.cpp for as long as the weights take to map, and
+        // that must not be the main actor's thread.
+        let result = await Task.detached(priority: .userInitiated) {
+            await ModelSelfTest(runtime: LlamaProbeRuntime()).run(
+                modelURL: modelURL,
+                requestedContextTokens: requested,
+                trainedContextTokens: trained
+            )
+        }.value
+        runtimeStatus = inferenceService.runtimeStatus
+        return ModelSelfTestReport.message(for: result)
+    }
+
+    func inspectRemoteModel(_ file: HuggingFaceGGUFFile) async -> RemoteModelFit {
+        await walletModel.inspectRemoteModel(file)
     }
 
     @discardableResult
@@ -4541,6 +4585,9 @@ struct LocalWalletChatDashboardView: View {
             },
             onResolveRepo: { repoID in
                 try await model.resolveHuggingFaceRepo(repoID)
+            },
+            onInspectRemoteFile: { file in
+                await model.inspectRemoteModel(file)
             },
             onSaveNetworkSettings: { settings in
                 try model.saveNetworkSettings(settings)

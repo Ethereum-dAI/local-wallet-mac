@@ -1,9 +1,23 @@
 import Foundation
 
-enum GGUFHeaderError: Error, Equatable {
+enum GGUFHeaderError: Error, Equatable, LocalizedError {
     case notGGUF
     case truncated
     case unsupportedValueType(UInt32)
+    case rangeNotSupported(status: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .notGGUF:
+            return "That file is not a GGUF model."
+        case .truncated:
+            return "That file's GGUF header is incomplete or malformed."
+        case .unsupportedValueType(let type):
+            return "That file's GGUF header uses an unsupported value type (\(type))."
+        case .rangeNotSupported(let status):
+            return "The host would not serve a partial read of that file (HTTP \(status)), so its size cannot be checked before downloading."
+        }
+    }
 }
 
 struct GGUFHeader: Equatable {
@@ -64,11 +78,105 @@ enum GGUFHeaderReader {
         return GGUFHeader(architecture: architecture, integers: integers)
     }
 
-    static func fetch(from url: URL, session: URLSession = .shared) async throws -> GGUFHeader {
+    /// Reads only the leading `headerProbeBytes` of a *remote* GGUF, so a model's
+    /// memory profile can be shown before committing to a multi-gigabyte download.
+    ///
+    /// Deliberately not `URLSession.data(for:)`: that buffers the whole response
+    /// body, so a host that ignored the `Range` header and answered `200 OK` would
+    /// pull an entire model into RAM — the exact failure this feature exists to
+    /// warn about. `BoundedRangeProbe` refuses anything but `206 Partial Content`
+    /// before a byte of body is kept, and cancels the transfer the moment the
+    /// probe is full.
+    static func fetch(
+        from url: URL,
+        configuration: URLSessionConfiguration = .ephemeral
+    ) async throws -> GGUFHeader {
         var request = URLRequest(url: url)
         request.setValue("bytes=0-\(headerProbeBytes - 1)", forHTTPHeaderField: "Range")
-        let (data, _) = try await session.data(for: request)
+        let data = try await BoundedRangeProbe(limit: headerProbeBytes)
+            .fetch(request, configuration: configuration)
         return try parse(data)
+    }
+
+    /// A one-shot data task that never buffers more than `limit` bytes.
+    ///
+    /// `@unchecked Sendable` with an `NSLock` rather than an actor: `URLSession`
+    /// calls its delegate from its own queues (and, for the `async` disposition
+    /// method, from an unspecified task), so the mutable state has to be guarded
+    /// wherever it is touched from. Every mutation goes through `lock`, and
+    /// `settle` clears the continuation under it so exactly one of
+    /// "probe full" / "transfer finished" / "response rejected" resumes it.
+    private final class BoundedRangeProbe: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        private let limit: Int
+        private let lock = NSLock()
+        private var buffer = Data()
+        private var continuation: CheckedContinuation<Data, Error>?
+
+        init(limit: Int) {
+            self.limit = limit
+            super.init()
+        }
+
+        func fetch(_ request: URLRequest, configuration: URLSessionConfiguration) async throws -> Data {
+            let queue = OperationQueue()
+            queue.maxConcurrentOperationCount = 1
+            let session = URLSession(configuration: configuration, delegate: self, delegateQueue: queue)
+            // The session holds the delegate strongly until it is invalidated;
+            // without this the probe (and its buffer) would outlive the call.
+            defer { session.finishTasksAndInvalidate() }
+            return try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                self.continuation = continuation
+                lock.unlock()
+                session.dataTask(with: request).resume()
+            }
+        }
+
+        private func settle(_ result: Result<Data, Error>) {
+            lock.lock()
+            let pending = continuation
+            continuation = nil
+            lock.unlock()
+            pending?.resume(with: result)
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            dataTask: URLSessionDataTask,
+            didReceive response: URLResponse
+        ) async -> URLSession.ResponseDisposition {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard status == 206 else {
+                settle(.failure(GGUFHeaderError.rangeNotSupported(status: status)))
+                return .cancel
+            }
+            return .allow
+        }
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+            lock.lock()
+            buffer.append(data)
+            let full = buffer.count >= limit ? Data(buffer.prefix(limit)) : nil
+            lock.unlock()
+            guard let full else { return }
+            // Cancelling drives `didCompleteWithError`, which finds the
+            // continuation already cleared and does nothing.
+            dataTask.cancel()
+            settle(.success(full))
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            if let error {
+                settle(.failure(error))
+                return
+            }
+            lock.lock()
+            let collected = buffer
+            lock.unlock()
+            // A server may legitimately have fewer bytes than the probe asked
+            // for; `parse` reports a genuinely short header as `.truncated`.
+            settle(.success(collected))
+        }
     }
 
     private struct Cursor {

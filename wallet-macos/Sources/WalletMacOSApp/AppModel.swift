@@ -626,6 +626,27 @@ final class AppModel: ObservableObject {
         try await huggingFaceRepository.info(repoID: repoID)
     }
 
+    /// Reads a candidate file's GGUF header over a ranged request — tens of
+    /// megabytes, not the whole model — so the fit verdict is on screen *before*
+    /// the user commits to a multi-gigabyte download.
+    ///
+    /// Never throws: a host that will not serve a partial read, or a header this
+    /// parser does not understand, degrades to the "size unknown" summary carrying
+    /// whatever reason there was. Not being able to predict the fit is not a reason
+    /// to refuse the download.
+    func inspectRemoteModel(_ file: HuggingFaceGGUFFile) async -> RemoteModelFit {
+        do {
+            let header = try await GGUFHeaderReader.fetch(from: file.downloadURL)
+            return RemoteModelFitDescriber.describe(
+                profile: header.memoryProfile(weightBytes: file.sizeBytes),
+                contextTokens: onboardingSettingsStore.contextWindowTokens,
+                budget: hardwareBudget
+            )
+        } catch {
+            return RemoteModelFitDescriber.unknown(reason: error.localizedDescription)
+        }
+    }
+
     /// Downloads, verifies, reads the GGUF header from the downloaded file for a fit
     /// profile, and records the install. Does not activate the model — that is a
     /// separate, explicit step.

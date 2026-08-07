@@ -180,7 +180,12 @@ private final class OnboardingState: ObservableObject {
     /// nil when the selected model fits comfortably; otherwise the sentence to show.
     var hardwareWarning: String? {
         guard let hardwareBudget else { return nil }
-        return OnboardingModelGate.warning(verdict: fitVerdict(for: selectedModel), budget: hardwareBudget)
+        return OnboardingModelGate.warning(
+            verdict: fitVerdict(for: selectedModel),
+            profile: selectedModel.memoryProfile,
+            contextTokens: ContextWindowPresets.fallback,
+            budget: hardwareBudget
+        )
     }
 
     var canComplete: Bool {

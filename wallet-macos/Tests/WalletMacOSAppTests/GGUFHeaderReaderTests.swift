@@ -202,3 +202,102 @@ struct GGUFHeaderReaderTests {
         #expect(header.integer("gemma4.some_i16") == -1)
     }
 }
+
+/// Serves a fixed body over a stubbed URL protocol so the ranged header probe can
+/// be exercised without a network. Serialized because the stub's configuration is
+/// necessarily static — `URLProtocol` subclasses are instantiated by URLSession.
+@Suite(.serialized)
+struct GGUFHeaderFetchTests {
+    /// Same shape as `GGUFHeaderReaderTests.fixture`, kept local so the two suites
+    /// do not share mutable state.
+    private func fixture() -> Data {
+        var data = Data("GGUF".utf8)
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func u64(_ v: UInt64) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func str(_ s: String) { let b = Array(s.utf8); u64(UInt64(b.count)); data.append(contentsOf: b) }
+        u32(3); u64(666); u64(6)
+        str("general.architecture"); u32(8); str("gemma4")
+        str("gemma4.block_count"); u32(4); u32(42)
+        str("gemma4.context_length"); u32(4); u32(131_072)
+        str("gemma4.attention.head_count_kv"); u32(4); u32(2)
+        str("gemma4.attention.key_length"); u32(4); u32(512)
+        str("gemma4.attention.value_length"); u32(4); u32(512)
+        return data
+    }
+
+    private func configuration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RangeStubProtocol.self]
+        return configuration
+    }
+
+    private let url = URL(string: "https://huggingface.co/owner/repo/resolve/main/model.gguf")!
+
+    @Test func readsTheHeaderFromThePrefixOfARangedResponse() async throws {
+        // The "file" is far larger than its header: the probe must come back with
+        // a usable profile without the rest ever being transferred.
+        RangeStubProtocol.reset(body: fixture() + Data(count: 4_000_000), status: 206)
+        let header = try await GGUFHeaderReader.fetch(from: url, configuration: configuration())
+        #expect(header.architecture == "gemma4")
+        #expect(header.memoryProfile(weightBytes: 4_590_807_392)?.blockCount == 42)
+        #expect(RangeStubProtocol.observedRangeHeaders == ["bytes=0-\(GGUFHeaderReader.headerProbeBytes - 1)"])
+    }
+
+    /// The whole point of the probe: a host that ignores `Range` and starts
+    /// streaming the entire model must be refused, not buffered into RAM.
+    @Test func refusesAHostThatIgnoresTheRangeHeader() async {
+        RangeStubProtocol.reset(body: fixture(), status: 200)
+        await #expect(throws: GGUFHeaderError.rangeNotSupported(status: 200)) {
+            try await GGUFHeaderReader.fetch(from: url, configuration: configuration())
+        }
+    }
+
+    @Test func aShortPartialResponseIsReportedAsTruncatedNotParsedAsGarbage() async {
+        RangeStubProtocol.reset(body: fixture().prefix(40), status: 206)
+        await #expect(throws: GGUFHeaderError.truncated) {
+            try await GGUFHeaderReader.fetch(from: url, configuration: configuration())
+        }
+    }
+
+    @Test func aServerErrorIsSurfacedWithItsStatus() async {
+        RangeStubProtocol.reset(body: Data(), status: 403)
+        await #expect(throws: GGUFHeaderError.rangeNotSupported(status: 403)) {
+            try await GGUFHeaderReader.fetch(from: url, configuration: configuration())
+        }
+    }
+}
+
+/// Replays a canned body and status for any request. `nonisolated(unsafe)` static
+/// state is unavoidable — URLSession owns the instantiation — hence the
+/// `.serialized` suite above.
+final class RangeStubProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) private static var body = Data()
+    nonisolated(unsafe) private static var status = 206
+    nonisolated(unsafe) private(set) static var observedRangeHeaders: [String] = []
+
+    static func reset(body: any DataProtocol, status: Int) {
+        self.body = Data(body)
+        self.status = status
+        observedRangeHeaders = []
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        if let range = request.value(forHTTPHeaderField: "Range") {
+            Self.observedRangeHeaders.append(range)
+        }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: Self.status,
+            httpVersion: "HTTP/1.1",
+            headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}

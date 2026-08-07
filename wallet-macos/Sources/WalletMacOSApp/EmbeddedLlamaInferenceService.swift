@@ -143,6 +143,26 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
         stateLock.unlock()
     }
 
+    /// Drops this service's loaded runtime so something else — the post-download
+    /// self test — can load a model without two sets of weights being resident at
+    /// once, which is exactly the OOM the fit verdicts exist to avoid. The next
+    /// `stream()` reloads lazily via `prepareRuntime`, so the only cost is one
+    /// model load on the next message.
+    ///
+    /// As in `prepareRuntime`, the old runtime is *released*, never `unload()`ed:
+    /// an in-flight generation may still hold its own reference to it, and tearing
+    /// down the native handle underneath that call would be a use-after-free.
+    /// Callers should therefore only reach for this when no generation is running,
+    /// or the weights they meant to free stay resident anyway.
+    func releaseLoadedRuntime() {
+        let replacement = LlamaRuntime(configuration: LocalLLMConfiguration(contextSize: Int32(contextSize)))
+        stateLock.lock()
+        runtime = replacement
+        loadedModelURL = nil
+        loadedContextTokens = nil
+        stateLock.unlock()
+    }
+
     var activeModelURL: URL? {
         stateLock.lock()
         defer { stateLock.unlock() }

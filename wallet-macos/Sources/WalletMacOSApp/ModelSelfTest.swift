@@ -6,7 +6,7 @@ enum LocalAIModelSelfTestError: Error, Equatable {
     case outOfMemory
 }
 
-enum ModelSelfTestResult: Equatable {
+enum ModelSelfTestResult: Equatable, Sendable {
     case ready(contextTokens: Int)
     case steppedDown(from: Int, to: Int)
     case noToolSupport

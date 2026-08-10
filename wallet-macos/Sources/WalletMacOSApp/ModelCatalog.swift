@@ -146,3 +146,21 @@ struct SettingsHardwareSummary: Equatable {
         diskText = format(budget.freeDiskBytes)
     }
 }
+
+/// Resolves a persisted `selectedModelID` to the name the chat should call it.
+///
+/// Curated first, then the user's own installs, then the default. The fallback
+/// matters: an id can outlive its model — removed on a previous launch, or a
+/// custom model whose file was deleted from Finder — and the chat must still have
+/// something to call itself rather than going blank.
+enum ActiveModelNaming {
+    static func displayName(
+        forModelID id: String,
+        curated: [LocalAIModel] = LocalAIModel.curated,
+        installed: [InstalledModel]
+    ) -> String {
+        if let model = curated.first(where: { $0.id == id }) { return model.name }
+        if let model = installed.first(where: { $0.id == id }) { return model.displayName }
+        return LocalAIModel.recommended.name
+    }
+}

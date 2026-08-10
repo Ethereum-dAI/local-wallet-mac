@@ -886,6 +886,10 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var conversations: [ChatConversation]
     @Published private(set) var activeConversationID: UUID
     @Published private(set) var isGenerating = false
+    /// What the chat calls the model it is talking to. Every one of these strings
+    /// used to be the literal "Gemma", written when Gemma was the only option, so
+    /// switching models changed the runtime and nothing the user could see.
+    @Published private(set) var activeModelName: String = LocalAIModel.recommended.name
     @Published private(set) var runtimeStatus: String
     @Published var thinkingEnabled = true
     @Published var isSidebarVisible = true
@@ -971,6 +975,10 @@ private final class ChatDashboardModel: ObservableObject {
             walletHistoryStore: walletHistoryStore
         )
         self.runtimeStatus = inferenceService.runtimeStatus
+        self.activeModelName = ActiveModelNaming.displayName(
+            forModelID: settingsStore.selectedModelID,
+            installed: InstalledModelStore().installed
+        )
         self.thinkingEnabled = preferencesStore.thinkingEnabled
         self.isSidebarVisible = preferencesStore.sidebarVisible
 
@@ -1667,8 +1675,15 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     var contextStatsText: String {
+        let configured = inferenceService.contextSize
         guard let stats = messages.last(where: { $0.stats != nil })?.stats else {
-            return "Context 0 / \(inferenceService.contextSize) · \(inferenceService.contextSize) left"
+            return "Context 0 / \(configured) · \(configured) left"
+        }
+        // The window the last reply ran under is not necessarily the one the next
+        // reply will: switching model or preset takes effect at the next message.
+        // Showing the old total here is what made a context change look ignored.
+        guard stats.contextSize == configured else {
+            return "Context \(stats.usedContextTokens) / \(configured) · applies from the next message"
         }
         return "Context \(stats.usedContextTokens) / \(stats.contextSize) · \(stats.contextTokensLeft) left"
     }
@@ -1796,7 +1811,9 @@ private final class ChatDashboardModel: ObservableObject {
         isGenerating = true
         streamingText = ""
         streamingMessageID = UUID()
-        runtimeStatus = thinkingEnabled ? "Gemma is thinking" : "Gemma is generating"
+        runtimeStatus = thinkingEnabled
+            ? "\(activeModelName) is thinking"
+            : "\(activeModelName) is generating"
 
         let stream = inferenceService.stream(
             prompt: prompt,
@@ -2471,6 +2488,7 @@ private final class ChatDashboardModel: ObservableObject {
     func applyActiveModel(_ selection: ActiveModelSelection) {
         inferenceService.setActiveModel(url: selection.url, contextTokens: selection.contextTokens)
         runtimeStatus = inferenceService.runtimeStatus
+        activeModelName = selection.displayName
     }
 
     /// Downloads a model and then actually tries it: arithmetic proposes the fit,
@@ -4336,6 +4354,7 @@ struct LocalWalletChatDashboardView: View {
                                 level: level,
                                 used: snapshot.used,
                                 total: snapshot.total,
+                                modelName: model.activeModelName,
                                 onNewChat: { model.createNewChat() }
                             )
                             .padding(.bottom, 8)
@@ -5002,6 +5021,7 @@ struct LocalWalletChatDashboardView: View {
                         if let streamingID = model.streamingMessageID {
                             StreamingAssistantBubble(
                                 text: model.streamingText,
+                                modelName: model.activeModelName,
                                 onStop: { model.stop() }
                             )
                             .id(streamingID)
@@ -5254,7 +5274,7 @@ struct LocalWalletChatDashboardView: View {
                 Text(greeting)
                     .font(.system(size: 32, weight: .heavy))
                     .foregroundStyle(ChatPalette.primaryText)
-                Text("Pick a starter below or just message Gemma directly.")
+                Text("Pick a starter below or just message \(model.activeModelName) directly.")
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(ChatPalette.secondaryText)
                     .multilineTextAlignment(.center)
@@ -5367,7 +5387,7 @@ struct LocalWalletChatDashboardView: View {
 
     private var footerControls: some View {
         HStack(spacing: 8) {
-            StatusPill(icon: "circle.fill", text: "Gemma 4 E4B", tint: ChatPalette.success)
+            StatusPill(icon: "circle.fill", text: model.activeModelName, tint: ChatPalette.success)
             Button {
                 model.toggleThinking()
             } label: {
@@ -5481,7 +5501,7 @@ struct LocalWalletChatDashboardView: View {
                 .disabled(model.isGenerating)
                     .frame(minHeight: 78, maxHeight: 96)
                 if model.inputText.isEmpty {
-                    Text("Message Gemma — describe what you want, or type / for tools")
+                    Text("Message \(model.activeModelName) — describe what you want, or type / for tools")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(ChatPalette.mutedText)
                         .padding(.horizontal, 17)
@@ -8074,6 +8094,7 @@ private struct AssistantErrorBubble: View {
 
 private struct StreamingAssistantBubble: View {
     let text: String
+    let modelName: String
     let onStop: () -> Void
     @State private var isThinkingExpanded = false
 
@@ -8088,7 +8109,7 @@ private struct StreamingAssistantBubble: View {
                     HStack(spacing: 10) {
                         ProgressView()
                             .scaleEffect(0.75)
-                        Text("Thinking with Gemma 4 E4B…")
+                        Text("Thinking with \(modelName)…")
                             .font(.system(size: 15, weight: .bold))
                             .foregroundStyle(ChatPalette.secondaryText)
                     }
@@ -8175,6 +8196,7 @@ private struct ContextUsageBanner: View {
     let level: ContextUsageLevel
     let used: Int
     let total: Int
+    let modelName: String
     let onNewChat: () -> Void
 
     private var tint: Color {
@@ -8204,7 +8226,7 @@ private struct ContextUsageBanner: View {
         case .warning:
             return "Used \(used) of \(total) tokens (\(percent)%). A fresh chat keeps responses crisp."
         case .critical:
-            return "Used \(used) of \(total) tokens (\(percent)%). Gemma may start truncating earlier turns — start a new chat."
+            return "Used \(used) of \(total) tokens (\(percent)%). \(modelName) may start truncating earlier turns — start a new chat."
         }
     }
 

@@ -28,9 +28,17 @@ APP_SUPPORT_MODEL="$HOME/Library/Application Support/LocalWallet/Models/$MODEL_F
 MODEL_CACHE_DIR="${LOCAL_WALLET_MODEL_CACHE_DIR:-$REPO_ROOT/build/model-cache}"
 NOTARYTOOL_AUTH_ARGS=()
 LLAMA_PREFIX="${LOCAL_LLAMA_PREFIX:-}"
+# Mirrors local-llm/Package.swift's resolution order: explicit override, then
+# the pin from local-llm/LLAMA_CPP_PIN, then Homebrew as a last resort. The
+# pinned prefix MUST precede Homebrew. The app is compiled against the pinned
+# headers, so resolving an @rpath dependency to a Homebrew dylib instead would
+# embed a different llama.cpp build than the one the code was compiled for --
+# and since the mangled C++ symbol names do not change between these versions,
+# that ships as silent runtime corruption rather than a load error.
 LLAMA_SEARCH_DIRS=(
   "${LOCAL_LLAMA_LIB_DIR:-}"
   "${LLAMA_PREFIX:+$LLAMA_PREFIX/lib}"
+  "$REPO_ROOT/.llama/current/lib"
   "/opt/homebrew/opt/llama.cpp/lib"
   "/opt/homebrew/opt/ggml/lib"
   "/opt/homebrew/lib"
@@ -290,7 +298,36 @@ embed_llama_dylibs() {
     patch_binary_llama_dependencies "$binary_path" "$frameworks_dir"
   done < <(find "$frameworks_dir" -type f -print0)
 
+  verify_ggml_backends_embedded "$frameworks_dir"
   verify_no_external_llama_dependencies "$app_path"
+}
+
+# ggml has no built-in CPU fallback: with no compute backend registered, every
+# model load fails with "Failed to load llama.cpp model" and inference has
+# nothing to run on. The recursive walker above picks the backends up on its own
+# because the pinned upstream release links them as ordinary @rpath dylibs, so
+# this is an assertion rather than a fixup -- but it is the assertion that would
+# have caught shipping an app with no backends at all, which is what a Homebrew
+# ggml produces (there the backends are dlopen'd plugins under libexec/, invisible
+# to the Mach-O dependency graph and never copied in).
+verify_ggml_backends_embedded() {
+  local frameworks_dir="$1"
+  local backend
+  local missing=0
+
+  for backend in libggml-base libggml-cpu libggml-metal; do
+    if ! compgen -G "$frameworks_dir/$backend*.dylib" >/dev/null; then
+      echo "No $backend dylib was embedded into Contents/Frameworks." >&2
+      missing=1
+    fi
+  done
+
+  if [[ "$missing" -ne 0 ]]; then
+    echo "The packaged app would have no ggml compute backend and could not run inference." >&2
+    echo "Check that the llama.cpp prefix in use ships its backends as linked dylibs" >&2
+    echo "under lib/ (the pinned upstream release does; Homebrew's ggml does not)." >&2
+    exit 1
+  fi
 }
 
 verify_no_external_llama_dependencies() {
@@ -303,8 +340,20 @@ verify_no_external_llama_dependencies() {
       continue
     fi
 
+    # Also covers the transitive libraries a Homebrew-built llama.cpp drags in
+    # (libomp via libggml-base, libssl/libcrypto via libllama-common). Those are
+    # absent from the pinned upstream release, but if one is ever reintroduced it
+    # must fail here rather than on an end user's Mac that has no Homebrew.
     local external_refs
-    external_refs="$(otool -L "$binary_path" | awk 'NR > 1 && $1 ~ /^\/.*\/lib\/lib(llama|ggml).*\.dylib$/ { print $1 }')"
+    external_refs="$(otool -L "$binary_path" | awk '
+      NR > 1 {
+        path = $1
+        if (path !~ /^\//) next
+        if (path ~ /^\/usr\/lib\//) next
+        if (path ~ /^\/System\//) next
+        if (path ~ /lib(llama|ggml|omp|ssl|crypto)/) print path
+      }
+    ')"
     if [[ -n "$external_refs" ]]; then
       echo "External llama.cpp dependencies remain in $binary_path:" >&2
       printf '%s\n' "$external_refs" >&2

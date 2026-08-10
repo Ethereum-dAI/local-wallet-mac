@@ -31,7 +31,9 @@ It fails closed when:
 
 Header integrity itself needs no checksum: git verifies fetched objects against the commit SHA.
 
-Setting `LOCAL_LLAMA_PREFIX` skips provisioning entirely, matching `local-llm/Package.swift`'s resolution order. `.llama/` is gitignored; the downloaded asset is cached under `.llama/cache` so re-provisioning needs no network.
+Setting `LOCAL_LLAMA_PREFIX` skips provisioning entirely, matching `local-llm/Package.swift`'s resolution order.
+
+`.llama/` is gitignored. The release asset and a shallow header checkout are cached under `.llama/cache`, so re-provisioning re-downloads neither — but it is **not** offline: the tag check and the header fetch both contact GitHub every time the prefix is actually rebuilt. Only the no-op path (a prefix already matching the pin) touches the network at all. Requires `git` new enough for partial clone (2.19+); the git shipped with Xcode Command Line Tools is fine.
 
 ### `build-ffi.sh`
 
@@ -82,7 +84,7 @@ By default the script builds `wallet-node` from the in-repo `local-wallet-daemon
 
 llama.cpp/ggml come from the pinned prefix at `.llama/current`, which `provision-llama.sh` assembles from the upstream release named in `local-llm/LLAMA_CPP_PIN`. Those dylibs are built `minos 13.3` and depend on nothing outside the prefix and the OS, so a **hand-built macOS 15 prefix is no longer needed** to get a packageable build. This used to be a required step, because Homebrew's bottles are built for whatever macOS the bottle targeted (`minos 26.0` on Tahoe) and tripped the deployment-target gate.
 
-If you do override with `LOCAL_LLAMA_PREFIX`, you own its compatibility — compile it with `CMAKE_OSX_DEPLOYMENT_TARGET=15.0` and `CMAKE_OSX_ARCHITECTURES=arm64`, and make sure its ggml ships the compute backends as ordinary linked dylibs under `lib/` (`-DGGML_BACKEND_DL=OFF`). A prefix whose backends are `dlopen`'d plugins under `libexec/` — which is how Homebrew builds ggml — produces an app that packages cleanly and then fails every model load at runtime, because nothing in the Mach-O dependency graph reveals the backends and none get embedded:
+If you do override with `LOCAL_LLAMA_PREFIX`, you own its compatibility — compile it with `CMAKE_OSX_DEPLOYMENT_TARGET=15.0` and `CMAKE_OSX_ARCHITECTURES=arm64`, and make sure its ggml ships the compute backends as ordinary linked dylibs under `lib/` (`-DGGML_BACKEND_DL=OFF`). It must also provide `include-common/` (llama.cpp's `common/` headers, with `jinja/` and `nlohmann/` nested inside) next to `include/` and `lib/`, or you must point `LOCAL_LLAMA_COMMON_INCLUDE_DIR` at them — the build reads those through `local-llm/Package.swift`, which no longer has an in-tree copy to fall back on. A prefix whose backends are `dlopen`'d plugins under `libexec/` — which is how Homebrew builds ggml — produces an app that packages cleanly and then fails every model load at runtime, because nothing in the Mach-O dependency graph reveals the backends and none get embedded:
 
 ```bash
 LOCAL_LLAMA_PREFIX="$PWD/build/llama-macos15-prefix" \

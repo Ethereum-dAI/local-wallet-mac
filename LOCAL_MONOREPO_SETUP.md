@@ -65,7 +65,12 @@ cbindgen 0.29.2
 
 ### llama.cpp is pinned, not installed
 
-`llama.cpp` provides the local inference libraries the app links (`libllama`, `libllama-common`, `libggml`, `libggml-base`) plus the ggml compute backends. **You do not install it.** `scripts/provision-llama.sh` downloads the exact pinned upstream release asset (~11 MB), verifies it against a committed sha256, and assembles a repo-local prefix at `.llama/current`. `scripts/build-ffi.sh` calls it for you, so the normal build sequence already does the right thing and repeat builds are a no-op.
+`llama.cpp` provides the local inference libraries the app links (`libllama`, `libllama-common`, `libggml`, `libggml-base`) plus the ggml compute backends. **You do not install it.** `scripts/provision-llama.sh` assembles a repo-local prefix at `.llama/current` from two pinned sources:
+
+- the upstream release asset (~11 MB), verified against a committed sha256, for the dylibs;
+- the pinned commit's headers (~1 MB), via a sparse `git fetch` — the release asset ships none.
+
+`scripts/build-ffi.sh` calls it for you, so the normal build sequence already does the right thing, and repeat builds are a no-op. The first provision needs network access and a `git` new enough for partial clone (2.19+, which the Xcode Command Line Tools git satisfies).
 
 The version is recorded in [`local-llm/LLAMA_CPP_PIN`](local-llm/LLAMA_CPP_PIN), which also documents how to bump it.
 
@@ -270,11 +275,13 @@ cd local-llm && swift test    # 21 tests; exercises real inference
 Read the error before assuming it is the prefix, though:
 
 - **`no member named …` / `no matching function for call to …` in `CLlamaBridge.cpp`** — an API mismatch between the pinned headers and the code. If you just bumped `LLAMA_CPP_PIN`, this is expected upstream churn and the bridge needs updating for the new API. If you did **not** touch the pin, check that `LOCAL_LLAMA_PREFIX` is not set in your environment or Xcode scheme, which would silently take you off-pin.
-- **`ld: library not found for -lllama`** — the prefix was never assembled. Run `./scripts/build-ffi.sh` (or `provision-llama.sh` directly).
+- **`ld: library 'llama' not found`**, usually preceded by `ld: warning: search path '…/.llama/current/lib' not found` — the headers resolved but `lib/` is missing or incomplete. A wholly unprovisioned tree fails earlier, at compile time, with `'llama.h' file not found`, so this points at a half-populated prefix or a `LOCAL_LLAMA_PREFIX` with headers but no dylibs. `rm -rf .llama && ./scripts/provision-llama.sh` rebuilds it.
 - **`Failed to load llama.cpp model` at runtime, with the build succeeding** — no ggml compute backend registered. `provision-llama.sh` verifies the backend closure, so this should be impossible on-pin; it is the signature of an off-pin Homebrew prefix, whose backends are `dlopen`'d plugins under `libexec/` that nothing copies or links.
-- **`Could not fetch llama.cpp commit …`** — provisioning fetches the headers from the pinned commit and could not reach GitHub, or `LLAMA_CPP_COMMIT` names a commit that does not exist upstream. Check connectivity first; if the pin was just edited, verify the commit against the release tag.
-- **`'llama.h' file not found`** — the prefix was never assembled, or `LOCAL_LLAMA_PREFIX` points at a prefix without an `include-common/` directory. See `local-llm/README.md`.
-- **`'chat.h' file not found` on an existing checkout** — a stale SwiftPM build directory. The `common/` headers used to be committed under `local-llm/Sources/CLlamaBridge/third_party/`; they are now fetched into the pinned prefix, and an incremental build planned before that change keeps looking for the deleted directory. Clean builds are unaffected:
+- **`LLAMA_CPP_COMMIT is not the commit release b… was built from`** — the two halves of the pin disagree, so the headers would describe a different ABI than the dylibs. Provisioning refuses rather than build a mismatched pair. Re-derive the commit from the release tag: `gh api repos/ggml-org/llama.cpp/git/refs/tags/b<release> --jq '.object.sha'`.
+- **`Could not fetch llama.cpp commit …`** / **`Could not resolve tag …`** — provisioning could not reach GitHub. A commit that does not exist upstream is caught earlier, by the tag check above, so treat this as a connectivity problem.
+- **`'llama.h' file not found`** — the prefix has no `include/`: either it was never assembled (run `./scripts/build-ffi.sh`), or `LOCAL_LLAMA_PREFIX` points somewhere without it.
+- **`'chat.h' file not found`** — the prefix has no `include-common/`. If you set `LOCAL_LLAMA_PREFIX`, it must supply that directory too, or set `LOCAL_LLAMA_COMMON_INCLUDE_DIR`; see `local-llm/README.md`. On an existing checkout, see the next entry first.
+- **`'chat.h' file not found` right after pulling** — a stale SwiftPM build directory, not a broken prefix. The `common/` headers used to be committed under `local-llm/Sources/CLlamaBridge/third_party/`; they are now fetched into the pinned prefix, and an incremental build planned before that change keeps looking for the deleted directory. Clean builds are unaffected:
 
 ```bash
 rm -rf local-llm/.build wallet-macos/.build

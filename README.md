@@ -76,7 +76,7 @@ cd local-wallet-mac
 
 This provisions the pinned llama.cpp prefix, compiles `wallet-ffi` for `aarch64-apple-darwin`, runs `cbindgen`, and stages the header and `.a` into `swift-bridge/`. The outputs are not committed to git.
 
-On a fresh clone the first run downloads ~11 MB of pinned llama.cpp libraries; later runs are a no-op.
+On a fresh clone the first run downloads the pinned llama.cpp: ~11 MB of libraries plus ~1 MB of headers. Later runs are a no-op.
 
 **Step 2: Build the daemon**
 

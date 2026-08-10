@@ -4,8 +4,15 @@
 # Downloads the pinned upstream release asset from GitHub, verifies it against
 # the sha256 in the pin, and assembles a repo-local prefix at .llama/current:
 #
-#   .llama/<release>/lib      <- dylibs from the release asset
-#   .llama/<release>/include  <- headers vendored at local-llm/third_party/llama_cpp_api
+#   .llama/<release>/lib            <- dylibs from the release asset
+#   .llama/<release>/include        <- llama.cpp + ggml public headers
+#   .llama/<release>/include-common <- llama.cpp common/ headers (+ jinja/, nlohmann/)
+#
+# Headers are fetched from the pinned commit with a sparse, blob-filtered git
+# fetch (~1 MB, ~3s) rather than being committed to this repo. Git verifies the
+# objects it fetches against the commit SHA, so the SHA in the pin *is* the
+# integrity guarantee -- there is no header checksum to maintain and no way for
+# the headers to disagree with the pin.
 #
 # Homebrew is not consulted. GitHub release assets are immutable, so every
 # contributor and CI run gets identical bytes and `brew upgrade` cannot move the
@@ -20,8 +27,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PIN_FILE="$REPO_ROOT/local-llm/LLAMA_CPP_PIN"
 LLAMA_DIR="$REPO_ROOT/.llama"
 CACHE_DIR="$LLAMA_DIR/cache"
-API_HEADERS="$REPO_ROOT/local-llm/third_party/llama_cpp_api"
-COMMON_HEADERS="$REPO_ROOT/local-llm/Sources/CLlamaBridge/third_party/llama_cpp_common"
+SRC_DIR="$CACHE_DIR/llama-src"
+UPSTREAM="https://github.com/ggml-org/llama.cpp.git"
 
 # An explicit prefix wins over the pin (release packaging with a hand-built
 # llama.cpp, or a deliberate Homebrew opt-in). Package.swift applies the same
@@ -47,50 +54,20 @@ source "$PIN_FILE"
 PREFIX="$LLAMA_DIR/$LLAMA_CPP_RELEASE"
 STAMP="$PREFIX/.pin-stamp"
 
-for tool in shasum curl tar otool; do
+for tool in shasum curl tar otool git; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "ERROR: Required tool not found: $tool" >&2
         exit 1
     }
 done
 
-# --- Coherence gate: vendored headers must match the pinned commit ------------
-# The dylibs come from the release asset; the headers are vendored in-repo. A
-# bump that updates one and not the other is an ABI mismatch, and because the
-# mangled C++ symbol names do not change it fails as silent runtime corruption
-# rather than as a link error. So refuse to provision a disagreeing pair.
-check_vendored_commit() {
-    local commit_file="$1" label="$2"
-    if [[ ! -f "$commit_file" ]]; then
-        echo "ERROR: Missing vendored-header provenance file: $commit_file" >&2
-        exit 1
-    fi
-    local declared
-    declared="$(awk '/^# Pinned commit:/ {print $4; exit}' "$commit_file")"
-    if [[ "$declared" != "$LLAMA_CPP_COMMIT" ]]; then
-        echo "ERROR: $label headers are vendored from a different commit than the pin." >&2
-        echo "  pin ($PIN_FILE):  $LLAMA_CPP_COMMIT" >&2
-        echo "  $label:  ${declared:-<none found>}" >&2
-        echo "  Re-vendor the headers from the pinned commit, or fix the pin." >&2
-        echo "  See $commit_file for the procedure." >&2
-        exit 1
-    fi
-}
-check_vendored_commit "$API_HEADERS/COMMIT" "llama_cpp_api"
-check_vendored_commit "$COMMON_HEADERS/COMMIT" "llama_cpp_common"
-
 # --- Fast path: prefix already matches the pin --------------------------------
-# The fingerprint covers the pin file and the vendored public headers, so
-# editing either re-provisions. It deliberately does NOT cover the prefix path:
-# the staged dylibs use @rpath install names, so the prefix is relocatable and
-# moving the repo needs a Swift rebuild, not a re-provision.
-fingerprint() {
-    {
-        shasum -a 256 "$PIN_FILE" | cut -d' ' -f1
-        (cd "$API_HEADERS" && shasum -a 256 *.h | sort)
-    } | shasum -a 256 | cut -d' ' -f1
-}
-PIN_FINGERPRINT="$(fingerprint)"
+# The fingerprint is the pin file's hash: it names both the release asset and the
+# header commit, so any change to either re-provisions. It deliberately does NOT
+# cover the prefix path -- the staged dylibs use @rpath install names, so the
+# prefix is relocatable and moving the repo needs a Swift rebuild, not a
+# re-provision.
+PIN_FINGERPRINT="$(shasum -a 256 "$PIN_FILE" | cut -d' ' -f1)"
 
 if [[ -f "$STAMP" && "$(cat "$STAMP")" == "$PIN_FINGERPRINT" ]]; then
     echo "llama.cpp prefix already provisioned at pin $LLAMA_CPP_RELEASE ($PREFIX)"
@@ -254,14 +231,103 @@ for f in libllama.dylib libllama-common.dylib libggml.dylib libggml-base.dylib \
 done
 echo "  all staged dylibs target macOS $minos or older"
 
-# --- Stage include/ from the vendored headers --------------------------------
-# The release asset ships no headers at all; see
-# local-llm/third_party/llama_cpp_api/COMMIT for why they are vendored instead
-# of downloaded. Copying them in here keeps exactly one copy of llama.h on the
-# compiler's include path and keeps the prefix self-describing.
-echo "=== Staging vendored public headers ==="
-cp "$API_HEADERS"/*.h "$PREFIX/include/"
-echo "  $(find "$PREFIX/include" -name '*.h' | wc -l | tr -d ' ') headers from llama_cpp_api @ ${LLAMA_CPP_COMMIT:0:12}"
+# --- Fetch + stage the headers from the pinned commit -------------------------
+# The release asset ships dylibs, CLI executables and LICENSE only -- zero
+# headers. Rather than committing upstream's headers to this repo, fetch them at
+# the pinned commit: sparse checkout of just the header directories plus
+# --filter=blob:none, which is ~1 MB and a few seconds against the 36 MB of a
+# full source archive.
+#
+# Git verifies fetched objects against the commit SHA, so no header checksum is
+# needed and the headers cannot drift from the pin -- they *are* the pin's commit.
+echo "=== Fetching headers at ${LLAMA_CPP_COMMIT:0:12} ==="
+
+# The release tag is the only thing that ties LLAMA_CPP_COMMIT to the release the
+# dylibs were built from. Without this check a commit that merely *exists*
+# upstream provisions happily, and the headers would then describe a different
+# ABI than the downloaded dylibs -- which, because the mangled C++ symbol names
+# do not change across these bumps, is silent runtime corruption rather than a
+# link error. So verify the pair against upstream rather than trusting the pin to
+# be internally consistent.
+resolve_tag_commit() {
+    local peeled
+    peeled="$(git ls-remote "$UPSTREAM" "refs/tags/$LLAMA_CPP_RELEASE^{}" 2>/dev/null | cut -f1 | head -1)"
+    if [[ -n "$peeled" ]]; then
+        printf '%s\n' "$peeled"          # annotated tag: the peeled commit
+    else
+        git ls-remote "$UPSTREAM" "refs/tags/$LLAMA_CPP_RELEASE" 2>/dev/null | cut -f1 | head -1
+    fi
+}
+
+tag_commit="$(resolve_tag_commit)"
+if [[ -z "$tag_commit" ]]; then
+    echo "ERROR: Could not resolve tag $LLAMA_CPP_RELEASE upstream." >&2
+    echo "  Offline, or LLAMA_CPP_RELEASE does not name a real release." >&2
+    exit 1
+fi
+if [[ "$tag_commit" != "$LLAMA_CPP_COMMIT" ]]; then
+    echo "ERROR: LLAMA_CPP_COMMIT is not the commit release $LLAMA_CPP_RELEASE was built from." >&2
+    echo "  pin declares:  $LLAMA_CPP_COMMIT" >&2
+    echo "  $LLAMA_CPP_RELEASE points at: $tag_commit" >&2
+    echo "  The headers would describe a different ABI than the dylibs. Fix the pin:" >&2
+    echo "    gh api repos/ggml-org/llama.cpp/git/refs/tags/$LLAMA_CPP_RELEASE --jq '.object.sha'" >&2
+    exit 1
+fi
+echo "  $LLAMA_CPP_RELEASE resolves to the pinned commit"
+
+if [[ ! -d "$SRC_DIR/.git" ]]; then
+    mkdir -p "$SRC_DIR"
+    git -C "$SRC_DIR" init -q
+    git -C "$SRC_DIR" remote add origin "$UPSTREAM"
+fi
+
+git -C "$SRC_DIR" config core.sparseCheckout true
+git -C "$SRC_DIR" config extensions.partialClone origin
+printf 'include/\nggml/include/\ncommon/\nvendor/nlohmann/\n' \
+    >"$SRC_DIR/.git/info/sparse-checkout"
+
+if ! git -C "$SRC_DIR" fetch -q --depth 1 --filter=blob:none origin "$LLAMA_CPP_COMMIT"; then
+    echo "ERROR: Could not fetch llama.cpp commit $LLAMA_CPP_COMMIT." >&2
+    echo "  Offline, or the commit does not exist upstream." >&2
+    echo "  Point the build at an existing llama.cpp prefix instead:" >&2
+    echo "    LOCAL_LLAMA_PREFIX=...   (see scripts/README.md)" >&2
+    exit 1
+fi
+git -C "$SRC_DIR" checkout -q --force FETCH_HEAD
+
+# Assert what git already guaranteed, so a mis-specified pin cannot slip through.
+fetched_sha="$(git -C "$SRC_DIR" rev-parse HEAD)"
+if [[ "$fetched_sha" != "$LLAMA_CPP_COMMIT" ]]; then
+    echo "ERROR: Fetched $fetched_sha but the pin declares $LLAMA_CPP_COMMIT." >&2
+    exit 1
+fi
+
+# Two include roots, mirroring how the bridge consumes them:
+#   include/         <llama.h>, ggml headers      -- the public API
+#   include-common/  "chat.h" and friends         -- llama.cpp's common/ layer,
+#                                                   whose implementations live in
+#                                                   libllama-common.dylib
+# nlohmann lands *inside* include-common/ because common/chat.h includes it as
+# "nlohmann/json_fwd.hpp", relative to its own directory, while upstream keeps it
+# at vendor/nlohmann/ and resolves it via a separate -I.
+mkdir -p "$PREFIX/include-common/jinja" "$PREFIX/include-common/nlohmann"
+cp "$SRC_DIR"/include/*.h "$PREFIX/include/"
+cp "$SRC_DIR"/ggml/include/*.h "$PREFIX/include/"
+cp "$SRC_DIR"/common/*.h "$PREFIX/include-common/"
+cp "$SRC_DIR"/common/jinja/*.h "$PREFIX/include-common/jinja/"
+cp "$SRC_DIR"/vendor/nlohmann/*.hpp "$PREFIX/include-common/nlohmann/"
+
+for required in "include/llama.h" "include/ggml.h" "include-common/chat.h" \
+    "include-common/common.h" "include-common/jinja/runtime.h" \
+    "include-common/nlohmann/json.hpp"; do
+    if [[ ! -f "$PREFIX/$required" ]]; then
+        echo "ERROR: Expected header missing after staging: $required" >&2
+        echo "  Upstream may have moved it at $LLAMA_CPP_COMMIT." >&2
+        exit 1
+    fi
+done
+echo "  public: $(find "$PREFIX/include" -name '*.h' | wc -l | tr -d ' ') headers"
+echo "  common: $(find "$PREFIX/include-common" -name '*.h' -o -name '*.hpp' | wc -l | tr -d ' ') headers"
 
 echo "$PIN_FINGERPRINT" >"$STAMP"
 ln -sfn "$LLAMA_CPP_RELEASE" "$LLAMA_DIR/current"

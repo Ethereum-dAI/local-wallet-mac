@@ -10,26 +10,33 @@ Current pin:
 
 - llama.cpp release: **b10330**
 - Upstream commit: `687e7789271ec1276e3470f158428e11a4f80b6f`
-- Vendored from: `https://github.com/ggml-org/llama.cpp/tree/687e7789271ec1276e3470f158428e11a4f80b6f`
+- Tree: `https://github.com/ggml-org/llama.cpp/tree/687e7789271ec1276e3470f158428e11a4f80b6f`
 
-`Package.swift` resolves `libllama`, `libllama-common`, `libggml`, and `libggml-base` from `LOCAL_LLAMA_PREFIX` / `LOCAL_LLAMA_INCLUDE_DIR` / `LOCAL_LLAMA_LIB_DIR` when set, and otherwise from the pinned prefix at `<repo>/.llama/current`. It also passes `-rpath` for the resolved lib dir, which the pinned dylibs need because they use `@rpath` install names.
+`Package.swift` resolves `libllama`, `libllama-common`, `libggml`, and `libggml-base` from `LOCAL_LLAMA_PREFIX` / `LOCAL_LLAMA_INCLUDE_DIR` / `LOCAL_LLAMA_COMMON_INCLUDE_DIR` / `LOCAL_LLAMA_LIB_DIR` when set, and otherwise from the pinned prefix at `<repo>/.llama/current`. It also passes `-rpath` for the resolved lib dir, which the pinned dylibs need because they use `@rpath` install names.
 
-There is deliberately **no implicit Homebrew fallback**. The `common/` headers below are on the include path unconditionally, so silently linking a Homebrew `libllama-common` would pair them with a different build of their own implementations — and since the mangled C++ symbol names do not change between versions, that is silent runtime corruption rather than a link error. An unprovisioned tree fails fast with `'llama.h' file not found`. To build against Homebrew anyway, say so explicitly:
+An explicit `LOCAL_LLAMA_PREFIX` must supply `include-common/` alongside `include/` and `lib/`, or point `LOCAL_LLAMA_COMMON_INCLUDE_DIR` at the `common/` directory of a llama.cpp source tree at the matching commit. That is new: the `common/` headers used to be committed under `Sources/CLlamaBridge/third_party/`, so any prefix worked.
+
+There is deliberately **no implicit Homebrew fallback**. Silently linking a Homebrew `libllama-common` would pair the pinned `common/` headers with a different build of their own implementations — and since the mangled C++ symbol names do not change between versions, that is silent runtime corruption rather than a link error. An unprovisioned tree fails fast with `'llama.h' file not found`. To build against Homebrew anyway, say so explicitly:
 
 ```bash
 LOCAL_LLAMA_PREFIX=/opt/homebrew swift build   # off-pin, unsupported
 ```
 
-Two header sets are vendored, both **headers only** — the implementations live in the staged dylibs — and both must come from the pinned commit above:
+The release asset ships dylibs and CLI executables only — **no headers at all**. `provision-llama.sh` fetches those from the pinned commit and stages them into two include roots, mirroring how the bridge consumes them:
 
-| Directory | Contents | Reaches the compiler via |
+| Prefix directory | Upstream source | Contents |
 |---|---|---|
-| `Sources/CLlamaBridge/third_party/llama_cpp_common/` | llama.cpp `common/`: `common_chat_parse`, `common_chat_templates_init`, `common_chat_templates_apply`, the modular jinja renderer, bundled nlohmann | `.headerSearchPath(...)` in `Package.swift` — `CLlamaBridge.cpp` includes these directly |
-| `third_party/llama_cpp_api/` | llama.cpp + ggml public headers (`llama.h`, `ggml*.h`, `gguf.h`) | copied into `.llama/current/include` by `provision-llama.sh`, then `-I<prefix>/include` |
+| `.llama/current/include` | `include/`, `ggml/include/` | the public API: `llama.h`, `ggml*.h`, `gguf.h` |
+| `.llama/current/include-common` | `common/`, `common/jinja/`, `vendor/nlohmann/` | `common_chat_parse`, `common_chat_templates_init`, `common_chat_templates_apply`, the modular jinja renderer, bundled nlohmann — headers only; the implementations live in `libllama-common.dylib` |
 
-The public headers are vendored because the upstream binary release asset ships **no headers at all**, and the only downloadable alternative is GitHub's auto-generated source archive — 36 MB against the binary's 11 MB, and with no byte-stability guarantee to pin a checksum against. Each directory's `COMMIT` file carries the full rationale and the re-vendor procedure.
+`nlohmann` lands *inside* `include-common/` because `common/chat.h` includes it as `"nlohmann/json_fwd.hpp"`, relative to its own directory, whereas upstream keeps it at `vendor/nlohmann/` and resolves it with a separate `-I`.
 
-`provision-llama.sh` refuses to run if the pin and either vendored `COMMIT` name different commits. That matters because the mangled C++ symbol names do not change across these version bumps, so a header/dylib mismatch is **not** a link error — it is silent runtime corruption. After any bump, run the suite (21 tests, real Gemma inference) to catch drift.
+**The headers are not committed to this repo.** They are fetched with a sparse, blob-filtered `git fetch` of just those directories — ~1 MB and a few seconds, against 36 MB for a full source archive. Two reasons that beats vendoring:
+
+- **Integrity is free.** Git verifies fetched objects against the commit SHA, so `LLAMA_CPP_COMMIT` *is* the guarantee. There is no header checksum to maintain, and the headers cannot drift from the pin because they are read out of it. (A checksum over GitHub's auto-generated source archive would be fragile for the opposite reason: GitHub does not guarantee the byte-stability of the gzip stream, only of the contents.)
+- **Bumping the pin stops involving headers.** It is three values in `LLAMA_CPP_PIN` plus whatever upstream API churn hits `CLlamaBridge.cpp`. Vendoring meant ~37k lines of upstream code in-tree and a re-vendoring step every time.
+
+A header/dylib mismatch would still be serious — the mangled C++ symbol names do not change across these bumps, so it is silent runtime corruption rather than a link error. So `provision-llama.sh` verifies with `git ls-remote` that `LLAMA_CPP_COMMIT` is the commit `LLAMA_CPP_RELEASE`'s tag points at, and refuses to provision otherwise. A commit that merely exists upstream is not enough. After any bump, run the suite (21 tests, real Gemma inference) to catch API drift too.
 
 ## Running the tests
 

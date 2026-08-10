@@ -269,10 +269,16 @@ cd local-llm && swift test    # 21 tests; exercises real inference
 
 Read the error before assuming it is the prefix, though:
 
-- **`no member named …` / `no matching function for call to …` in `CLlamaBridge.cpp`** — an API mismatch between the vendored headers and the code. If you just bumped `LLAMA_CPP_PIN`, this is expected upstream churn and the bridge needs updating for the new API. If you did **not** touch the pin, check that `LOCAL_LLAMA_PREFIX` is not set in your environment or Xcode scheme, which would silently take you off-pin.
+- **`no member named …` / `no matching function for call to …` in `CLlamaBridge.cpp`** — an API mismatch between the pinned headers and the code. If you just bumped `LLAMA_CPP_PIN`, this is expected upstream churn and the bridge needs updating for the new API. If you did **not** touch the pin, check that `LOCAL_LLAMA_PREFIX` is not set in your environment or Xcode scheme, which would silently take you off-pin.
 - **`ld: library not found for -lllama`** — the prefix was never assembled. Run `./scripts/build-ffi.sh` (or `provision-llama.sh` directly).
 - **`Failed to load llama.cpp model` at runtime, with the build succeeding** — no ggml compute backend registered. `provision-llama.sh` verifies the backend closure, so this should be impossible on-pin; it is the signature of an off-pin Homebrew prefix, whose backends are `dlopen`'d plugins under `libexec/` that nothing copies or links.
-- **`headers are vendored from a different commit than the pin`** — `LLAMA_CPP_PIN` and the vendored headers disagree. Re-vendor both header sets from the pinned commit; the procedure is in `local-llm/third_party/llama_cpp_api/COMMIT`.
+- **`Could not fetch llama.cpp commit …`** — provisioning fetches the headers from the pinned commit and could not reach GitHub, or `LLAMA_CPP_COMMIT` names a commit that does not exist upstream. Check connectivity first; if the pin was just edited, verify the commit against the release tag.
+- **`'llama.h' file not found`** — the prefix was never assembled, or `LOCAL_LLAMA_PREFIX` points at a prefix without an `include-common/` directory. See `local-llm/README.md`.
+- **`'chat.h' file not found` on an existing checkout** — a stale SwiftPM build directory. The `common/` headers used to be committed under `local-llm/Sources/CLlamaBridge/third_party/`; they are now fetched into the pinned prefix, and an incremental build planned before that change keeps looking for the deleted directory. Clean builds are unaffected:
+
+```bash
+rm -rf local-llm/.build wallet-macos/.build
+```
 
 For release packaging, the pinned dylibs are `minos 13.3` and carry no external dependencies, so they clear the deployment-target and external-dependency gates in `scripts/package-macos-demo.sh` without a hand-built prefix.
 

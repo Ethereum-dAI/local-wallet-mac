@@ -32,6 +32,17 @@ let llamaPrefix = environment["LOCAL_LLAMA_PREFIX"] ?? pinnedPrefix
 let llamaIncludeDir = environment["LOCAL_LLAMA_INCLUDE_DIR"] ?? "\(llamaPrefix)/include"
 let llamaLibDir = environment["LOCAL_LLAMA_LIB_DIR"] ?? "\(llamaPrefix)/lib"
 
+// llama.cpp's common/ headers (chat.h, the jinja renderer, bundled nlohmann).
+// They used to be committed under Sources/CLlamaBridge/third_party/ and reached
+// via .headerSearchPath; provision-llama.sh now fetches them at the pinned
+// commit, which means they live outside the target and need a -I instead.
+//
+// An explicit LOCAL_LLAMA_PREFIX must therefore supply include-common/ as well as
+// include/ and lib/, or point this at the common/ directory of a llama.cpp source
+// tree at the matching commit.
+let llamaCommonIncludeDir = environment["LOCAL_LLAMA_COMMON_INCLUDE_DIR"]
+    ?? "\(llamaPrefix)/include-common"
+
 let package = Package(
     name: "LocalLLM",
     platforms: [.macOS(.v15)],
@@ -45,12 +56,14 @@ let package = Package(
             path: "Sources/CLlamaBridge",
             publicHeadersPath: "include",
             cxxSettings: [
-                .unsafeFlags(["-I\(llamaIncludeDir)", "-std=c++17"]),
-                // Headers vendored from llama.cpp common/ are consumed by
-                // CLlamaBridge.cpp (it `#include "chat.h"` and implements
-                // chat_render / parse_assistant_turn / count_tokens / generate_v2);
-                // this search path makes them resolvable.
-                .headerSearchPath("third_party/llama_cpp_common"),
+                // CLlamaBridge.cpp includes <llama.h> from the first path and
+                // "chat.h" / "nlohmann/json.hpp" from the second (it implements
+                // chat_render / parse_assistant_turn / count_tokens / generate_v2).
+                .unsafeFlags([
+                    "-I\(llamaIncludeDir)",
+                    "-I\(llamaCommonIncludeDir)",
+                    "-std=c++17",
+                ]),
                 .define("LLAMA_USE_CURL", to: "0"),
             ],
             linkerSettings: [

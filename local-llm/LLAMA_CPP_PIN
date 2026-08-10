@@ -3,7 +3,7 @@
 # WHY THIS FILE EXISTS
 #
 # `local-llm` links libllama / libllama-common / libggml / libggml-base, and
-# CLlamaBridge.cpp compiles against vendored llama.cpp headers. Before this pin,
+# CLlamaBridge.cpp compiles against llama.cpp's own headers. Before this pin,
 # those libraries came from `brew install llama.cpp` with no version constraint,
 # which means the version was "whatever was current the day you ran it" and was
 # not expressible in the repo at all. Two contributors cloning the same commit a
@@ -37,14 +37,24 @@
 # dependencies (no libomp, no openssl) and is built `minos 13.3`, comfortably
 # under this repo's macOS 15.0 deployment floor.
 #
-# WHY THE HEADERS ARE NOT LISTED HERE
+# WHY THERE IS NO HEADER CHECKSUM HERE
 #
 # The binary release asset contains dylibs, CLI executables and LICENSE only —
-# zero headers. They are vendored in-repo instead, so provisioning stays a
-# single immutable download; see local-llm/third_party/llama_cpp_api/COMMIT for
-# the full reasoning. LLAMA_CPP_COMMIT below records the commit those vendored
-# headers came from, and provision-llama.sh fails closed if it disagrees with
-# what the vendored trees declare.
+# zero headers. provision-llama.sh fetches those out of LLAMA_CPP_COMMIT below
+# with a sparse, blob-filtered git fetch of just the header directories: ~1 MB
+# and a few seconds, against 36 MB for a full source archive.
+#
+# No checksum is needed, because git verifies the objects it fetches against the
+# commit SHA — the SHA *is* the integrity guarantee. It also means the headers
+# cannot drift from the pin, since they are read straight out of the pinned
+# commit. They are deliberately not committed to this repo either: that would put
+# ~37k lines of upstream code in-tree and add a re-vendoring chore to every bump.
+#
+# LLAMA_CPP_COMMIT must be the commit the release was built from, or the headers
+# describe a different ABI than the dylibs. Because the mangled C++ symbol names
+# do not change across these bumps, such a mismatch is silent runtime corruption
+# rather than a link error. Step 1 below derives the commit from the release tag,
+# which is what makes it correct by construction.
 #
 # TO BUMP THIS PIN
 #
@@ -55,14 +65,12 @@
 #        curl -fsSL -o /tmp/llama.tar.gz \
 #          https://github.com/ggml-org/llama.cpp/releases/download/b<new>/llama-b<new>-bin-macos-arm64.tar.gz
 #        shasum -a 256 /tmp/llama.tar.gz
-#   3. Update LLAMA_CPP_RELEASE, LLAMA_CPP_COMMIT and LLAMA_CPP_SHA256 below.
-#   4. Re-vendor BOTH header sets from that same commit:
-#        local-llm/third_party/llama_cpp_api/COMMIT
-#        local-llm/Sources/CLlamaBridge/third_party/llama_cpp_common/COMMIT
-#   5. rm -rf .llama && ./scripts/provision-llama.sh
-#   6. cd local-llm && swift test    # 21 tests, real inference — catches ABI drift
+#   3. Update the four values below. That is the entire pin change — there are no
+#      vendored headers to refresh.
+#   4. rm -rf .llama && ./scripts/provision-llama.sh
+#   5. cd local-llm && swift test    # 21 tests, real inference — catches ABI drift
 #
-# Expect upstream API churn at step 6; that is the point of pinning. b9200 to
+# Expect upstream API churn at step 5; that is the point of pinning. b9200 to
 # b10330 needed two edits in CLlamaBridge.cpp (`use_mmap` became the
 # `llama_load_mode` enum; `llama_sampler_init_penalties` regained a leading
 # `n_vocab` parameter).

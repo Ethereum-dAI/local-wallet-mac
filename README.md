@@ -99,8 +99,8 @@ headers. Both sides are pinned to a single upstream release in
 | | |
 |---|---|
 | **Dylibs** | `scripts/provision-llama.sh` downloads the pinned upstream release asset (~11 MB), verifies a committed sha256, and stages `.llama/current/lib`. Called automatically by `build-ffi.sh`; idempotent. |
-| **Headers** | Vendored in-repo at `local-llm/third_party/llama_cpp_api/` and `local-llm/Sources/CLlamaBridge/third_party/llama_cpp_common/`, from the same upstream commit. |
-| **Coherence** | Provisioning fails closed if the pin and the vendored headers name different commits, if the checksum does not match, if the ggml backend closure is incomplete, or if a dylib exceeds the macOS deployment floor. |
+| **Headers** | The release asset ships none, so they are fetched from the pinned commit with a sparse, blob-filtered `git fetch` of just the header directories (~1 MB). Not committed to this repo. |
+| **Coherence** | Provisioning fails closed unless `LLAMA_CPP_COMMIT` is the commit the release's tag points at, so the headers cannot describe a different ABI than the dylibs. Also fails on a checksum mismatch, an incomplete ggml backend closure, or a dylib exceeding the macOS deployment floor. Git verifies the fetched headers against the commit SHA. |
 
 Homebrew is not involved, because Homebrew *cannot* pin llama.cpp: there is no versioned formula, the
 core tap is API-only, `brew pin` only freezes what is already installed, and `ggml` is a separate

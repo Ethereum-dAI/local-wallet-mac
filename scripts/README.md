@@ -8,7 +8,7 @@ Run scripts from the repository root unless the script says otherwise.
 
 ### `provision-llama.sh`
 
-Assembles the pinned llama.cpp prefix declared in `local-llm/LLAMA_CPP_PIN`. Downloads the pinned upstream release asset (~11 MB), verifies it against the committed sha256, stages the dylibs into `.llama/<release>/lib`, stages the vendored public headers into `.llama/<release>/include`, and links `.llama/current`.
+Assembles the pinned llama.cpp prefix declared in `local-llm/LLAMA_CPP_PIN`. Downloads the pinned upstream release asset (~11 MB), verifies it against the committed sha256, and stages the dylibs into `.llama/<release>/lib`. The release ships no headers, so it then fetches them from the pinned commit — a sparse, blob-filtered `git fetch` of just the header directories, ~1 MB — into `.llama/<release>/include` (public API) and `.llama/<release>/include-common` (llama.cpp `common/`, plus `jinja/` and `nlohmann/`). Finally it links `.llama/current`.
 
 ```bash
 ./scripts/provision-llama.sh
@@ -20,7 +20,16 @@ You rarely call this directly — `build-ffi.sh` calls it, and it is idempotent,
 rm -rf .llama && ./scripts/provision-llama.sh
 ```
 
-It fails closed, before staging anything, when the pin and either vendored header set name different upstream commits; when the download's sha256 does not match; when `LLAMA_CPP_ASSET` does not correspond to `LLAMA_CPP_RELEASE`; when a staged dylib's `@rpath` closure is incomplete or reaches outside the prefix and the OS; or when a dylib's `minos` exceeds `LOCAL_WALLET_DEPLOYMENT_TARGET` (default 15.0).
+It fails closed when:
+
+- the download's sha256 does not match `LLAMA_CPP_SHA256`
+- `LLAMA_CPP_ASSET` does not correspond to `LLAMA_CPP_RELEASE`
+- **`LLAMA_CPP_COMMIT` is not the commit that `LLAMA_CPP_RELEASE`'s tag points at** — checked with `git ls-remote` against upstream, so the headers cannot describe a different ABI than the dylibs
+- a staged dylib's `@rpath` closure is incomplete or reaches outside the prefix and the OS
+- a dylib's `minos` exceeds `LOCAL_WALLET_DEPLOYMENT_TARGET` (default 15.0)
+- an expected header is missing after staging
+
+Header integrity itself needs no checksum: git verifies fetched objects against the commit SHA.
 
 Setting `LOCAL_LLAMA_PREFIX` skips provisioning entirely, matching `local-llm/Package.swift`'s resolution order. `.llama/` is gitignored; the downloaded asset is cached under `.llama/cache` so re-provisioning needs no network.
 

@@ -930,7 +930,7 @@ private final class ChatDashboardModel: ObservableObject {
     private var transferPreflightTasks: [UUID: Task<Void, Never>] = [:]
     private var swapPreflightTasks: [UUID: Task<Void, Never>] = [:]
     private var walletModelCancellable: AnyCancellable?
-    private var gasPollTask: Task<Void, Never>?
+    private var gasWarmupTask: Task<Void, Never>?
     private var sessionActivityEventMonitor: Any?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private let inferenceService: EmbeddedLlamaInferenceService
@@ -1013,12 +1013,14 @@ private final class ChatDashboardModel: ObservableObject {
         }
         refreshAccountIdentity()
         self.walletModel.bootstrap()
-        // Capture the AppModel, not self: the poll loop runs until cancelled, so a
-        // strong self-capture would keep this model alive forever and prevent deinit
-        // (hence the cancel) from ever running.
+        // One warm-up, not a poll. The header pill would otherwise read "— gwei"
+        // until first tapped; after this it is refreshed by the things that precede
+        // looking at or acting on gas (tapping the pill, returning to the app).
+        // Captures the AppModel rather than self so a slow first daemon launch
+        // cannot keep this model alive past deinit.
         let gasModel = self.walletModel
-        gasPollTask = Task {
-            await gasModel.runGasPriceUpdates()
+        gasWarmupTask = Task {
+            await gasModel.refreshLiveGasPricesIfStale()
         }
         // Picks up operations left unfinalised by a previous session. Goes through the AppModel
         // entry point rather than the loop body so this launch-time start and the post-send start
@@ -1030,7 +1032,7 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     deinit {
-        gasPollTask?.cancel()
+        gasWarmupTask?.cancel()
         // The reconciler task now lives on the AppModel, and `deinit` is nonisolated, so stopping it
         // means hopping to the main actor. Capture the model, not `self`, which is mid-deallocation.
         // The running loop retains the AppModel for the duration of its current call, so without
@@ -1110,7 +1112,7 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     func refreshGasPricesNow() {
-        Task { await walletModel.refreshLiveGasPrices() }
+        Task { await walletModel.refreshLiveGasPricesNow() }
     }
 
     /// Quiet balance re-read for a user action that reveals the balance. Subject to the same

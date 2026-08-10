@@ -132,6 +132,7 @@ final class AppModel: ObservableObject {
     private var reconcilerTask: Task<Void, Never>?
     /// Last event-driven balance read, for the coalescing floor in `refreshAccountBalanceQuietly`.
     private var lastBackgroundBalanceReadAt: Date?
+    private var lastGasIndicatorReadAt: Date?
     /// True once a balance read has failed and the failure has been logged; cleared on the next
     /// success so a fresh run of failures logs again exactly once.
     private var suppressedBalanceReadFailure = false
@@ -155,6 +156,9 @@ final class AppModel: ObservableObject {
     /// cmd-tab away and straight back shouldn't cost a chain read, so coalesce anything closer
     /// together than this. Mirrors `sessionUserActivityPersistenceMinInterval`'s rate-limiting.
     private static let backgroundBalanceReadMinInterval: TimeInterval = 5
+    /// Long enough that re-focusing the app repeatedly does not re-read, short
+    /// enough that the pill is not obviously stale when you come back to it.
+    private static let gasIndicatorMinRefreshInterval: TimeInterval = 20
     private static let sessionUserActivityPersistenceMinInterval: TimeInterval = 15
     private static let relayerBalanceRetryDelays: [UInt64] = [
         400_000_000,
@@ -558,6 +562,9 @@ final class AppModel: ObservableObject {
         // left, funded the account from a faucet or another wallet, and came back to check. With
         // no poll, this is the only trigger that catches money the app didn't move itself.
         Task { await refreshAccountBalanceQuietly(logContext: "balance-resume") }
+        // Same reasoning as the balance: coming back is when a stale gas number is
+        // most likely to be looked at, and about to be acted on.
+        Task { await refreshLiveGasPricesIfStale(now: now) }
     }
 
     func recordSessionUserActivity(now: Date = Date()) {
@@ -781,6 +788,9 @@ final class AppModel: ObservableObject {
         liveGasPrice = nil
         liveBaseFeeWei = nil
         liveGasUpdatedAt = nil
+        // The new chain's first reading must not be suppressed as "refreshed just
+        // now" by the old chain's timestamp.
+        lastGasIndicatorReadAt = nil
         localRelayerStatus = nil
         localRelayerMessage = walletNodeClient == nil
             ? "Local wallet-node daemon will restart with the selected network."
@@ -3333,12 +3343,34 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Long-lived poll driving the chat gas indicator. Cancelled with its Task.
-    func runGasPriceUpdates() async {
-        while !Task.isCancelled {
-            await refreshLiveGasPrices()
-            try? await Task.sleep(nanoseconds: 30_000_000_000)
-        }
+    /// An explicit request — tapping the pill — always reads, and stamps the gate so
+    /// a follow-on trigger does not immediately read again.
+    func refreshLiveGasPricesNow(now: Date = Date()) async {
+        lastGasIndicatorReadAt = now
+        await refreshLiveGasPrices()
+    }
+
+    /// Refreshes the chat gas indicator, unless it was refreshed moments ago.
+    ///
+    /// This used to be a 30-second poll that ran for the life of the app. It fed
+    /// nothing but the header pill and its popover — the fees an operation is
+    /// actually signed with come from `suggestedUserOperationFees`, which fetches
+    /// its own price when the operation is built. Meanwhile every tick went through
+    /// `withWalletNodeClient`, which relaunches the daemon on socket loss, so a
+    /// decorative number was able to resurrect a dead daemon and unlock the relayer
+    /// key on a fixed schedule with nothing on screen to explain it.
+    ///
+    /// Now it runs on the things that precede looking at or acting on gas: opening
+    /// the popover, returning to the app, and once after launch. The gate keeps a
+    /// burst of those from becoming a burst of chain reads.
+    func refreshLiveGasPricesIfStale(now: Date = Date()) async {
+        guard GasIndicatorRefreshGate.allowed(
+            now: now,
+            lastReadAt: lastGasIndicatorReadAt,
+            minInterval: Self.gasIndicatorMinRefreshInterval
+        ) else { return }
+        lastGasIndicatorReadAt = now
+        await refreshLiveGasPrices()
     }
 
     private func appendDraftLogSummary(_ draft: UserOperationDraft, context: String) {
@@ -3443,6 +3475,16 @@ enum WalletIdleGate {
 
 /// Coalescing floor for the event-driven balance reads. Pure so the boundary is testable without
 /// an `AppModel`; `nil` means nothing has been read yet, which always allows.
+/// Coalescing floor for the gas indicator. Same shape as the balance gate, kept
+/// separate because the two are refreshed by different triggers and would
+/// otherwise suppress each other.
+enum GasIndicatorRefreshGate {
+    static func allowed(now: Date, lastReadAt: Date?, minInterval: TimeInterval) -> Bool {
+        guard let lastReadAt else { return true }
+        return now.timeIntervalSince(lastReadAt) >= minInterval
+    }
+}
+
 enum BackgroundBalanceReadGate {
     static func allowed(now: Date, lastReadAt: Date?, minInterval: TimeInterval) -> Bool {
         guard let lastReadAt else { return true }

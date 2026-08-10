@@ -5,36 +5,39 @@ import Testing
 
 /// The reuse window only ever meant something if the context carrying it outlives
 /// the call. These pin that, and pin which paths are allowed to use it at all.
+///
+/// Each test builds its own pool rather than touching
+/// `BiometricAuthenticationContexts.shared`. Tests in a suite run concurrently,
+/// and a sibling's `invalidateAll()` would invalidate a context this one is
+/// still asserting on — an invalidated `LAContext` reports a reuse duration of
+/// 0, so the shared pool made these tests fail on timing alone.
 struct BiometricAuthenticationContextsTests {
     @Test func aDomainGetsTheSameContextBackSoTheReuseWindowApplies() {
-        let pool = BiometricAuthenticationContexts.shared
+        let pool = BiometricAuthenticationContexts()
         let first = pool.context(for: .relayerLaunch, reason: "Unlock the local relayer key")
         let second = pool.context(for: .relayerLaunch, reason: "Unlock the local relayer key")
         #expect(first === second)
         #expect(first.touchIDAuthenticationAllowableReuseDuration
             == BiometricAuthenticationContexts.maximumReuseDuration)
-        pool.invalidateAll()
     }
 
     /// One unlock must not authorise the other: the relayer secret and the RAILGUN
     /// entropy are different key material with different access controls.
     @Test func domainsDoNotShareAnAuthorisation() {
-        let pool = BiometricAuthenticationContexts.shared
+        let pool = BiometricAuthenticationContexts()
         let relayer = pool.context(for: .relayerLaunch, reason: "a")
         let railgun = pool.context(for: .railgun, reason: "b")
         #expect(relayer !== railgun)
-        pool.invalidateAll()
     }
 
     /// Deleting or resetting key material must drop the window, or the next read
     /// of whatever replaces it would be waved through.
     @Test func invalidatingADomainForcesAFreshContext() {
-        let pool = BiometricAuthenticationContexts.shared
+        let pool = BiometricAuthenticationContexts()
         let before = pool.context(for: .relayerLaunch, reason: "a")
         pool.invalidate(.relayerLaunch)
         let after = pool.context(for: .relayerLaunch, reason: "a")
         #expect(before !== after)
-        pool.invalidateAll()
     }
 
     /// The security boundary, asserted rather than assumed: there is no signing

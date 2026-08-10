@@ -6,7 +6,7 @@ import Testing
     let toml = WalletNodeDaemon.daemonConfigTOML(chain: .ethereumSepolia)
 
     #expect(toml.contains(#"chain_id = 11155111"#))
-    #expect(toml.contains(#"execution_rpc = "https://sepolia.drpc.org""#))
+    #expect(toml.contains(#"execution_rpc = "https://ethereum-sepolia-rpc.publicnode.com""#))
     #expect(toml.contains(#"consensus_rpc = "http://unstable.sepolia.beacon-api.nimbus.team""#))
     #expect(toml.contains(#"read_verification = "helios""#))
     #expect(toml.contains(#"max_fee_per_gas = "0xba43b7400""#))

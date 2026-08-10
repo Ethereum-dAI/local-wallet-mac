@@ -47,8 +47,13 @@ struct DemoNetworkSettings: Equatable {
         autoGasTier: .standard
     )
 
+    /// Anyone still pointing at a superseded default is moved to the current
+    /// one on the next launch; a URL the user typed themselves is left alone.
+    /// dRPC is here because it began answering `eth_chainId` with HTTP 400
+    /// ("chain is not available on free plan"), which stops the daemon booting
+    /// at all — an install left on it is bricked until this migration runs.
     static let previousDefaultSepoliaRPCURLs = [
-        "https://ethereum-sepolia-rpc.publicnode.com",
+        "https://sepolia.drpc.org",
     ]
     static let previousDefaultMainnetConsensusRPCURLs = [
         "https://lodestar-mainnet.chainsafe.io",

@@ -1,10 +1,16 @@
 name: macOS
 
-# Expensive Swift/macOS suite. macOS runners cost ~10x Linux minutes and the
-# LLM-linked packages pull llama.cpp from Homebrew, so this does NOT run on
-# every push/PR (the cheap ubuntu Rust jobs in ci.yml cover those). It runs on
-# published releases, version tags, and on-demand via the Actions "Run workflow"
-# button.
+# Expensive Swift/macOS suite. macOS runners cost ~10x Linux minutes, so this
+# does NOT run on every push/PR (the cheap ubuntu Rust jobs in ci.yml cover
+# those). It runs on published releases, version tags, and on-demand via the
+# Actions "Run workflow" button.
+#
+# llama.cpp is NOT installed from Homebrew here. It is pinned by
+# local-llm/LLAMA_CPP_PIN and provisioned by scripts/provision-llama.sh, so this
+# job builds against the same bytes as every contributor. Because the full suite
+# is release-gated, note that a pin problem is not caught per-PR -- run this
+# workflow manually via workflow_dispatch when changing the pin or the vendored
+# llama.cpp headers.
 on:
   release:
     types: [published]
@@ -33,8 +39,32 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      - name: Install build tools (cbindgen, xcodegen, llama.cpp+ggml)
-        run: brew install cbindgen xcodegen llama.cpp
+      - name: Install build tools (cbindgen, xcodegen)
+        # llama.cpp/ggml deliberately absent: they come from the pin, not brew.
+        # Homebrew cannot install a specific llama.cpp version at all, which is
+        # what made an unpinned `brew install llama.cpp` here a build-breaker.
+        run: brew install cbindgen xcodegen
+
+      - name: Cache the pinned llama.cpp download
+        uses: actions/cache@v4
+        with:
+          # Only the downloaded asset is cached, not the assembled prefix: the
+          # prefix is cheap to rebuild and staging it fresh keeps the integrity
+          # and closure checks running on every job.
+          path: .llama/cache
+          key: llama-cpp-${{ hashFiles('local-llm/LLAMA_CPP_PIN') }}
+
+      - name: Provision pinned llama.cpp
+        # build-ffi.sh provisions too, and this is idempotent, so the call below
+        # is a no-op. Doing it as its own step means a bad pin, a failed
+        # checksum, a header/pin commit mismatch or an incomplete backend
+        # closure reports here rather than being buried in the Rust build.
+        run: |
+          ./scripts/provision-llama.sh
+          echo "--- staged prefix ---"
+          ls -la .llama/current/lib
+          echo "--- libllama dependencies ---"
+          otool -L .llama/current/lib/libllama.dylib
 
       - name: Build wallet-ffi + stage bridge lib/headers
         run: ./scripts/build-ffi.sh

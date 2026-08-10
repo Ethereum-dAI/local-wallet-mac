@@ -36,6 +36,23 @@ use state::{DaemonState, TransportInfo};
 use transport::handler::Handler;
 use wallet_chain::{ChainConfig, ChainError, ExecutionRpcChainAdapter, HeliosChainAdapter};
 
+/// Report a fatal startup failure and exit.
+///
+/// Prints to stderr as before, and — when the parent gave us a ready fd —
+/// sends the same reason down it before exiting, so the app can say what went
+/// wrong instead of only that the pipe closed. Use this for every failure that
+/// returns before the `ReadyEvent` is written; afterwards the fd is spent.
+macro_rules! fail_before_ready {
+    ($cli:expr, $($arg:tt)*) => {{
+        let reason = format!($($arg)*);
+        eprintln!("{reason}");
+        if let Some(fd) = $cli.ready_fd {
+            let _ = ready::write_failure_to_fd(&reason, fd as RawFd);
+        }
+        return ExitCode::FAILURE;
+    }};
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -56,8 +73,7 @@ async fn main() -> ExitCode {
     }
 
     if let Err(err) = cli.validate() {
-        eprintln!("{err}");
-        return ExitCode::FAILURE;
+        fail_before_ready!(cli, "{err}");
     }
 
     let http_addr = match cli.http.as_deref() {
@@ -65,13 +81,11 @@ async fn main() -> ExitCode {
             let addr: SocketAddr = match addr.parse() {
                 Ok(addr) => addr,
                 Err(err) => {
-                    eprintln!("failed to parse --http address: {err}");
-                    return ExitCode::FAILURE;
+                    fail_before_ready!(cli, "failed to parse --http address: {err}");
                 }
             };
             if let Err(err) = transport::http::validate_bind_address(addr, cli.allow_public) {
-                eprintln!("{err}");
-                return ExitCode::FAILURE;
+                fail_before_ready!(cli, "{err}");
             }
             Some(addr)
         }
@@ -81,16 +95,14 @@ async fn main() -> ExitCode {
     let paths = match paths::Paths::resolve(cli.config.clone()) {
         Ok(paths) => paths,
         Err(err) => {
-            eprintln!("failed to resolve wallet-node paths: {err}");
-            return ExitCode::FAILURE;
+            fail_before_ready!(cli, "failed to resolve wallet-node paths: {err}");
         }
     };
 
     let _logging_guard = match logging::init(cli.debug, Some(&paths.logs_dir)) {
         Ok(guard) => guard,
         Err(err) => {
-            eprintln!("failed to initialize wallet-node logging: {err}");
-            return ExitCode::FAILURE;
+            fail_before_ready!(cli, "failed to initialize wallet-node logging: {err}");
         }
     };
     if let Some(manifest_url) = cli.manifest_url.as_deref() {
@@ -103,21 +115,18 @@ async fn main() -> ExitCode {
     let config = match config::Config::load(&paths.config_path) {
         Ok(config) => Arc::new(config),
         Err(err) => {
-            eprintln!("failed to load wallet-node config: {err}");
-            return ExitCode::FAILURE;
+            fail_before_ready!(cli, "failed to load wallet-node config: {err}");
         }
     };
 
     let mut conn = match wallet_node_store::db::open(&paths.db_path) {
         Ok(conn) => conn,
         Err(err) => {
-            eprintln!("failed to open wallet-node store: {err}");
-            return ExitCode::FAILURE;
+            fail_before_ready!(cli, "failed to open wallet-node store: {err}");
         }
     };
     if let Err(err) = wallet_node_store::migrations::apply(&mut conn) {
-        eprintln!("failed to migrate wallet-node store: {err}");
-        return ExitCode::FAILURE;
+        fail_before_ready!(cli, "failed to migrate wallet-node store: {err}");
     }
     let store = wallet_node_store::StoreActor::start(conn);
     let bundler_key_store = Arc::new(InMemoryBundlerKeyStore::new());
@@ -125,19 +134,18 @@ async fn main() -> ExitCode {
         Some(fd) => match load_secrets_from_fd(fd, &bundler_key_store) {
             Ok(keys) => keys,
             Err(err) => {
-                eprintln!("failed to load bundler secrets from fd {fd}: {err}");
-                return ExitCode::FAILURE;
+                fail_before_ready!(cli, "failed to load bundler secrets from fd {fd}: {err}");
             }
         },
         None => Vec::new(),
     };
     for key in &installed_bundler_keys {
         if let Err(err) = ensure_bundler_account_for_installed_key(&store, key).await {
-            eprintln!(
+            fail_before_ready!(
+                cli,
                 "failed to register supplied bundler key {}: {err}",
                 key.key_ref
             );
-            return ExitCode::FAILURE;
         }
     }
 
@@ -163,7 +171,7 @@ async fn main() -> ExitCode {
                 }
                 Err(err) => {
                     tracing::error!(error = %err, "failed to start helios chain adapter");
-                    return ExitCode::FAILURE;
+                    fail_before_ready!(cli, "failed to start helios chain adapter: {err}");
                 }
             }
         }
@@ -183,7 +191,12 @@ async fn main() -> ExitCode {
                     expected_chain_id = config.chain_id_for_helios(),
                     "execution RPC chain id validation failed"
                 );
-                return ExitCode::FAILURE;
+                fail_before_ready!(
+                    cli,
+                    "execution RPC {} rejected chain id {}: {err}",
+                    config.execution_rpc_for_helios(),
+                    config.chain_id_for_helios()
+                );
             }
             Arc::new(adapter)
         }
@@ -279,8 +292,7 @@ async fn main() -> ExitCode {
             shutdown_tx.clone(),
             shutdown_rx.clone(),
         ) {
-            eprintln!("failed to install alive pipe watcher: {err}");
-            return ExitCode::FAILURE;
+            fail_before_ready!(cli, "failed to install alive pipe watcher: {err}");
         }
         let _ppid_backstop =
             lifecycle::install_ppid_backstop(shutdown_tx.clone(), Duration::from_secs(5));

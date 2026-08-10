@@ -20,16 +20,18 @@ Install these before opening the app in Xcode:
 - 16 GB RAM minimum for the local Gemma 4 E4B model setup.
 - Xcode 16 or newer, with Command Line Tools installed. Use the latest stable Xcode when possible; the app target is built with Swift 6.
 - An Apple Development team selected in Xcode for local app signing.
-- Homebrew.
+- Homebrew, for `cbindgen` and `xcodegen`. (Not for llama.cpp — see below.)
 - Rust 1.91 or newer, preferably installed with `rustup`. Latest stable Rust is recommended.
 - `cbindgen`; current known-good local version is 0.29.2.
 - Access to the `local-wallet-mac` GitHub repository.
 
 ```bash
 xcode-select --install
-brew install cbindgen xcodegen llama.cpp
+brew install cbindgen xcodegen
 rustup target add aarch64-apple-darwin
 ```
+
+Do **not** `brew install llama.cpp`. It is pinned and downloaded by the repo — see [llama.cpp is pinned, not installed](#llamacpp-is-pinned-not-installed) below.
 
 If `rustup` is not installed yet, install it from `https://rustup.rs/`, open a new shell, and rerun the `rustup target add` command.
 
@@ -61,13 +63,34 @@ stable-aarch64-apple-darwin
 cbindgen 0.29.2
 ```
 
-`llama.cpp` provides the local inference libraries used by the app. If Homebrew does not install `ggml` as a dependency on your machine, install or reinstall it with:
+### llama.cpp is pinned, not installed
 
-```bash
-brew install ggml
+`llama.cpp` provides the local inference libraries the app links (`libllama`, `libllama-common`, `libggml`, `libggml-base`) plus the ggml compute backends. **You do not install it.** `scripts/provision-llama.sh` downloads the exact pinned upstream release asset (~11 MB), verifies it against a committed sha256, and assembles a repo-local prefix at `.llama/current`. `scripts/build-ffi.sh` calls it for you, so the normal build sequence already does the right thing and repeat builds are a no-op.
+
+The version is recorded in [`local-llm/LLAMA_CPP_PIN`](local-llm/LLAMA_CPP_PIN), which also documents how to bump it.
+
+This exists because Homebrew **cannot** install a specific `llama.cpp` version: there is no versioned formula, the core tap is API-only so there is no local formula history to check out, `brew pin` only freezes whatever you already have, and `ggml` is a separate formula that has to move in lockstep. An unpinned `brew install llama.cpp` therefore gave you "whatever was current the day you ran it", and two contributors cloning the same commit weeks apart got different ABIs. The symptom was a compile error in `CLlamaBridge.cpp` on an unmodified tree, such as:
+
+```text
+error: no member named 'use_mmap' in 'llama_model_params'
+error: no matching function for call to 'llama_sampler_init_penalties'
 ```
 
-The packaged v0.1 alpha app is built for macOS 15+. For release packaging, do not assume the Homebrew `llama.cpp`/`ggml` bottles on your current machine are macOS 15-compatible; use `LOCAL_LLAMA_PREFIX` with dylibs compiled for `CMAKE_OSX_DEPLOYMENT_TARGET=15.0` as described in `scripts/README.md`.
+Nothing `brew upgrade` does can move the build off the pin now. Homebrew is still used for `cbindgen` and `xcodegen`, which are code generators rather than linked libraries — a version drift there regenerates a file instead of corrupting an ABI.
+
+`.llama/` is gitignored. To force a clean re-provision:
+
+```bash
+rm -rf .llama && ./scripts/provision-llama.sh
+```
+
+There is no implicit fallback to Homebrew: an unprovisioned tree fails fast with `'llama.h' file not found` rather than silently building against whatever version happens to be installed. If you deliberately want to build against a different llama.cpp — a hand-built prefix, or Homebrew's — set `LOCAL_LLAMA_PREFIX` to its root. That overrides the pin and skips provisioning entirely, and you then own keeping its headers and dylibs consistent with each other:
+
+```bash
+LOCAL_LLAMA_PREFIX=/opt/homebrew ./scripts/build-ffi.sh   # off-pin, unsupported
+```
+
+The packaged v0.1 alpha app is built for macOS 15+. The pinned release dylibs are built `minos 13.3`, so they satisfy that floor on any host and release packaging no longer needs a hand-built prefix to get past the deployment-target gate in `scripts/package-macos-demo.sh`.
 
 ## Clone The Local Monorepo
 
@@ -237,16 +260,21 @@ Open and run `LocalWallet.xcodeproj` in Xcode. The GUI app needs a signed macOS 
 
 ### llama.cpp or ggml linker errors
 
-For local Xcode development, install or reinstall the Homebrew libraries:
+Do **not** reach for `brew install llama.cpp` — that is what these errors used to mean, but llama.cpp is now pinned and Homebrew is not involved. Re-provision the pinned prefix instead:
 
 ```bash
-brew install llama.cpp ggml
-brew reinstall llama.cpp
+rm -rf .llama && ./scripts/provision-llama.sh
+cd local-llm && swift test    # 21 tests; exercises real inference
 ```
 
-Then rebuild the FFI bridge and app.
+Read the error before assuming it is the prefix, though:
 
-For release packaging, verify the embedded `llama.cpp`/`ggml` dylibs are built for macOS 15.0 or older. Recent Homebrew bottles can be built with a newer deployment target on newer macOS versions; in that case, build a local macOS 15-compatible prefix and pass it with `LOCAL_LLAMA_PREFIX`.
+- **`no member named …` / `no matching function for call to …` in `CLlamaBridge.cpp`** — an API mismatch between the vendored headers and the code. If you just bumped `LLAMA_CPP_PIN`, this is expected upstream churn and the bridge needs updating for the new API. If you did **not** touch the pin, check that `LOCAL_LLAMA_PREFIX` is not set in your environment or Xcode scheme, which would silently take you off-pin.
+- **`ld: library not found for -lllama`** — the prefix was never assembled. Run `./scripts/build-ffi.sh` (or `provision-llama.sh` directly).
+- **`Failed to load llama.cpp model` at runtime, with the build succeeding** — no ggml compute backend registered. `provision-llama.sh` verifies the backend closure, so this should be impossible on-pin; it is the signature of an off-pin Homebrew prefix, whose backends are `dlopen`'d plugins under `libexec/` that nothing copies or links.
+- **`headers are vendored from a different commit than the pin`** — `LLAMA_CPP_PIN` and the vendored headers disagree. Re-vendor both header sets from the pinned commit; the procedure is in `local-llm/third_party/llama_cpp_api/COMMIT`.
+
+For release packaging, the pinned dylibs are `minos 13.3` and carry no external dependencies, so they clear the deployment-target and external-dependency gates in `scripts/package-macos-demo.sh` without a hand-built prefix.
 
 ### Xcode project is out of date
 

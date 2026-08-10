@@ -37,9 +37,15 @@ Additional requirements for local development:
 
 - Xcode 16 or newer with Command Line Tools installed.
 - An Apple Development team selected in Xcode for local app signing.
-- Homebrew.
+- Homebrew, for `cbindgen` and `xcodegen`.
 - Rust via `rustup`, with the `aarch64-apple-darwin` target installed.
-- `cbindgen`, `xcodegen`, `llama.cpp`, and `ggml`.
+
+llama.cpp and ggml are **not** prerequisites you install. They are version-pinned in
+[`local-llm/LLAMA_CPP_PIN`](local-llm/LLAMA_CPP_PIN) and downloaded into a repo-local prefix by
+`scripts/provision-llama.sh`, which `scripts/build-ffi.sh` runs for you. Homebrew cannot install a
+specific llama.cpp version, so an unpinned `brew install llama.cpp` meant contributors silently got
+different ABIs and the C++ bridge failed to compile on an untouched tree. See
+[Pinned llama.cpp](#pinned-llamacpp).
 
 ## Repository Map
 
@@ -68,7 +74,9 @@ cd local-wallet-mac
 ./scripts/build-ffi.sh
 ```
 
-This compiles `wallet-ffi` for `aarch64-apple-darwin`, runs `cbindgen`, and stages the header and `.a` into `swift-bridge/`. The outputs are not committed to git.
+This provisions the pinned llama.cpp prefix, compiles `wallet-ffi` for `aarch64-apple-darwin`, runs `cbindgen`, and stages the header and `.a` into `swift-bridge/`. The outputs are not committed to git.
+
+On a fresh clone the first run downloads ~11 MB of pinned llama.cpp libraries; later runs are a no-op.
 
 **Step 2: Build the daemon**
 
@@ -81,6 +89,28 @@ cd local-wallet-daemon && cargo build -p wallet-node --release
 Open `LocalWallet.xcodeproj` in Xcode, select the `LocalWalletApp` scheme, choose your Apple development team, and build and run.
 
 For a full fresh-clone walkthrough, see [LOCAL_MONOREPO_SETUP.md](LOCAL_MONOREPO_SETUP.md).
+
+## Pinned llama.cpp
+
+The on-device LLM links llama.cpp and ggml, and `CLlamaBridge.cpp` compiles against llama.cpp's C++
+headers. Both sides are pinned to a single upstream release in
+[`local-llm/LLAMA_CPP_PIN`](local-llm/LLAMA_CPP_PIN):
+
+| | |
+|---|---|
+| **Dylibs** | `scripts/provision-llama.sh` downloads the pinned upstream release asset (~11 MB), verifies a committed sha256, and stages `.llama/current/lib`. Called automatically by `build-ffi.sh`; idempotent. |
+| **Headers** | Vendored in-repo at `local-llm/third_party/llama_cpp_api/` and `local-llm/Sources/CLlamaBridge/third_party/llama_cpp_common/`, from the same upstream commit. |
+| **Coherence** | Provisioning fails closed if the pin and the vendored headers name different commits, if the checksum does not match, if the ggml backend closure is incomplete, or if a dylib exceeds the macOS deployment floor. |
+
+Homebrew is not involved, because Homebrew *cannot* pin llama.cpp: there is no versioned formula, the
+core tap is API-only, `brew pin` only freezes what is already installed, and `ggml` is a separate
+formula that must move in lockstep. An unpinned `brew install llama.cpp` gave whichever version was
+current that day, so contributors on the same commit got different ABIs and the bridge failed to
+compile on an untouched tree. Nothing `brew upgrade` does can affect the build now.
+
+To bump the pin, or to build against a different llama.cpp via `LOCAL_LLAMA_PREFIX`, see
+[`local-llm/LLAMA_CPP_PIN`](local-llm/LLAMA_CPP_PIN) and
+[LOCAL_MONOREPO_SETUP.md](LOCAL_MONOREPO_SETUP.md#llamacpp-is-pinned-not-installed).
 
 ## Architecture
 
@@ -141,7 +171,7 @@ LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..." ./scripts/package-macos-demo.sh
 
 The package script builds and embeds `wallet-node`, copies the llama.cpp/ggml dynamic libraries into the app bundle, verifies embedded Mach-O deployment targets, signs the copied app, and checks that the final signature has the application identifier entitlement required by Secure Enclave. For testers outside your own Macs, use the Developer ID notarization path documented in `scripts/README.md` (`LOCAL_WALLET_NOTARIZE=1` plus a Developer ID Application identity and notarytool credentials); otherwise Gatekeeper may block the zip. Removing quarantine from a trusted copy is less destructive than ad-hoc re-signing; ad-hoc re-signing breaks the entitlement identity needed for wallet creation.
 
-The v0.1 alpha zip targets macOS 15+ on Apple Silicon and does not embed the recommended GGUF model by default; onboarding downloads/installs it during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` only when you explicitly want a large self-contained demo build. If your installed Homebrew llama.cpp/ggml dylibs target a newer macOS, build a local macOS 15-compatible prefix and pass it with `LOCAL_LLAMA_PREFIX`.
+The v0.1 alpha zip targets macOS 15+ on Apple Silicon and does not embed the recommended GGUF model by default; onboarding downloads/installs it during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` only when you explicitly want a large self-contained demo build. The pinned llama.cpp dylibs are built `minos 13.3` and have no external dependencies, so they clear the deployment-target and external-dependency gates without a hand-built prefix — packaging embeds them, and the ggml compute backends they link, straight from `.llama/current`.
 
 ## Privacy (RAILGUN) — experimental, testnet only
 

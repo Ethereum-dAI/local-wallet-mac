@@ -4,12 +4,60 @@ Swift package providing a local LLM inference bridge for the Local Wallet macOS 
 
 ## llama.cpp linkage
 
-`libllama`, `libggml`, `libggml-base`, and `libllama-common` are resolved from `LOCAL_LLAMA_PREFIX`, `LOCAL_LLAMA_INCLUDE_DIR`, or `LOCAL_LLAMA_LIB_DIR` when set, falling back to Homebrew (`/opt/homebrew`). The `common/` C++ headers we need (`common_chat_parse`, `common_chat_templates_init`, `common_chat_templates_apply`, the modular jinja renderer) are vendored under `Sources/CLlamaBridge/third_party/llama_cpp_common/` (**headers only** — the implementations live in `libllama-common.dylib`). Both the linked llama.cpp artifacts and the vendored headers must originate from the **same upstream commit**, recorded here:
+llama.cpp is **pinned**, not installed. [`LLAMA_CPP_PIN`](LLAMA_CPP_PIN) is the single source of truth; `../scripts/provision-llama.sh` assembles the prefix and `../scripts/build-ffi.sh` calls it, so a fresh clone needs no llama.cpp setup. Homebrew cannot install a specific llama.cpp version, which is why it is no longer on this path — see the pin file for the full reasoning.
 
-- llama.cpp pinned commit: `3e12fbdea5c1ac4225c7dcf79506d30950283fc3` (Homebrew bottle b9200)
-- Vendored from: `https://github.com/ggml-org/llama.cpp/tree/3e12fbdea5c1ac4225c7dcf79506d30950283fc3/common`
+Current pin:
 
-When Homebrew or the release build prefix bumps `llama.cpp`, re-vendor the `common/` headers from the matching commit and run `swift test` to catch ABI drift early (see `Sources/CLlamaBridge/third_party/llama_cpp_common/COMMIT` for the step-by-step procedure). For release packaging, prefer a local llama.cpp/ggml prefix compiled with `CMAKE_OSX_DEPLOYMENT_TARGET=15.0` and `CMAKE_OSX_ARCHITECTURES=arm64`.
+- llama.cpp release: **b10330**
+- Upstream commit: `687e7789271ec1276e3470f158428e11a4f80b6f`
+- Vendored from: `https://github.com/ggml-org/llama.cpp/tree/687e7789271ec1276e3470f158428e11a4f80b6f`
+
+`Package.swift` resolves `libllama`, `libllama-common`, `libggml`, and `libggml-base` from `LOCAL_LLAMA_PREFIX` / `LOCAL_LLAMA_INCLUDE_DIR` / `LOCAL_LLAMA_LIB_DIR` when set, and otherwise from the pinned prefix at `<repo>/.llama/current`. It also passes `-rpath` for the resolved lib dir, which the pinned dylibs need because they use `@rpath` install names.
+
+There is deliberately **no implicit Homebrew fallback**. The `common/` headers below are on the include path unconditionally, so silently linking a Homebrew `libllama-common` would pair them with a different build of their own implementations — and since the mangled C++ symbol names do not change between versions, that is silent runtime corruption rather than a link error. An unprovisioned tree fails fast with `'llama.h' file not found`. To build against Homebrew anyway, say so explicitly:
+
+```bash
+LOCAL_LLAMA_PREFIX=/opt/homebrew swift build   # off-pin, unsupported
+```
+
+Two header sets are vendored, both **headers only** — the implementations live in the staged dylibs — and both must come from the pinned commit above:
+
+| Directory | Contents | Reaches the compiler via |
+|---|---|---|
+| `Sources/CLlamaBridge/third_party/llama_cpp_common/` | llama.cpp `common/`: `common_chat_parse`, `common_chat_templates_init`, `common_chat_templates_apply`, the modular jinja renderer, bundled nlohmann | `.headerSearchPath(...)` in `Package.swift` — `CLlamaBridge.cpp` includes these directly |
+| `third_party/llama_cpp_api/` | llama.cpp + ggml public headers (`llama.h`, `ggml*.h`, `gguf.h`) | copied into `.llama/current/include` by `provision-llama.sh`, then `-I<prefix>/include` |
+
+The public headers are vendored because the upstream binary release asset ships **no headers at all**, and the only downloadable alternative is GitHub's auto-generated source archive — 36 MB against the binary's 11 MB, and with no byte-stability guarantee to pin a checksum against. Each directory's `COMMIT` file carries the full rationale and the re-vendor procedure.
+
+`provision-llama.sh` refuses to run if the pin and either vendored `COMMIT` name different commits. That matters because the mangled C++ symbol names do not change across these version bumps, so a header/dylib mismatch is **not** a link error — it is silent runtime corruption. After any bump, run the suite (21 tests, real Gemma inference) to catch drift.
+
+## Running the tests
+
+```bash
+swift test
+```
+
+21 tests, of which the model-backed ones self-skip when the GGUF is absent (which is how this suite stays green on CI runners with no model).
+
+**All model-backed tests share one `LlamaRuntime`**, defined in `Tests/LocalLLMTests/SharedTestRuntime.swift` and reached via `sharedLoadedRuntime()`. Do not construct a `LlamaRuntime` in a test, and never call `unload()` on the shared one.
+
+That matters because each test file used to build its own runtime, so a single `swift test` loaded the 4.59 GB model up to nine times. Those loads do not share their weights, so peak memory hit ~54 GB on a 36 GB host and the suite failed non-deterministically under swift-testing's default parallelism — `llama_decode` running out of memory mid-generation, taking a different test down each run:
+
+```text
+Caught error: .generationFailed("Failed while generating response.")
+Expectation failed: (result.produced → -4) > 0
+```
+
+Measured on a 36 GB M-series host:
+
+| | Result | Peak resident |
+|---|---|---|
+| one runtime per test file (before) | 1/3 runs passed | 53.74 GB |
+| shared runtime (now) | 5/5 runs passed | 4.56 GB |
+
+Sharing is safe under concurrent tests: every bridge entry point that mutates llama state takes the runtime's `std::mutex`, and both generate paths call `llama_memory_clear()` first, so each call starts from a clean KV cache. `lllm_chat_render` and `lllm_parse_assistant_turn` do not lock but only read the model and its chat template.
+
+If you ever see those two errors again, suspect that a new test built its own runtime — and note that they are **not** llama.cpp ABI drift, which is deterministic and fails at model load rather than mid-decode. Remaining work, including decoupling `llama_model` from `llama_context` in the bridge so the app can hold multiple sessions without reloading weights, is tracked in [#80](https://github.com/Ethereum-dAI/local-wallet-mac/issues/80).
 
 ## Minja / template-render spike (2026-05-18)
 

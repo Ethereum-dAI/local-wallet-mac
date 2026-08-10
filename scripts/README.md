@@ -6,9 +6,27 @@ Run scripts from the repository root unless the script says otherwise.
 
 ## Scripts
 
+### `provision-llama.sh`
+
+Assembles the pinned llama.cpp prefix declared in `local-llm/LLAMA_CPP_PIN`. Downloads the pinned upstream release asset (~11 MB), verifies it against the committed sha256, stages the dylibs into `.llama/<release>/lib`, stages the vendored public headers into `.llama/<release>/include`, and links `.llama/current`.
+
+```bash
+./scripts/provision-llama.sh
+```
+
+You rarely call this directly — `build-ffi.sh` calls it, and it is idempotent, so a prefix that already matches the pin is a no-op. Call it directly to re-provision after editing the pin:
+
+```bash
+rm -rf .llama && ./scripts/provision-llama.sh
+```
+
+It fails closed, before staging anything, when the pin and either vendored header set name different upstream commits; when the download's sha256 does not match; when `LLAMA_CPP_ASSET` does not correspond to `LLAMA_CPP_RELEASE`; when a staged dylib's `@rpath` closure is incomplete or reaches outside the prefix and the OS; or when a dylib's `minos` exceeds `LOCAL_WALLET_DEPLOYMENT_TARGET` (default 15.0).
+
+Setting `LOCAL_LLAMA_PREFIX` skips provisioning entirely, matching `local-llm/Package.swift`'s resolution order. `.llama/` is gitignored; the downloaded asset is cached under `.llama/cache` so re-provisioning needs no network.
+
 ### `build-ffi.sh`
 
-Builds the Rust FFI bridge for Apple Silicon macOS, generates the C header with `cbindgen`, copies the `wallet-node-api` version header, and stages the static library for Swift. The default deployment target is macOS 15.0.
+Provisions the pinned llama.cpp prefix (see above), builds the Rust FFI bridge for Apple Silicon macOS, generates the C header with `cbindgen`, copies the `wallet-node-api` version header, and stages the static library for Swift. The default deployment target is macOS 15.0.
 
 ```bash
 ./scripts/build-ffi.sh
@@ -53,7 +71,9 @@ LOCAL_WALLET_SEPOLIA_BUNDLER_URL=https://your-bundler.example \
 
 By default the script builds `wallet-node` from the in-repo `local-wallet-daemon` directory, targets macOS 15.0, and does not embed the recommended model, so the v0.1 alpha zip stays smaller and onboarding installs the model during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` to embed the model, downloading it if it is not already present in `~/Library/Application Support/LocalWallet/Models/`. Override with `LOCAL_WALLET_ZIP_NAME`, `LOCAL_WALLET_DAEMON_REPO`, `LOCAL_WALLET_NODE_BIN`, `LOCAL_MODEL_PATH`, `LOCAL_LLAMA_PREFIX`, `LOCAL_LLAMA_LIB_DIR`, `LOCAL_WALLET_DEPLOYMENT_TARGET`, or `LOCAL_WALLET_MODEL_CACHE_DIR` as needed.
 
-For a macOS 15-compatible package, make sure any external llama.cpp/ggml dylibs were compiled with `CMAKE_OSX_DEPLOYMENT_TARGET=15.0` and `CMAKE_OSX_ARCHITECTURES=arm64`, then pass their install prefix:
+llama.cpp/ggml come from the pinned prefix at `.llama/current`, which `provision-llama.sh` assembles from the upstream release named in `local-llm/LLAMA_CPP_PIN`. Those dylibs are built `minos 13.3` and depend on nothing outside the prefix and the OS, so a **hand-built macOS 15 prefix is no longer needed** to get a packageable build. This used to be a required step, because Homebrew's bottles are built for whatever macOS the bottle targeted (`minos 26.0` on Tahoe) and tripped the deployment-target gate.
+
+If you do override with `LOCAL_LLAMA_PREFIX`, you own its compatibility — compile it with `CMAKE_OSX_DEPLOYMENT_TARGET=15.0` and `CMAKE_OSX_ARCHITECTURES=arm64`, and make sure its ggml ships the compute backends as ordinary linked dylibs under `lib/` (`-DGGML_BACKEND_DL=OFF`). A prefix whose backends are `dlopen`'d plugins under `libexec/` — which is how Homebrew builds ggml — produces an app that packages cleanly and then fails every model load at runtime, because nothing in the Mach-O dependency graph reveals the backends and none get embedded:
 
 ```bash
 LOCAL_LLAMA_PREFIX="$PWD/build/llama-macos15-prefix" \
@@ -61,7 +81,7 @@ LOCAL_WALLET_DEPLOYMENT_TARGET=15.0 \
 ./scripts/package-macos-demo.sh
 ```
 
-The package step verifies every embedded Mach-O in `Contents/MacOS`, `Contents/Frameworks`, and `Contents/Resources/bin` has `minos <= LOCAL_WALLET_DEPLOYMENT_TARGET`. It also verifies that the final app signature includes an application identifier entitlement; without that entitlement the Secure Enclave key creation path returns `errSecMissingEntitlement` and onboarding cannot create a wallet.
+The package step verifies every embedded Mach-O in `Contents/MacOS`, `Contents/Frameworks`, and `Contents/Resources/bin` has `minos <= LOCAL_WALLET_DEPLOYMENT_TARGET`. It also asserts that `libggml-base`, `libggml-cpu`, and `libggml-metal` actually landed in `Contents/Frameworks`, and that no embedded binary still references a llama/ggml/omp/ssl/crypto dylib outside the bundle. It also verifies that the final app signature includes an application identifier entitlement; without that entitlement the Secure Enclave key creation path returns `errSecMissingEntitlement` and onboarding cannot create a wallet.
 
 For external alpha distribution, sign with a Developer ID Application certificate and notarize the build:
 

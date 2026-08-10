@@ -1,0 +1,65 @@
+# Vendored llama.cpp + ggml PUBLIC headers — HEADERS ONLY
+# Upstream: https://github.com/ggml-org/llama.cpp
+# Pinned commit: 687e7789271ec1276e3470f158428e11a4f80b6f
+# Released upstream as llama.cpp b10330
+#
+# WHY THESE ARE VENDORED RATHER THAN DOWNLOADED
+#
+# scripts/provision-llama.sh fetches the prebuilt dylibs from the upstream
+# release asset `llama-b10330-bin-macos-arm64.tar.gz`. That asset ships
+# dylibs, CLI executables and LICENSE only — it contains ZERO headers.
+#
+# The headers exist only in the source tree, and the only downloadable form of
+# that is GitHub's auto-generated source archive, which is (a) 36 MB against
+# the binary asset's 11 MB and (b) NOT guaranteed byte-stable by GitHub, so a
+# committed sha256 for it can break with no upstream release having happened.
+#
+# Vendoring the 24 headers (~336 KB) keeps provisioning down to one immutable,
+# checksummed download, lets a fresh clone build offline, and turns the
+# "headers and dylibs must come from the same commit" rule into an invariant
+# that is checkable in-tree instead of a download-time coincidence.
+#
+# HOW THEY REACH THE COMPILER
+#
+# provision-llama.sh copies this directory into `.llama/b<release>/include/`,
+# alongside the `lib/` staged from the release tarball. local-llm/Package.swift
+# then passes `-I<prefix>/include`. Keeping the compile-time copy inside the
+# prefix means exactly one set of these headers is ever on the include path,
+# and it means an explicit `LOCAL_LLAMA_PREFIX` (release packaging, or a
+# hand-built llama.cpp) supplies its own matching headers rather than silently
+# combining someone else's dylibs with these.
+#
+# Distinct from Sources/CLlamaBridge/third_party/llama_cpp_common/, which
+# vendors the llama.cpp `common/` headers. Those are on the compiler's header
+# search path directly because CLlamaBridge.cpp includes them; these are the
+# public API headers that `common/` itself includes. BOTH must come from the
+# commit recorded above, and both must match the dylibs — the mangled C++
+# symbol names do not change across these bumps, so a mismatch fails as silent
+# runtime corruption rather than as a link error.
+#
+# Re-vendor procedure (when bumping the pin, e.g. to b10331):
+#
+#   # 1. Resolve the commit for the new release tag:
+#   gh api repos/ggml-org/llama.cpp/git/refs/tags/b10331 --jq '.object.sha'
+#
+#   # 2. Fetch and unpack the source archive for that tag:
+#   curl -fsSL -o /tmp/llama-src.tar.gz \
+#     https://github.com/ggml-org/llama.cpp/archive/refs/tags/b10331.tar.gz
+#   rm -rf /tmp/llama-src && mkdir /tmp/llama-src
+#   tar -xzf /tmp/llama-src.tar.gz -C /tmp/llama-src
+#   SRC=/tmp/llama-src/llama.cpp-b10331
+#
+#   # 3. Refresh these headers (DEST is the directory containing this file):
+#   DEST=local-llm/third_party/llama_cpp_api
+#   cp "$SRC"/include/*.h "$DEST/"
+#   cp "$SRC"/ggml/include/*.h "$DEST/"
+#
+#   # 4. Re-vendor common/ too, from the SAME tree — see
+#   #    Sources/CLlamaBridge/third_party/llama_cpp_common/COMMIT
+#
+#   # 5. Update the commit SHA above, in that COMMIT file, and in
+#   #    local-llm/LLAMA_CPP_PIN (LLAMA_CPP_COMMIT). provision-llama.sh
+#   #    fails closed if the pin and this file disagree.
+#
+#   # 6. rm -rf .llama && ./scripts/provision-llama.sh
+#   #    cd local-llm && swift test   — 21 tests, real inference; catches drift.

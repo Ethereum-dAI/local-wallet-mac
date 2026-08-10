@@ -2,9 +2,35 @@
 import Foundation
 import PackageDescription
 
-let llamaPrefix = ProcessInfo.processInfo.environment["LOCAL_LLAMA_PREFIX"] ?? "/opt/homebrew"
-let llamaIncludeDir = ProcessInfo.processInfo.environment["LOCAL_LLAMA_INCLUDE_DIR"] ?? "\(llamaPrefix)/include"
-let llamaLibDir = ProcessInfo.processInfo.environment["LOCAL_LLAMA_LIB_DIR"] ?? "\(llamaPrefix)/lib"
+// llama.cpp prefix resolution:
+//
+//   1. LOCAL_LLAMA_PREFIX     — explicit override (release packaging, a hand-built prefix, or a
+//                               deliberate `LOCAL_LLAMA_PREFIX=/opt/homebrew` brew opt-in)
+//   2. <repo>/.llama/current  — the pin from local-llm/LLAMA_CPP_PIN, assembled by
+//                               scripts/provision-llama.sh (the normal case; build-ffi.sh runs it)
+//
+// There is deliberately NO implicit Homebrew fallback. The llama.cpp common/ headers vendored
+// under Sources/CLlamaBridge/third_party/llama_cpp_common/ are on the include path
+// unconditionally, so quietly linking a Homebrew libllama-common would pair those headers with a
+// different build of their own implementations. Because the mangled C++ symbol names do not change
+// between llama.cpp versions, that mismatch does not fail to link — it corrupts at runtime. An
+// unprovisioned tree instead fails fast with 'llama.h' file not found, naming .llama/current in
+// the include path.
+//
+// The pinned prefix is found via #filePath rather than an environment variable on purpose:
+// SwiftPM evaluates this manifest in its own process and Xcode does not reliably forward
+// scheme environment variables to manifest evaluation, so an env-var-only default would
+// break the Xcode build. (#filePath resolves fine here; only *writes* are sandboxed.)
+let environment = ProcessInfo.processInfo.environment
+let repoRoot = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()  // local-llm/
+    .deletingLastPathComponent()  // repo root
+    .path
+let pinnedPrefix = "\(repoRoot)/.llama/current"
+
+let llamaPrefix = environment["LOCAL_LLAMA_PREFIX"] ?? pinnedPrefix
+let llamaIncludeDir = environment["LOCAL_LLAMA_INCLUDE_DIR"] ?? "\(llamaPrefix)/include"
+let llamaLibDir = environment["LOCAL_LLAMA_LIB_DIR"] ?? "\(llamaPrefix)/lib"
 
 let package = Package(
     name: "LocalLLM",
@@ -28,7 +54,13 @@ let package = Package(
                 .define("LLAMA_USE_CURL", to: "0"),
             ],
             linkerSettings: [
-                .unsafeFlags(["-L\(llamaLibDir)"]),
+                // The upstream llama.cpp release dylibs use @rpath install names (unlike
+                // Homebrew's, which bake absolute paths), so consumers must supply the
+                // runtime search path. Harmless for an explicit Homebrew prefix, whose
+                // absolute install names do not consult it.
+                // Note: -Wl,-rpath,... is rejected by SwiftPM's driver; pass it as
+                // separate -Xlinker arguments as below.
+                .unsafeFlags(["-L\(llamaLibDir)", "-Xlinker", "-rpath", "-Xlinker", llamaLibDir]),
                 .linkedLibrary("llama"),
                 .linkedLibrary("llama-common"),
                 .linkedLibrary("ggml"),

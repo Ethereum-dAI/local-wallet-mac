@@ -8,6 +8,14 @@ DEPLOYMENT_TARGET="${LOCAL_WALLET_DEPLOYMENT_TARGET:-15.0}"
 
 export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
 
+# The local-llm package links the pinned llama.cpp prefix, so provision it here:
+# this script is the mandatory step before any Swift build or test, which makes
+# it the one place that guarantees the prefix exists. Idempotent — a no-op once
+# the prefix matches local-llm/LLAMA_CPP_PIN, and skipped entirely when
+# LOCAL_LLAMA_PREFIX is set.
+echo "=== Provisioning pinned llama.cpp ==="
+"$REPO_ROOT/scripts/provision-llama.sh"
+
 echo "=== Building wallet-ffi (transitively materializes wallet-node-api) ==="
 cd "$RUST_DIR"
 cargo build -p wallet-ffi --release --target aarch64-apple-darwin

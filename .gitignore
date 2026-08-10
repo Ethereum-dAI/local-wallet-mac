@@ -51,6 +51,10 @@ DerivedData/
 # Local git worktrees created for parallel branch work
 .worktrees/
 
+# Pinned llama.cpp prefix assembled by scripts/provision-llama.sh
+# (contents are fetched by sha256 from local-llm/LLAMA_CPP_PIN, never committed)
+.llama/
+
 # Editor / shell noise
 .idea/
 .vscode/

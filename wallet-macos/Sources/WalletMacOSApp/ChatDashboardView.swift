@@ -2519,6 +2519,11 @@ private final class ChatDashboardModel: ObservableObject {
         return ModelSelfTestReport.message(for: result)
     }
 
+    @discardableResult
+    func cancelModelDownload() -> Bool {
+        walletModel.cancelModelDownload()
+    }
+
     func inspectRemoteModel(_ file: HuggingFaceGGUFFile) async -> RemoteModelFit {
         await walletModel.inspectRemoteModel(file)
     }
@@ -4605,6 +4610,9 @@ struct LocalWalletChatDashboardView: View {
             },
             onDownloadCuratedModel: { id, progress in
                 try await model.downloadCuratedModel(id: id, progress: progress)
+            },
+            onCancelModelDownload: {
+                model.cancelModelDownload()
             },
             onSaveNetworkSettings: { settings in
                 try model.saveNetworkSettings(settings)

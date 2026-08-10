@@ -278,6 +278,7 @@ struct LocalWalletSettingsView: View {
     let onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo
     let onInspectRemoteFile: (HuggingFaceGGUFFile) async -> RemoteModelFit
     let onDownloadCuratedModel: (String, @escaping @MainActor (ModelInstallPhase) -> Void) async throws -> String
+    let onCancelModelDownload: () -> Void
     let onSaveNetworkSettings: (DemoNetworkSettings) throws -> String
     let onTestNetworkSettings: (DemoNetworkSettings) async throws -> String
     let onRunDiagnostics: (DemoNetworkSettings) async -> SettingsDiagnosticsReport
@@ -350,6 +351,7 @@ struct LocalWalletSettingsView: View {
         onResolveRepo: @escaping (String) async throws -> HuggingFaceRepositoryInfo,
         onInspectRemoteFile: @escaping (HuggingFaceGGUFFile) async -> RemoteModelFit,
         onDownloadCuratedModel: @escaping (String, @escaping @MainActor (ModelInstallPhase) -> Void) async throws -> String,
+        onCancelModelDownload: @escaping () -> Void,
         onSaveNetworkSettings: @escaping (DemoNetworkSettings) throws -> String,
         onTestNetworkSettings: @escaping (DemoNetworkSettings) async throws -> String,
         onRunDiagnostics: @escaping (DemoNetworkSettings) async -> SettingsDiagnosticsReport,
@@ -384,6 +386,7 @@ struct LocalWalletSettingsView: View {
         self.onResolveRepo = onResolveRepo
         self.onInspectRemoteFile = onInspectRemoteFile
         self.onDownloadCuratedModel = onDownloadCuratedModel
+        self.onCancelModelDownload = onCancelModelDownload
         self.onSaveNetworkSettings = onSaveNetworkSettings
         self.onTestNetworkSettings = onTestNetworkSettings
         self.onRunDiagnostics = onRunDiagnostics
@@ -804,13 +807,12 @@ struct LocalWalletSettingsView: View {
             SettingsSection(title: "Text Model") {
                 ForEach(snapshot.modelRows) { row in
                     HStack(spacing: 12) {
-                        Image(systemName: row.isActive ? "largecircle.fill.circle" : "circle")
-                            .foregroundStyle(row.isActive ? SettingsPalette.blue : SettingsPalette.mutedText)
+                        modelStateIcon(row)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(row.displayName)
                                 .font(.system(size: 13, weight: .bold))
                                 .foregroundStyle(SettingsPalette.primaryText)
-                            Text("\(row.detail) · \(row.estimatedText) in memory")
+                            Text(modelRowDetail(row))
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(SettingsPalette.secondaryText)
                         }
@@ -821,16 +823,19 @@ struct LocalWalletSettingsView: View {
                         SettingsBadge(text: row.verdict.label, tint: settingsVerdictTint(row.verdict))
                         if installingModelID == row.id {
                             installProgressLabel
-                        }
-                        if row.isDownloadable {
+                            if case .downloading = installPhase {
+                                Button("Cancel") { onCancelModelDownload() }
+                                    .buttonStyle(SettingsSecondaryButtonStyle())
+                            }
+                        } else if row.isActive {
+                            SettingsBadge(text: "In use", tint: SettingsPalette.blue)
+                        } else if row.isDownloadable {
                             Button("Download") { install(row.id) }
                                 .buttonStyle(SettingsSecondaryButtonStyle())
                                 .disabled(installingModelID != nil)
-                        }
-                        if row.isInstalled {
+                        } else if row.isInstalled {
                             Button("Use") { runModelAction { try onSelectModel(row.id) } }
-                                .buttonStyle(SettingsSecondaryButtonStyle())
-                                .disabled(row.isActive)
+                                .buttonStyle(SettingsPrimaryButtonStyle())
                         }
                         if row.isRemovable {
                             Button("Remove") { runModelAction { try onRemoveModel(row.id) } }
@@ -839,6 +844,13 @@ struct LocalWalletSettingsView: View {
                     }
                     .padding(10)
                     .background(RoundedRectangle(cornerRadius: 8).fill(SettingsPalette.rowBackground))
+                    // The whole row selects an installed model, so the state dot is a
+                    // real target rather than decoration that looks clickable.
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard row.isInstalled, !row.isActive else { return }
+                        runModelAction { try onSelectModel(row.id) }
+                    }
                 }
                 if let modelMessage {
                     SettingsMessageBanner(message: modelMessage)
@@ -890,7 +902,8 @@ struct LocalWalletSettingsView: View {
                 AddHuggingFaceModelForm(
                     onResolveRepo: onResolveRepo,
                     onInspectRemoteFile: onInspectRemoteFile,
-                    onDownloadModel: onDownloadModel
+                    onDownloadModel: onDownloadModel,
+                    onCancelModelDownload: onCancelModelDownload
                 )
             }
 
@@ -912,6 +925,29 @@ struct LocalWalletSettingsView: View {
         } catch {
             modelMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
         }
+    }
+
+    /// The leading glyph states what the row *is*, and is never a control that
+    /// silently does nothing. An empty radio next to a model you have not
+    /// downloaded reads as "click to select" and cannot be — so a model that is not
+    /// on disk gets a download glyph instead, and only rows that can actually be
+    /// selected get the radio.
+    @ViewBuilder
+    private func modelStateIcon(_ row: SettingsModelRow) -> some View {
+        if row.isActive {
+            Image(systemName: "largecircle.fill.circle").foregroundStyle(SettingsPalette.blue)
+        } else if row.isInstalled {
+            Image(systemName: "circle").foregroundStyle(SettingsPalette.secondaryText)
+        } else {
+            Image(systemName: "arrow.down.circle").foregroundStyle(SettingsPalette.mutedText)
+        }
+    }
+
+    /// Says out loud whether the file is on disk. Without it, "5.03 GB · 6.48 GB in
+    /// memory" reads identically for a model you have and one you do not.
+    private func modelRowDetail(_ row: SettingsModelRow) -> String {
+        let base = "\(row.detail) · \(row.estimatedText) in memory"
+        return row.isInstalled ? base : "\(base) · not downloaded"
     }
 
     /// Multi-gigabyte download followed by a real load test, so the row says which
@@ -3368,6 +3404,7 @@ private struct AddHuggingFaceModelForm: View {
     let onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo
     let onInspectRemoteFile: (HuggingFaceGGUFFile) async -> RemoteModelFit
     let onDownloadModel: (ModelDownloadRequest, @escaping @MainActor (ModelInstallPhase) -> Void) async throws -> String
+    let onCancelModelDownload: () -> Void
 
     @State private var repoID: String = ""
     @State private var files: [HuggingFaceGGUFFile] = []
@@ -3414,6 +3451,10 @@ private struct AddHuggingFaceModelForm: View {
                             .foregroundStyle(.secondary)
                     case nil:
                         EmptyView()
+                    }
+                    if case .downloading = phase {
+                        Button("Cancel") { onCancelModelDownload() }
+                            .buttonStyle(SettingsSecondaryButtonStyle())
                     }
                     Spacer()
                     Button("Download & add") { download() }

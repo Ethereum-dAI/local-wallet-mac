@@ -626,6 +626,16 @@ final class AppModel: ObservableObject {
         try await huggingFaceRepository.info(repoID: repoID)
     }
 
+    /// Stops the download in flight. The awaiting `downloadModel` call throws
+    /// `.cancelled`, so nothing is recorded as installed and no partial file is
+    /// left behind. Returns false when there was nothing to cancel.
+    @discardableResult
+    func cancelModelDownload() -> Bool {
+        let cancelled = modelDownloadManager.cancelActiveDownload()
+        if cancelled { appendLog("models: download cancelled") }
+        return cancelled
+    }
+
     /// Reads a candidate file's GGUF header over a ranged request — tens of
     /// megabytes, not the whole model — so the fit verdict is on screen *before*
     /// the user commits to a multi-gigabyte download.

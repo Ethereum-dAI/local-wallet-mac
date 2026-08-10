@@ -48,6 +48,7 @@ enum LocalAIModelDownloadError: LocalizedError {
     case missingDownload
     case insufficientDisk(neededBytes: UInt64, availableBytes: UInt64)
     case downloadAlreadyInProgress
+    case cancelled
 
     var errorDescription: String? {
         switch self {
@@ -64,7 +65,9 @@ enum LocalAIModelDownloadError: LocalizedError {
             let availableText = ByteCountFormatter.string(fromByteCount: Int64(available), countStyle: .file)
             return "This model needs \(neededText) but only \(availableText) is free."
         case .downloadAlreadyInProgress:
-            return "Another model is already downloading. Wait for it to finish, or cancel it first."
+            return "Another model is already downloading. Cancel it, or wait for it to finish."
+        case .cancelled:
+            return "Download cancelled. The partial file was discarded."
         }
     }
 }
@@ -117,6 +120,37 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
     }
 
     private let slot = DownloadSlot<ActiveDownload>()
+    /// The in-flight `URLSessionDownloadTask`, so `cancelActiveDownload` can stop
+    /// it. Kept beside the slot rather than inside `ActiveDownload` because the
+    /// task does not exist until after the slot has been claimed — claiming first
+    /// is what makes the refusal of a second download atomic.
+    private let taskLock = NSLock()
+    private var activeTask: URLSessionDownloadTask?
+
+    private func setActiveTask(_ task: URLSessionDownloadTask?) {
+        taskLock.lock()
+        activeTask = task
+        taskLock.unlock()
+    }
+
+    /// Stops the download in flight, if any. The URLSession delegate then reports
+    /// `NSURLErrorCancelled`, which `didCompleteWithError` maps to
+    /// `.cancelled` so the caller gets an intentional outcome rather than a
+    /// network failure. Partial bytes are dropped by URLSession — cancelling
+    /// without `resumeData` leaves nothing on disk to clean up.
+    ///
+    /// Returns false when there was nothing to cancel, so a stale button press
+    /// cannot report a cancellation that did not happen.
+    @discardableResult
+    func cancelActiveDownload() -> Bool {
+        taskLock.lock()
+        let task = activeTask
+        activeTask = nil
+        taskLock.unlock()
+        guard let task else { return false }
+        task.cancel()
+        return true
+    }
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.default
         configuration.allowsExpensiveNetworkAccess = true
@@ -198,7 +232,9 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
                 continuation.resume(throwing: LocalAIModelDownloadError.downloadAlreadyInProgress)
                 return
             }
-            session.downloadTask(with: model.artifactURL).resume()
+            let task = session.downloadTask(with: model.artifactURL)
+            setActiveTask(task)
+            task.resume()
         }
     }
 
@@ -225,7 +261,9 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
                 continuation.resume(throwing: LocalAIModelDownloadError.downloadAlreadyInProgress)
                 return
             }
-            session.downloadTask(with: request.url).resume()
+            let task = session.downloadTask(with: request.url)
+            setActiveTask(task)
+            task.resume()
         }
     }
 
@@ -251,6 +289,7 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
+        setActiveTask(nil)
         guard let activeDownload = takeDownload() else {
             return
         }
@@ -297,9 +336,16 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
         didCompleteWithError error: Error?
     ) {
         guard let error, let activeDownload = takeDownload() else {
+            setActiveTask(nil)
             return
         }
-        activeDownload.continuation.resume(throwing: error)
+        setActiveTask(nil)
+        // A cancelled transfer is a user decision, not a failure to report as one.
+        let isCancelled = (error as NSError).domain == NSURLErrorDomain
+            && (error as NSError).code == NSURLErrorCancelled
+        activeDownload.continuation.resume(
+            throwing: isCancelled ? LocalAIModelDownloadError.cancelled : error
+        )
     }
 
     private func currentDownload() -> ActiveDownload? {

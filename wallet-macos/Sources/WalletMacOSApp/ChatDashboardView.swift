@@ -67,6 +67,16 @@ struct ChatConversation: Identifiable, Equatable, Codable {
     var updatedAt = Date()
 }
 
+/// A chain ID is an identifier, not a quantity.
+///
+/// `Text("Chain \(id)")` interpolates a `UInt64` into a `LocalizedStringKey`,
+/// which formats it for the viewer's locale — Sepolia's 11155111 rendered as
+/// "Chain 11.155.111" on a European locale. Interpolating the `String` instead
+/// keeps the digits contiguous everywhere.
+enum ChainIDFormatting {
+    static func text(_ chainID: UInt64) -> String { String(chainID) }
+}
+
 private struct ChatAccountIdentity: Equatable {
     let chainName: String
     let chainID: UInt64
@@ -5800,7 +5810,7 @@ private struct ChainStatusStrip: View {
                 Text(identity.chainName)
                     .font(.system(size: 13, weight: .heavy))
                     .foregroundStyle(ChatPalette.primaryText)
-                Text("Chain \(identity.chainID)")
+                Text("Chain \(ChainIDFormatting.text(identity.chainID))")
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .foregroundStyle(ChatPalette.secondaryText)
                 Text(identity.isTestnet ? "Testnet" : "Mainnet")
@@ -7010,7 +7020,7 @@ private struct OnchainTransactionCard: View {
 
                 Spacer()
 
-                Text("Chain \(summary.chainID)")
+                Text("Chain \(ChainIDFormatting.text(summary.chainID))")
                     .font(.system(size: 11, weight: .black, design: .monospaced))
                     .foregroundStyle(ChatPalette.secondaryText)
                     .padding(.horizontal, 8)

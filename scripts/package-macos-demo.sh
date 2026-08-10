@@ -28,12 +28,18 @@ APP_SUPPORT_MODEL="$HOME/Library/Application Support/LocalWallet/Models/$MODEL_F
 MODEL_CACHE_DIR="${LOCAL_WALLET_MODEL_CACHE_DIR:-$REPO_ROOT/build/model-cache}"
 NOTARYTOOL_AUTH_ARGS=()
 LLAMA_PREFIX="${LOCAL_LLAMA_PREFIX:-}"
+# Mirrors local-llm/Package.swift's resolution order, and like the manifest it has
+# NO Homebrew fallback. The app is compiled against the pinned headers, so
+# resolving an @rpath dependency to a Homebrew dylib would embed a different
+# llama.cpp build than the code was compiled for -- and since the mangled C++
+# symbol names do not change between these versions, that ships as silent runtime
+# corruption rather than a load error. Neither new gate below would catch it: a
+# libggml-metal*.dylib would be present, and the reference would be @rpath/... from
+# inside Frameworks. Failing to find a dylib is the safer outcome.
 LLAMA_SEARCH_DIRS=(
   "${LOCAL_LLAMA_LIB_DIR:-}"
   "${LLAMA_PREFIX:+$LLAMA_PREFIX/lib}"
-  "/opt/homebrew/opt/llama.cpp/lib"
-  "/opt/homebrew/opt/ggml/lib"
-  "/opt/homebrew/lib"
+  "$REPO_ROOT/.llama/current/lib"
 )
 
 if [[ ! -d "$PROJECT" ]]; then
@@ -249,6 +255,18 @@ patch_binary_llama_dependencies() {
     return
   fi
 
+  # local-llm/Package.swift links with `-rpath <repo>/.llama/current/lib` so the
+  # pinned @rpath dylibs resolve during local development. That absolute path must
+  # not survive into a shipped binary: it leaks the packaging machine's home
+  # directory, and because -add_rpath appends, it would be searched BEFORE
+  # @executable_path/../Frameworks. On the packaging machine that path exists, so a
+  # dylib missing from Frameworks would still resolve locally and pass QA and both
+  # embed gates -- then fail at launch on a user's Mac. Neither gate inspects
+  # LC_RPATH, so strip it here.
+  while IFS= read -r stale_rpath; do
+    install_name_tool -delete_rpath "$stale_rpath" "$binary_path" >/dev/null 2>&1 || true
+  done < <(otool -l "$binary_path" | awk '/LC_RPATH/{f=1} f && /path /{print $2; f=0}' | grep '/\.llama/' || true)
+
   install_name_tool -add_rpath "@executable_path/../Frameworks" "$binary_path" >/dev/null 2>&1 || true
 
   while IFS= read -r dependency; do
@@ -290,7 +308,62 @@ embed_llama_dylibs() {
     patch_binary_llama_dependencies "$binary_path" "$frameworks_dir"
   done < <(find "$frameworks_dir" -type f -print0)
 
+  verify_ggml_backends_embedded "$frameworks_dir"
+  verify_no_developer_rpaths "$app_path"
   verify_no_external_llama_dependencies "$app_path"
+}
+
+# No shipped binary may keep an LC_RPATH into the build machine's .llama prefix.
+# Such a path both leaks a developer home directory and, being searched before
+# @executable_path/../Frameworks, hides a dylib missing from the bundle for as long
+# as packaging happens on the machine that has the prefix.
+verify_no_developer_rpaths() {
+  local app_path="$1"
+  local failures=0
+  local binary_path
+
+  while IFS= read -r -d '' binary_path; do
+    if ! is_mach_o_file "$binary_path"; then
+      continue
+    fi
+    local leaked
+    leaked="$(otool -l "$binary_path" | awk '/LC_RPATH/{f=1} f && /path /{print $2; f=0}' | grep '/\.llama/' || true)"
+    if [[ -n "$leaked" ]]; then
+      echo "Build-machine rpath left in $binary_path:" >&2
+      printf '%s\n' "$leaked" >&2
+      failures=1
+    fi
+  done < <(find "$app_path/Contents/MacOS" "$app_path/Contents/Frameworks" -type f -print0)
+
+  return $failures
+}
+
+# ggml has no built-in CPU fallback: with no compute backend registered, every
+# model load fails with "Failed to load llama.cpp model" and inference has
+# nothing to run on. The recursive walker above picks the backends up on its own
+# because the pinned upstream release links them as ordinary @rpath dylibs, so
+# this is an assertion rather than a fixup -- but it is the assertion that would
+# have caught shipping an app with no backends at all, which is what a Homebrew
+# ggml produces (there the backends are dlopen'd plugins under libexec/, invisible
+# to the Mach-O dependency graph and never copied in).
+verify_ggml_backends_embedded() {
+  local frameworks_dir="$1"
+  local backend
+  local missing=0
+
+  for backend in libggml-base libggml-cpu libggml-metal; do
+    if ! compgen -G "$frameworks_dir/$backend*.dylib" >/dev/null; then
+      echo "No $backend dylib was embedded into Contents/Frameworks." >&2
+      missing=1
+    fi
+  done
+
+  if [[ "$missing" -ne 0 ]]; then
+    echo "The packaged app would have no ggml compute backend and could not run inference." >&2
+    echo "Check that the llama.cpp prefix in use ships its backends as linked dylibs" >&2
+    echo "under lib/ (the pinned upstream release does; Homebrew's ggml does not)." >&2
+    exit 1
+  fi
 }
 
 verify_no_external_llama_dependencies() {
@@ -303,8 +376,20 @@ verify_no_external_llama_dependencies() {
       continue
     fi
 
+    # Also covers the transitive libraries a Homebrew-built llama.cpp drags in
+    # (libomp via libggml-base, libssl/libcrypto via libllama-common). Those are
+    # absent from the pinned upstream release, but if one is ever reintroduced it
+    # must fail here rather than on an end user's Mac that has no Homebrew.
     local external_refs
-    external_refs="$(otool -L "$binary_path" | awk 'NR > 1 && $1 ~ /^\/.*\/lib\/lib(llama|ggml).*\.dylib$/ { print $1 }')"
+    external_refs="$(otool -L "$binary_path" | awk '
+      NR > 1 {
+        path = $1
+        if (path !~ /^\//) next
+        if (path ~ /^\/usr\/lib\//) next
+        if (path ~ /^\/System\//) next
+        if (path ~ /lib(llama|ggml|omp|ssl|crypto)/) print path
+      }
+    ')"
     if [[ -n "$external_refs" ]]; then
       echo "External llama.cpp dependencies remain in $binary_path:" >&2
       printf '%s\n' "$external_refs" >&2

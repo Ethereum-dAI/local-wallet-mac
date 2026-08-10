@@ -4,13 +4,7 @@ import Testing
 import CLlamaBridge
 
 @Test func chatTemplateMetadataIsAvailableAfterLoad() async throws {
-    let modelURL = URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf")
-    guard FileManager.default.fileExists(atPath: modelURL.path) else { return }
-
-    let runtime = LlamaRuntime()
-    try runtime.loadModel(at: modelURL)
-    defer { runtime.unload() }
+    guard let runtime = try sharedLoadedRuntime() else { return }
 
     let template = runtime.embeddedChatTemplate
     #expect(template != nil)

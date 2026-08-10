@@ -1,0 +1,81 @@
+# Single source of truth for the llama.cpp toolchain this repo builds against.
+#
+# WHY THIS FILE EXISTS
+#
+# `local-llm` links libllama / libllama-common / libggml / libggml-base, and
+# CLlamaBridge.cpp compiles against llama.cpp's own headers. Before this pin,
+# those libraries came from `brew install llama.cpp` with no version constraint,
+# which means the version was "whatever was current the day you ran it" and was
+# not expressible in the repo at all. Two contributors cloning the same commit a
+# few weeks apart got different ABIs; the symptom is a compile error such as
+# `no member named 'use_mmap' in 'llama_model_params'` on an unmodified tree.
+#
+# Homebrew cannot fix this, because it cannot install a specific llama.cpp
+# version: there is no versioned formula, the core tap is API-only so there is
+# no local formula history to check out, `brew pin` only freezes whatever you
+# already have, and `ggml` is a separate formula that must move in lockstep.
+# Through Homebrew the repo could declare and detect a version, never deliver
+# one.
+#
+# So Homebrew is no longer involved. scripts/provision-llama.sh downloads the
+# release asset named below from GitHub, verifies it against the sha256 here,
+# and assembles a repo-local prefix at `.llama/current`. GitHub release assets
+# are immutable, so every contributor and CI run gets identical bytes, and
+# nothing `brew upgrade` does can move the build off this pin.
+#
+# WHY THE UPSTREAM RELEASE ASSET AND NOT A HOMEBREW BOTTLE
+#
+# Bottles were tried first and do not work when pulled outside Homebrew.
+# Homebrew builds ggml with `-DGGML_BACKEND_DL=ON -DGGML_BACKEND_DIR=<libexec>`,
+# so the Metal/CPU/BLAS compute backends are dlopen'd plugins in `libexec/` and
+# that directory is a compile-time string baked into the dylib. Relocating the
+# bottle cannot rewrite it (install_name_tool only edits Mach-O load commands),
+# so zero backends register and every model load fails instantly. The upstream
+# release is built with `GGML_BACKEND_DL=OFF`: the backends are ordinary linked
+# dylibs under `lib/`, with `@rpath` install names throughout, which also means
+# no install_name_tool and no re-signing are needed. It has no external formula
+# dependencies (no libomp, no openssl) and is built `minos 13.3`, comfortably
+# under this repo's macOS 15.0 deployment floor.
+#
+# WHY THERE IS NO HEADER CHECKSUM HERE
+#
+# The binary release asset contains dylibs, CLI executables and LICENSE only —
+# zero headers. provision-llama.sh fetches those out of LLAMA_CPP_COMMIT below
+# with a sparse, blob-filtered git fetch of just the header directories: ~1 MB
+# and a few seconds, against 36 MB for a full source archive.
+#
+# No checksum is needed, because git verifies the objects it fetches against the
+# commit SHA — the SHA *is* the integrity guarantee. It also means the headers
+# cannot drift from the pin, since they are read straight out of the pinned
+# commit. They are deliberately not committed to this repo either: that would put
+# ~37k lines of upstream code in-tree and add a re-vendoring chore to every bump.
+#
+# LLAMA_CPP_COMMIT must be the commit the release was built from, or the headers
+# describe a different ABI than the dylibs. Because the mangled C++ symbol names
+# do not change across these bumps, such a mismatch is silent runtime corruption
+# rather than a link error. Step 1 below derives the commit from the release tag,
+# which is what makes it correct by construction.
+#
+# TO BUMP THIS PIN
+#
+#   1. Pick a release from https://github.com/ggml-org/llama.cpp/releases
+#      and resolve its commit:
+#        gh api repos/ggml-org/llama.cpp/git/refs/tags/b<new> --jq '.object.sha'
+#   2. Get the asset's sha256:
+#        curl -fsSL -o /tmp/llama.tar.gz \
+#          https://github.com/ggml-org/llama.cpp/releases/download/b<new>/llama-b<new>-bin-macos-arm64.tar.gz
+#        shasum -a 256 /tmp/llama.tar.gz
+#   3. Update the four values below. That is the entire pin change — there are no
+#      vendored headers to refresh.
+#   4. rm -rf .llama && ./scripts/provision-llama.sh
+#   5. cd local-llm && swift test    # 21 tests, real inference — catches ABI drift
+#
+# Expect upstream API churn at step 5; that is the point of pinning. b9200 to
+# b10330 needed two edits in CLlamaBridge.cpp (`use_mmap` became the
+# `llama_load_mode` enum; `llama_sampler_init_penalties` regained a leading
+# `n_vocab` parameter).
+
+LLAMA_CPP_RELEASE=b10330
+LLAMA_CPP_COMMIT=687e7789271ec1276e3470f158428e11a4f80b6f
+LLAMA_CPP_ASSET=llama-b10330-bin-macos-arm64.tar.gz
+LLAMA_CPP_SHA256=0b107ef13b2f5a20f5538a98ab9a2606b7bbe90824da0f7818a1059e6229cf64

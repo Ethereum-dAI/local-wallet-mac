@@ -30,15 +30,6 @@ private func errorString(from buffer: [CChar]) -> String {
     return String(decoding: bytes, as: UTF8.self)
 }
 
-private func loadedRuntime() throws -> LlamaRuntime? {
-    let url = URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf")
-    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-    let rt = LlamaRuntime()
-    try rt.loadModel(at: url)
-    return rt
-}
-
 private func fixture(_ name: String) throws -> String {
     let url = try #require(Bundle.module.url(
         forResource: name,
@@ -72,8 +63,7 @@ private func arguments(from function: [String: Any]) throws -> [String: Any] {
 // output) is the real validation; this test guards the API surface, not the
 // upstream parser's correctness on synthetic input.
 @Test func parsesGemmaDSLEnvelopeWithoutError() async throws {
-    guard let rt = try loadedRuntime() else { return }
-    defer { rt.unload() }
+    guard let rt = try sharedLoadedRuntime() else { return }
 
     let parsed = try parse(rt, assistantOutput: fixture("gemma4-tool-call"))
     #expect(parsed["tool_calls"] is [Any])
@@ -82,8 +72,7 @@ private func arguments(from function: [String: Any]) throws -> [String: Any] {
 }
 
 @Test func parsesPlainTextAsContentOnly() async throws {
-    guard let rt = try loadedRuntime() else { return }
-    defer { rt.unload() }
+    guard let rt = try sharedLoadedRuntime() else { return }
 
     let parsed = try parse(rt, assistantOutput: "Plain assistant response.")
     let calls = try toolCalls(from: parsed)

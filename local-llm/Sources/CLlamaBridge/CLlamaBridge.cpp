@@ -190,7 +190,9 @@ lllm_runtime * lllm_runtime_create(
 
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = gpu_layers;
-    model_params.use_mmap = true;
+    // llama.cpp replaced the use_mmap/use_mlock/use_direct_io booleans with a
+    // single load_mode enum. MMAP is the old `use_mmap = true` behaviour.
+    model_params.load_mode = LLAMA_LOAD_MODE_MMAP;
 
     runtime->model = llama_model_load_from_file(model_path, model_params);
     if (runtime->model == nullptr) {
@@ -573,7 +575,10 @@ int32_t lllm_runtime_generate_v2(
     int32_t  limit   = params.max_tokens > 0 ? params.max_tokens : 512;
 
     if (rep_pen != 1.0f) {
-        llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, rep_pen, 0.0f, 0.0f));
+        // llama_sampler_init_penalties regained a leading n_vocab parameter.
+        llama_sampler_chain_add(
+            sampler,
+            llama_sampler_init_penalties(llama_vocab_n_tokens(rt->vocab), 64, rep_pen, 0.0f, 0.0f));
     }
     llama_sampler_chain_add(sampler, llama_sampler_init_top_k(top_k));
     llama_sampler_chain_add(sampler, llama_sampler_init_top_p(top_p, 1));

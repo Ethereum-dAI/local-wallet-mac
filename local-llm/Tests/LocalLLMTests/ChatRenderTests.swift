@@ -20,26 +20,15 @@ private func render(_ rt: LlamaRuntime, messages: String, tools: String?, thinki
     return (nil, errStr)
 }
 
-private func loadedRuntime() throws -> LlamaRuntime? {
-    let url = URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf")
-    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-    let rt = LlamaRuntime()
-    try rt.loadModel(at: url)
-    return rt
-}
-
 @Test func renderRejectsMalformedMessagesJSON() async throws {
-    guard let rt = try loadedRuntime() else { return }
-    defer { rt.unload() }
+    guard let rt = try sharedLoadedRuntime() else { return }
     let (out, err) = render(rt, messages: "not json", tools: nil, thinking: false)
     #expect(out == nil)
     #expect(err.contains("messages_json"))
 }
 
 @Test func renderProducesPromptThatEndsInModelTurn() async throws {
-    guard let rt = try loadedRuntime() else { return }
-    defer { rt.unload() }
+    guard let rt = try sharedLoadedRuntime() else { return }
     let (out, _) = render(rt,
         messages: #"[{"role":"user","content":"Hi."}]"#,
         tools: nil,
@@ -49,8 +38,7 @@ private func loadedRuntime() throws -> LlamaRuntime? {
 }
 
 @Test func renderIncludesToolBlockWhenToolsProvided() async throws {
-    guard let rt = try loadedRuntime() else { return }
-    defer { rt.unload() }
+    guard let rt = try sharedLoadedRuntime() else { return }
     let (out, _) = render(rt,
         messages: #"[{"role":"user","content":"swap 1 eth to usdc"}]"#,
         tools: #"[{"type":"function","function":{"name":"swap","description":"x","parameters":{"type":"object","properties":{}}}}]"#,
@@ -60,8 +48,7 @@ private func loadedRuntime() throws -> LlamaRuntime? {
 }
 
 @Test func renderInjectsThinkingChannelWhenEnabled() async throws {
-    guard let rt = try loadedRuntime() else { return }
-    defer { rt.unload() }
+    guard let rt = try sharedLoadedRuntime() else { return }
     let (out, _) = render(rt,
         messages: #"[{"role":"user","content":"x"}]"#,
         tools: nil,

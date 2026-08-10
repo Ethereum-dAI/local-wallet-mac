@@ -26,16 +26,6 @@ private let generateV2Callback: lllm_token_callback_v2 = { tokenPointer, userDat
     return 0
 }
 
-private func loadedRuntime() throws -> LlamaRuntime? {
-    let url = URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf")
-    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-
-    let runtime = LlamaRuntime()
-    try runtime.loadModel(at: url)
-    return runtime
-}
-
 private func promptTemplate(_ text: String) -> String {
     "<|turn>user\n\(text)<turn|>\n<|turn>model\n"
 }
@@ -123,8 +113,7 @@ private func generateV2(
 @Suite(.serialized) struct GenerateV2Suite {
 
 @Test func generateV2ProducesNonEmptyOutput() async throws {
-    guard let runtime = try loadedRuntime() else { return }
-    defer { runtime.unload() }
+    guard let runtime = try sharedLoadedRuntime() else { return }
 
     let result = generateV2(
         runtime: runtime,
@@ -137,8 +126,7 @@ private func generateV2(
 }
 
 @Test func generateV2RespectsCancellationFromCallback() async throws {
-    guard let runtime = try loadedRuntime() else { return }
-    defer { runtime.unload() }
+    guard let runtime = try sharedLoadedRuntime() else { return }
 
     let result = generateV2(
         runtime: runtime,
@@ -151,8 +139,7 @@ private func generateV2(
 }
 
 @Test func generateV2ConstrainsToGBNFGrammar() async throws {
-    guard let runtime = try loadedRuntime() else { return }
-    defer { runtime.unload() }
+    guard let runtime = try sharedLoadedRuntime() else { return }
 
     let result = generateV2(
         runtime: runtime,
@@ -166,8 +153,7 @@ private func generateV2(
 }
 
 @Test func generateV2HonorsStopSequence() async throws {
-    guard let runtime = try loadedRuntime() else { return }
-    defer { runtime.unload() }
+    guard let runtime = try sharedLoadedRuntime() else { return }
 
     let result = generateV2(
         runtime: runtime,

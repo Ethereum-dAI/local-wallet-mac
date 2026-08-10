@@ -3,15 +3,6 @@ import Testing
 @testable import LocalLLM
 import CLlamaBridge
 
-private func loadedRuntime() throws -> LlamaRuntime? {
-    let modelURL = URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf")
-    guard FileManager.default.fileExists(atPath: modelURL.path) else { return nil }
-    let rt = LlamaRuntime()
-    try rt.loadModel(at: modelURL)
-    return rt
-}
-
 private func chatRender(_ rt: LlamaRuntime, messages: String, tools: String?) -> String? {
     var buf = [CChar](repeating: 0, count: 1024)
     let result = buf.withUnsafeMutableBufferPointer { ptr -> UnsafeMutablePointer<CChar>? in
@@ -24,8 +15,7 @@ private func chatRender(_ rt: LlamaRuntime, messages: String, tools: String?) ->
 }
 
 @Test func spikeRendersSystemAndUserOnly() async throws {
-    guard let rt = try loadedRuntime() else { return }
-    defer { rt.unload() }
+    guard let rt = try sharedLoadedRuntime() else { return }
 
     let messages = #"""
     [{"role":"system","content":"You are a wallet assistant."},
@@ -42,8 +32,7 @@ private func chatRender(_ rt: LlamaRuntime, messages: String, tools: String?) ->
 }
 
 @Test func spikeRendersToolsBlock() async throws {
-    guard let rt = try loadedRuntime() else { return }
-    defer { rt.unload() }
+    guard let rt = try sharedLoadedRuntime() else { return }
 
     let messages = #"""
     [{"role":"system","content":"You are a wallet assistant."},

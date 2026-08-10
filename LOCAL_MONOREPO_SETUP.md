@@ -89,11 +89,17 @@ Nothing `brew upgrade` does can move the build off the pin now. Homebrew is stil
 rm -rf .llama && ./scripts/provision-llama.sh
 ```
 
-There is no implicit fallback to Homebrew: an unprovisioned tree fails fast with `'llama.h' file not found` rather than silently building against whatever version happens to be installed. If you deliberately want to build against a different llama.cpp — a hand-built prefix, or Homebrew's — set `LOCAL_LLAMA_PREFIX` to its root. That overrides the pin and skips provisioning entirely, and you then own keeping its headers and dylibs consistent with each other:
+There is no implicit fallback to Homebrew: an unprovisioned tree fails fast with `'llama.h' file not found` rather than silently building against whatever version happens to be installed.
+
+**`LOCAL_LLAMA_PREFIX=/opt/homebrew` is not an escape hatch.** Homebrew ships llama.cpp's public headers but none of the `common/` layer that `CLlamaBridge.cpp` needs, so it fails on `'chat.h' file not found`. An override prefix has to provide `lib/`, `include/` **and** `include-common/` — in practice, a hand-built llama.cpp at the pinned commit. If GitHub is unreachable, the previously provisioned prefix is left untouched and an existing checkout keeps building; there is no offline path to a *first* provision.
+
+If you are doing Rust-only or `swift-bridge`-only work and do not want `build-ffi.sh` fetching llama.cpp at all:
 
 ```bash
-LOCAL_LLAMA_PREFIX=/opt/homebrew ./scripts/build-ffi.sh   # off-pin, unsupported
+LOCAL_WALLET_SKIP_LLAMA_PROVISION=1 ./scripts/build-ffi.sh
 ```
+
+That still produces `libwallet_ffi.a` and the headers `swift-bridge` needs; anything that builds `local-llm` will then need the prefix provisioned separately.
 
 The packaged v0.1 alpha app is built for macOS 15+. The pinned release dylibs are built `minos 13.3`, so they satisfy that floor on any host and release packaging no longer needs a hand-built prefix to get past the deployment-target gate in `scripts/package-macos-demo.sh`.
 

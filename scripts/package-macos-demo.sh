@@ -28,20 +28,18 @@ APP_SUPPORT_MODEL="$HOME/Library/Application Support/LocalWallet/Models/$MODEL_F
 MODEL_CACHE_DIR="${LOCAL_WALLET_MODEL_CACHE_DIR:-$REPO_ROOT/build/model-cache}"
 NOTARYTOOL_AUTH_ARGS=()
 LLAMA_PREFIX="${LOCAL_LLAMA_PREFIX:-}"
-# Mirrors local-llm/Package.swift's resolution order: explicit override, then
-# the pin from local-llm/LLAMA_CPP_PIN, then Homebrew as a last resort. The
-# pinned prefix MUST precede Homebrew. The app is compiled against the pinned
-# headers, so resolving an @rpath dependency to a Homebrew dylib instead would
-# embed a different llama.cpp build than the one the code was compiled for --
-# and since the mangled C++ symbol names do not change between these versions,
-# that ships as silent runtime corruption rather than a load error.
+# Mirrors local-llm/Package.swift's resolution order, and like the manifest it has
+# NO Homebrew fallback. The app is compiled against the pinned headers, so
+# resolving an @rpath dependency to a Homebrew dylib would embed a different
+# llama.cpp build than the code was compiled for -- and since the mangled C++
+# symbol names do not change between these versions, that ships as silent runtime
+# corruption rather than a load error. Neither new gate below would catch it: a
+# libggml-metal*.dylib would be present, and the reference would be @rpath/... from
+# inside Frameworks. Failing to find a dylib is the safer outcome.
 LLAMA_SEARCH_DIRS=(
   "${LOCAL_LLAMA_LIB_DIR:-}"
   "${LLAMA_PREFIX:+$LLAMA_PREFIX/lib}"
   "$REPO_ROOT/.llama/current/lib"
-  "/opt/homebrew/opt/llama.cpp/lib"
-  "/opt/homebrew/opt/ggml/lib"
-  "/opt/homebrew/lib"
 )
 
 if [[ ! -d "$PROJECT" ]]; then
@@ -257,6 +255,18 @@ patch_binary_llama_dependencies() {
     return
   fi
 
+  # local-llm/Package.swift links with `-rpath <repo>/.llama/current/lib` so the
+  # pinned @rpath dylibs resolve during local development. That absolute path must
+  # not survive into a shipped binary: it leaks the packaging machine's home
+  # directory, and because -add_rpath appends, it would be searched BEFORE
+  # @executable_path/../Frameworks. On the packaging machine that path exists, so a
+  # dylib missing from Frameworks would still resolve locally and pass QA and both
+  # embed gates -- then fail at launch on a user's Mac. Neither gate inspects
+  # LC_RPATH, so strip it here.
+  while IFS= read -r stale_rpath; do
+    install_name_tool -delete_rpath "$stale_rpath" "$binary_path" >/dev/null 2>&1 || true
+  done < <(otool -l "$binary_path" | awk '/LC_RPATH/{f=1} f && /path /{print $2; f=0}' | grep '/\.llama/' || true)
+
   install_name_tool -add_rpath "@executable_path/../Frameworks" "$binary_path" >/dev/null 2>&1 || true
 
   while IFS= read -r dependency; do
@@ -299,7 +309,33 @@ embed_llama_dylibs() {
   done < <(find "$frameworks_dir" -type f -print0)
 
   verify_ggml_backends_embedded "$frameworks_dir"
+  verify_no_developer_rpaths "$app_path"
   verify_no_external_llama_dependencies "$app_path"
+}
+
+# No shipped binary may keep an LC_RPATH into the build machine's .llama prefix.
+# Such a path both leaks a developer home directory and, being searched before
+# @executable_path/../Frameworks, hides a dylib missing from the bundle for as long
+# as packaging happens on the machine that has the prefix.
+verify_no_developer_rpaths() {
+  local app_path="$1"
+  local failures=0
+  local binary_path
+
+  while IFS= read -r -d '' binary_path; do
+    if ! is_mach_o_file "$binary_path"; then
+      continue
+    fi
+    local leaked
+    leaked="$(otool -l "$binary_path" | awk '/LC_RPATH/{f=1} f && /path /{print $2; f=0}' | grep '/\.llama/' || true)"
+    if [[ -n "$leaked" ]]; then
+      echo "Build-machine rpath left in $binary_path:" >&2
+      printf '%s\n' "$leaked" >&2
+      failures=1
+    fi
+  done < <(find "$app_path/Contents/MacOS" "$app_path/Contents/Frameworks" -type f -print0)
+
+  return $failures
 }
 
 # ggml has no built-in CPU fallback: with no compute backend registered, every

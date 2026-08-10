@@ -13,8 +13,19 @@ export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
 # it the one place that guarantees the prefix exists. Idempotent — a no-op once
 # the prefix matches local-llm/LLAMA_CPP_PIN, and skipped entirely when
 # LOCAL_LLAMA_PREFIX is set.
-echo "=== Provisioning pinned llama.cpp ==="
-"$REPO_ROOT/scripts/provision-llama.sh"
+#
+# Provisioning contacts GitHub whenever the prefix has to be rebuilt, which would
+# otherwise make an unrelated llama.cpp fetch a hard prerequisite for Rust-only or
+# swift-bridge-only work (this script produces libwallet_ffi.a, which those need
+# and llama.cpp has nothing to do with). Set LOCAL_WALLET_SKIP_LLAMA_PROVISION=1
+# to skip it; anything that actually builds local-llm will then need the prefix
+# provisioned some other way.
+if [[ "${LOCAL_WALLET_SKIP_LLAMA_PROVISION:-0}" == "1" ]]; then
+    echo "=== Skipping llama.cpp provisioning (LOCAL_WALLET_SKIP_LLAMA_PROVISION=1) ==="
+else
+    echo "=== Provisioning pinned llama.cpp ==="
+    "$REPO_ROOT/scripts/provision-llama.sh"
+fi
 
 echo "=== Building wallet-ffi (transitively materializes wallet-node-api) ==="
 cd "$RUST_DIR"

@@ -4,18 +4,20 @@ import PackageDescription
 
 // llama.cpp prefix resolution:
 //
-//   1. LOCAL_LLAMA_PREFIX     — explicit override (release packaging, a hand-built prefix, or a
-//                               deliberate `LOCAL_LLAMA_PREFIX=/opt/homebrew` brew opt-in)
+//   1. LOCAL_LLAMA_PREFIX     — explicit override (a hand-built llama.cpp). It must supply lib/,
+//                               include/ AND include-common/; see below.
 //   2. <repo>/.llama/current  — the pin from local-llm/LLAMA_CPP_PIN, assembled by
 //                               scripts/provision-llama.sh (the normal case; build-ffi.sh runs it)
 //
-// There is deliberately NO implicit Homebrew fallback. The llama.cpp common/ headers vendored
-// under Sources/CLlamaBridge/third_party/llama_cpp_common/ are on the include path
-// unconditionally, so quietly linking a Homebrew libllama-common would pair those headers with a
-// different build of their own implementations. Because the mangled C++ symbol names do not change
-// between llama.cpp versions, that mismatch does not fail to link — it corrupts at runtime. An
-// unprovisioned tree instead fails fast with 'llama.h' file not found, naming .llama/current in
-// the include path.
+// There is deliberately NO implicit Homebrew fallback, and Homebrew is not a usable override
+// either: it ships llama.cpp's public headers but none of the common/ layer (chat.h, the jinja
+// renderer, bundled nlohmann) that CLlamaBridge.cpp includes, so pointing at /opt/homebrew fails
+// on 'chat.h' file not found. Those headers come from the pinned commit — provision-llama.sh
+// stages them into include-common/ — and pairing them with a different build of libllama-common
+// would not fail to link, because the mangled C++ symbol names do not change between llama.cpp
+// versions. It would corrupt at runtime. So resolution stops at the pinned prefix, and an
+// unprovisioned tree fails fast with 'llama.h' file not found, naming .llama/current in the
+// include path.
 //
 // The pinned prefix is found via #filePath rather than an environment variable on purpose:
 // SwiftPM evaluates this manifest in its own process and Xcode does not reliably forward
@@ -38,8 +40,11 @@ let llamaLibDir = environment["LOCAL_LLAMA_LIB_DIR"] ?? "\(llamaPrefix)/lib"
 // commit, which means they live outside the target and need a -I instead.
 //
 // An explicit LOCAL_LLAMA_PREFIX must therefore supply include-common/ as well as
-// include/ and lib/, or point this at the common/ directory of a llama.cpp source
-// tree at the matching commit.
+// include/ and lib/. Note that upstream's own common/ directory will NOT do
+// unmodified: chat.h includes "nlohmann/json_fwd.hpp" relative to itself, while
+// upstream keeps nlohmann at vendor/nlohmann/ and resolves it with a separate -I.
+// provision-llama.sh nests it under include-common/nlohmann/ for that reason, so
+// an override has to reproduce that layout.
 let llamaCommonIncludeDir = environment["LOCAL_LLAMA_COMMON_INCLUDE_DIR"]
     ?? "\(llamaPrefix)/include-common"
 

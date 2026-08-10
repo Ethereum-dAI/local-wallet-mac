@@ -14,13 +14,9 @@ Current pin:
 
 `Package.swift` resolves `libllama`, `libllama-common`, `libggml`, and `libggml-base` from `LOCAL_LLAMA_PREFIX` / `LOCAL_LLAMA_INCLUDE_DIR` / `LOCAL_LLAMA_COMMON_INCLUDE_DIR` / `LOCAL_LLAMA_LIB_DIR` when set, and otherwise from the pinned prefix at `<repo>/.llama/current`. It also passes `-rpath` for the resolved lib dir, which the pinned dylibs need because they use `@rpath` install names.
 
-An explicit `LOCAL_LLAMA_PREFIX` must supply `include-common/` alongside `include/` and `lib/`, or point `LOCAL_LLAMA_COMMON_INCLUDE_DIR` at the `common/` directory of a llama.cpp source tree at the matching commit. That is new: the `common/` headers used to be committed under `Sources/CLlamaBridge/third_party/`, so any prefix worked.
+An explicit `LOCAL_LLAMA_PREFIX` must supply all three of `lib/`, `include/` and `include-common/`. That is new — the `common/` headers used to be committed under `Sources/CLlamaBridge/third_party/`, so any prefix worked. Note that upstream's own `common/` directory will not serve as `include-common/` unmodified: `chat.h` includes `"nlohmann/json_fwd.hpp"` relative to itself, while upstream keeps nlohmann at `vendor/nlohmann/`, so an override has to reproduce the nested layout `provision-llama.sh` builds.
 
-There is deliberately **no implicit Homebrew fallback**. Silently linking a Homebrew `libllama-common` would pair the pinned `common/` headers with a different build of their own implementations — and since the mangled C++ symbol names do not change between versions, that is silent runtime corruption rather than a link error. An unprovisioned tree fails fast with `'llama.h' file not found`. To build against Homebrew anyway, say so explicitly:
-
-```bash
-LOCAL_LLAMA_PREFIX=/opt/homebrew swift build   # off-pin, unsupported
-```
+There is deliberately **no implicit Homebrew fallback**, and **Homebrew is not a usable override either**: it ships llama.cpp's public headers but none of the `common/` layer, so `LOCAL_LLAMA_PREFIX=/opt/homebrew` fails on `'chat.h' file not found`. Even if it did build, linking a Homebrew `libllama-common` against pinned `common/` headers would pair them with a different build of their own implementations — and since the mangled C++ symbol names do not change between versions, that is silent runtime corruption rather than a link error. An unprovisioned tree fails fast with `'llama.h' file not found` instead.
 
 The release asset ships dylibs and CLI executables only — **no headers at all**. `provision-llama.sh` fetches those from the pinned commit and stages them into two include roots, mirroring how the bridge consumes them:
 

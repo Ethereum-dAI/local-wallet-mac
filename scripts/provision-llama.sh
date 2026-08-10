@@ -53,6 +53,10 @@ source "$PIN_FILE"
 
 PREFIX="$LLAMA_DIR/$LLAMA_CPP_RELEASE"
 STAMP="$PREFIX/.pin-stamp"
+# Everything is built here first and only swapped into $PREFIX once every step has
+# succeeded, so a failure part-way through cannot leave a half-built prefix that
+# the build then compiles against.
+STAGING="$LLAMA_DIR/.staging-$LLAMA_CPP_RELEASE"
 
 for tool in shasum curl tar otool git; do
     command -v "$tool" >/dev/null 2>&1 || {
@@ -60,6 +64,22 @@ for tool in shasum curl tar otool git; do
         exit 1
     }
 done
+
+# The files Package.swift needs. Used to decide whether an existing prefix is
+# actually usable, not merely stamped.
+prefix_is_complete() {
+    local root="$1"
+    [[ -e "$root/lib/libllama.dylib" ]] &&
+        [[ -f "$root/include/llama.h" ]] &&
+        [[ -f "$root/include-common/chat.h" ]]
+}
+
+# Point .llama/current at the pinned release. This is the path Package.swift
+# consumes, so it -- not the per-release stamp -- is what determines which
+# llama.cpp the build actually uses.
+repoint_current() {
+    ln -sfn "$LLAMA_CPP_RELEASE" "$LLAMA_DIR/current"
+}
 
 # --- Fast path: prefix already matches the pin --------------------------------
 # The fingerprint is the pin file's hash: it names both the release asset and the
@@ -69,9 +89,23 @@ done
 # re-provision.
 PIN_FINGERPRINT="$(shasum -a 256 "$PIN_FILE" | cut -d' ' -f1)"
 
-if [[ -f "$STAMP" && "$(cat "$STAMP")" == "$PIN_FINGERPRINT" ]]; then
+if [[ -f "$STAMP" && "$(cat "$STAMP")" == "$PIN_FINGERPRINT" ]] && prefix_is_complete "$PREFIX"; then
+    # The stamp is per-release, so it says nothing about where `current` points.
+    # Bumping the pin and then reverting it leaves `current` on the newer release
+    # with the older release still stamped: without this the script would report
+    # success while the build compiled against a release the repo does not declare.
+    if [[ "$(readlink "$LLAMA_DIR/current" 2>/dev/null)" != "$LLAMA_CPP_RELEASE" ]]; then
+        repoint_current
+        echo "Repointed .llama/current -> $LLAMA_CPP_RELEASE (was stale)"
+    fi
     echo "llama.cpp prefix already provisioned at pin $LLAMA_CPP_RELEASE ($PREFIX)"
     exit 0
+fi
+
+# A stamped but incomplete prefix means an earlier run died part-way through (or
+# somebody deleted files by hand). Re-provision rather than trust the stamp.
+if [[ -f "$STAMP" ]] && ! prefix_is_complete "$PREFIX"; then
+    echo "Prefix at $PREFIX is stamped but incomplete; re-provisioning."
 fi
 
 echo "=== Provisioning pinned llama.cpp $LLAMA_CPP_RELEASE ==="
@@ -93,8 +127,11 @@ else
     rm -f "$TARBALL"
     curl -fsSL "$URL" -o "$TARBALL" || {
         echo "ERROR: Failed to download $URL" >&2
-        echo "  Offline? Point the build at an existing llama.cpp prefix instead:" >&2
-        echo "    LOCAL_LLAMA_PREFIX=/opt/homebrew   (whatever version brew has, OFF-PIN)" >&2
+        echo "  Offline or GitHub unreachable. The previously provisioned prefix, if any," >&2
+        echo "  is untouched, so an existing checkout keeps building." >&2
+        echo "  Note that LOCAL_LLAMA_PREFIX=/opt/homebrew is NOT a way out: Homebrew" >&2
+        echo "  ships no llama.cpp common/ headers, so the build would fail on 'chat.h'." >&2
+        echo "  An override prefix must provide lib/, include/ and include-common/." >&2
         exit 1
     }
     actual="$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)"
@@ -110,11 +147,13 @@ else
 fi
 
 # --- Stage lib/ from the asset ------------------------------------------------
-rm -rf "$PREFIX"
-mkdir -p "$PREFIX/lib" "$PREFIX/include"
+rm -rf "$STAGING"
+mkdir -p "$STAGING/lib" "$STAGING/include"
 
 WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
+# Also clears the staging prefix, so a failed run leaves no half-built directory
+# behind. On success the staging dir has already been moved, making this a no-op.
+trap 'rm -rf "$WORKDIR" "$STAGING"' EXIT
 tar -xzf "$TARBALL" -C "$WORKDIR"
 
 EXTRACTED="$WORKDIR/llama-$LLAMA_CPP_RELEASE"
@@ -143,7 +182,7 @@ for src in "$EXTRACTED"/*.dylib; do
             # -a preserves the symlink triplets upstream ships
             # (libllama.dylib -> libllama.0.dylib -> libllama.0.0.<rel>.dylib);
             # dereferencing them would triple the prefix size for nothing.
-            cp -a "$src" "$PREFIX/lib/"
+            cp -a "$src" "$STAGING/lib/"
             staged=$((staged + 1))
             ;;
     esac
@@ -158,7 +197,7 @@ echo "  staged $staged dylib entries"
 # The versioned filename encodes the build number, so this catches a pin whose
 # LLAMA_CPP_ASSET names a different release than LLAMA_CPP_RELEASE.
 VERSIONED="libllama.0.0.${LLAMA_CPP_RELEASE#b}.dylib"
-if [[ ! -f "$PREFIX/lib/$VERSIONED" ]]; then
+if [[ ! -f "$STAGING/lib/$VERSIONED" ]]; then
     echo "ERROR: Expected $VERSIONED in the asset, but it is not there." >&2
     echo "  LLAMA_CPP_ASSET=$LLAMA_CPP_ASSET does not look like release $LLAMA_CPP_RELEASE." >&2
     exit 1
@@ -166,7 +205,7 @@ fi
 
 for required in libllama.dylib libllama-common.dylib libggml.dylib libggml-base.dylib \
     libggml-cpu.dylib libggml-metal.dylib; do
-    if [[ ! -e "$PREFIX/lib/$required" ]]; then
+    if [[ ! -e "$STAGING/lib/$required" ]]; then
         echo "ERROR: Required library missing from the staged prefix: $required" >&2
         exit 1
     fi
@@ -180,11 +219,11 @@ done
 # the failure only surfaced as "Failed to load llama.cpp model" at runtime.
 echo "=== Verifying @rpath closure ==="
 missing=0
-for f in "$PREFIX"/lib/*.dylib; do
+for f in "$STAGING"/lib/*.dylib; do
     [[ -L "$f" ]] && continue
     while read -r dep; do
         [[ -z "$dep" ]] && continue
-        if [[ ! -e "$PREFIX/lib/$(basename "$dep")" ]]; then
+        if [[ ! -e "$STAGING/lib/$(basename "$dep")" ]]; then
             echo "ERROR: $(basename "$f") needs $(basename "$dep"), which is not staged." >&2
             missing=1
         fi
@@ -197,7 +236,7 @@ done
 # future asset that reintroduces such a dep is caught here rather than by
 # package-macos-demo.sh's gate (or by an end user with no Homebrew).
 external=0
-for f in "$PREFIX"/lib/*.dylib; do
+for f in "$STAGING"/lib/*.dylib; do
     [[ -L "$f" ]] && continue
     while read -r dep; do
         case "$dep" in
@@ -217,19 +256,33 @@ echo "  closure is self-contained"
 # macOS than the floor, so catch it here where the fix is a pin change.
 FLOOR="${LOCAL_WALLET_DEPLOYMENT_TARGET:-15.0}"
 echo "=== Verifying deployment targets (floor $FLOOR) ==="
-for f in libllama.dylib libllama-common.dylib libggml.dylib libggml-base.dylib \
-    libggml-cpu.dylib libggml-metal.dylib; do
-    minos="$(otool -l "$PREFIX/lib/$f" | awk '/LC_BUILD_VERSION/,/sdk/' | awk '/minos/ {print $2; exit}')"
+# Every staged dylib, not a hard-coded subset: libggml-blas and libggml-rpc are
+# staged too and get pulled into Contents/Frameworks by package-macos-demo.sh's
+# recursive embedder, so leaving them unchecked would defer the failure to that
+# script's verify_mach_o_deployment_targets gate -- the deferral this check exists
+# to prevent.
+max_minos=""
+for f in "$STAGING"/lib/*.dylib; do
+    [[ -L "$f" ]] && continue
+    minos="$(otool -l "$f" | awk '/LC_BUILD_VERSION/,/sdk/' | awk '/minos/ {print $2; exit}')"
     if [[ -z "$minos" ]]; then
-        echo "ERROR: Could not read minos from $f" >&2
+        echo "ERROR: Could not read minos from $(basename "$f")" >&2
         exit 1
     fi
     if [[ "$(printf '%s\n%s\n' "$minos" "$FLOOR" | sort -V | head -1)" != "$minos" ]]; then
-        echo "ERROR: $f targets macOS $minos, newer than the $FLOOR floor." >&2
+        echo "ERROR: $(basename "$f") targets macOS $minos, newer than the $FLOOR floor." >&2
         exit 1
     fi
+    # Report the newest requirement across the set, not whichever came last.
+    if [[ -z "$max_minos" || "$(printf '%s\n%s\n' "$max_minos" "$minos" | sort -V | tail -1)" == "$minos" ]]; then
+        max_minos="$minos"
+    fi
 done
-echo "  all staged dylibs target macOS $minos or older"
+if [[ -z "$max_minos" ]]; then
+    echo "ERROR: No dylibs found to check deployment targets against." >&2
+    exit 1
+fi
+echo "  all staged dylibs target macOS $max_minos or older"
 
 # --- Fetch + stage the headers from the pinned commit -------------------------
 # The release asset ships dylibs, CLI executables and LICENSE only -- zero
@@ -288,9 +341,9 @@ printf 'include/\nggml/include/\ncommon/\nvendor/nlohmann/\n' \
 
 if ! git -C "$SRC_DIR" fetch -q --depth 1 --filter=blob:none origin "$LLAMA_CPP_COMMIT"; then
     echo "ERROR: Could not fetch llama.cpp commit $LLAMA_CPP_COMMIT." >&2
-    echo "  Offline, or the commit does not exist upstream." >&2
-    echo "  Point the build at an existing llama.cpp prefix instead:" >&2
-    echo "    LOCAL_LLAMA_PREFIX=...   (see scripts/README.md)" >&2
+    echo "  GitHub unreachable. (A commit that does not exist upstream is rejected" >&2
+    echo "  earlier, by the release-tag check.) The previously provisioned prefix," >&2
+    echo "  if any, is untouched, so an existing checkout keeps building." >&2
     exit 1
 fi
 git -C "$SRC_DIR" checkout -q --force FETCH_HEAD
@@ -310,27 +363,67 @@ fi
 # nlohmann lands *inside* include-common/ because common/chat.h includes it as
 # "nlohmann/json_fwd.hpp", relative to its own directory, while upstream keeps it
 # at vendor/nlohmann/ and resolves it via a separate -I.
-mkdir -p "$PREFIX/include-common/jinja" "$PREFIX/include-common/nlohmann"
-cp "$SRC_DIR"/include/*.h "$PREFIX/include/"
-cp "$SRC_DIR"/ggml/include/*.h "$PREFIX/include/"
-cp "$SRC_DIR"/common/*.h "$PREFIX/include-common/"
-cp "$SRC_DIR"/common/jinja/*.h "$PREFIX/include-common/jinja/"
-cp "$SRC_DIR"/vendor/nlohmann/*.hpp "$PREFIX/include-common/nlohmann/"
+mkdir -p "$STAGING/include-common/jinja" "$STAGING/include-common/nlohmann"
+cp "$SRC_DIR"/include/*.h "$STAGING/include/"
+cp "$SRC_DIR"/ggml/include/*.h "$STAGING/include/"
+cp "$SRC_DIR"/common/*.h "$STAGING/include-common/"
+cp "$SRC_DIR"/common/jinja/*.h "$STAGING/include-common/jinja/"
+cp "$SRC_DIR"/vendor/nlohmann/*.hpp "$STAGING/include-common/nlohmann/"
 
 for required in "include/llama.h" "include/ggml.h" "include-common/chat.h" \
     "include-common/common.h" "include-common/jinja/runtime.h" \
     "include-common/nlohmann/json.hpp"; do
-    if [[ ! -f "$PREFIX/$required" ]]; then
+    if [[ ! -f "$STAGING/$required" ]]; then
         echo "ERROR: Expected header missing after staging: $required" >&2
         echo "  Upstream may have moved it at $LLAMA_CPP_COMMIT." >&2
         exit 1
     fi
 done
-echo "  public: $(find "$PREFIX/include" -name '*.h' | wc -l | tr -d ' ') headers"
-echo "  common: $(find "$PREFIX/include-common" -name '*.h' -o -name '*.hpp' | wc -l | tr -d ' ') headers"
+echo "  public: $(find "$STAGING/include" -name '*.h' | wc -l | tr -d ' ') headers"
+echo "  common: $(find "$STAGING/include-common" -name '*.h' -o -name '*.hpp' | wc -l | tr -d ' ') headers"
 
-echo "$PIN_FINGERPRINT" >"$STAMP"
-ln -sfn "$LLAMA_CPP_RELEASE" "$LLAMA_DIR/current"
+echo "$PIN_FINGERPRINT" >"$STAGING/.pin-stamp"
+
+# --- Swap the finished prefix into place --------------------------------------
+# Only now is $PREFIX touched. Everything above ran against $STAGING, so a failed
+# download, a rejected tag, an unreachable remote or a missing header leaves the
+# previously working prefix exactly as it was -- which matters because a partially
+# staged prefix is unbuildable and, with the headers no longer vendored, there is
+# no in-tree copy to fall back on while offline.
+echo "=== Installing ==="
+if [[ -d "$PREFIX" ]]; then
+    rm -rf "$PREFIX.replaced"
+    mv "$PREFIX" "$PREFIX.replaced"
+fi
+if ! mv "$STAGING" "$PREFIX"; then
+    echo "ERROR: Could not move $STAGING into place at $PREFIX." >&2
+    if [[ -d "$PREFIX.replaced" ]]; then
+        mv "$PREFIX.replaced" "$PREFIX"
+        echo "  Restored the previous prefix." >&2
+    fi
+    exit 1
+fi
+rm -rf "$PREFIX.replaced"
+
+repoint_current
+
+# --- Prune superseded releases ------------------------------------------------
+# Each bump would otherwise leave a full prefix behind (~14 MB) and a stale
+# tarball (~11 MB), per worktree. Only the release `current` points at is useful.
+pruned=0
+for old in "$LLAMA_DIR"/b*; do
+    [[ -d "$old" ]] || continue
+    [[ "$(basename "$old")" == "$LLAMA_CPP_RELEASE" ]] && continue
+    rm -rf "$old"
+    pruned=$((pruned + 1))
+done
+for old_asset in "$CACHE_DIR"/llama-*-bin-macos-arm64.tar.gz; do
+    [[ -f "$old_asset" ]] || continue
+    [[ "$(basename "$old_asset")" == "$LLAMA_CPP_ASSET" ]] && continue
+    rm -f "$old_asset"
+    pruned=$((pruned + 1))
+done
+[[ "$pruned" -gt 0 ]] && echo "  pruned $pruned superseded prefix/asset(s)"
 
 echo "=== Pinned llama.cpp ready ==="
 echo "  prefix: $PREFIX"

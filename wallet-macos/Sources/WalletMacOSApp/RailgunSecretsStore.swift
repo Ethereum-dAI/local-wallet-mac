@@ -108,11 +108,12 @@ enum RailgunSecretsStore {
         if hasItem == errSecItemNotFound { return nil }
         guard hasItem == errSecSuccess else { throw StoreError.keychain(hasItem) }
 
-        // Biometric-gated read, with the shared reuse-window so one unlock covers a burst.
-        let context = LAContext()
-        context.localizedReason = "Unlock your RAILGUN privacy account"
-        context.touchIDAuthenticationAllowableReuseDuration =
-            BundlerSecretPromptReusePolicy.authenticationReuseDuration
+        // Biometric-gated read. The context is held across calls, because setting a
+        // reuse duration on a context created and dropped inside one call never
+        // suppressed anything — see `BiometricAuthenticationContexts`.
+        let reason = "Unlock your RAILGUN privacy account"
+        BiometricPromptLog.shared.record(reason: reason, reusable: true)
+        let context = BiometricAuthenticationContexts.shared.context(for: .railgun, reason: reason)
 
         var query = baseQuery(service: service, account: account)
         query[kSecReturnData as String] = true

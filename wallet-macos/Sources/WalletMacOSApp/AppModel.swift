@@ -856,6 +856,11 @@ final class AppModel: ObservableObject {
         lines.append("[history]")
         lines.append(contentsOf: debugHistoryLines())
         lines.append("")
+        // Answers "why did it ask me for Touch ID so many times?" with the reasons
+        // and their counts, rather than leaving it to be guessed at from the source.
+        lines.append("[biometricAuthorisations]")
+        lines.append(contentsOf: BiometricPromptLog.shared.reportLines(formatter: Self.debugReportDateFormatter))
+        lines.append("")
         lines.append("[debugLog]")
         lines.append(debugLogText.isEmpty ? "No debug log entries." : debugLogText)
         lines.append("")

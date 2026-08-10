@@ -35,58 +35,57 @@ enum EmbeddedLlamaStreamEvent {
     case completed(EmbeddedLlamaGenerationResult)
 }
 
-/// Some Gemma 4 builds leak the reasoning channel into the content stream as
-/// literal `<|channel>thought ... <channel|>` markers that the upstream
-/// common_chat_parse does not currently split. Re-extract them here so the
-/// dashboard can still render reasoning in its own disclosure.
-struct GemmaStreamingSplit {
+/// Some models leak their reasoning channel into the content stream as literal
+/// markers that the upstream `common_chat_parse` does not split for us. Re-extract
+/// them here so the dashboard can render reasoning in its own disclosure instead of
+/// printing it as the answer.
+///
+/// Two marker styles are handled, because the app now runs more than one model:
+/// Gemma's `<|channel>thought … <channel|>` and the `<think> … </think>` used by
+/// Qwen3 and other reasoning models. Adding a style is a one-line change to
+/// `ReasoningMarkers.all`.
+struct ReasoningSplit {
     let reasoning: String?
     let content: String
 }
 
-enum GemmaChannelFallback {
-    static let openMarker = "<|channel>"
-    static let closeMarker = "<channel|>"
+struct ReasoningMarkers {
+    let open: String
+    let close: String
+    /// Gemma writes a channel name straight after the opening marker
+    /// (`<|channel>thought`); it is routing metadata, not reasoning. `<think>` has
+    /// no such name, and stripping leading letters there would eat the first word.
+    let hasChannelName: Bool
 
-    static func streamingSplit(of text: String) -> GemmaStreamingSplit {
-        guard let openRange = text.range(of: openMarker) else {
-            return GemmaStreamingSplit(reasoning: nil, content: text)
+    static let all: [ReasoningMarkers] = [
+        ReasoningMarkers(open: "<|channel>", close: "<channel|>", hasChannelName: true),
+        ReasoningMarkers(open: "<think>", close: "</think>", hasChannelName: false),
+    ]
+}
+
+enum ReasoningChannelFallback {
+    static func streamingSplit(of text: String) -> ReasoningSplit {
+        if let opened = firstOpen(in: text) {
+            return splitAtOpen(text, markers: opened.markers, openRange: opened.range)
         }
-        let prefix = String(text[..<openRange.lowerBound])
-        if let closeRange = text.range(of: closeMarker, range: openRange.upperBound..<text.endIndex) {
-            let inner = String(text[openRange.upperBound..<closeRange.lowerBound])
-            let reasoning = stripChannelName(inner)
+        // A close marker with nothing opening it: several chat templates pre-fill
+        // the opening tag, so the model's own output begins *inside* the reasoning
+        // and only ever emits the closing one. Everything before it is reasoning.
+        if let closed = firstClose(in: text) {
+            let reasoning = String(text[..<closed.range.lowerBound])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let suffix = String(text[closeRange.upperBound...])
+            let content = String(text[closed.range.upperBound...])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let trimmedPrefix = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
-            let body: String
-            if trimmedPrefix.isEmpty {
-                body = suffix
-            } else if suffix.isEmpty {
-                body = trimmedPrefix
-            } else {
-                body = trimmedPrefix + "\n\n" + suffix
-            }
-            return GemmaStreamingSplit(
-                reasoning: reasoning.isEmpty ? nil : reasoning,
-                content: body
-            )
+            return ReasoningSplit(reasoning: reasoning.isEmpty ? nil : reasoning, content: content)
         }
-        let inner = String(text[openRange.upperBound...])
-        let reasoning = stripChannelName(inner)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return GemmaStreamingSplit(
-            reasoning: reasoning.isEmpty ? nil : reasoning,
-            content: prefix.trimmingCharacters(in: .whitespacesAndNewlines)
-        )
+        return ReasoningSplit(reasoning: nil, content: text)
     }
 
     static func normalise(_ parsed: ParsedAssistantTurnFlat) -> ParsedAssistantTurnFlat {
         let trimmedReasoning = parsed.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard trimmedReasoning.isEmpty,
               let content = parsed.content,
-              content.contains(openMarker)
+              containsAnyMarker(content)
         else {
             return parsed
         }
@@ -98,7 +97,66 @@ enum GemmaChannelFallback {
         )
     }
 
-    private static func stripChannelName(_ text: String) -> String {
+    static func containsAnyMarker(_ text: String) -> Bool {
+        ReasoningMarkers.all.contains { text.contains($0.open) || text.contains($0.close) }
+    }
+
+    // MARK: - Internals
+
+    /// Earliest opening marker of any style, so a model that emits both is split at
+    /// whichever actually came first rather than at whichever we happened to check.
+    private static func firstOpen(in text: String) -> (markers: ReasoningMarkers, range: Range<String.Index>)? {
+        ReasoningMarkers.all
+            .compactMap { markers in text.range(of: markers.open).map { (markers, $0) } }
+            .min { $0.1.lowerBound < $1.1.lowerBound }
+    }
+
+    private static func firstClose(in text: String) -> (markers: ReasoningMarkers, range: Range<String.Index>)? {
+        ReasoningMarkers.all
+            .compactMap { markers in text.range(of: markers.close).map { (markers, $0) } }
+            .min { $0.1.lowerBound < $1.1.lowerBound }
+    }
+
+    private static func splitAtOpen(
+        _ text: String,
+        markers: ReasoningMarkers,
+        openRange: Range<String.Index>
+    ) -> ReasoningSplit {
+        let prefix = String(text[..<openRange.lowerBound])
+        guard let closeRange = text.range(
+            of: markers.close,
+            range: openRange.upperBound..<text.endIndex
+        ) else {
+            // Still streaming: the reasoning has opened and not closed, so nothing
+            // after the marker is content yet.
+            let inner = String(text[openRange.upperBound...])
+            let reasoning = strippedChannelName(inner, markers: markers)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return ReasoningSplit(
+                reasoning: reasoning.isEmpty ? nil : reasoning,
+                content: prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+
+        let inner = String(text[openRange.upperBound..<closeRange.lowerBound])
+        let reasoning = strippedChannelName(inner, markers: markers)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let suffix = String(text[closeRange.upperBound...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPrefix = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body: String
+        if trimmedPrefix.isEmpty {
+            body = suffix
+        } else if suffix.isEmpty {
+            body = trimmedPrefix
+        } else {
+            body = trimmedPrefix + "\n\n" + suffix
+        }
+        return ReasoningSplit(reasoning: reasoning.isEmpty ? nil : reasoning, content: body)
+    }
+
+    private static func strippedChannelName(_ text: String, markers: ReasoningMarkers) -> String {
+        guard markers.hasChannelName else { return text }
         var iterator = text.unicodeScalars.makeIterator()
         var nameLength = 0
         while let scalar = iterator.next(), CharacterSet.letters.contains(scalar) {
@@ -232,7 +290,7 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
                     } catch {
                         extracted = ParsedAssistantTurnFlat(content: accumulated, reasoning: nil, toolCalls: [])
                     }
-                    let parsed = GemmaChannelFallback.normalise(extracted)
+                    let parsed = ReasoningChannelFallback.normalise(extracted)
                     let generationStats = stats ?? GenerationStats(
                         promptTokens: 0,
                         generatedTokens: 0,

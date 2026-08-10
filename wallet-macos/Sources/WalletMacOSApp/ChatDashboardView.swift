@@ -8098,8 +8098,8 @@ private struct StreamingAssistantBubble: View {
     let onStop: () -> Void
     @State private var isThinkingExpanded = false
 
-    private var split: GemmaStreamingSplit {
-        GemmaChannelFallback.streamingSplit(of: text)
+    private var split: ReasoningSplit {
+        ReasoningChannelFallback.streamingSplit(of: text)
     }
 
     var body: some View {

@@ -76,6 +76,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveBaseFeeWei: Data?
     @Published private(set) var liveGasUpdatedAt: Date?
     @Published private(set) var reconcilerUpdatedAt: Date?
+    @Published var hardwareBudget: HardwareBudget?
+    @Published var modelActionMessage: String?
 
     var activeChain: ChainConfiguration {
         configuration.activeChain
@@ -130,11 +132,15 @@ final class AppModel: ObservableObject {
     private var reconcilerTask: Task<Void, Never>?
     /// Last event-driven balance read, for the coalescing floor in `refreshAccountBalanceQuietly`.
     private var lastBackgroundBalanceReadAt: Date?
+    private var lastGasIndicatorReadAt: Date?
     /// True once a balance read has failed and the failure has been logged; cleared on the next
     /// success so a fresh run of failures logs again exactly once.
     private var suppressedBalanceReadFailure = false
     private let userOperationBuilder: UserOperationBuilder
     private let walletHistoryStore: WalletTransactionHistoryStore
+    let installedModelStore = InstalledModelStore()
+    private let huggingFaceRepository = HuggingFaceRepository()
+    private let modelDownloadManager = LocalAIModelDownloadManager()
     private static let startupInspectionRetryDelays: [UInt64] = [
         500_000_000,
         1_250_000_000,
@@ -150,6 +156,9 @@ final class AppModel: ObservableObject {
     /// cmd-tab away and straight back shouldn't cost a chain read, so coalesce anything closer
     /// together than this. Mirrors `sessionUserActivityPersistenceMinInterval`'s rate-limiting.
     private static let backgroundBalanceReadMinInterval: TimeInterval = 5
+    /// Long enough that re-focusing the app repeatedly does not re-read, short
+    /// enough that the pill is not obviously stale when you come back to it.
+    private static let gasIndicatorMinRefreshInterval: TimeInterval = 20
     private static let sessionUserActivityPersistenceMinInterval: TimeInterval = 15
     private static let relayerBalanceRetryDelays: [UInt64] = [
         400_000_000,
@@ -505,6 +514,16 @@ final class AppModel: ObservableObject {
         lastSubmittedUserOperationHash = nil
         lastBundledTransactionHash = nil
         bootstrap()
+        // `resetWalletNodeConnectionAfterNetworkChange` clears the pill so the new
+        // chain does not inherit the old chain's number. Something then has to put
+        // a number back: the app-only branch above does it, but this branch left it
+        // to the app-became-active trigger, which does not fire for a switch made
+        // inside the running app — so the pill read "— gwei" for the rest of the
+        // session. `refreshLiveGasPrices` goes through `withWalletNodeClient`, so it
+        // waits for the daemon `bootstrap()` is bringing up. Unlike the poll this
+        // replaced, it is one read caused by a deliberate user action, not a timer
+        // that can resurrect a daemon nobody asked for.
+        Task { await refreshLiveGasPricesNow() }
     }
 
     func updateSessionPolicy(_ policy: SessionPolicyConfig) throws {
@@ -553,6 +572,9 @@ final class AppModel: ObservableObject {
         // left, funded the account from a faucet or another wallet, and came back to check. With
         // no poll, this is the only trigger that catches money the app didn't move itself.
         Task { await refreshAccountBalanceQuietly(logContext: "balance-resume") }
+        // Same reasoning as the balance: coming back is when a stale gas number is
+        // most likely to be looked at, and about to be acted on.
+        Task { await refreshLiveGasPricesIfStale(now: now) }
     }
 
     func recordSessionUserActivity(now: Date = Date()) {
@@ -568,11 +590,176 @@ final class AppModel: ObservableObject {
     }
 
     func setContextWindowTokens(_ tokens: Int) {
-        let model = LocalAIModel.available.first { $0.id == onboardingSettingsStore.selectedModelID } ?? .recommended
+        let model = LocalAIModel.curated.first { $0.id == onboardingSettingsStore.selectedModelID } ?? .recommended
         let clamped = ContextWindowPresets.clamp(tokens, maxTokens: model.maxContextTokens)
         guard onboardingSettingsStore.contextWindowTokens != clamped else { return }
         onboardingSettingsStore.contextWindowTokens = clamped
-        appendLog("models: context window set to \(clamped) tokens (applies after restart)")
+        appendLog("models: context window set to \(clamped) tokens (applies from the next message)")
+    }
+
+    var modelCatalog: ModelCatalog {
+        ModelCatalog(installedStore: installedModelStore, downloadManager: modelDownloadManager)
+    }
+
+    func refreshHardwareBudget() async {
+        hardwareBudget = await LocalHardwareInspector().budget()
+    }
+
+    func fitVerdict(for entry: ModelCatalogEntry) -> ModelFitVerdict {
+        guard let hardwareBudget else { return .unknown }
+        return ModelSelectionPolicy.verdict(
+            entry: entry,
+            contextTokens: onboardingSettingsStore.contextWindowTokens,
+            budget: hardwareBudget
+        )
+    }
+
+    /// Persists the choice and returns what the dashboard should activate. Takes
+    /// effect on the next message; the current conversation keeps its history.
+    /// AppModel deliberately does not touch the runtime — see the ownership note.
+    ///
+    /// The disk-presence check is the one impure input; `ModelActivationPlanner`
+    /// makes the actual decision (installed-or-not, and what URL/context to
+    /// activate with) so that logic is unit-testable without a real file on disk.
+    func selectModel(id: String) throws -> ActiveModelSelection {
+        let entry = modelCatalog.entries.first(where: { $0.id == id })
+        let fileExists = entry?.installedPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+        guard case let .activate(selection) = ModelActivationPlanner.decide(
+            entry: entry,
+            fileExists: fileExists,
+            currentContextTokens: onboardingSettingsStore.contextWindowTokens
+        ) else {
+            throw AppError.modelNotInstalled
+        }
+        onboardingSettingsStore.selectedModelID = id
+        onboardingSettingsStore.installedModelPath = selection.url.path
+        onboardingSettingsStore.contextWindowTokens = selection.contextTokens
+        modelActionMessage = "\(selection.displayName) is now active."
+        appendLog("models: active model set to \(selection.displayName) at \(selection.contextTokens) tokens")
+        return selection
+    }
+
+    func resolveHuggingFaceRepo(_ repoID: String) async throws -> HuggingFaceRepositoryInfo {
+        try await huggingFaceRepository.info(repoID: repoID)
+    }
+
+    /// Stops the download in flight. The awaiting `downloadModel` call throws
+    /// `.cancelled`, so nothing is recorded as installed and no partial file is
+    /// left behind. Returns false when there was nothing to cancel.
+    @discardableResult
+    func cancelModelDownload() -> Bool {
+        let cancelled = modelDownloadManager.cancelActiveDownload()
+        if cancelled { appendLog("models: download cancelled") }
+        return cancelled
+    }
+
+    /// Reads a candidate file's GGUF header over a ranged request — tens of
+    /// megabytes, not the whole model — so the fit verdict is on screen *before*
+    /// the user commits to a multi-gigabyte download.
+    ///
+    /// Never throws: a host that will not serve a partial read, or a header this
+    /// parser does not understand, degrades to the "size unknown" summary carrying
+    /// whatever reason there was. Not being able to predict the fit is not a reason
+    /// to refuse the download.
+    func inspectRemoteModel(_ file: HuggingFaceGGUFFile) async -> RemoteModelFit {
+        do {
+            let header = try await GGUFHeaderReader.fetch(from: file.downloadURL)
+            return RemoteModelFitDescriber.describe(
+                profile: header.memoryProfile(weightBytes: file.sizeBytes),
+                contextTokens: onboardingSettingsStore.contextWindowTokens,
+                budget: hardwareBudget
+            )
+        } catch {
+            return RemoteModelFitDescriber.unknown(reason: error.localizedDescription)
+        }
+    }
+
+    /// Downloads, verifies, reads the GGUF header from the downloaded file for a fit
+    /// profile, and records the install. Does not activate the model — that is a
+    /// separate, explicit step.
+    ///
+    /// Reads the header from the local file rather than re-fetching a ranged
+    /// request over the network: the download already pulled the whole file to
+    /// disk, so re-requesting up to `GGUFHeaderReader.headerProbeBytes` (24 MB)
+    /// from the remote host would be a wasted round trip for bytes already
+    /// sitting on disk. Failure behavior is unchanged: if the header can't be
+    /// read or parsed, `profile` is nil and the install still succeeds — a nil
+    /// profile surfaces later as the "Size unknown" verdict, by design.
+    func downloadModel(
+        _ request: ModelDownloadRequest,
+        progress: @escaping @MainActor (Double) -> Void
+    ) async throws {
+        if let hardwareBudget {
+            try LocalAIModelDownloadManager.assertDiskSpace(neededBytes: request.sizeBytes, budget: hardwareBudget)
+        }
+        let fileURL = try await modelDownloadManager.download(request, progress: progress)
+        let profile = Self.readMemoryProfile(fileURL: fileURL, weightBytes: request.sizeBytes)
+        installedModelStore.add(InstalledModel(
+            id: request.modelID,
+            displayName: request.displayName,
+            repoID: request.repoID,
+            fileName: request.fileName,
+            path: fileURL.path,
+            sizeBytes: request.sizeBytes,
+            sha256: request.expectedSHA256,
+            profile: profile
+        ))
+        modelActionMessage = "\(request.displayName) downloaded."
+        appendLog("models: installed \(request.modelID) at \(fileURL.path)")
+    }
+
+    /// Reads the leading `GGUFHeaderReader.headerProbeBytes` of an already-downloaded
+    /// file and parses it for a memory profile. Returns nil (never throws) on any
+    /// failure — a missing/unparsable header degrades to the "Size unknown" verdict
+    /// rather than blocking the install that already succeeded.
+    private static func readMemoryProfile(fileURL: URL, weightBytes: UInt64) -> ModelMemoryProfile? {
+        guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return nil }
+        defer { try? handle.close() }
+        guard let prefix = try? handle.read(upToCount: GGUFHeaderReader.headerProbeBytes) else { return nil }
+        guard let header = try? GGUFHeaderReader.parse(prefix) else { return nil }
+        return header.memoryProfile(weightBytes: weightBytes)
+    }
+
+    /// Removes a custom model's file and its catalog entry. The default model can be
+    /// removed too, but selection falls back to it, so the UI keeps it non-removable.
+    ///
+    /// The store entry is only forgotten once the file is actually gone —
+    /// `ModelRemovalPlanner.mayForgetEntry` makes that call from the deletion
+    /// attempt's outcome. Swallowing a deletion failure here would leave a
+    /// multi-gigabyte file on disk with no remaining catalog row to find or
+    /// delete it from, so a real failure is surfaced and the entry kept.
+    func removeModel(id: String) throws {
+        guard let installed = installedModelStore.model(id: id) else { return }
+        guard !ModelRemovalPlanner.isBlockedBecauseActive(
+            id: id,
+            selectedModelID: onboardingSettingsStore.selectedModelID
+        ) else {
+            throw AppError.localDaemonLaunchFailed("Switch to another model before removing this one.")
+        }
+
+        let fileExistedBeforeAttempt = FileManager.default.fileExists(atPath: installed.path)
+        var deletionError: Error?
+        if fileExistedBeforeAttempt {
+            do {
+                try FileManager.default.removeItem(atPath: installed.path)
+            } catch {
+                deletionError = error
+            }
+        }
+
+        guard ModelRemovalPlanner.mayForgetEntry(
+            fileExistedBeforeAttempt: fileExistedBeforeAttempt,
+            deletionSucceeded: deletionError == nil
+        ) else {
+            throw AppError.localDaemonLaunchFailed(
+                "Could not delete \(installed.displayName) at \(installed.path): "
+                    + (deletionError?.localizedDescription ?? "unknown error")
+            )
+        }
+
+        installedModelStore.remove(id: id)
+        modelActionMessage = "\(installed.displayName) removed."
+        appendLog("models: removed \(id)")
     }
 
     func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
@@ -611,6 +798,9 @@ final class AppModel: ObservableObject {
         liveGasPrice = nil
         liveBaseFeeWei = nil
         liveGasUpdatedAt = nil
+        // The new chain's first reading must not be suppressed as "refreshed just
+        // now" by the old chain's timestamp.
+        lastGasIndicatorReadAt = nil
         localRelayerStatus = nil
         localRelayerMessage = walletNodeClient == nil
             ? "Local wallet-node daemon will restart with the selected network."
@@ -685,6 +875,11 @@ final class AppModel: ObservableObject {
         lines.append("")
         lines.append("[history]")
         lines.append(contentsOf: debugHistoryLines())
+        lines.append("")
+        // Answers "why did it ask me for Touch ID so many times?" with the reasons
+        // and their counts, rather than leaving it to be guessed at from the source.
+        lines.append("[biometricAuthorisations]")
+        lines.append(contentsOf: BiometricPromptLog.shared.reportLines(formatter: Self.debugReportDateFormatter))
         lines.append("")
         lines.append("[debugLog]")
         lines.append(debugLogText.isEmpty ? "No debug log entries." : debugLogText)
@@ -3158,12 +3353,34 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Long-lived poll driving the chat gas indicator. Cancelled with its Task.
-    func runGasPriceUpdates() async {
-        while !Task.isCancelled {
-            await refreshLiveGasPrices()
-            try? await Task.sleep(nanoseconds: 30_000_000_000)
-        }
+    /// An explicit request — tapping the pill — always reads, and stamps the gate so
+    /// a follow-on trigger does not immediately read again.
+    func refreshLiveGasPricesNow(now: Date = Date()) async {
+        lastGasIndicatorReadAt = now
+        await refreshLiveGasPrices()
+    }
+
+    /// Refreshes the chat gas indicator, unless it was refreshed moments ago.
+    ///
+    /// This used to be a 30-second poll that ran for the life of the app. It fed
+    /// nothing but the header pill and its popover — the fees an operation is
+    /// actually signed with come from `suggestedUserOperationFees`, which fetches
+    /// its own price when the operation is built. Meanwhile every tick went through
+    /// `withWalletNodeClient`, which relaunches the daemon on socket loss, so a
+    /// decorative number was able to resurrect a dead daemon and unlock the relayer
+    /// key on a fixed schedule with nothing on screen to explain it.
+    ///
+    /// Now it runs on the things that precede looking at or acting on gas: opening
+    /// the popover, returning to the app, and once after launch. The gate keeps a
+    /// burst of those from becoming a burst of chain reads.
+    func refreshLiveGasPricesIfStale(now: Date = Date()) async {
+        guard GasIndicatorRefreshGate.allowed(
+            now: now,
+            lastReadAt: lastGasIndicatorReadAt,
+            minInterval: Self.gasIndicatorMinRefreshInterval
+        ) else { return }
+        lastGasIndicatorReadAt = now
+        await refreshLiveGasPrices()
     }
 
     private func appendDraftLogSummary(_ draft: UserOperationDraft, context: String) {
@@ -3268,6 +3485,16 @@ enum WalletIdleGate {
 
 /// Coalescing floor for the event-driven balance reads. Pure so the boundary is testable without
 /// an `AppModel`; `nil` means nothing has been read yet, which always allows.
+/// Coalescing floor for the gas indicator. Same shape as the balance gate, kept
+/// separate because the two are refreshed by different triggers and would
+/// otherwise suppress each other.
+enum GasIndicatorRefreshGate {
+    static func allowed(now: Date, lastReadAt: Date?, minInterval: TimeInterval) -> Bool {
+        guard let lastReadAt else { return true }
+        return now.timeIntervalSince(lastReadAt) >= minInterval
+    }
+}
+
 enum BackgroundBalanceReadGate {
     static func allowed(now: Date, lastReadAt: Date?, minInterval: TimeInterval) -> Bool {
         guard let lastReadAt else { return true }

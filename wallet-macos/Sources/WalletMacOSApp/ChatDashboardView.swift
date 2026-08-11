@@ -67,6 +67,16 @@ struct ChatConversation: Identifiable, Equatable, Codable {
     var updatedAt = Date()
 }
 
+/// A chain ID is an identifier, not a quantity.
+///
+/// `Text("Chain \(id)")` interpolates a `UInt64` into a `LocalizedStringKey`,
+/// which formats it for the viewer's locale — Sepolia's 11155111 rendered as
+/// "Chain 11.155.111" on a European locale. Interpolating the `String` instead
+/// keeps the digits contiguous everywhere.
+enum ChainIDFormatting {
+    static func text(_ chainID: UInt64) -> String { String(chainID) }
+}
+
 private struct ChatAccountIdentity: Equatable {
     let chainName: String
     let chainID: UInt64
@@ -886,6 +896,10 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var conversations: [ChatConversation]
     @Published private(set) var activeConversationID: UUID
     @Published private(set) var isGenerating = false
+    /// What the chat calls the model it is talking to. Every one of these strings
+    /// used to be the literal "Gemma", written when Gemma was the only option, so
+    /// switching models changed the runtime and nothing the user could see.
+    @Published private(set) var activeModelName: String = LocalAIModel.recommended.name
     @Published private(set) var runtimeStatus: String
     @Published var thinkingEnabled = true
     @Published var isSidebarVisible = true
@@ -930,7 +944,7 @@ private final class ChatDashboardModel: ObservableObject {
     private var transferPreflightTasks: [UUID: Task<Void, Never>] = [:]
     private var swapPreflightTasks: [UUID: Task<Void, Never>] = [:]
     private var walletModelCancellable: AnyCancellable?
-    private var gasPollTask: Task<Void, Never>?
+    private var gasWarmupTask: Task<Void, Never>?
     private var sessionActivityEventMonitor: Any?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private let inferenceService: EmbeddedLlamaInferenceService
@@ -971,6 +985,10 @@ private final class ChatDashboardModel: ObservableObject {
             walletHistoryStore: walletHistoryStore
         )
         self.runtimeStatus = inferenceService.runtimeStatus
+        self.activeModelName = ActiveModelNaming.displayName(
+            forModelID: settingsStore.selectedModelID,
+            installed: InstalledModelStore().installed
+        )
         self.thinkingEnabled = preferencesStore.thinkingEnabled
         self.isSidebarVisible = preferencesStore.sidebarVisible
 
@@ -1013,12 +1031,14 @@ private final class ChatDashboardModel: ObservableObject {
         }
         refreshAccountIdentity()
         self.walletModel.bootstrap()
-        // Capture the AppModel, not self: the poll loop runs until cancelled, so a
-        // strong self-capture would keep this model alive forever and prevent deinit
-        // (hence the cancel) from ever running.
+        // One warm-up, not a poll. The header pill would otherwise read "— gwei"
+        // until first tapped; after this it is refreshed by the things that precede
+        // looking at or acting on gas (tapping the pill, returning to the app).
+        // Captures the AppModel rather than self so a slow first daemon launch
+        // cannot keep this model alive past deinit.
         let gasModel = self.walletModel
-        gasPollTask = Task {
-            await gasModel.runGasPriceUpdates()
+        gasWarmupTask = Task {
+            await gasModel.refreshLiveGasPricesIfStale()
         }
         // Picks up operations left unfinalised by a previous session. Goes through the AppModel
         // entry point rather than the loop body so this launch-time start and the post-send start
@@ -1030,7 +1050,7 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     deinit {
-        gasPollTask?.cancel()
+        gasWarmupTask?.cancel()
         // The reconciler task now lives on the AppModel, and `deinit` is nonisolated, so stopping it
         // means hopping to the main actor. Capture the model, not `self`, which is mid-deallocation.
         // The running loop retains the AppModel for the duration of its current call, so without
@@ -1110,7 +1130,7 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     func refreshGasPricesNow() {
-        Task { await walletModel.refreshLiveGasPrices() }
+        Task { await walletModel.refreshLiveGasPricesNow() }
     }
 
     /// Quiet balance re-read for a user action that reveals the balance. Subject to the same
@@ -1167,7 +1187,7 @@ private final class ChatDashboardModel: ObservableObject {
 
     var settingsSnapshot: LocalWalletSettingsSnapshot {
         let chain = walletModel.activeChain
-        let selectedModel = LocalAIModel.available.first { $0.id == onboardingSettingsStore.selectedModelID } ?? .recommended
+        let selectedModel = LocalAIModel.curated.first { $0.id == onboardingSettingsStore.selectedModelID } ?? .recommended
         let storedInstalledPath = onboardingSettingsStore.installedModelPath ?? ""
         let bundledInstalledPath = LocalAIModelDownloadManager.bundledFileURL(for: selectedModel)?.path ?? ""
         let installedPath = storedInstalledPath.isEmpty ? bundledInstalledPath : storedInstalledPath
@@ -1194,6 +1214,28 @@ private final class ChatDashboardModel: ObservableObject {
         let databaseSize = Self.byteFormatter.string(fromByteCount: Int64(chatStore.databaseFileSizeBytes()))
         let rankingCount = (try? chatStore.loadToolIntentFeedbackExportRecords().count) ?? 0
 
+        // Built once here (not per-row in the view), per catalog walk: `modelCatalog`
+        // re-reads installed-model state and `entry.isInstalled` does a filesystem
+        // check, so both belong in this once-per-snapshot pass, not inside a ForEach.
+        let budget = walletModel.hardwareBudget
+        let activeModelID = onboardingSettingsStore.selectedModelID
+        let catalog = walletModel.modelCatalog
+        let modelRows = catalog.entries.map { entry in
+            SettingsModelRow(
+                id: entry.id,
+                displayName: entry.displayName,
+                detail: entry.source == .curated ? entry.sizeText : entry.repoID,
+                source: entry.source,
+                verdict: walletModel.fitVerdict(for: entry),
+                estimatedBytes: entry.profile.map {
+                    ModelFitEvaluator.requiredBytes(profile: $0, contextTokens: onboardingSettingsStore.contextWindowTokens)
+                } ?? 0,
+                isInstalled: entry.isInstalled,
+                isActive: entry.id == activeModelID,
+                isDefault: entry.isDefault
+            )
+        }
+
         return LocalWalletSettingsSnapshot(
             capturedAt: now,
             appVersion: appBuild.version,
@@ -1207,6 +1249,12 @@ private final class ChatDashboardModel: ObservableObject {
             textModelRuntimeStatus: runtimeStatus,
             textModelInstallStatus: installStatus,
             textModelPath: installedPath.isEmpty ? "Not set" : installedPath,
+            modelRows: modelRows,
+            hardwareSummary: budget.map(SettingsHardwareSummary.init),
+            selectableContextTokens: ModelFitEvaluator.selectableContexts(
+                profile: catalog.entries.first { $0.id == activeModelID }?.profile,
+                budget: budget
+            ),
             contextWindow: "\(inferenceService.contextSize) tokens",
             contextWindowTokens: onboardingSettingsStore.contextWindowTokens,
             contextWindowMaxTokens: selectedModel.maxContextTokens,
@@ -1637,8 +1685,15 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     var contextStatsText: String {
+        let configured = inferenceService.contextSize
         guard let stats = messages.last(where: { $0.stats != nil })?.stats else {
-            return "Context 0 / \(inferenceService.contextSize) · \(inferenceService.contextSize) left"
+            return "Context 0 / \(configured) · \(configured) left"
+        }
+        // The window the last reply ran under is not necessarily the one the next
+        // reply will: switching model or preset takes effect at the next message.
+        // Showing the old total here is what made a context change look ignored.
+        guard stats.contextSize == configured else {
+            return "Context \(stats.usedContextTokens) / \(configured) · applies from the next message"
         }
         return "Context \(stats.usedContextTokens) / \(stats.contextSize) · \(stats.contextTokensLeft) left"
     }
@@ -1766,7 +1821,9 @@ private final class ChatDashboardModel: ObservableObject {
         isGenerating = true
         streamingText = ""
         streamingMessageID = UUID()
-        runtimeStatus = thinkingEnabled ? "Gemma is thinking" : "Gemma is generating"
+        runtimeStatus = thinkingEnabled
+            ? "\(activeModelName) is thinking"
+            : "\(activeModelName) is generating"
 
         let stream = inferenceService.stream(
             prompt: prompt,
@@ -2423,6 +2480,124 @@ private final class ChatDashboardModel: ObservableObject {
         return "Revealed model file."
     }
 
+    /// Switches the active model. `AppModel.selectModel` only decides *what* to
+    /// activate and persists the choice — it never touches the runtime (see
+    /// `applyActiveModel`, the one place allowed to). Surfaces the specific message
+    /// `AppModel` set (e.g. "X is now active."), falling back only if that is nil.
+    @discardableResult
+    func selectModel(id: String) throws -> String {
+        let selection = try walletModel.selectModel(id: id)
+        applyActiveModel(selection)
+        return walletModel.modelActionMessage ?? "\(selection.displayName) is now active."
+    }
+
+    /// Points the one runtime instance at the newly selected model. The swap itself
+    /// happens lazily inside the service, at the start of the next generation. This
+    /// is the only place that may touch `inferenceService` on a model switch —
+    /// `AppModel` never gets a reference to it.
+    func applyActiveModel(_ selection: ActiveModelSelection) {
+        inferenceService.setActiveModel(url: selection.url, contextTokens: selection.contextTokens)
+        runtimeStatus = inferenceService.runtimeStatus
+        activeModelName = selection.displayName
+    }
+
+    /// Downloads a model and then actually tries it: arithmetic proposes the fit,
+    /// a real load disposes. The test result is appended to the download message
+    /// rather than gating anything — the model is installed either way.
+    func downloadModel(
+        _ request: ModelDownloadRequest,
+        progress: @escaping @MainActor (ModelInstallPhase) -> Void
+    ) async throws -> String {
+        try await walletModel.downloadModel(request) { fraction in
+            progress(.downloading(fraction))
+        }
+        let installed = walletModel.modelActionMessage ?? "\(request.displayName) downloaded."
+        progress(.testing)
+        guard let verdict = await runSelfTest(for: request) else { return installed }
+        return "\(installed) \(verdict)"
+    }
+
+    /// Loads the freshly downloaded model for real and asks it for one tool call —
+    /// the only capability the wallet actually needs from a model. Returns nil when
+    /// the test could not be attempted at all.
+    private func runSelfTest(for request: ModelDownloadRequest) async -> String? {
+        guard let installed = walletModel.installedModelStore.model(id: request.modelID) else { return nil }
+        guard !isGenerating else { return ModelSelfTestReport.skippedWhileGenerating }
+
+        let modelURL = URL(fileURLWithPath: installed.path)
+        let trained = installed.profile?.trainedContextTokens ?? ContextWindowPresets.fallback
+        let requested = min(onboardingSettingsStore.contextWindowTokens, trained)
+
+        // The probe loads a second copy of the weights. Free the live runtime
+        // first, or a Mac sized for exactly one model is asked to hold two — the
+        // failure the fit verdicts exist to prevent. Safe here because
+        // `isGenerating` is false, so nothing holds a runtime snapshot.
+        inferenceService.releaseLoadedRuntime()
+        runtimeStatus = inferenceService.runtimeStatus
+
+        // `Task.detached`, not a plain `await`: `LlamaProbeRuntime.load` blocks
+        // its thread inside llama.cpp for as long as the weights take to map, and
+        // that must not be the main actor's thread.
+        let result = await Task.detached(priority: .userInitiated) {
+            await ModelSelfTest(runtime: LlamaProbeRuntime()).run(
+                modelURL: modelURL,
+                requestedContextTokens: requested,
+                trainedContextTokens: trained
+            )
+        }.value
+        runtimeStatus = inferenceService.runtimeStatus
+
+        // A step-down is a measurement, not a suggestion: the probe just proved
+        // the configured window does not load on this Mac. Reporting it only as
+        // text left `contextWindowTokens` at the value that failed, so the very
+        // next message hit the same allocation failure the probe already hit —
+        // and every message after it. Adopt what actually worked.
+        if case .steppedDown(_, let working) = result {
+            setContextWindowTokens(working)
+        }
+        return ModelSelfTestReport.message(for: result)
+    }
+
+    @discardableResult
+    func cancelModelDownload() -> Bool {
+        walletModel.cancelModelDownload()
+    }
+
+    func inspectRemoteModel(_ file: HuggingFaceGGUFFile) async -> RemoteModelFit {
+        await walletModel.inspectRemoteModel(file)
+    }
+
+    /// Fetches one of the models the app ships knowledge of, by id. The URL and
+    /// checksum come from `LocalAIModel`, not from the user, so there is no repo to
+    /// resolve first — otherwise this is the same path as a Hugging Face add, self
+    /// test included.
+    func downloadCuratedModel(
+        id: String,
+        progress: @escaping @MainActor (ModelInstallPhase) -> Void
+    ) async throws -> String {
+        guard let model = LocalAIModel.curated.first(where: { $0.id == id }) else {
+            throw AppError.modelNotInstalled
+        }
+        return try await downloadModel(ModelDownloadRequest(model: model), progress: progress)
+    }
+
+    @discardableResult
+    func removeModel(id: String) throws -> String {
+        try walletModel.removeModel(id: id)
+        return walletModel.modelActionMessage ?? "Model removed."
+    }
+
+    func resolveHuggingFaceRepo(_ repoID: String) async throws -> HuggingFaceRepositoryInfo {
+        try await walletModel.resolveHuggingFaceRepo(repoID)
+    }
+
+    /// Refreshes this Mac's memory/disk budget so the fit verdicts and context
+    /// picker in Settings › Models reflect current conditions rather than whatever
+    /// was measured at launch.
+    func refreshHardwareBudget() async {
+        await walletModel.refreshHardwareBudget()
+    }
+
     func saveNetworkSettings(_ settings: DemoNetworkSettings) throws -> String {
         let validated = try settings.validated()
         let requiresRestart = NetworkSettingsChangePolicy.requiresWalletNodeRestart(
@@ -2646,8 +2821,17 @@ private final class ChatDashboardModel: ObservableObject {
         walletModel.setSwapSlippageBps(bps)
     }
 
+    /// Persists the choice *and* moves the live runtime to it.
+    ///
+    /// `AppModel` deliberately never touches `inferenceService` — this class owns
+    /// the only instance — so persisting alone left the setting inert: the runtime
+    /// kept the window it was constructed with, `snapshot.contextWindow` kept
+    /// reporting the old size, and the change only took effect on the next launch.
+    /// Reads back the clamped value rather than echoing the argument, since
+    /// `AppModel` bounds it against the active model's trained context.
     func setContextWindowTokens(_ tokens: Int) {
         walletModel.setContextWindowTokens(tokens)
+        inferenceService.setContextTokens(onboardingSettingsStore.contextWindowTokens)
     }
 
     private func appendMessage(_ message: ChatMessage, to conversationID: UUID) {
@@ -4198,6 +4382,7 @@ struct LocalWalletChatDashboardView: View {
                                 level: level,
                                 used: snapshot.used,
                                 total: snapshot.total,
+                                modelName: model.activeModelName,
                                 onNewChat: { model.createNewChat() }
                             )
                             .padding(.bottom, 8)
@@ -4243,6 +4428,7 @@ struct LocalWalletChatDashboardView: View {
         }
         .onAppear {
             model.startSessionActivityTracking()
+            Task { await model.refreshHardwareBudget() }
         }
         .onDisappear {
             model.stopSessionActivityTracking()
@@ -4455,6 +4641,27 @@ struct LocalWalletChatDashboardView: View {
             },
             onRevealModelFile: {
                 try model.revealModelFile()
+            },
+            onSelectModel: { id in
+                try model.selectModel(id: id)
+            },
+            onDownloadModel: { request, progress in
+                try await model.downloadModel(request, progress: progress)
+            },
+            onRemoveModel: { id in
+                try model.removeModel(id: id)
+            },
+            onResolveRepo: { repoID in
+                try await model.resolveHuggingFaceRepo(repoID)
+            },
+            onInspectRemoteFile: { file in
+                await model.inspectRemoteModel(file)
+            },
+            onDownloadCuratedModel: { id, progress in
+                try await model.downloadCuratedModel(id: id, progress: progress)
+            },
+            onCancelModelDownload: {
+                model.cancelModelDownload()
             },
             onSaveNetworkSettings: { settings in
                 try model.saveNetworkSettings(settings)
@@ -4842,6 +5049,7 @@ struct LocalWalletChatDashboardView: View {
                         if let streamingID = model.streamingMessageID {
                             StreamingAssistantBubble(
                                 text: model.streamingText,
+                                modelName: model.activeModelName,
                                 onStop: { model.stop() }
                             )
                             .id(streamingID)
@@ -5094,7 +5302,7 @@ struct LocalWalletChatDashboardView: View {
                 Text(greeting)
                     .font(.system(size: 32, weight: .heavy))
                     .foregroundStyle(ChatPalette.primaryText)
-                Text("Pick a starter below or just message Gemma directly.")
+                Text("Pick a starter below or just message \(model.activeModelName) directly.")
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(ChatPalette.secondaryText)
                     .multilineTextAlignment(.center)
@@ -5207,7 +5415,7 @@ struct LocalWalletChatDashboardView: View {
 
     private var footerControls: some View {
         HStack(spacing: 8) {
-            StatusPill(icon: "circle.fill", text: "Gemma 4 E4B", tint: ChatPalette.success)
+            StatusPill(icon: "circle.fill", text: model.activeModelName, tint: ChatPalette.success)
             Button {
                 model.toggleThinking()
             } label: {
@@ -5321,7 +5529,7 @@ struct LocalWalletChatDashboardView: View {
                 .disabled(model.isGenerating)
                     .frame(minHeight: 78, maxHeight: 96)
                 if model.inputText.isEmpty {
-                    Text("Message Gemma — describe what you want, or type / for tools")
+                    Text("Message \(model.activeModelName) — describe what you want, or type / for tools")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(ChatPalette.mutedText)
                         .padding(.horizontal, 17)
@@ -5620,7 +5828,7 @@ private struct ChainStatusStrip: View {
                 Text(identity.chainName)
                     .font(.system(size: 13, weight: .heavy))
                     .foregroundStyle(ChatPalette.primaryText)
-                Text("Chain \(identity.chainID)")
+                Text("Chain \(ChainIDFormatting.text(identity.chainID))")
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .foregroundStyle(ChatPalette.secondaryText)
                 Text(identity.isTestnet ? "Testnet" : "Mainnet")
@@ -6830,7 +7038,7 @@ private struct OnchainTransactionCard: View {
 
                 Spacer()
 
-                Text("Chain \(summary.chainID)")
+                Text("Chain \(ChainIDFormatting.text(summary.chainID))")
                     .font(.system(size: 11, weight: .black, design: .monospaced))
                     .foregroundStyle(ChatPalette.secondaryText)
                     .padding(.horizontal, 8)
@@ -7914,11 +8122,12 @@ private struct AssistantErrorBubble: View {
 
 private struct StreamingAssistantBubble: View {
     let text: String
+    let modelName: String
     let onStop: () -> Void
     @State private var isThinkingExpanded = false
 
-    private var split: GemmaStreamingSplit {
-        GemmaChannelFallback.streamingSplit(of: text)
+    private var split: ReasoningSplit {
+        ReasoningChannelFallback.streamingSplit(of: text)
     }
 
     var body: some View {
@@ -7928,7 +8137,7 @@ private struct StreamingAssistantBubble: View {
                     HStack(spacing: 10) {
                         ProgressView()
                             .scaleEffect(0.75)
-                        Text("Thinking with Gemma 4 E4B…")
+                        Text("Thinking with \(modelName)…")
                             .font(.system(size: 15, weight: .bold))
                             .foregroundStyle(ChatPalette.secondaryText)
                     }
@@ -8015,6 +8224,7 @@ private struct ContextUsageBanner: View {
     let level: ContextUsageLevel
     let used: Int
     let total: Int
+    let modelName: String
     let onNewChat: () -> Void
 
     private var tint: Color {
@@ -8044,7 +8254,7 @@ private struct ContextUsageBanner: View {
         case .warning:
             return "Used \(used) of \(total) tokens (\(percent)%). A fresh chat keeps responses crisp."
         case .critical:
-            return "Used \(used) of \(total) tokens (\(percent)%). Gemma may start truncating earlier turns — start a new chat."
+            return "Used \(used) of \(total) tokens (\(percent)%). \(modelName) may start truncating earlier turns — start a new chat."
         }
     }
 

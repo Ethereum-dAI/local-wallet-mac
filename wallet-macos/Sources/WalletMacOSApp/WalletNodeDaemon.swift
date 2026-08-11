@@ -199,6 +199,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
             try setCloseOnExec(secretPipe[0])
             try setCloseOnExec(secretPipe[1])
 
+            let launchedAt = Date()
             let pid = try withWalletNodeLoggingEnvironment(environment) {
                 try spawnHelper(
                     execPath: execPath,
@@ -213,7 +214,11 @@ final class WalletNodeDaemon: @unchecked Sendable {
             try writeSecretPayload(bundlerSecrets, to: secretPipe[1])
             closeIfOpen(&secretPipe[1])
 
-            let readyData = try readLineWithTimeout(fd: readyPipe[0], timeout: 8)
+            let readyData = try readLineWithTimeout(
+                fd: readyPipe[0],
+                timeout: 8,
+                launchedAt: launchedAt
+            )
             closeIfOpen(&readyPipe[0])
             let ready = try parseReadyEvent(readyData)
             return WalletNodeDaemon(pid: pid, aliveWriteFD: alivePipe[1], ready: ready)
@@ -423,8 +428,16 @@ final class WalletNodeDaemon: @unchecked Sendable {
     ].joined(separator: ",")
 
     private static func parseReadyEvent(_ data: Data) throws -> ReadyEvent {
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let token = object["token"] as? String,
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AppError.localDaemonLaunchFailed("wallet-node ready event was invalid")
+        }
+        // A fatal startup failure arrives on this same pipe. The daemon knows
+        // exactly why it is exiting, so prefer its reason over anything we
+        // could infer from the fd closing.
+        if let reason = object["error"] as? String, !reason.isEmpty {
+            throw AppError.localDaemonLaunchFailed("wallet-node failed to start: \(reason)")
+        }
+        guard let token = object["token"] as? String,
               let apiVersion = object["apiVersion"] as? Int,
               let socketPath = object["socketPath"] as? String,
               !token.isEmpty,
@@ -435,16 +448,72 @@ final class WalletNodeDaemon: @unchecked Sendable {
         return ReadyEvent(token: token, apiVersion: apiVersion, socketPath: socketPath)
     }
 
-    private static func readLineWithTimeout(fd: Int32, timeout: TimeInterval) throws -> Data {
+    /// tracing writes microsecond precision (`…:57.751405Z`); `ISO8601DateFormatter`
+    /// accepts only milliseconds, so trim the surplus digits before parsing.
+    static func parseDaemonLogTimestamp(_ raw: String) -> Date? {
+        // Built per call rather than cached: ISO8601DateFormatter is not
+        // Sendable, and this only ever runs on a failed launch.
+        guard raw.hasSuffix("Z"), let dot = raw.firstIndex(of: ".") else {
+            return ISO8601DateFormatter().date(from: raw)
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let fraction = raw[raw.index(after: dot)..<raw.index(before: raw.endIndex)]
+        let milliseconds = String(fraction.prefix(3)).padding(toLength: 3, withPad: "0", startingAt: 0)
+        return formatter.date(from: "\(raw[raw.startIndex..<dot]).\(milliseconds)Z")
+    }
+
+    /// The last error the daemon logged at or after `since`, for the case where
+    /// it died without writing a failure event at all — a signal, a panic, a
+    /// failed exec.
+    ///
+    /// The `since` bound is load-bearing: the log is appended across launches,
+    /// so without it a stale error from a previous run would be reported as the
+    /// reason this one failed.
+    static func lastLoggedDaemonError(since: Date, tail: String? = nil) -> String? {
+        let text = tail ?? managedLogTail(maxBytes: 16 * 1024)
+        for line in text.split(separator: "\n").reversed() {
+            guard let data = line.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["level"] as? String == "ERROR",
+                  let rawTimestamp = object["timestamp"] as? String,
+                  let at = parseDaemonLogTimestamp(rawTimestamp),
+                  at >= since,
+                  let fields = object["fields"] as? [String: Any],
+                  let message = fields["message"] as? String
+            else { continue }
+            guard let detail = fields["error"] as? String else { return message }
+            return "\(message): \(detail)"
+        }
+        return nil
+    }
+
+    /// `launchedAt` bounds the log scan in `launchFailure`; it must be captured
+    /// before the spawn, since the daemon can log and die before we get here.
+    private static func readLineWithTimeout(
+        fd: Int32,
+        timeout: TimeInterval,
+        launchedAt: Date
+    ) throws -> Data {
         let deadline = Date().addingTimeInterval(timeout)
         var data = Data()
+
+        // Attach the daemon's own last error when we have nothing better. Both
+        // bare messages below are true and useless on their own — they say the
+        // pipe went quiet, not why.
+        func launchFailure(_ summary: String) -> AppError {
+            guard let logged = lastLoggedDaemonError(since: launchedAt) else {
+                return AppError.localDaemonLaunchFailed(summary)
+            }
+            return AppError.localDaemonLaunchFailed("\(summary) — last daemon error: \(logged)")
+        }
 
         while Date() < deadline {
             var pollFd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
             let remainingMilliseconds = max(1, Int32(deadline.timeIntervalSinceNow * 1_000))
             let pollResult = poll(&pollFd, 1, remainingMilliseconds)
             if pollResult == 0 {
-                throw AppError.localDaemonLaunchFailed("timed out waiting for wallet-node ready event")
+                throw launchFailure("timed out waiting for wallet-node ready event")
             }
             if pollResult < 0 {
                 if errno == EINTR {
@@ -465,7 +534,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
                     throw AppError.localDaemonLaunchFailed("wallet-node ready pipe read failed: errno \(errno)")
                 }
                 if readCount == 0 {
-                    throw AppError.localDaemonLaunchFailed("wallet-node ready pipe closed before ready event")
+                    throw launchFailure("wallet-node exited before it was ready")
                 }
                 if byte == UInt8(ascii: "\n") {
                     return data
@@ -474,7 +543,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
             }
         }
 
-        throw AppError.localDaemonLaunchFailed("timed out waiting for wallet-node ready event")
+        throw launchFailure("timed out waiting for wallet-node ready event")
     }
 
     private static func setCloseOnExec(_ fd: Int32) throws {

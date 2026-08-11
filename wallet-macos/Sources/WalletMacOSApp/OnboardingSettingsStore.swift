@@ -168,7 +168,11 @@ struct LocalAIModel: Identifiable, Equatable {
     let artifactFileName: String
     let artifactURL: URL
     let sha256: String
-    let maxContextTokens: Int
+    let memoryProfile: ModelMemoryProfile
+
+    /// The context ceiling the model was trained for. Comes from the GGUF header,
+    /// not from a guess: `gemma4.context_length` is 131072.
+    var maxContextTokens: Int { memoryProfile.trainedContextTokens }
 
     static let recommended = LocalAIModel(
         id: "google/gemma-4-E4B-it",
@@ -183,12 +187,58 @@ struct LocalAIModel: Identifiable, Equatable {
         // the closest surviving quant.
         artifactURL: URL(string: "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf?download=true")!,
         sha256: "a555b900214b477d8880e7832e0b8925e139b0159640036b09fe472b6f2097f2",
-        // Trained context for Gemma 4 E4B. Confirm against the model card; presets are
-        // filtered to this value. Conservative cap keeps the KV cache bounded.
-        maxContextTokens: 32768
+        // Read from the GGUF header of the pinned artifact:
+        // gemma4.block_count=42, head_count_kv=2, key/value_length=512,
+        // context_length=131072 → 168 KiB of KV cache per token.
+        memoryProfile: ModelMemoryProfile(
+            weightBytes: 4_590_807_392,
+            blockCount: 42,
+            kvHeadCount: 2,
+            keyLength: 512,
+            valueLength: 512,
+            trainedContextTokens: 131_072
+        )
     )
 
-    static let available: [LocalAIModel] = [
+    /// Qwen's own GGUF build, deliberately sized to sit next to Gemma 4 rather than
+    /// below it: 5.03 GB of weights and 144 KiB of KV per token means ~6.5 GB at
+    /// 4k against Gemma's ~6.1 GB, so a Mac that runs one runs the other.
+    static let qwen3 = LocalAIModel(
+        id: "Qwen/Qwen3-8B",
+        name: "Qwen3 8B",
+        size: "5.03 GB",
+        detail: "Qwen3 8B as a Q4_K_M GGUF, published by Qwen. Trained to 40,960 tokens, so it offers a shorter maximum context than Gemma 4.",
+        tag: "GGUF",
+        systemImage: "cube",
+        artifactRepo: "Qwen/Qwen3-8B-GGUF",
+        artifactFileName: "Qwen3-8B-Q4_K_M.gguf",
+        artifactURL: URL(string: "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf?download=true")!,
+        sha256: "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+        // Read from the GGUF header of the pinned artifact:
+        // qwen3.block_count=36, head_count_kv=8, key/value_length=128,
+        // context_length=40960 → 144 KiB of KV cache per token.
+        memoryProfile: ModelMemoryProfile(
+            weightBytes: 5_027_783_488,
+            blockCount: 36,
+            kvHeadCount: 8,
+            keyLength: 128,
+            valueLength: 128,
+            trainedContextTokens: 40_960
+        )
+    )
+
+    /// Every model the app ships knowledge of: the Settings catalog, and the lookup
+    /// table for resolving a persisted `selectedModelID` back to its pinned profile.
+    static let curated: [LocalAIModel] = [
+        recommended,
+        qwen3,
+    ]
+
+    /// What first-run setup offers — deliberately just the default. Onboarding is
+    /// not the place to make this choice: it is where you get a working wallet with
+    /// the model the app was tested against. Everything else is a Settings decision,
+    /// made later, by someone who has seen their own hardware verdicts.
+    static let onboardingOptions: [LocalAIModel] = [
         recommended,
     ]
 }

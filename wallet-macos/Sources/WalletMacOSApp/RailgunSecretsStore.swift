@@ -108,11 +108,18 @@ enum RailgunSecretsStore {
         if hasItem == errSecItemNotFound { return nil }
         guard hasItem == errSecSuccess else { throw StoreError.keychain(hasItem) }
 
-        // Biometric-gated read, with the shared reuse-window so one unlock covers a burst.
+        // Biometric-gated read, with a context created and dropped inside this
+        // call: no reuse window, so every read of the spending entropy prompts.
+        //
+        // Deliberately NOT a `BiometricAuthenticationContexts` domain. This is the
+        // root every ephemeral per-exit sender is derived from, and it is read
+        // once per sidecar launch — so a reuse window would suppress almost no
+        // prompts while leaving a five-minute period in which spending material
+        // could be unlocked with nobody present. See `Domain` for the bar.
+        let reason = "Unlock your RAILGUN privacy account"
+        BiometricPromptLog.shared.record(reason: reason, reusable: false)
         let context = LAContext()
-        context.localizedReason = "Unlock your RAILGUN privacy account"
-        context.touchIDAuthenticationAllowableReuseDuration =
-            BundlerSecretPromptReusePolicy.authenticationReuseDuration
+        context.localizedReason = reason
 
         var query = baseQuery(service: service, account: account)
         query[kSecReturnData as String] = true

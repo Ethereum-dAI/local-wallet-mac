@@ -159,6 +159,7 @@ struct BundlerKeyStore {
     }
 
     func delete(keyRef: String) throws {
+        BiometricAuthenticationContexts.shared.invalidate(.relayerLaunch)
         let status = SecItemDelete(baseQuery(keyRef: keyRef) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw mapSecurityStatus(status)
@@ -183,11 +184,18 @@ struct BundlerKeyStore {
         reason: String,
         allowAuthenticationReuse: Bool
     ) throws -> BundlerSecretRecord {
-        let context = LAContext()
-        context.localizedReason = reason
+        BiometricPromptLog.shared.record(reason: reason, reusable: allowAuthenticationReuse)
+
+        // The launch path reuses one long-lived context, so spawning the daemon
+        // several times in a session costs one authorisation rather than one per
+        // spawn. Everything else — above all revealing the private key — gets a
+        // throwaway context that can never inherit a live authorisation.
+        let context: LAContext
         if allowAuthenticationReuse {
-            context.touchIDAuthenticationAllowableReuseDuration =
-                BundlerSecretPromptReusePolicy.authenticationReuseDuration
+            context = BiometricAuthenticationContexts.shared.context(for: .relayerLaunch, reason: reason)
+        } else {
+            context = LAContext()
+            context.localizedReason = reason
         }
 
         var query = baseQuery(keyRef: keyRef)
@@ -268,10 +276,21 @@ enum BundlerLaunchKeyPolicy {
 }
 
 enum BundlerSecretPromptReusePolicy {
-    static let cacheTTL: TimeInterval = 10
+    /// How long a launch unlock stays usable in this process. Was 10 seconds,
+    /// which meant every daemon respawn — a network change, an RPC edit, a retry
+    /// after a Helios readiness failure — re-prompted. The daemon it feeds keeps
+    /// that secret in RAM for as long as it runs, so re-reading the Keychain
+    /// minutes later protects nothing that is not already exposed; what it does
+    /// buy is a stream of prompts the user cannot attribute to anything they did.
+    ///
+    /// Deliberately not "forever": the cache is dropped with the process, and a
+    /// wallet left open all day should re-authorise eventually.
+    static let cacheTTL: TimeInterval = 30 * 60
     static let onboardingHandoffCacheTTL: TimeInterval = 31 * 60
     static let failureCooldown: TimeInterval = 4
-    static let authenticationReuseDuration: TimeInterval = 10
+    /// Only meaningful because the context that carries it is now reused; see
+    /// `BiometricAuthenticationContexts`.
+    static let authenticationReuseDuration: TimeInterval = BiometricAuthenticationContexts.maximumReuseDuration
 
     static func shouldUseCached(now: Date, expiresAt: Date) -> Bool {
         now < expiresAt

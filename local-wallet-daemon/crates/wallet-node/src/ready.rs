@@ -15,6 +15,30 @@ pub struct ReadyEvent {
     pub http_addr: Option<String>,
 }
 
+/// Sent on the ready fd when startup fails before a `ReadyEvent` exists.
+///
+/// Without it the parent only observes the pipe closing, and every downstream
+/// error it reports is "ready pipe closed before ready event" — true, and
+/// useless. The daemon already knows exactly why it is exiting; this hands that
+/// reason across the same channel. The parent distinguishes the two shapes by
+/// the presence of `error`.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupFailure<'a> {
+    pub error: &'a str,
+}
+
+/// Write a `StartupFailure` as compact JSON + newline to the given raw fd.
+///
+/// Shares `write_to_fd`'s ownership contract: the fd is consumed, so this and
+/// `write_to_fd` are mutually exclusive on a given launch.
+pub fn write_failure_to_fd(reason: &str, ready_fd: RawFd) -> io::Result<()> {
+    let mut file = unsafe { <File as FromRawFd>::from_raw_fd(ready_fd) };
+    serde_json::to_writer(&mut file, &StartupFailure { error: reason })?;
+    file.write_all(b"\n")?;
+    file.flush()
+}
+
 pub fn write_to_stdout(event: &ReadyEvent) -> io::Result<()> {
     let stdout = io::stdout();
     let mut lock = stdout.lock();
@@ -40,7 +64,36 @@ pub fn write_to_fd(event: &ReadyEvent, ready_fd: RawFd) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::ReadyEvent;
+    use super::{ReadyEvent, StartupFailure};
+
+    #[test]
+    fn serializes_startup_failure() {
+        let json = serde_json::to_string(&StartupFailure {
+            error: "execution RPC chain id validation failed",
+        })
+        .expect("serialize startup failure");
+
+        assert_eq!(
+            json,
+            r#"{"error":"execution RPC chain id validation failed"}"#
+        );
+    }
+
+    /// The parent tells the two shapes apart by `error`, so a ready event must
+    /// never carry that key.
+    #[test]
+    fn ready_event_has_no_error_field() {
+        let json = serde_json::to_string(&ReadyEvent {
+            token: "abc".to_string(),
+            api_version: 1,
+            daemon_spawn_protocol: 1,
+            socket_path: None,
+            http_addr: None,
+        })
+        .expect("serialize ready event");
+
+        assert!(!json.contains("\"error\""), "{json}");
+    }
 
     #[test]
     fn serializes_daemon_spawn_protocol() {

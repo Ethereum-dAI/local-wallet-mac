@@ -175,6 +175,11 @@ struct LocalWalletSettingsSnapshot: Equatable {
     let textModelRuntimeStatus: String
     let textModelInstallStatus: String
     let textModelPath: String
+    let modelRows: [SettingsModelRow]
+    let hardwareSummary: SettingsHardwareSummary?
+    /// Context presets worth offering on this Mac; never empty. See
+    /// ModelFitEvaluator.selectableContexts.
+    let selectableContextTokens: [Int]
     let contextWindow: String
     let contextWindowTokens: Int
     let contextWindowMaxTokens: Int
@@ -267,6 +272,13 @@ struct LocalWalletSettingsView: View {
     let onClearChatHistory: () throws -> String
     let onClearRankings: () throws -> String
     let onRevealModelFile: () throws -> String
+    let onSelectModel: (String) throws -> String
+    let onDownloadModel: (ModelDownloadRequest, @escaping @MainActor (ModelInstallPhase) -> Void) async throws -> String
+    let onRemoveModel: (String) throws -> String
+    let onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo
+    let onInspectRemoteFile: (HuggingFaceGGUFFile) async -> RemoteModelFit
+    let onDownloadCuratedModel: (String, @escaping @MainActor (ModelInstallPhase) -> Void) async throws -> String
+    let onCancelModelDownload: () -> Void
     let onSaveNetworkSettings: (DemoNetworkSettings) throws -> String
     let onTestNetworkSettings: (DemoNetworkSettings) async throws -> String
     let onRunDiagnostics: (DemoNetworkSettings) async -> SettingsDiagnosticsReport
@@ -299,6 +311,10 @@ struct LocalWalletSettingsView: View {
     @State private var diagnosticsMessage: SettingsMessage?
     @State private var dataMessage: SettingsMessage?
     @State private var modelMessage: SettingsMessage?
+    /// Which curated model is being fetched, and how far along. One at a time —
+    /// `LocalAIModelDownloadManager` refuses a second concurrent download anyway.
+    @State private var installingModelID: String?
+    @State private var installPhase: ModelInstallPhase?
     @State private var walletMessage: SettingsMessage?
     @State private var securityMessage: SettingsMessage?
     @State private var sessionMessage: SettingsMessage?
@@ -329,6 +345,13 @@ struct LocalWalletSettingsView: View {
         onClearChatHistory: @escaping () throws -> String,
         onClearRankings: @escaping () throws -> String,
         onRevealModelFile: @escaping () throws -> String,
+        onSelectModel: @escaping (String) throws -> String,
+        onDownloadModel: @escaping (ModelDownloadRequest, @escaping @MainActor (ModelInstallPhase) -> Void) async throws -> String,
+        onRemoveModel: @escaping (String) throws -> String,
+        onResolveRepo: @escaping (String) async throws -> HuggingFaceRepositoryInfo,
+        onInspectRemoteFile: @escaping (HuggingFaceGGUFFile) async -> RemoteModelFit,
+        onDownloadCuratedModel: @escaping (String, @escaping @MainActor (ModelInstallPhase) -> Void) async throws -> String,
+        onCancelModelDownload: @escaping () -> Void,
         onSaveNetworkSettings: @escaping (DemoNetworkSettings) throws -> String,
         onTestNetworkSettings: @escaping (DemoNetworkSettings) async throws -> String,
         onRunDiagnostics: @escaping (DemoNetworkSettings) async -> SettingsDiagnosticsReport,
@@ -357,6 +380,13 @@ struct LocalWalletSettingsView: View {
         self.onClearChatHistory = onClearChatHistory
         self.onClearRankings = onClearRankings
         self.onRevealModelFile = onRevealModelFile
+        self.onSelectModel = onSelectModel
+        self.onDownloadModel = onDownloadModel
+        self.onRemoveModel = onRemoveModel
+        self.onResolveRepo = onResolveRepo
+        self.onInspectRemoteFile = onInspectRemoteFile
+        self.onDownloadCuratedModel = onDownloadCuratedModel
+        self.onCancelModelDownload = onCancelModelDownload
         self.onSaveNetworkSettings = onSaveNetworkSettings
         self.onTestNetworkSettings = onTestNetworkSettings
         self.onRunDiagnostics = onRunDiagnostics
@@ -693,7 +723,7 @@ struct LocalWalletSettingsView: View {
                         title: "Model memory",
                         value: hardwareMemoryStatus,
                         systemImage: "memorychip.fill",
-                        tint: hardwareProfile?.hasMinimumModelMemory == false ? SettingsPalette.orange : SettingsPalette.green
+                        tint: SettingsPalette.green
                     )
                     SettingsInfoItem(
                         title: "macOS",
@@ -764,52 +794,102 @@ struct LocalWalletSettingsView: View {
 
     private var modelsTab: some View {
         VStack(alignment: .leading, spacing: 18) {
-            SettingsSection(title: "Text Runtime") {
-                SettingsKeyValueRows(rows: [
-                    SettingsKeyValue(title: "Selected", value: snapshot.textModelName),
-                    SettingsKeyValue(title: "Identifier", value: snapshot.textModelIdentifier),
-                    SettingsKeyValue(title: "Detail", value: snapshot.textModelDetail),
-                    SettingsKeyValue(title: "Repository", value: snapshot.textModelArtifactRepo),
-                    SettingsKeyValue(title: "Artifact", value: snapshot.textModelArtifactFileName),
-                    SettingsKeyValue(title: "Install status", value: snapshot.textModelInstallStatus),
-                    SettingsKeyValue(title: "Path", value: snapshot.textModelPath),
-                    SettingsKeyValue(title: "Runtime", value: snapshot.textModelRuntimeStatus),
-                ])
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("Context window")
-                            .font(.system(size: 12, weight: .heavy))
-                            .foregroundStyle(SettingsPalette.mutedText)
+            if let hardware = snapshot.hardwareSummary {
+                SettingsSection(title: "This Mac") {
+                    SettingsKeyValueRows(rows: [
+                        SettingsKeyValue(title: "Memory", value: hardware.memoryText),
+                        SettingsKeyValue(title: "Model budget", value: hardware.budgetText),
+                        SettingsKeyValue(title: "Free disk", value: hardware.diskText),
+                    ])
+                }
+            }
+
+            SettingsSection(title: "Text Model") {
+                ForEach(snapshot.modelRows) { row in
+                    HStack(spacing: 12) {
+                        modelStateIcon(row)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(row.displayName)
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(SettingsPalette.primaryText)
+                            Text(modelRowDetail(row))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(SettingsPalette.secondaryText)
+                        }
                         Spacer()
-                        Picker("", selection: Binding(
-                            get: { contextWindowDraft },
-                            set: { newValue in
-                                contextWindowDraft = newValue
-                                onSetContextWindowTokens(newValue)
-                                modelMessage = SettingsMessage(
-                                    kind: .success,
-                                    text: "Context window set to \(newValue) tokens. Applies after you restart the app."
-                                )
+                        if row.isDefault {
+                            SettingsBadge(text: "Default", tint: SettingsPalette.blue)
+                        }
+                        SettingsBadge(text: row.verdict.label, tint: settingsVerdictTint(row.verdict))
+                        if installingModelID == row.id {
+                            installProgressLabel
+                            if case .downloading = installPhase {
+                                Button("Cancel") { onCancelModelDownload() }
+                                    .buttonStyle(SettingsSecondaryButtonStyle())
                             }
-                        )) {
-                            ForEach(ContextWindowPresets.options(maxTokens: snapshot.contextWindowMaxTokens), id: \.self) { tokens in
-                                Text("\(tokens) tokens").tag(tokens)
+                        } else {
+                            // Precedence lives on the row (`primaryControl`), not in
+                            // this chain, so it can be asserted without a view.
+                            switch row.primaryControl {
+                            case .download:
+                                Button("Download") { install(row.id) }
+                                    .buttonStyle(SettingsSecondaryButtonStyle())
+                                    .disabled(installingModelID != nil)
+                            case .inUse:
+                                SettingsBadge(text: "In use", tint: SettingsPalette.blue)
+                            case .use:
+                                Button("Use") { runModelAction { try onSelectModel(row.id) } }
+                                    .buttonStyle(SettingsPrimaryButtonStyle())
+                            case .none:
+                                EmptyView()
                             }
                         }
-                        .pickerStyle(.menu)
-                        .frame(width: 160)
+                        if row.isRemovable {
+                            Button("Remove") { runModelAction { try onRemoveModel(row.id) } }
+                                .buttonStyle(SettingsSecondaryButtonStyle())
+                        }
                     }
-                    Text("Active: \(snapshot.contextWindow). Changes apply after restart. Larger windows use more memory.")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(SettingsPalette.secondaryText)
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(SettingsPalette.rowBackground))
+                    // The whole row selects an installed model, so the state dot is a
+                    // real target rather than decoration that looks clickable.
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard row.isInstalled, !row.isActive else { return }
+                        runModelAction { try onSelectModel(row.id) }
+                    }
                 }
-                .padding(.top, 4)
+                if let modelMessage {
+                    SettingsMessageBanner(message: modelMessage)
+                }
+            }
+
+            SettingsSection(title: "Context Window") {
+                Picker("", selection: Binding(
+                    get: { contextWindowDraft },
+                    set: { newValue in
+                        contextWindowDraft = newValue
+                        onSetContextWindowTokens(newValue)
+                        modelMessage = SettingsMessage(
+                            kind: .success,
+                            text: "Context window set to \(newValue) tokens. Applies to the next message."
+                        )
+                    }
+                )) {
+                    ForEach(snapshot.selectableContextTokens, id: \.self) { tokens in
+                        Text("\(tokens) tokens").tag(tokens)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 200)
+                Text("Active: \(snapshot.contextWindow). Larger windows use more memory — the verdicts above are computed at this size. Sizes this Mac cannot hold are not listed.")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(SettingsPalette.secondaryText)
                 Divider().overlay(SettingsPalette.border).padding(.vertical, 4)
                 HStack(spacing: 12) {
                     Toggle("Show thinking", isOn: $thinkingEnabled)
                         .toggleStyle(.switch)
                         .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(SettingsPalette.primaryText)
                     Spacer()
                     Button {
                         do {
@@ -823,9 +903,15 @@ struct LocalWalletSettingsView: View {
                     }
                     .buttonStyle(SettingsSecondaryButtonStyle())
                 }
-                if let modelMessage {
-                    SettingsMessageBanner(message: modelMessage)
-                }
+            }
+
+            SettingsSection(title: "Add From Hugging Face") {
+                AddHuggingFaceModelForm(
+                    onResolveRepo: onResolveRepo,
+                    onInspectRemoteFile: onInspectRemoteFile,
+                    onDownloadModel: onDownloadModel,
+                    onCancelModelDownload: onCancelModelDownload
+                )
             }
 
             SettingsSection(title: "Multimodal Runtime") {
@@ -834,19 +920,79 @@ struct LocalWalletSettingsView: View {
                     SettingsKeyValue(title: "Status", value: snapshot.multimodalModelStatus),
                 ])
             }
+        }
+    }
 
-            SettingsSection(title: "Available Text Models") {
-                SettingsInfoGrid {
-                    ForEach(LocalAIModel.available) { model in
-                        SettingsInfoItem(
-                            title: model.name,
-                            value: model.size,
-                            detail: model.detail,
-                            systemImage: model.systemImage,
-                            tint: model.id == snapshot.textModelIdentifier ? SettingsPalette.green : SettingsPalette.blue
-                        )
-                    }
-                }
+    /// Runs a model action (select/remove) and surfaces the specific outcome
+    /// `AppModel` reports — never a generic "Done." — or the thrown error's
+    /// `localizedDescription` on failure.
+    private func runModelAction(_ action: () throws -> String) {
+        do {
+            modelMessage = SettingsMessage(kind: .success, text: try action())
+        } catch {
+            modelMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
+        }
+    }
+
+    /// The leading glyph states what the row *is*, and is never a control that
+    /// silently does nothing. An empty radio next to a model you have not
+    /// downloaded reads as "click to select" and cannot be — so a model that is not
+    /// on disk gets a download glyph instead, and only rows that can actually be
+    /// selected get the radio.
+    @ViewBuilder
+    private func modelStateIcon(_ row: SettingsModelRow) -> some View {
+        if row.isActive {
+            Image(systemName: "largecircle.fill.circle").foregroundStyle(SettingsPalette.blue)
+        } else if row.isInstalled {
+            Image(systemName: "circle").foregroundStyle(SettingsPalette.secondaryText)
+        } else {
+            Image(systemName: "arrow.down.circle").foregroundStyle(SettingsPalette.mutedText)
+        }
+    }
+
+    /// Says out loud whether the file is on disk. Without it, "5.03 GB · 6.48 GB in
+    /// memory" reads identically for a model you have and one you do not.
+    private func modelRowDetail(_ row: SettingsModelRow) -> String {
+        let base = "\(row.detail) · \(row.estimatedText) in memory"
+        return row.isInstalled ? base : "\(base) · not downloaded"
+    }
+
+    /// Multi-gigabyte download followed by a real load test, so the row says which
+    /// of the two it is doing rather than showing one bar that stalls at 100%.
+    @ViewBuilder
+    private var installProgressLabel: some View {
+        switch installPhase {
+        case .downloading(let value):
+            ProgressView(value: value).frame(width: 120)
+            Text("\(Int(value * 100))%")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(SettingsPalette.secondaryText)
+        case .testing:
+            ProgressView().controlSize(.small)
+            Text("Testing")
+                .font(.system(size: 11))
+                .foregroundStyle(SettingsPalette.secondaryText)
+        case nil:
+            EmptyView()
+        }
+    }
+
+    private func install(_ id: String) {
+        installingModelID = id
+        installPhase = .downloading(0)
+        modelMessage = nil
+        Task { @MainActor in
+            defer {
+                installingModelID = nil
+                installPhase = nil
+            }
+            do {
+                modelMessage = SettingsMessage(
+                    kind: .success,
+                    text: try await onDownloadCuratedModel(id) { phase in installPhase = phase }
+                )
+            } catch {
+                modelMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
             }
         }
     }
@@ -2334,9 +2480,10 @@ struct LocalWalletSettingsView: View {
         guard let hardwareProfile else {
             return "Inspecting..."
         }
-        return hardwareProfile.hasMinimumModelMemory
-            ? "\(hardwareProfile.memoryText) available"
-            : "\(hardwareProfile.memoryText), below local model target"
+        guard let summary = snapshot.hardwareSummary else {
+            return hardwareProfile.memoryText
+        }
+        return "\(summary.memoryText) · \(summary.budgetText) for models"
     }
 
     private static let dateFormatter: DateFormatter = {
@@ -3085,6 +3232,22 @@ private struct SettingsTransactionProgressBanner: View {
     }
 }
 
+/// A small pill label — a fit verdict, "Default", a health state — matching the
+/// capsule style already used inline by `SettingsHealthRow`.
+private struct SettingsBadge: View {
+    let text: String
+    let tint: Color
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10, weight: .heavy))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(tint.opacity(0.14)))
+    }
+}
+
 private struct SettingsMessageBanner: View {
     let message: SettingsMessage
 
@@ -3215,6 +3378,7 @@ private enum SettingsPalette {
     static let sidebar = Color(red: 0.035, green: 0.042, blue: 0.082)
     static let panel = Color(red: 0.066, green: 0.076, blue: 0.125)
     static let row = Color(red: 0.082, green: 0.094, blue: 0.150)
+    static let rowBackground = row
     static let selected = Color(red: 0.116, green: 0.135, blue: 0.215)
     static let control = Color(red: 0.105, green: 0.121, blue: 0.190)
     static let border = Color(red: 0.175, green: 0.205, blue: 0.315)
@@ -3226,4 +3390,211 @@ private enum SettingsPalette {
     static let cyan = Color(red: 0.250, green: 0.740, blue: 0.820)
     static let orange = Color(red: 0.930, green: 0.560, blue: 0.230)
     static let red = Color(red: 0.950, green: 0.280, blue: 0.260)
+}
+
+/// Maps a fit verdict to its badge colour. A free function rather than a method so
+/// the model list and the Hugging Face form colour the same verdict identically.
+private func settingsVerdictTint(_ verdict: ModelFitVerdict) -> Color {
+    switch verdict {
+    case .fits: return SettingsPalette.green
+    case .tight: return SettingsPalette.orange
+    case .wontFit: return SettingsPalette.red
+    case .unknown: return SettingsPalette.mutedText
+    }
+}
+
+/// Repo → file → verdict → download. Resolution is explicit (a button, not on every
+/// keystroke) so a half-typed repo name never fires a request; the fit verdict then
+/// follows the selected file automatically, since it is what decides whether the
+/// download is worth starting.
+private struct AddHuggingFaceModelForm: View {
+    let onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo
+    let onInspectRemoteFile: (HuggingFaceGGUFFile) async -> RemoteModelFit
+    let onDownloadModel: (ModelDownloadRequest, @escaping @MainActor (ModelInstallPhase) -> Void) async throws -> String
+    let onCancelModelDownload: () -> Void
+
+    @State private var repoID: String = ""
+    /// The repo the listed `files` actually came from, in its validated,
+    /// normalised form.
+    ///
+    /// `download()` must key the install off this and never off `repoID`, which
+    /// is live, editable, and unvalidated. Editing the field after "Find models"
+    /// (or clearing it) previously downloaded the right bytes but stored them
+    /// under the new text: wrong `repoID` on the row, a destination named after a
+    /// repo the file did not come from, and a `modelID` that no longer matches
+    /// the real repo — so re-adding it later installed a second multi-gigabyte
+    /// copy instead of recognising the existing one.
+    @State private var resolvedRepoID: String = ""
+    @State private var files: [HuggingFaceGGUFFile] = []
+    @State private var selectedPath: String = ""
+    @State private var message: SettingsMessage?
+    @State private var phase: ModelInstallPhase?
+    @State private var isResolving = false
+    @State private var fit: RemoteModelFit?
+    @State private var isInspecting = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                SettingsEditableField(
+                    title: "Repository",
+                    placeholder: "unsloth/gemma-4-E2B-it-GGUF",
+                    text: $repoID
+                )
+                Button(isResolving ? "Checking…" : "Find models") { resolve() }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .disabled(repoID.isEmpty || isResolving)
+            }
+
+            if !files.isEmpty {
+                Picker("File", selection: $selectedPath) {
+                    ForEach(files.filter { !$0.isAuxiliary }) { file in
+                        Text("\(file.path) · \(ByteCountFormatter.string(fromByteCount: Int64(file.sizeBytes), countStyle: .file))")
+                            .tag(file.path)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                fitLine
+
+                HStack {
+                    switch phase {
+                    case .downloading(let value):
+                        ProgressView(value: value).frame(width: 180)
+                        Text("\(Int(value * 100))%").font(.system(size: 11, design: .monospaced))
+                    case .testing:
+                        ProgressView().controlSize(.small)
+                        Text("Loading it for real and checking it can make a tool call — this can take a minute.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    case nil:
+                        EmptyView()
+                    }
+                    if case .downloading = phase {
+                        Button("Cancel") { onCancelModelDownload() }
+                            .buttonStyle(SettingsSecondaryButtonStyle())
+                    }
+                    Spacer()
+                    Button("Download & add") { download() }
+                        .buttonStyle(SettingsPrimaryButtonStyle())
+                        .disabled(selectedPath.isEmpty || phase != nil)
+                }
+            }
+
+            if let message {
+                SettingsMessageBanner(message: message)
+            }
+
+            Text("Public GGUF repositories only. Unverified models can get tool calls wrong — review every transaction.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        // On the container, not the Picker: the Picker only exists once `files`
+        // is non-empty, and an `onChange` that appears at the same moment its
+        // value is set does not fire for that first assignment.
+        .onChange(of: selectedPath) { _, _ in inspect() }
+        // Editing the repository after resolving it makes the listed files stale.
+        // `download()` is keyed off `resolvedRepoID` so it could not install the
+        // wrong thing either way, but showing another repo's file list under a
+        // changed name invites exactly that misreading.
+        .onChange(of: repoID) { _, newValue in
+            guard newValue != resolvedRepoID, !files.isEmpty else { return }
+            files = []
+            selectedPath = ""
+            resolvedRepoID = ""
+            fit = nil
+        }
+    }
+
+    /// The pre-download verdict. Advisory: it never disables "Download & add".
+    @ViewBuilder
+    private var fitLine: some View {
+        if isInspecting {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Reading this file's header to size it against this Mac…")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        } else if let fit {
+            HStack(alignment: .top, spacing: 8) {
+                SettingsBadge(text: fit.verdict.label, tint: settingsVerdictTint(fit.verdict))
+                Text(fit.summary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Reads the selected file's GGUF header over a ranged request. `inspectionID`
+    /// discards a slow reply for a file the user has already navigated away from.
+    @State private var inspectionID = 0
+
+    private func inspect() {
+        guard let file = files.first(where: { $0.path == selectedPath }) else {
+            fit = nil
+            return
+        }
+        inspectionID += 1
+        let id = inspectionID
+        fit = nil
+        isInspecting = true
+        Task { @MainActor in
+            let result = await onInspectRemoteFile(file)
+            guard id == inspectionID else { return }
+            isInspecting = false
+            fit = result
+        }
+    }
+
+    private func resolve() {
+        isResolving = true
+        message = nil
+        fit = nil
+        Task { @MainActor in
+            defer { isResolving = false }
+            do {
+                let normalised = try HuggingFaceRepository.validate(repoID: repoID)
+                let info = try await onResolveRepo(normalised)
+                resolvedRepoID = normalised
+                files = info.files
+                let firstPath = info.files.first { !$0.isAuxiliary }?.path ?? ""
+                // Re-resolving the same repo leaves `selectedPath` unchanged, so
+                // `onChange` would not fire; inspect explicitly in that case.
+                if firstPath == selectedPath { inspect() } else { selectedPath = firstPath }
+                let context = info.trainedContextTokens.map { " · trained to \($0)" } ?? ""
+                message = SettingsMessage(
+                    kind: info.hasChatTemplate ? .success : .error,
+                    text: info.hasChatTemplate
+                        ? "\(info.files.count) GGUF file(s)\(context)."
+                        : "This repo has no chat template, so it cannot make tool calls."
+                )
+            } catch {
+                files = []
+                resolvedRepoID = ""
+                selectedPath = ""
+                fit = nil
+                message = SettingsMessage(kind: .error, text: error.localizedDescription)
+            }
+        }
+    }
+
+    private func download() {
+        guard let file = files.first(where: { $0.path == selectedPath }),
+              !resolvedRepoID.isEmpty
+        else { return }
+        let request = ModelDownloadRequest(repoID: resolvedRepoID, file: file)
+        phase = .downloading(0)
+        Task { @MainActor in
+            do {
+                let resultMessage = try await onDownloadModel(request) { update in phase = update }
+                phase = nil
+                message = SettingsMessage(kind: .success, text: resultMessage)
+            } catch {
+                phase = nil
+                message = SettingsMessage(kind: .error, text: error.localizedDescription)
+            }
+        }
+    }
 }

@@ -13,70 +13,13 @@ use serde_json::Value;
 #[test]
 #[ignore = "requires AF_UNIX bind capability + fd inheritance; run with --include-ignored"]
 fn fd_handshake_full_lifecycle() {
-    let test_home = TempHome::new();
-    let (ready_read_fd, ready_write_fd) = pipe().expect("create ready pipe");
-    let (alive_read_fd, alive_write_fd) = pipe().expect("create alive pipe");
-    let (secret_read_fd, secret_write_fd) = pipe().expect("create secret pipe");
-
-    let ready_read_raw = ready_read_fd.as_raw_fd();
-    let ready_write_raw = ready_write_fd.as_raw_fd();
-    let alive_read_raw = alive_read_fd.as_raw_fd();
-    let alive_write_raw = alive_write_fd.as_raw_fd();
-    let secret_read_raw = secret_read_fd.as_raw_fd();
-    let secret_write_raw = secret_write_fd.as_raw_fd();
-
-    let mut command = Command::new(env!("CARGO_BIN_EXE_wallet-node"));
-    command
-        .args(["--ready-fd", "3", "--alive-fd", "4", "--secret-fd", "5"])
-        .env("HOME", test_home.path())
-        .env_remove("XDG_DATA_HOME");
-
-    // SAFETY: pre_exec runs after fork and before exec. The closure below only
-    // calls async-signal-safe libc functions plus last_os_error for reporting a
-    // failed syscall back to the parent process.
-    unsafe {
-        command.pre_exec(move || -> std::io::Result<()> {
-            if ready_write_raw != 3 && libc::dup2(ready_write_raw, 3) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            if alive_read_raw != 4 && libc::dup2(alive_read_raw, 4) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            if secret_read_raw != 5 && libc::dup2(secret_read_raw, 5) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            if ready_read_raw != 3 && ready_read_raw != 4 && ready_read_raw != 5 {
-                libc::close(ready_read_raw);
-            }
-            if ready_write_raw != 3 && ready_write_raw != 4 && ready_write_raw != 5 {
-                libc::close(ready_write_raw);
-            }
-            if alive_read_raw != 3 && alive_read_raw != 4 && alive_read_raw != 5 {
-                libc::close(alive_read_raw);
-            }
-            if alive_write_raw != 3 && alive_write_raw != 4 && alive_write_raw != 5 {
-                libc::close(alive_write_raw);
-            }
-            if secret_read_raw != 3 && secret_read_raw != 4 && secret_read_raw != 5 {
-                libc::close(secret_read_raw);
-            }
-            if secret_write_raw != 3 && secret_write_raw != 4 && secret_write_raw != 5 {
-                libc::close(secret_write_raw);
-            }
-
-            Ok(())
-        });
-    }
-
-    let child = command.spawn().expect("spawn wallet-node");
-    let mut process = TestProcess { child };
-
-    drop(ready_write_fd);
-    drop(alive_read_fd);
-    drop(secret_read_fd);
+    let test_home = TempHome::new("");
+    let Spawned {
+        mut process,
+        ready_read_fd,
+        alive_write_fd,
+        secret_write_fd,
+    } = spawn_wallet_node(&test_home);
 
     let mut secret_writer = File::from(secret_write_fd);
     secret_writer
@@ -86,7 +29,7 @@ fn fd_handshake_full_lifecycle() {
         .expect("write secret payload");
     drop(secret_writer);
 
-    wait_for_readable(&ready_read_fd, Duration::from_secs(5));
+    wait_for_readable(&ready_read_fd, READY_TIMEOUT);
     let mut ready_reader = BufReader::new(File::from(ready_read_fd));
     let mut ready_line = String::new();
     let bytes_read = ready_reader
@@ -123,6 +66,171 @@ fn fd_handshake_full_lifecycle() {
         .wait_for_exit(Duration::from_secs(3))
         .expect("wallet-node should exit within 3 seconds after alive pipe EOF");
     assert!(status.success(), "wallet-node exited with {status}");
+}
+
+/// A fatal startup failure must reach the parent as a JSON `error` line on the
+/// ready fd. Without it the parent only sees the fd close and can say nothing
+/// about why — the exact hole that made a dead Sepolia RPC look like a generic
+/// "ready pipe closed before ready event".
+#[test]
+#[ignore = "requires fd inheritance; run with --include-ignored"]
+fn startup_failure_is_reported_on_the_ready_fd() {
+    let test_home = TempHome::new("f");
+    let Spawned {
+        mut process,
+        ready_read_fd,
+        alive_write_fd,
+        secret_write_fd,
+    } = spawn_wallet_node(&test_home);
+
+    // Malformed secret payload: deterministic, offline, and it fails at a
+    // startup stage that runs after logging and the store are up.
+    let mut secret_writer = File::from(secret_write_fd);
+    secret_writer
+        .write_all(br#"{"keys":"not-an-array"}"#)
+        .expect("write malformed secret payload");
+    drop(secret_writer);
+
+    wait_for_readable(&ready_read_fd, READY_TIMEOUT);
+    let mut ready_reader = BufReader::new(File::from(ready_read_fd));
+    let mut line = String::new();
+    let bytes_read = ready_reader
+        .read_line(&mut line)
+        .expect("read failure line from fd");
+    assert!(
+        bytes_read > 0,
+        "ready fd closed without reporting a failure reason"
+    );
+
+    let event: Value = serde_json::from_str(line.trim_end()).expect("failure event JSON");
+    let reason = event["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an error field, got {line}"));
+    assert!(
+        reason.contains("bundler secrets"),
+        "failure reason should name the failing stage, got {reason:?}"
+    );
+    // The parent tells the shapes apart by `error`, so a failure must not also
+    // look like a ready event.
+    assert!(event["token"].is_null(), "failure must carry no token");
+
+    drop(alive_write_fd);
+    let status = process
+        .wait_for_exit(Duration::from_secs(5))
+        .expect("wallet-node should exit after a fatal startup failure");
+    assert!(
+        !status.success(),
+        "wallet-node should exit non-zero, got {status}"
+    );
+}
+
+/// A pipe neither end of which survives an unrelated `exec`.
+fn cloexec_pipe(name: &str) -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
+    let (read_fd, write_fd) = pipe().unwrap_or_else(|err| panic!("create {name} pipe: {err}"));
+    for fd in [&read_fd, &write_fd] {
+        // SAFETY: `fd` is a live descriptor this function owns.
+        let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+        assert_ne!(
+            result,
+            -1,
+            "set FD_CLOEXEC on {name} pipe: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    (read_fd, write_fd)
+}
+
+struct Spawned {
+    process: TestProcess,
+    ready_read_fd: std::os::fd::OwnedFd,
+    alive_write_fd: std::os::fd::OwnedFd,
+    secret_write_fd: std::os::fd::OwnedFd,
+}
+
+/// Launch `wallet-node` over the fd 3/4/5 contract the macOS app uses.
+///
+/// Every pipe is created `O_CLOEXEC`, which is what makes two of these tests
+/// safe to run at once. Without it, a `spawn` on one thread forks while another
+/// test's pipes are open, and the child inherits them: that child then holds a
+/// copy of the *other* test's secret-pipe write end, so dropping the writer never
+/// closes the pipe, the other daemon blocks forever on its fd-5 read, and both
+/// tests time out waiting for a ready event that cannot arrive. `dup2` onto
+/// 3/4/5 below is what deliberately re-exposes the three we do want to pass.
+fn spawn_wallet_node(test_home: &TempHome) -> Spawned {
+    let (ready_read_fd, ready_write_fd) = cloexec_pipe("ready");
+    let (alive_read_fd, alive_write_fd) = cloexec_pipe("alive");
+    let (secret_read_fd, secret_write_fd) = cloexec_pipe("secret");
+
+    let ready_read_raw = ready_read_fd.as_raw_fd();
+    let ready_write_raw = ready_write_fd.as_raw_fd();
+    let alive_read_raw = alive_read_fd.as_raw_fd();
+    let alive_write_raw = alive_write_fd.as_raw_fd();
+    let secret_read_raw = secret_read_fd.as_raw_fd();
+    let secret_write_raw = secret_write_fd.as_raw_fd();
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wallet-node"));
+    command
+        .args(["--ready-fd", "3", "--alive-fd", "4", "--secret-fd", "5"])
+        .env("HOME", test_home.path())
+        .env_remove("XDG_DATA_HOME");
+
+    // SAFETY: pre_exec runs after fork and before exec. The closure below only
+    // calls async-signal-safe libc functions plus last_os_error for reporting a
+    // failed syscall back to the parent process.
+    unsafe {
+        command.pre_exec(move || -> std::io::Result<()> {
+            if ready_write_raw != 3 && libc::dup2(ready_write_raw, 3) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            if alive_read_raw != 4 && libc::dup2(alive_read_raw, 4) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            if secret_read_raw != 5 && libc::dup2(secret_read_raw, 5) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            for raw in [
+                ready_read_raw,
+                ready_write_raw,
+                alive_read_raw,
+                alive_write_raw,
+                secret_read_raw,
+                secret_write_raw,
+            ] {
+                if raw != 3 && raw != 4 && raw != 5 {
+                    libc::close(raw);
+                }
+            }
+
+            // The pipes are O_CLOEXEC, and `dup2` clears that flag on the new
+            // descriptor — except when oldfd == newfd, where POSIX makes it a
+            // no-op that changes nothing. Clear it explicitly so the daemon
+            // still receives all three however the parent's fds happened to be
+            // numbered.
+            for target in [3, 4, 5] {
+                if libc::fcntl(target, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+
+            Ok(())
+        });
+    }
+
+    let child = command.spawn().expect("spawn wallet-node");
+
+    drop(ready_write_fd);
+    drop(alive_read_fd);
+    drop(secret_read_fd);
+
+    Spawned {
+        process: TestProcess { child },
+        ready_read_fd,
+        alive_write_fd,
+        secret_write_fd,
+    }
 }
 
 struct TestProcess {
@@ -188,8 +296,14 @@ struct TempHome {
 }
 
 impl TempHome {
-    fn new() -> Self {
-        let path = PathBuf::from("/tmp").join(format!("wnfd-{}", std::process::id()));
+    /// `suffix` keeps concurrent tests off each other's HOME, and **must stay a
+    /// character or two**. The daemon binds its socket at
+    /// `<HOME>/Library/Application Support/Local Wallet/wallet-node/wallet-node.sock`,
+    /// and `sun_path` is 104 bytes on macOS: a descriptive suffix like
+    /// `-startup-failure` overruns it, and the only symptom is the daemon never
+    /// reaching ready — no error, just a silent hang.
+    fn new(suffix: &str) -> Self {
+        let path = PathBuf::from("/tmp").join(format!("wnfd-{}{suffix}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create temp HOME");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
@@ -208,12 +322,21 @@ impl Drop for TempHome {
     }
 }
 
+/// How long a spawned daemon gets to reach its ready event.
+///
+/// Generous on purpose. These tests are `#[ignore]`d and opt-in, they start real
+/// daemons, and they run concurrently with each other — a full startup does real
+/// work (chain adapter included) and a tight budget turns load into a failure
+/// that looks like a bug in the fd contract. A long timeout costs nothing on a
+/// passing run.
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn wait_for_readable(fd: &impl AsRawFd, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
         let now = Instant::now();
         if now >= deadline {
-            panic!("ready fd did not become readable within 5 seconds");
+            panic!("ready fd did not become readable within {timeout:?}");
         }
 
         let remaining = deadline.saturating_duration_since(now);
@@ -226,7 +349,7 @@ fn wait_for_readable(fd: &impl AsRawFd, timeout: Duration) {
 
         let result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
         if result == 0 {
-            panic!("ready fd did not become readable within 5 seconds");
+            panic!("ready fd did not become readable within {timeout:?}");
         }
         if result > 0 {
             return;

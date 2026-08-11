@@ -253,8 +253,17 @@ fn parse_hex_u256_result(method: &'static str, value: Value) -> Result<U256, Cha
         .map_err(|error| ChainError::RpcError(format!("{method} hex quantity: {error}")))
 }
 
-fn rpc_error(error: impl std::fmt::Display) -> ChainError {
-    ChainError::RpcError(error.to_string())
+/// Transport failures must never carry the endpoint URL.
+///
+/// `reqwest::Error`'s `Display` interpolates the request URL ("error sending
+/// request for url (https://.../v2/<API-KEY>)"), and most providers put the API
+/// key in the path or query. This string is not confined to the daemon's own
+/// log: it reaches the app as a startup-failure reason and lands in the
+/// copyable debug report users paste into issues. `without_url` is reqwest's
+/// own opt-out; the method name in the caller's message is the part with
+/// diagnostic value anyway.
+fn rpc_error(error: reqwest::Error) -> ChainError {
+    ChainError::RpcError(error.without_url().to_string())
 }
 
 #[cfg(test)]
@@ -361,7 +370,7 @@ mod tests {
             .expect_err("eth_call reverts");
 
         assert!(
-            matches!(error, ChainError::CallReverted(data) if data == Bytes::from(vec![0x08, 0xc3, 0x79, 0xa0]))
+            matches!(error, ChainError::CallReverted(data) if data == vec![0x08, 0xc3, 0x79, 0xa0])
         );
     }
 

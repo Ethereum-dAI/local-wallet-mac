@@ -51,7 +51,11 @@ struct ChainConfiguration: Equatable {
         name: "Ethereum Sepolia",
         shortName: "sepolia",
         isTestnet: true,
-        rpcURL: URL(string: "https://sepolia.drpc.org")!,
+        // dRPC moved Sepolia behind a paid plan and now answers `eth_chainId`
+        // with HTTP 400, which the daemon correctly treats as a fatal startup
+        // error. publicnode matches the mainnet default above: no key, no quota
+        // signup.
+        rpcURL: URL(string: "https://ethereum-sepolia-rpc.publicnode.com")!,
         archiveRPCURL: nil,
         consensusRPCURL: URL(string: "http://unstable.sepolia.beacon-api.nimbus.team")!,
         bundlerURL: configuredSepoliaBundlerURL(),

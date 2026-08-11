@@ -2,11 +2,11 @@ import Foundation
 
 /// Context-window preset options for the local model.
 ///
-/// We present a fixed ladder filtered to the selected model's trained maximum
-/// (a static `LocalAIModel.maxContextTokens`) rather than reading llama.cpp's
-/// `n_ctx_train`, which would require the model to be loaded.
+/// The ladder is filtered twice: by the model's trained maximum, and — in the UI —
+/// by what this Mac's memory budget can hold (`ModelFitEvaluator`). A preset being
+/// listed here does not mean it fits; that is the evaluator's job.
 enum ContextWindowPresets {
-    static let ladder: [Int] = [2048, 4096, 8192, 16384, 32768]
+    static let ladder: [Int] = [2048, 4096, 8192, 16384, 32768, 65536, 131072]
     static let fallback = 4096
 
     /// Allowed presets for a model whose trained max is `maxTokens`.

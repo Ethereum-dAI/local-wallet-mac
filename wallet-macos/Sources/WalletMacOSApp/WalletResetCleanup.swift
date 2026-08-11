@@ -32,7 +32,12 @@ struct WalletResetCleanup {
                 ])
             },
             clearMetadata: { try metadataStore.clear() },
-            deleteRailgunSecrets: { try RailgunSecretsStore.clear() }
+            deleteRailgunSecrets: {
+                try RailgunSecretsStore.clear()
+                // Every key this reset destroyed is gone; a surviving reuse window
+                // must not wave through a read of whatever replaces it.
+                BiometricAuthenticationContexts.shared.invalidateAll()
+            }
         )
     }
 

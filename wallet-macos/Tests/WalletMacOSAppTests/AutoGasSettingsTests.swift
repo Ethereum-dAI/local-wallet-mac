@@ -15,15 +15,18 @@ private func freshStore() -> DemoSettingsStore {
     #expect(settings.heliosVerificationEnabled == true)
 }
 
-@Test func defaultSepoliaRPCUsesDrpcAndConsensusStartsEmpty() {
+@Test func defaultSepoliaRPCUsesPublicnodeAndConsensusStartsEmpty() {
     let store = freshStore()
 
-    #expect(store.networkSettings.sepoliaRPCURL == "https://sepolia.drpc.org")
+    #expect(store.networkSettings.sepoliaRPCURL == "https://ethereum-sepolia-rpc.publicnode.com")
     #expect(store.networkSettings.sepoliaConsensusRPCURL == "")
     #expect(store.networkSettings.isHeliosVerificationActive == false)
 }
 
-@Test func previousSepoliaExecutionDefaultMigratesToDrpc() {
+/// dRPC put Sepolia behind a paid plan and now fails the daemon's chain-id
+/// check, so an install still holding that default cannot start wallet-node at
+/// all. The migration is what unbricks it without the user editing Settings.
+@Test func previousSepoliaExecutionDefaultMigratesToPublicnode() {
     let suite = UserDefaults(suiteName: "auto-gas-tests-\(UUID().uuidString)")!
     suite.set(
         DemoNetworkSettings.previousDefaultSepoliaRPCURLs[0],
@@ -31,7 +34,7 @@ private func freshStore() -> DemoSettingsStore {
     )
     let store = DemoSettingsStore(defaults: suite)
 
-    #expect(store.networkSettings.sepoliaRPCURL == "https://sepolia.drpc.org")
+    #expect(store.networkSettings.sepoliaRPCURL == "https://ethereum-sepolia-rpc.publicnode.com")
 }
 
 @Test func previousSepoliaConsensusDefaultsMigrateToEmpty() {

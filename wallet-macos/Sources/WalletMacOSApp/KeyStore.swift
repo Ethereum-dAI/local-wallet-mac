@@ -75,6 +75,10 @@ struct KeyStore {
     // an account owned by the old key, and a silently regenerated key would
     // produce signatures the account rejects with no local diagnosis.
     func sign(preimage: Data, reason: String) throws -> SignatureComponents {
+        // Never a reused context: every signature — a transaction, a session-key
+        // enablement — is authorised on its own. This is the boundary the relayer
+        // and RAILGUN unlock paths are allowed to relax and this one is not.
+        BiometricPromptLog.shared.record(reason: reason, reusable: false)
         let context = LAContext()
         context.localizedReason = reason
 

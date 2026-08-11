@@ -29,7 +29,7 @@ fn fd_handshake_full_lifecycle() {
         .expect("write secret payload");
     drop(secret_writer);
 
-    wait_for_readable(&ready_read_fd, Duration::from_secs(5));
+    wait_for_readable(&ready_read_fd, READY_TIMEOUT);
     let mut ready_reader = BufReader::new(File::from(ready_read_fd));
     let mut ready_line = String::new();
     let bytes_read = ready_reader
@@ -91,7 +91,7 @@ fn startup_failure_is_reported_on_the_ready_fd() {
         .expect("write malformed secret payload");
     drop(secret_writer);
 
-    wait_for_readable(&ready_read_fd, Duration::from_secs(5));
+    wait_for_readable(&ready_read_fd, READY_TIMEOUT);
     let mut ready_reader = BufReader::new(File::from(ready_read_fd));
     let mut line = String::new();
     let bytes_read = ready_reader
@@ -124,6 +124,22 @@ fn startup_failure_is_reported_on_the_ready_fd() {
     );
 }
 
+/// A pipe neither end of which survives an unrelated `exec`.
+fn cloexec_pipe(name: &str) -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
+    let (read_fd, write_fd) = pipe().unwrap_or_else(|err| panic!("create {name} pipe: {err}"));
+    for fd in [&read_fd, &write_fd] {
+        // SAFETY: `fd` is a live descriptor this function owns.
+        let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+        assert_ne!(
+            result,
+            -1,
+            "set FD_CLOEXEC on {name} pipe: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    (read_fd, write_fd)
+}
+
 struct Spawned {
     process: TestProcess,
     ready_read_fd: std::os::fd::OwnedFd,
@@ -132,10 +148,18 @@ struct Spawned {
 }
 
 /// Launch `wallet-node` over the fd 3/4/5 contract the macOS app uses.
+///
+/// Every pipe is created `O_CLOEXEC`, which is what makes two of these tests
+/// safe to run at once. Without it, a `spawn` on one thread forks while another
+/// test's pipes are open, and the child inherits them: that child then holds a
+/// copy of the *other* test's secret-pipe write end, so dropping the writer never
+/// closes the pipe, the other daemon blocks forever on its fd-5 read, and both
+/// tests time out waiting for a ready event that cannot arrive. `dup2` onto
+/// 3/4/5 below is what deliberately re-exposes the three we do want to pass.
 fn spawn_wallet_node(test_home: &TempHome) -> Spawned {
-    let (ready_read_fd, ready_write_fd) = pipe().expect("create ready pipe");
-    let (alive_read_fd, alive_write_fd) = pipe().expect("create alive pipe");
-    let (secret_read_fd, secret_write_fd) = pipe().expect("create secret pipe");
+    let (ready_read_fd, ready_write_fd) = cloexec_pipe("ready");
+    let (alive_read_fd, alive_write_fd) = cloexec_pipe("alive");
+    let (secret_read_fd, secret_write_fd) = cloexec_pipe("secret");
 
     let ready_read_raw = ready_read_fd.as_raw_fd();
     let ready_write_raw = ready_write_fd.as_raw_fd();
@@ -177,6 +201,17 @@ fn spawn_wallet_node(test_home: &TempHome) -> Spawned {
             ] {
                 if raw != 3 && raw != 4 && raw != 5 {
                     libc::close(raw);
+                }
+            }
+
+            // The pipes are O_CLOEXEC, and `dup2` clears that flag on the new
+            // descriptor — except when oldfd == newfd, where POSIX makes it a
+            // no-op that changes nothing. Clear it explicitly so the daemon
+            // still receives all three however the parent's fds happened to be
+            // numbered.
+            for target in [3, 4, 5] {
+                if libc::fcntl(target, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
                 }
             }
 
@@ -287,12 +322,21 @@ impl Drop for TempHome {
     }
 }
 
+/// How long a spawned daemon gets to reach its ready event.
+///
+/// Generous on purpose. These tests are `#[ignore]`d and opt-in, they start real
+/// daemons, and they run concurrently with each other — a full startup does real
+/// work (chain adapter included) and a tight budget turns load into a failure
+/// that looks like a bug in the fd contract. A long timeout costs nothing on a
+/// passing run.
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn wait_for_readable(fd: &impl AsRawFd, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
         let now = Instant::now();
         if now >= deadline {
-            panic!("ready fd did not become readable within 5 seconds");
+            panic!("ready fd did not become readable within {timeout:?}");
         }
 
         let remaining = deadline.saturating_duration_since(now);
@@ -305,7 +349,7 @@ fn wait_for_readable(fd: &impl AsRawFd, timeout: Duration) {
 
         let result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
         if result == 0 {
-            panic!("ready fd did not become readable within 5 seconds");
+            panic!("ready fd did not become readable within {timeout:?}");
         }
         if result > 0 {
             return;

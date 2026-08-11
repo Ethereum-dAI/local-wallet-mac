@@ -2546,6 +2546,15 @@ private final class ChatDashboardModel: ObservableObject {
             )
         }.value
         runtimeStatus = inferenceService.runtimeStatus
+
+        // A step-down is a measurement, not a suggestion: the probe just proved
+        // the configured window does not load on this Mac. Reporting it only as
+        // text left `contextWindowTokens` at the value that failed, so the very
+        // next message hit the same allocation failure the probe already hit —
+        // and every message after it. Adopt what actually worked.
+        if case .steppedDown(_, let working) = result {
+            setContextWindowTokens(working)
+        }
         return ModelSelfTestReport.message(for: result)
     }
 
@@ -2812,8 +2821,17 @@ private final class ChatDashboardModel: ObservableObject {
         walletModel.setSwapSlippageBps(bps)
     }
 
+    /// Persists the choice *and* moves the live runtime to it.
+    ///
+    /// `AppModel` deliberately never touches `inferenceService` — this class owns
+    /// the only instance — so persisting alone left the setting inert: the runtime
+    /// kept the window it was constructed with, `snapshot.contextWindow` kept
+    /// reporting the old size, and the change only took effect on the next launch.
+    /// Reads back the clamped value rather than echoing the argument, since
+    /// `AppModel` bounds it against the active model's trained context.
     func setContextWindowTokens(_ tokens: Int) {
         walletModel.setContextWindowTokens(tokens)
+        inferenceService.setContextTokens(onboardingSettingsStore.contextWindowTokens)
     }
 
     private func appendMessage(_ message: ChatMessage, to conversationID: UUID) {

@@ -514,6 +514,16 @@ final class AppModel: ObservableObject {
         lastSubmittedUserOperationHash = nil
         lastBundledTransactionHash = nil
         bootstrap()
+        // `resetWalletNodeConnectionAfterNetworkChange` clears the pill so the new
+        // chain does not inherit the old chain's number. Something then has to put
+        // a number back: the app-only branch above does it, but this branch left it
+        // to the app-became-active trigger, which does not fire for a switch made
+        // inside the running app — so the pill read "— gwei" for the rest of the
+        // session. `refreshLiveGasPrices` goes through `withWalletNodeClient`, so it
+        // waits for the daemon `bootstrap()` is bringing up. Unlike the poll this
+        // replaced, it is one read caused by a deliberate user action, not a timer
+        // that can resurrect a daemon nobody asked for.
+        Task { await refreshLiveGasPricesNow() }
     }
 
     func updateSessionPolicy(_ policy: SessionPolicyConfig) throws {
@@ -584,7 +594,7 @@ final class AppModel: ObservableObject {
         let clamped = ContextWindowPresets.clamp(tokens, maxTokens: model.maxContextTokens)
         guard onboardingSettingsStore.contextWindowTokens != clamped else { return }
         onboardingSettingsStore.contextWindowTokens = clamped
-        appendLog("models: context window set to \(clamped) tokens (applies after restart)")
+        appendLog("models: context window set to \(clamped) tokens (applies from the next message)")
     }
 
     var modelCatalog: ModelCatalog {

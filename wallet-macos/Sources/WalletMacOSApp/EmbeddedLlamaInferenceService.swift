@@ -201,6 +201,20 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
         stateLock.unlock()
     }
 
+    /// Resize the context window without changing which model is loaded.
+    ///
+    /// Separate from `setActiveModel` because the context picker has no model URL
+    /// to hand over: the active model may be one `prepareRuntime` resolved from
+    /// `installedModelPath` rather than one anybody selected, and passing a URL
+    /// here would be inventing a model switch. `prepareRuntime` compares the whole
+    /// `(url, contextTokens)` pair, so moving this alone is enough to make the next
+    /// message reload at the new size.
+    func setContextTokens(_ tokens: Int) {
+        stateLock.lock()
+        desiredContextTokens = tokens
+        stateLock.unlock()
+    }
+
     /// Drops this service's loaded runtime so something else — the post-download
     /// self test — can load a model without two sets of weights being resident at
     /// once, which is exactly the OOM the fit verdicts exist to avoid. The next

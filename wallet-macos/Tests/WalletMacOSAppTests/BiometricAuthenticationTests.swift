@@ -21,15 +21,6 @@ struct BiometricAuthenticationContextsTests {
             == BiometricAuthenticationContexts.maximumReuseDuration)
     }
 
-    /// One unlock must not authorise the other: the relayer secret and the RAILGUN
-    /// entropy are different key material with different access controls.
-    @Test func domainsDoNotShareAnAuthorisation() {
-        let pool = BiometricAuthenticationContexts()
-        let relayer = pool.context(for: .relayerLaunch, reason: "a")
-        let railgun = pool.context(for: .railgun, reason: "b")
-        #expect(relayer !== railgun)
-    }
-
     /// Deleting or resetting key material must drop the window, or the next read
     /// of whatever replaces it would be waved through.
     @Test func invalidatingADomainForcesAFreshContext() {
@@ -40,11 +31,13 @@ struct BiometricAuthenticationContextsTests {
         #expect(before !== after)
     }
 
-    /// The security boundary, asserted rather than assumed: there is no signing
-    /// domain, so a transaction can never reuse an unlock granted to the daemon.
-    @Test func thereIsNoReusableDomainForSigning() {
-        #expect(BiometricAuthenticationContexts.Domain.allCases.map(\.rawValue).sorted()
-            == ["railgun", "relayerLaunch"])
+    /// The security boundary, asserted rather than assumed: launching the daemon
+    /// is the only unlock that may be reused. Nothing that authorises moving
+    /// funds — signing a transaction, or reading the RAILGUN spending entropy —
+    /// gets a window, so an unlock granted to the daemon can never cover one.
+    @Test func onlyTheDaemonLaunchUnlockIsReusable() {
+        #expect(BiometricAuthenticationContexts.Domain.allCases.map(\.rawValue)
+            == ["relayerLaunch"])
     }
 
     /// The OS clamps at five minutes; asking for more just hides the clamp.

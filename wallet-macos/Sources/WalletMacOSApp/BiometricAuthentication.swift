@@ -16,14 +16,23 @@ import LocalAuthentication
 final class BiometricAuthenticationContexts: @unchecked Sendable {
     static let shared = BiometricAuthenticationContexts()
 
-    /// The only two things allowed to reuse an authorisation. Both are "unlock a
-    /// secret this process will hold for the rest of the session anyway", where
-    /// re-prompting buys nothing.
+    /// The only thing allowed to reuse an authorisation.
+    ///
+    /// The bar is: the unlock recurs often enough within a session that
+    /// re-prompting is noise, and the secret is one this process holds for the
+    /// rest of the session anyway, so a reuse window grants nothing a live
+    /// process does not already have.
+    ///
+    /// RAILGUN's spending entropy was briefly in here and has been taken back
+    /// out. It failed the first half of the bar — it is read once per sidecar
+    /// launch, so the window almost never applied — while widening the second:
+    /// the entropy is the root every ephemeral exit sender is derived from, and
+    /// a fresh read of it is the one moment a person has to be present for.
+    /// Trading a prompt nobody was seeing for a five-minute unprompted window on
+    /// spending material is a bad trade in both directions.
     enum Domain: String, CaseIterable {
         /// Handing the relayer secret to a freshly spawned `wallet-node`.
         case relayerLaunch
-        /// Unlocking the RAILGUN entropy for the sidecar.
-        case railgun
     }
 
     /// The OS caps reuse at `LATouchIDAuthenticationMaximumAllowableReuseDuration`

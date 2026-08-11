@@ -370,7 +370,7 @@ mod tests {
             .expect_err("eth_call reverts");
 
         assert!(
-            matches!(error, ChainError::CallReverted(data) if data == Bytes::from(vec![0x08, 0xc3, 0x79, 0xa0]))
+            matches!(error, ChainError::CallReverted(data) if data == vec![0x08, 0xc3, 0x79, 0xa0])
         );
     }
 

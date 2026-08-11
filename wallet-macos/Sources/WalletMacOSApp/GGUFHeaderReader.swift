@@ -4,6 +4,7 @@ enum GGUFHeaderError: Error, Equatable, LocalizedError {
     case notGGUF
     case truncated
     case unsupportedValueType(UInt32)
+    case arrayNestingTooDeep
     case rangeNotSupported(status: Int)
 
     var errorDescription: String? {
@@ -14,6 +15,8 @@ enum GGUFHeaderError: Error, Equatable, LocalizedError {
             return "That file's GGUF header is incomplete or malformed."
         case .unsupportedValueType(let type):
             return "That file's GGUF header uses an unsupported value type (\(type))."
+        case .arrayNestingTooDeep:
+            return "That file's GGUF header nests arrays too deeply to be a real model."
         case .rangeNotSupported(let status):
             return "The host would not serve a partial read of that file (HTTP \(status)), so its size cannot be checked before downloading."
         }
@@ -33,11 +36,23 @@ struct GGUFHeader: Equatable {
 
     /// nil when the header lacks the attention shape we need; callers surface that
     /// as `.unknown` rather than guessing.
+    ///
+    /// A dimension is also treated as missing when it is not a plausible attention
+    /// shape. GGUF's signed integer types (1/3/5/11) decode to genuinely negative
+    /// values, so `<arch>.block_count` can arrive as `-1` from a corrupt or hostile
+    /// header — and every consumer downstream multiplies these together as
+    /// `UInt64`. Rejecting them here is what keeps "Size unknown" the answer
+    /// instead of a trap; `ModelFitEvaluator` saturates as well, for profiles
+    /// already persisted by an earlier build.
     func memoryProfile(weightBytes: UInt64) -> ModelMemoryProfile? {
         guard let blocks = integer("\(architecture).block_count"),
               let kvHeads = integer("\(architecture).attention.head_count_kv"),
               let keyLength = integer("\(architecture).attention.key_length"),
-              let valueLength = integer("\(architecture).attention.value_length")
+              let valueLength = integer("\(architecture).attention.value_length"),
+              ModelMemoryProfile.isPlausibleDimension(blocks),
+              ModelMemoryProfile.isPlausibleDimension(kvHeads),
+              ModelMemoryProfile.isPlausibleDimension(keyLength),
+              ModelMemoryProfile.isPlausibleDimension(valueLength)
         else { return nil }
         return ModelMemoryProfile(
             weightBytes: weightBytes,
@@ -45,7 +60,8 @@ struct GGUFHeader: Equatable {
             kvHeadCount: kvHeads,
             keyLength: keyLength,
             valueLength: valueLength,
-            trainedContextTokens: integer("\(architecture).context_length") ?? 4096
+            trainedContextTokens: integer("\(architecture).context_length")
+                .flatMap { ModelMemoryProfile.isPlausibleContextLength($0) ? $0 : nil } ?? 4096
         )
     }
 }
@@ -71,7 +87,7 @@ enum GGUFHeaderReader {
                 architecture = try cursor.string()
                 continue
             }
-            if let value = try cursor.scalarInteger(type: type) {
+            if let value = try cursor.scalarInteger(type: type, depth: 0) {
                 integers[key] = value
             }
         }
@@ -216,10 +232,22 @@ enum GGUFHeaderReader {
             return String(decoding: try take(length), as: UTF8.self)
         }
 
+        /// How deep an array-of-array chain may nest before the header is rejected.
+        ///
+        /// Real GGUF metadata nests one level at most (`tokenizer.ggml.merges` and
+        /// friends are flat arrays of strings). Recursion here is driven entirely
+        /// by attacker-controlled bytes: a chain of singleton nested arrays costs
+        /// 12 header bytes per level and satisfies the remaining-budget guard at
+        /// every step, so a sub-megabyte header reaches tens of thousands of frames
+        /// and overflows the 8 MB main-thread stack — a SIGSEGV, not a catchable
+        /// error. Every other length in this parser is bounded; this is the bound
+        /// for depth.
+        static let maximumArrayNesting = 4
+
         /// Consumes one value. Returns it as an Int when it is a scalar integer,
         /// nil for everything else (strings, floats, bools, arrays) — those are
         /// skipped, not stored.
-        mutating func scalarInteger(type: UInt32) throws -> Int? {
+        mutating func scalarInteger(type: UInt32, depth: Int) throws -> Int? {
             switch type {
             case 0, 7: return Int(try take(1)[0])
             case 1: return Int(Int8(bitPattern: try take(1)[0]))
@@ -232,6 +260,9 @@ enum GGUFHeaderReader {
             case 6: _ = try take(4); return nil
             case 8: _ = try string(); return nil
             case 9:
+                guard depth < Self.maximumArrayNesting else {
+                    throw GGUFHeaderError.arrayNestingTooDeep
+                }
                 let elementType = try u32()
                 let count = try u64()
                 // Same attacker-controlled-length concern as `string()`: a
@@ -240,7 +271,7 @@ enum GGUFHeaderReader {
                 // element needs at least one byte, so this is a sound lower
                 // bound, not just a heuristic).
                 guard count <= UInt64(data.count - offset) else { throw GGUFHeaderError.truncated }
-                for _ in 0..<count { _ = try scalarInteger(type: elementType) }
+                for _ in 0..<count { _ = try scalarInteger(type: elementType, depth: depth + 1) }
                 return nil
             case 10:
                 let value = try u64()

@@ -9,6 +9,33 @@ struct ModelMemoryProfile: Equatable, Codable {
     let keyLength: Int
     let valueLength: Int
     let trainedContextTokens: Int
+
+    /// Attention dimensions arrive from an untrusted GGUF header, where the signed
+    /// integer types decode to genuinely negative values and a u64 field decodes
+    /// near `Int.max`. Anything outside this range is not a model shape, and the
+    /// upper bound is deliberately far above the largest real one (~200 blocks,
+    /// ~128 KV heads, ~1024-wide keys) so that widening it is never the reason a
+    /// legitimate model is rejected.
+    static func isPlausibleDimension(_ value: Int) -> Bool {
+        (1...65_536).contains(value)
+    }
+
+    /// Context length gets its own, much larger ceiling: 131072 is ordinary today
+    /// and million-token models exist, so the attention-shape bound would reject
+    /// real models. Only the sign and the overflow range matter here.
+    static func isPlausibleContextLength(_ value: Int) -> Bool {
+        (1...16_777_216).contains(value)
+    }
+
+    /// False for a profile that could only have come from a malformed header — or
+    /// from `InstalledModelStore`, which persisted such profiles before the parser
+    /// rejected them and replays them on every launch.
+    var isWellFormed: Bool {
+        Self.isPlausibleDimension(blockCount)
+            && Self.isPlausibleDimension(kvHeadCount)
+            && Self.isPlausibleDimension(keyLength)
+            && Self.isPlausibleDimension(valueLength)
+    }
 }
 
 enum ModelFitVerdict: String, Equatable {
@@ -28,19 +55,45 @@ enum ModelFitVerdict: String, Equatable {
 }
 
 enum ModelFitEvaluator {
+    /// Every step below saturates instead of trapping.
+    ///
+    /// The inputs are attacker-controlled: a pasted Hugging Face repo's GGUF header
+    /// sets these dimensions, and `InstalledModelStore` replays whatever it
+    /// persisted on every later launch — so a bad profile is not a one-shot, it is
+    /// a crash on every Settings open that survives relaunch. `UInt64.init(_: Int)`
+    /// traps on a negative and these products overflow well inside the plausible
+    /// range, so a nonsense profile has to land on `.wontFit`, never on a trap.
+    private static func saturatingProduct(_ values: [UInt64]) -> UInt64 {
+        values.reduce(1) { total, value in
+            let (product, overflow) = total.multipliedReportingOverflow(by: value)
+            return overflow ? .max : product
+        }
+    }
+
+    private static func saturatingSum(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? .max : sum
+    }
+
     /// llama.cpp keeps an f16 K and V entry per layer, per KV head, per token.
     static func kvCacheBytes(profile: ModelMemoryProfile, contextTokens: Int) -> UInt64 {
-        let perToken = UInt64(profile.blockCount)
-            * UInt64(profile.kvHeadCount)
-            * UInt64(profile.keyLength + profile.valueLength)
-            * 2
-        return perToken * UInt64(max(contextTokens, 0))
+        guard profile.isWellFormed else { return .max }
+        let perToken = saturatingProduct([
+            UInt64(profile.blockCount),
+            UInt64(profile.kvHeadCount),
+            UInt64(profile.keyLength + profile.valueLength),
+            2,
+        ])
+        return saturatingProduct([perToken, UInt64(max(contextTokens, 0))])
     }
 
     /// Weights + KV cache + 15% for the compute graph, scratch buffers and tokenizer.
     static func requiredBytes(profile: ModelMemoryProfile, contextTokens: Int) -> UInt64 {
-        let raw = profile.weightBytes + kvCacheBytes(profile: profile, contextTokens: contextTokens)
-        return raw / 100 * 115
+        let raw = saturatingSum(
+            profile.weightBytes,
+            kvCacheBytes(profile: profile, contextTokens: contextTokens)
+        )
+        return saturatingProduct([raw / 100, 115])
     }
 
     static func verdict(
@@ -49,6 +102,9 @@ enum ModelFitEvaluator {
         budget: HardwareBudget
     ) -> ModelFitVerdict {
         guard let profile else { return .unknown }
+        // A profile that cannot be a real model shape is not "won't fit" — it is
+        // not measurable, and `.unknown` is the verdict that says so.
+        guard profile.isWellFormed else { return .unknown }
         let need = requiredBytes(profile: profile, contextTokens: contextTokens)
         if need <= budget.comfortableBytes { return .fits }
         if need <= budget.usableBytes { return .tight }
@@ -66,10 +122,14 @@ enum ModelFitEvaluator {
         comfortable: Bool
     ) -> UInt64 {
         let need = requiredBytes(profile: profile, contextTokens: contextTokens)
-        let target = comfortable ? need * 100 / 80 : need
-        let smallMachine = target * 100 / 60
+        // Multiply-then-divide, as before, so the ordinary result is unchanged;
+        // only the overflow case differs, and there it saturates rather than traps.
+        let target = comfortable ? saturatingProduct([need, 100]) / 80 : need
+        let smallMachine = saturatingProduct([target, 100]) / 60
         let twentyGiB: UInt64 = 20 * 1_073_741_824
-        return smallMachine <= twentyGiB ? smallMachine : target + 8 * 1_073_741_824
+        return smallMachine <= twentyGiB
+            ? smallMachine
+            : saturatingSum(target, 8 * 1_073_741_824)
     }
 
     /// The largest ladder preset that still lands in `.fits`, or nil if none do.

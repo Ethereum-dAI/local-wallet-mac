@@ -301,3 +301,129 @@ final class RangeStubProtocol: URLProtocol, @unchecked Sendable {
 
     override func stopLoading() {}
 }
+
+/// The GGUF value types 1/3/5/11 decode as genuinely signed, and the parser is
+/// fed bytes from any repository a user pastes into Add From Hugging Face. A
+/// negative or absurd attention dimension therefore has to end as "Size unknown",
+/// because every consumer downstream converts these to `UInt64` and multiplies
+/// them — and because `InstalledModelStore` would persist the bad profile and
+/// replay it on every launch.
+struct GGUFHostileHeaderTests {
+    private func header(blockCount: Int32) throws -> GGUFHeader {
+        var data = Data("GGUF".utf8)
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func u64(_ v: UInt64) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func str(_ s: String) { let b = Array(s.utf8); u64(UInt64(b.count)); data.append(contentsOf: b) }
+
+        u32(3); u64(1); u64(5)
+        str("general.architecture"); u32(8); str("gemma4")
+        // Type 5 is int32: the bit pattern is decoded as signed.
+        str("gemma4.block_count"); u32(5); u32(UInt32(bitPattern: blockCount))
+        str("gemma4.attention.head_count_kv"); u32(4); u32(2)
+        str("gemma4.attention.key_length"); u32(4); u32(512)
+        str("gemma4.attention.value_length"); u32(4); u32(512)
+        return try GGUFHeaderReader.parse(data)
+    }
+
+    @Test func aNegativeBlockCountYieldsNoProfileRatherThanTrapping() throws {
+        let parsed = try header(blockCount: -1)
+        #expect(parsed.integer("gemma4.block_count") == -1)
+        #expect(parsed.memoryProfile(weightBytes: 4_000_000_000) == nil)
+    }
+
+    @Test func anAbsurdBlockCountYieldsNoProfile() throws {
+        #expect(try header(blockCount: .max).memoryProfile(weightBytes: 4_000_000_000) == nil)
+    }
+
+    @Test func aZeroBlockCountYieldsNoProfile() throws {
+        #expect(try header(blockCount: 0).memoryProfile(weightBytes: 4_000_000_000) == nil)
+    }
+
+    /// Each nesting level costs only 12 header bytes and passes the
+    /// remaining-budget guard, so without a depth cap a small header recurses
+    /// deep enough to overflow the stack — a SIGSEGV no `catch` can see.
+    @Test func deeplyNestedArraysThrowRatherThanOverflowingTheStack() {
+        var data = Data("GGUF".utf8)
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func u64(_ v: UInt64) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func str(_ s: String) { let b = Array(s.utf8); u64(UInt64(b.count)); data.append(contentsOf: b) }
+
+        u32(3); u64(1); u64(1)
+        str("nested"); u32(9)
+        // A chain of singleton arrays: each level declares element type 9 (array)
+        // and a count of 1, so it costs 12 bytes and recurses once. 20_000 levels
+        // is ~240 KB of header and ~20_000 stack frames.
+        for _ in 0..<20_000 { u32(9); u64(1) }
+        u32(4); u64(1); u32(7)   // innermost: an array of one uint32
+
+        #expect(throws: GGUFHeaderError.arrayNestingTooDeep) {
+            try GGUFHeaderReader.parse(data)
+        }
+    }
+
+    /// One level of nesting is real GGUF (an array of arrays of tokens), so the
+    /// cap must not reject it.
+    @Test func aSinglyNestedArrayStillParses() throws {
+        var data = Data("GGUF".utf8)
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func u64(_ v: UInt64) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func str(_ s: String) { let b = Array(s.utf8); u64(UInt64(b.count)); data.append(contentsOf: b) }
+
+        u32(3); u64(1); u64(2)
+        str("outer"); u32(9); u32(9); u64(2)
+        u32(4); u64(1); u32(11)
+        u32(4); u64(1); u32(12)
+        str("general.architecture"); u32(8); str("gemma4")
+
+        #expect(try GGUFHeaderReader.parse(data).architecture == "gemma4")
+    }
+}
+
+/// A bad profile persisted by an earlier build is replayed from
+/// `InstalledModelStore` on every launch, so the evaluator has to survive one
+/// even though the parser now refuses to produce it.
+struct ModelFitEvaluatorHostileProfileTests {
+    private func profile(blockCount: Int) -> ModelMemoryProfile {
+        ModelMemoryProfile(
+            weightBytes: 4_000_000_000,
+            blockCount: blockCount,
+            kvHeadCount: 2,
+            keyLength: 512,
+            valueLength: 512,
+            trainedContextTokens: 8192
+        )
+    }
+
+    @Test func aNegativeDimensionDoesNotTrap() {
+        let bad = profile(blockCount: -1)
+        #expect(bad.isWellFormed == false)
+        #expect(ModelFitEvaluator.kvCacheBytes(profile: bad, contextTokens: 8192) == .max)
+        #expect(ModelFitEvaluator.requiredBytes(profile: bad, contextTokens: 8192) > 0)
+    }
+
+    @Test func anUnmeasurableProfileReadsAsUnknownNotAsAFit() {
+        let verdict = ModelFitEvaluator.verdict(
+            profile: profile(blockCount: -1),
+            contextTokens: 8192,
+            budget: HardwareBudget(
+                totalMemoryBytes: 64 * 1_073_741_824,
+                metalBudgetBytes: 48 * 1_073_741_824,
+                freeDiskBytes: 500 * 1_073_741_824
+            )
+        )
+        #expect(verdict == .unknown)
+    }
+
+    @Test func anEnormousButWellFormedProfileSaturatesInsteadOfOverflowing() {
+        let huge = ModelMemoryProfile(
+            weightBytes: .max,
+            blockCount: 65_536,
+            kvHeadCount: 65_536,
+            keyLength: 65_536,
+            valueLength: 65_536,
+            trainedContextTokens: 131_072
+        )
+        #expect(ModelFitEvaluator.requiredBytes(profile: huge, contextTokens: 131_072) == .max)
+        #expect(ModelFitEvaluator.minimumMemoryBytes(profile: huge, contextTokens: 131_072, comfortable: true) > 0)
+    }
+}

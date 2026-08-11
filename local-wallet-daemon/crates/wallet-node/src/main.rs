@@ -10,6 +10,7 @@ mod logging;
 mod paths;
 mod rate_limit;
 mod ready;
+mod redact;
 mod relayer_lifecycle;
 mod relayer_signer;
 mod state;
@@ -177,7 +178,7 @@ async fn main() -> ExitCode {
         }
         config::ReadVerificationMode::ExecutionRpc => {
             tracing::warn!(
-                execution_rpc = %config.execution_rpc_for_helios(),
+                execution_rpc = %redact::redact_url(config.execution_rpc_for_helios()),
                 "helios read verification disabled; serving reads directly from execution RPC"
             );
             let adapter =
@@ -194,7 +195,7 @@ async fn main() -> ExitCode {
                 fail_before_ready!(
                     cli,
                     "execution RPC {} rejected chain id {}: {err}",
-                    config.execution_rpc_for_helios(),
+                    redact::redact_url(config.execution_rpc_for_helios()),
                     config.chain_id_for_helios()
                 );
             }

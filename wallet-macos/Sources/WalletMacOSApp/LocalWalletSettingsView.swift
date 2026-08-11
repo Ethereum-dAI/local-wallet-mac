@@ -176,11 +176,6 @@ struct LocalWalletSettingsSnapshot: Equatable {
     let textModelInstallStatus: String
     let textModelPath: String
     let modelRows: [SettingsModelRow]
-    /// The install in flight and the last one's outcome, read from the chat model
-    /// rather than held as view state — that is what lets progress survive a trip
-    /// to another Settings tab. See `ModelInstallProgress`.
-    let modelInstall: ModelInstallProgress?
-    let modelInstallOutcome: ModelInstallOutcome?
     let hardwareSummary: SettingsHardwareSummary?
     /// Context presets worth offering on this Mac; never empty. See
     /// ModelFitEvaluator.selectableContexts.
@@ -269,6 +264,11 @@ struct LocalWalletSettingsSnapshot: Equatable {
 
 struct LocalWalletSettingsView: View {
     let snapshot: LocalWalletSettingsSnapshot
+    /// Install progress lives outside the snapshot, observed directly: it changes
+    /// ~100 times per download, and re-deriving the whole settings surface (catalog
+    /// stats, fit verdicts, a SQLite count) that often is wasted work. See
+    /// `ModelInstallStore`.
+    @ObservedObject var installs: ModelInstallStore
     @Binding var thinkingEnabled: Bool
     let initialTab: LocalWalletSettingsTab
     let onExportRankings: () -> Void
@@ -279,14 +279,12 @@ struct LocalWalletSettingsView: View {
     let onRevealModelFile: () throws -> String
     let onSelectModel: (String) throws -> String
     /// Starts an install; returns nothing to await. The progress and the final
-    /// sentence come back through `snapshot.modelInstall` / `.modelInstallOutcome`,
-    /// which outlive this view.
+    /// sentence come back through `installs`, which outlives this view.
     let onStartModelInstall: (ModelDownloadRequest) -> Void
     let onRemoveModel: (String) throws -> String
     let onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo
     let onInspectRemoteFile: (HuggingFaceGGUFFile) async -> RemoteModelFit
     let onStartCuratedModelInstall: (String) -> Void
-    let onClearModelInstallOutcome: () -> Void
     let onCancelModelDownload: () -> Void
     let onSaveNetworkSettings: (DemoNetworkSettings) throws -> String
     let onTestNetworkSettings: (DemoNetworkSettings) async throws -> String
@@ -344,6 +342,7 @@ struct LocalWalletSettingsView: View {
 
     init(
         snapshot: LocalWalletSettingsSnapshot,
+        installs: ModelInstallStore,
         thinkingEnabled: Binding<Bool>,
         initialTab: LocalWalletSettingsTab = .info,
         onExportRankings: @escaping () -> Void,
@@ -358,7 +357,6 @@ struct LocalWalletSettingsView: View {
         onResolveRepo: @escaping (String) async throws -> HuggingFaceRepositoryInfo,
         onInspectRemoteFile: @escaping (HuggingFaceGGUFFile) async -> RemoteModelFit,
         onStartCuratedModelInstall: @escaping (String) -> Void,
-        onClearModelInstallOutcome: @escaping () -> Void,
         onCancelModelDownload: @escaping () -> Void,
         onSaveNetworkSettings: @escaping (DemoNetworkSettings) throws -> String,
         onTestNetworkSettings: @escaping (DemoNetworkSettings) async throws -> String,
@@ -380,6 +378,7 @@ struct LocalWalletSettingsView: View {
         onClose: @escaping () -> Void
     ) {
         self.snapshot = snapshot
+        self._installs = ObservedObject(wrappedValue: installs)
         self._thinkingEnabled = thinkingEnabled
         self.initialTab = initialTab
         self.onExportRankings = onExportRankings
@@ -394,7 +393,6 @@ struct LocalWalletSettingsView: View {
         self.onResolveRepo = onResolveRepo
         self.onInspectRemoteFile = onInspectRemoteFile
         self.onStartCuratedModelInstall = onStartCuratedModelInstall
-        self.onClearModelInstallOutcome = onClearModelInstallOutcome
         self.onCancelModelDownload = onCancelModelDownload
         self.onSaveNetworkSettings = onSaveNetworkSettings
         self.onTestNetworkSettings = onTestNetworkSettings
@@ -830,7 +828,7 @@ struct LocalWalletSettingsView: View {
                             SettingsBadge(text: "Default", tint: SettingsPalette.blue)
                         }
                         SettingsBadge(text: row.verdict.label, tint: settingsVerdictTint(row.verdict))
-                        if let install = snapshot.modelInstall, install.modelID == row.id {
+                        if let install = installs.install, install.modelID == row.id {
                             installProgressLabel(install.phase)
                             if case .downloading = install.phase {
                                 Button("Cancel") { onCancelModelDownload() }
@@ -843,7 +841,7 @@ struct LocalWalletSettingsView: View {
                             case .download:
                                 Button("Download") { install(row.id) }
                                     .buttonStyle(SettingsSecondaryButtonStyle())
-                                    .disabled(snapshot.modelInstall != nil)
+                                    .disabled(installs.install != nil)
                             case .inUse:
                                 SettingsBadge(text: "In use", tint: SettingsPalette.blue)
                             case .use:
@@ -868,7 +866,14 @@ struct LocalWalletSettingsView: View {
                         runModelAction { try onSelectModel(row.id) }
                     }
                 }
-                if let banner = modelMessage ?? installOutcomeMessage {
+                // The outcome outranks `modelMessage`, and every local action clears
+                // it, so the banner always shows the newest of the two. The other
+                // order swallowed the install result whenever a stale "Revealed…"
+                // or "Switched to…" was still on screen — including checksum and
+                // disk failures, which then had nowhere at all to appear.
+                if let outcome = installOutcomeMessage {
+                    SettingsMessageBanner(message: outcome, onDismiss: { installs.clearOutcome() })
+                } else if let banner = modelMessage {
                     SettingsMessageBanner(message: banner)
                 }
             }
@@ -879,10 +884,10 @@ struct LocalWalletSettingsView: View {
                     set: { newValue in
                         contextWindowDraft = newValue
                         onSetContextWindowTokens(newValue)
-                        modelMessage = SettingsMessage(
+                        showModelMessage(SettingsMessage(
                             kind: .success,
                             text: "Context window set to \(newValue) tokens. Applies to the next message."
-                        )
+                        ))
                     }
                 )) {
                     ForEach(snapshot.selectableContextTokens, id: \.self) { tokens in
@@ -902,9 +907,9 @@ struct LocalWalletSettingsView: View {
                     Spacer()
                     Button {
                         do {
-                            modelMessage = SettingsMessage(kind: .success, text: try onRevealModelFile())
+                            showModelMessage(SettingsMessage(kind: .success, text: try onRevealModelFile()))
                         } catch {
-                            modelMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
+                            showModelMessage(SettingsMessage(kind: .error, text: error.localizedDescription))
                         }
                     } label: {
                         Label("Reveal model file", systemImage: "folder")
@@ -916,7 +921,8 @@ struct LocalWalletSettingsView: View {
 
             SettingsSection(title: "Add From Hugging Face") {
                 AddHuggingFaceModelForm(
-                    install: snapshot.modelInstall,
+                    install: huggingFaceInstall,
+                    blockedByInstallOf: blockingInstallName,
                     onResolveRepo: onResolveRepo,
                     onInspectRemoteFile: onInspectRemoteFile,
                     onStartModelInstall: onStartModelInstall,
@@ -933,11 +939,28 @@ struct LocalWalletSettingsView: View {
         }
     }
 
-    /// The last install's result, as a banner. Comes from the model, so a download
-    /// that finished while the user was on another tab still reports itself.
+    /// The last install's result, as a banner. Comes from the install store, so a
+    /// download that finished while the user was on another tab still reports
+    /// itself.
     private var installOutcomeMessage: SettingsMessage? {
-        guard let outcome = snapshot.modelInstallOutcome else { return nil }
+        guard let outcome = installs.outcome else { return nil }
         return SettingsMessage(kind: outcome.isFailure ? .error : .success, text: outcome.text)
+    }
+
+    /// The install this form is responsible for drawing: one that no model row has
+    /// claimed. A curated download is rendered by its own row, and a Hugging Face
+    /// model gets a row only once `InstalledModelStore` has a record — which is
+    /// exactly when it stops being this form's business.
+    private var huggingFaceInstall: ModelInstallProgress? {
+        guard let install = installs.install else { return nil }
+        return install.isClaimedByRow(ids: snapshot.modelRows.map(\.id)) ? nil : install
+    }
+
+    /// Set when something *else* holds the one install slot, so a disabled
+    /// "Download & add" says why instead of just looking broken.
+    private var blockingInstallName: String? {
+        guard huggingFaceInstall == nil else { return nil }
+        return installs.install?.displayName
     }
 
     /// Runs a model action (select/remove) and surfaces the specific outcome
@@ -945,10 +968,19 @@ struct LocalWalletSettingsView: View {
     /// `localizedDescription` on failure.
     private func runModelAction(_ action: () throws -> String) {
         do {
-            modelMessage = SettingsMessage(kind: .success, text: try action())
+            showModelMessage(SettingsMessage(kind: .success, text: try action()))
         } catch {
-            modelMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
+            showModelMessage(SettingsMessage(kind: .error, text: error.localizedDescription))
         }
+    }
+
+    /// Every locally produced model message goes through here, so it replaces the
+    /// previous install outcome rather than being ranked against it. Without the
+    /// clear, whichever of the two the banner preferred could hide the other
+    /// indefinitely.
+    private func showModelMessage(_ message: SettingsMessage) {
+        installs.clearOutcome()
+        modelMessage = message
     }
 
     /// The leading glyph states what the row *is*, and is never a control that
@@ -977,7 +1009,7 @@ struct LocalWalletSettingsView: View {
     /// Multi-gigabyte download followed by a real load test, so the row says which
     /// of the two it is doing rather than showing one bar that stalls at 100%.
     @ViewBuilder
-    private func installProgressLabel(_ phase: ModelInstallPhase?) -> some View {
+    private func installProgressLabel(_ phase: ModelInstallPhase) -> some View {
         switch phase {
         case .downloading(let value):
             ProgressView(value: value).frame(width: 120)
@@ -989,8 +1021,6 @@ struct LocalWalletSettingsView: View {
             Text("Testing")
                 .font(.system(size: 11))
                 .foregroundStyle(SettingsPalette.secondaryText)
-        case nil:
-            EmptyView()
         }
     }
 
@@ -1000,7 +1030,7 @@ struct LocalWalletSettingsView: View {
     /// by that.
     private func install(_ id: String) {
         modelMessage = nil
-        onClearModelInstallOutcome()
+        installs.clearOutcome()
         onStartCuratedModelInstall(id)
     }
 
@@ -3257,6 +3287,11 @@ private struct SettingsBadge: View {
 
 private struct SettingsMessageBanner: View {
     let message: SettingsMessage
+    /// Non-nil for a message that outlives the view showing it — the install
+    /// outcome, which is session state and would otherwise re-appear on every
+    /// return to this tab with no way to acknowledge it. View-local messages die
+    /// with the view and need no button.
+    var onDismiss: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -3270,6 +3305,15 @@ private struct SettingsMessageBanner: View {
                 .lineLimit(3)
                 .textSelection(.enabled)
             Spacer(minLength: 0)
+            if let onDismiss {
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .black))
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(SettingsIconButtonStyle())
+                .help("Dismiss")
+            }
         }
         .padding(12)
         .background(
@@ -3415,10 +3459,15 @@ private func settingsVerdictTint(_ verdict: ModelFitVerdict) -> Color {
 /// follows the selected file automatically, since it is what decides whether the
 /// download is worth starting.
 private struct AddHuggingFaceModelForm: View {
-    /// The install in flight, owned by the chat model. The repo/file list above it
-    /// is still local state and is lost on navigation — but the download is not,
-    /// which is the part measured in gigabytes.
+    /// This form's own install, already filtered by the caller to one that no model
+    /// row is drawing. The repo/file list is still local state and is lost on
+    /// navigation — but the download is not, which is the part measured in
+    /// gigabytes, so its progress and its Cancel button render outside every
+    /// `files`-dependent branch below.
     let install: ModelInstallProgress?
+    /// The name of an install the *rest* of Settings owns. It holds the single
+    /// install slot, so this form can start nothing — and has to say which.
+    let blockedByInstallOf: String?
     let onResolveRepo: (String) async throws -> HuggingFaceRepositoryInfo
     let onInspectRemoteFile: (HuggingFaceGGUFFile) async -> RemoteModelFit
     let onStartModelInstall: (ModelDownloadRequest) -> Void
@@ -3468,27 +3517,24 @@ private struct AddHuggingFaceModelForm: View {
                 fitLine
 
                 HStack {
-                    switch install?.phase {
-                    case .downloading(let value):
-                        ProgressView(value: value).frame(width: 180)
-                        Text("\(Int(value * 100))%").font(.system(size: 11, design: .monospaced))
-                    case .testing:
-                        ProgressView().controlSize(.small)
-                        Text("Loading it for real and checking it can make a tool call — this can take a minute.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    case nil:
-                        EmptyView()
-                    }
-                    if case .downloading = install?.phase {
-                        Button("Cancel") { onCancelModelDownload() }
-                            .buttonStyle(SettingsSecondaryButtonStyle())
-                    }
                     Spacer()
                     Button("Download & add") { download() }
                         .buttonStyle(SettingsPrimaryButtonStyle())
-                        .disabled(selectedPath.isEmpty || install != nil)
+                        .disabled(selectedPath.isEmpty || install != nil || blockedByInstallOf != nil)
                 }
+            }
+
+            // Outside the `files` branch on purpose. `files` is view state: leaving
+            // this tab and coming back rebuilds the form empty, and a 6 GB download
+            // in flight then had nowhere to draw its progress and nowhere to offer
+            // Cancel — while every other Download in Settings stayed disabled
+            // behind it. Quitting the app was the only way out.
+            if let install {
+                installLine(install)
+            } else if let blockedByInstallOf {
+                Text("Waiting on \(blockedByInstallOf) — one download at a time.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
 
             if let message {
@@ -3513,6 +3559,31 @@ private struct AddHuggingFaceModelForm: View {
             selectedPath = ""
             resolvedRepoID = ""
             fit = nil
+        }
+    }
+
+    /// Progress for this form's own install, naming the model — after a trip to
+    /// another tab the file picker that started it is gone, so the bar has to say
+    /// what it belongs to.
+    @ViewBuilder
+    private func installLine(_ install: ModelInstallProgress) -> some View {
+        HStack {
+            switch install.phase {
+            case .downloading(let value):
+                ProgressView(value: value).frame(width: 180)
+                Text("\(Int(value * 100))% · \(install.displayName)")
+                    .font(.system(size: 11, design: .monospaced))
+            case .testing:
+                ProgressView().controlSize(.small)
+                Text("Loading \(install.displayName) for real and checking it can make a tool call — this can take a minute.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            if case .downloading = install.phase {
+                Button("Cancel") { onCancelModelDownload() }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+            }
+            Spacer()
         }
     }
 

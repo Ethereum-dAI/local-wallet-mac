@@ -907,11 +907,12 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var streamingText: String = ""
     @Published private(set) var streamingMessageID: UUID? = nil
     @Published var feedbackExportMessage: String? = nil
-    /// The model download/self-test in flight, and how the last one ended. On the
-    /// model so navigating away from Settings › Models cannot orphan them — see
-    /// `ModelInstallProgress`.
-    @Published private(set) var modelInstall: ModelInstallProgress?
-    @Published private(set) var modelInstallOutcome: ModelInstallOutcome?
+    /// The model download/self-test in flight, and how the last one ended. Owned
+    /// here so navigating away from Settings › Models cannot orphan them — but held
+    /// in its own observable object, and deliberately not `@Published`, so a
+    /// progress tick invalidates only the view that draws it. See
+    /// `ModelInstallStore`.
+    let modelInstalls = ModelInstallStore()
     @Published private(set) var walletHistoryRecords: [WalletTransactionRecord] = []
     @Published private(set) var isRefreshingWalletHistory = false
     @Published var walletHistoryMessage: String? = nil
@@ -1255,8 +1256,6 @@ private final class ChatDashboardModel: ObservableObject {
             textModelInstallStatus: installStatus,
             textModelPath: installedPath.isEmpty ? "Not set" : installedPath,
             modelRows: modelRows,
-            modelInstall: modelInstall,
-            modelInstallOutcome: modelInstallOutcome,
             hardwareSummary: budget.map(SettingsHardwareSummary.init),
             selectableContextTokens: ModelFitEvaluator.selectableContexts(
                 profile: catalog.entries.first { $0.id == activeModelID }?.profile,
@@ -2508,51 +2507,33 @@ private final class ChatDashboardModel: ObservableObject {
         activeModelName = selection.displayName
     }
 
-    /// Starts an install and owns its progress until it ends.
+    /// Starts an install and drives `modelInstalls` until it ends.
     ///
     /// Fire-and-forget by design: the caller is a view that may be gone long
     /// before the download is, so it gets no continuation to await. Everything
     /// observable about the install — the phase, and the sentence it ends with —
-    /// lands on `modelInstall` / `modelInstallOutcome`, which any later view can
-    /// re-read. Returns false when an install is already in flight, so a second
-    /// press is a no-op rather than a `downloadAlreadyInProgress` error thrown at
-    /// whoever happened to be on screen.
+    /// lands on the store, which any later view can re-read. Returns false when an
+    /// install is already in flight.
     @discardableResult
     func startModelInstall(_ request: ModelDownloadRequest) -> Bool {
-        guard modelInstall == nil else { return false }
-        modelInstall = ModelInstallProgress(
-            modelID: request.modelID,
-            displayName: request.displayName,
-            phase: .downloading(0)
-        )
-        modelInstallOutcome = nil
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.modelInstall = nil }
+        guard modelInstalls.begin(modelID: request.modelID, displayName: request.displayName)
+        else { return false }
+        let installs = modelInstalls
+        // Strong `self` on purpose: the store must be told how this ended, and a
+        // `[weak self]` that lost its model mid-download would leave the store
+        // stuck reporting an install that nothing is driving. The retain lasts only
+        // as long as the download.
+        Task { @MainActor in
             do {
-                let text = try await self.downloadModel(request) { [weak self] phase in
-                    guard let self, var install = self.modelInstall, install.modelID == request.modelID
-                    else { return }
-                    // Throttled to whole percents, which is all the row renders
-                    // (`Int(value * 100)`). Unlike the view state this replaced,
-                    // publishing here recomputes `settingsSnapshot` — which walks the
-                    // model catalog and stats a file per row — and URLSession reports
-                    // progress once per received chunk, hundreds of times a second on
-                    // a fast link. Un-throttled that is a filesystem call per chunk.
-                    if case .downloading(let updated) = phase,
-                       case .downloading(let current) = install.phase,
-                       Int(updated * 100) == Int(current * 100) {
-                        return
-                    }
-                    install.phase = phase
-                    self.modelInstall = install
+                let text = try await self.downloadModel(request) { phase in
+                    installs.update(modelID: request.modelID, phase: phase)
                 }
-                self.modelInstallOutcome = ModelInstallOutcome(isFailure: false, text: text)
+                installs.finish(ModelInstallOutcome(isFailure: false, text: text))
             } catch {
-                self.modelInstallOutcome = ModelInstallOutcome(
+                installs.finish(ModelInstallOutcome(
                     isFailure: true,
                     text: error.localizedDescription
-                )
+                ))
             }
         }
         return true
@@ -2562,10 +2543,6 @@ private final class ChatDashboardModel: ObservableObject {
     func startCuratedModelInstall(id: String) -> Bool {
         guard let model = LocalAIModel.curated.first(where: { $0.id == id }) else { return false }
         return startModelInstall(ModelDownloadRequest(model: model))
-    }
-
-    func clearModelInstallOutcome() {
-        modelInstallOutcome = nil
     }
 
     /// Downloads a model and then actually tries it: arithmetic proposes the fit,
@@ -4679,6 +4656,7 @@ struct LocalWalletChatDashboardView: View {
     private var settingsBody: some View {
         LocalWalletSettingsView(
             snapshot: model.settingsSnapshot,
+            installs: model.modelInstalls,
             thinkingEnabled: $model.thinkingEnabled,
             initialTab: settingsInitialTab,
             onExportRankings: {
@@ -4716,9 +4694,6 @@ struct LocalWalletChatDashboardView: View {
             },
             onStartCuratedModelInstall: { id in
                 model.startCuratedModelInstall(id: id)
-            },
-            onClearModelInstallOutcome: {
-                model.clearModelInstallOutcome()
             },
             onCancelModelDownload: {
                 model.cancelModelDownload()

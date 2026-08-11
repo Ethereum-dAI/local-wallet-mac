@@ -749,15 +749,16 @@ final class AppModel: ObservableObject {
             .flatMap { try? modelDownloadManager.localFileURL(for: $0) }
             .map(\.path)
             .flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
-        let bundledCopyExists = curated
+        let bundledCopyPath = curated
             .flatMap { modelDownloadManager.bundledFileURL(for: $0) }
-            .map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+            .map(\.path)
+            .flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
 
         switch ModelRemovalPlanner.target(
             record: installedModelStore.model(id: id),
             curated: curated,
             downloadedCopyPath: downloadedCopyPath,
-            bundledCopyExists: bundledCopyExists
+            bundledCopyPath: bundledCopyPath
         ) {
         case .nothingToRemove:
             throw AppError.localDaemonLaunchFailed(
@@ -783,6 +784,14 @@ final class AppModel: ObservableObject {
     /// record can still be cleared, and surfacing a real failure so the caller never
     /// forgets an entry whose gigabytes are still on disk.
     private func deleteModelFile(at path: String, displayName: String) throws {
+        // Refuse anything inside the .app regardless of which target resolved it: a
+        // stored record can point at the embedded GGUF, and removing that would
+        // break the running application's signature with no in-app recovery.
+        guard !ModelRemovalPlanner.isInsideBundle(path: path, bundlePath: Bundle.main.bundlePath) else {
+            throw AppError.localDaemonLaunchFailed(
+                "\(displayName) ships inside the app bundle, so it cannot be removed here."
+            )
+        }
         let fileExistedBeforeAttempt = FileManager.default.fileExists(atPath: path)
         var deletionError: Error?
         if fileExistedBeforeAttempt {

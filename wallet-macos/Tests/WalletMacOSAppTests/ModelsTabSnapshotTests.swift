@@ -113,10 +113,14 @@ struct ModelRowAffordanceTests {
         #expect(r.isRemovable == false)
     }
 
-    /// The default model is never removable even when idle — it is the fallback
-    /// every other selection falls back to.
-    @Test func theDefaultModelIsNeverRemovable() {
-        #expect(row(isInstalled: true, isActive: false, isDefault: true).isRemovable == false)
+    /// Being the default is not a reason to keep a file the user does not want. It
+    /// used to be exempt, which stranded 5.34 GB: download the default to compare it
+    /// with the base, prefer the base, switch back — and no row offered Remove.
+    /// Re-downloading it is one press on the same row.
+    @Test func theDefaultModelIsRemovableOnceItIsNotTheActiveOne() {
+        #expect(row(isInstalled: true, isActive: false, isDefault: true).isRemovable == true)
+        // Still never the running model, default or not.
+        #expect(row(isInstalled: true, isActive: true, isDefault: true).isRemovable == false)
     }
 }
 

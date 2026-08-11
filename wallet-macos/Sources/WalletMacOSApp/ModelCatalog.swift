@@ -116,8 +116,13 @@ struct SettingsModelRow: Identifiable, Equatable {
     let isActive: Bool
     let isDefault: Bool
 
-    /// The shipped default is never removable, and neither is the running model.
-    var isRemovable: Bool { !isDefault && isInstalled && !isActive }
+    /// The running model is not removable — switch away from it first. The shipped
+    /// default used to be exempt too, which stranded it: a user who downloaded the
+    /// 5.34 GB default to compare it against the base, preferred the base and
+    /// switched back had no Remove button for it and no way to reclaim the space
+    /// short of Finder. Being the default is not a reason to keep a file the user
+    /// does not want; it stays re-downloadable from its own row either way.
+    var isRemovable: Bool { isInstalled && !isActive }
 
     /// Only curated rows offer a download button: the app knows their URL and
     /// checksum. A Hugging Face row exists precisely because its file was already
@@ -140,9 +145,9 @@ struct SettingsModelRow: Identifiable, Equatable {
     /// `selectedModelID` defaults to the recommended model, so the default row is
     /// active from first launch — before it is downloaded, and again if its file
     /// is deleted from disk. Ranking `isActive` first left that row showing an
-    /// "In use" badge, no Download button, and (since the default is never
-    /// removable) no Remove either, while every message failed with
-    /// `modelNotInstalled`. There was no route back inside the app.
+    /// "In use" badge, no Download button, and no Remove either (an active row is
+    /// not removable), while every message failed with `modelNotInstalled`. There
+    /// was no route back inside the app.
     var primaryControl: PrimaryControl {
         if isDownloadable { return .download }
         if isActive { return .inUse }

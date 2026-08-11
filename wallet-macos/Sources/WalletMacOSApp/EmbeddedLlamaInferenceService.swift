@@ -403,19 +403,21 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
         return replacement
     }
 
+    /// The model file to load, resolved by `ModelFileResolver` — which prefers the
+    /// stored path only when it still exists, then the *selected* model's own copies
+    /// rather than the recommended model's. Both details matter: the recommended
+    /// model's file name changes when the default changes, and the stored path can
+    /// point into a bundle the user has since replaced.
     private func installedModelURL() throws -> URL {
-        if let path = settingsStore.installedModelPath, !path.isEmpty {
-            return URL(fileURLWithPath: path)
-        }
-        let localURL = try downloadManager.localFileURL(for: .recommended)
-        if FileManager.default.fileExists(atPath: localURL.path) {
-            return localURL
-        }
-        if let bundledURL = downloadManager.bundledFileURL(for: .recommended),
-           FileManager.default.fileExists(atPath: bundledURL.path) {
-            return bundledURL
-        }
-        return localURL
+        let selected = LocalAIModel.curated.first { $0.id == settingsStore.selectedModelID }
+        let path = ModelFileResolver.resolve(
+            storedPath: settingsStore.installedModelPath,
+            selectedLocalPath: selected.flatMap { try? downloadManager.localFileURL(for: $0) }?.path,
+            selectedBundledPath: selected.flatMap { downloadManager.bundledFileURL(for: $0) }?.path,
+            fallbackPath: try downloadManager.localFileURL(for: .recommended).path,
+            exists: { FileManager.default.fileExists(atPath: $0) }
+        )
+        return URL(fileURLWithPath: path)
     }
 
     private func personaSystemPrompt() -> String {

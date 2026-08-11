@@ -235,7 +235,7 @@ Shared flags:
 
 | Flag                 | Default                  | Notes                                  |
 |----------------------|--------------------------|----------------------------------------|
-| `--model PATH`       | onboarding-installed GGUF | Path to a Gemma 4 GGUF                 |
+| `--model PATH`       | the app's default model (`gemma-4-E4B-wallet-ft.Q4_K_M.gguf` under Application Support) | Path to a Gemma 4 GGUF |
 | `--repeats N`        | `3`                      | Per-case repetitions                   |
 | `--seed S`           | `0xC0DEFEED`             | Hex or decimal                         |
 | `--json PATH`        | (none)                   | Structured `EvalEntry[]` report        |

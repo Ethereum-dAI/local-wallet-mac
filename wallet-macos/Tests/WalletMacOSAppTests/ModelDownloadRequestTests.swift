@@ -6,7 +6,7 @@ struct ModelDownloadRequestTests {
     @Test func curatedModelMapsOntoARequest() {
         let request = ModelDownloadRequest(model: .recommended)
         #expect(request.modelID == LocalAIModel.recommended.id)
-        #expect(request.fileName == "gemma-4-E4B-it-Q4_0.gguf")
+        #expect(request.fileName == "gemma-4-E4B-wallet-ft.Q4_K_M.gguf")
         #expect(request.expectedSHA256 == LocalAIModel.recommended.sha256)
         #expect(request.url == LocalAIModel.recommended.artifactURL)
     }
@@ -39,7 +39,11 @@ struct ModelDownloadRequestTests {
     @Test func curatedDestinationKeepsItsHistoricalFileName() throws {
         let manager = LocalAIModelDownloadManager()
         let curated = try manager.localFileURL(for: ModelDownloadRequest(model: .recommended))
-        #expect(curated.lastPathComponent == "gemma-4-E4B-it-Q4_0.gguf")
+        #expect(curated.lastPathComponent == "gemma-4-E4B-wallet-ft.Q4_K_M.gguf")
+        // The base model kept its own un-namespaced name across the default
+        // change, which is what lets an existing install keep its file on disk.
+        let base = try manager.localFileURL(for: ModelDownloadRequest(model: .gemma4Base))
+        #expect(base.lastPathComponent == "gemma-4-E4B-it-Q4_0.gguf")
     }
 
     @Test func diskCheckRejectsADownloadThatWillNotFit() {

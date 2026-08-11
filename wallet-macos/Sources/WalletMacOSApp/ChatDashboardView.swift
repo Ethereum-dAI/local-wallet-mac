@@ -907,6 +907,11 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var streamingText: String = ""
     @Published private(set) var streamingMessageID: UUID? = nil
     @Published var feedbackExportMessage: String? = nil
+    /// The model download/self-test in flight, and how the last one ended. On the
+    /// model so navigating away from Settings › Models cannot orphan them — see
+    /// `ModelInstallProgress`.
+    @Published private(set) var modelInstall: ModelInstallProgress?
+    @Published private(set) var modelInstallOutcome: ModelInstallOutcome?
     @Published private(set) var walletHistoryRecords: [WalletTransactionRecord] = []
     @Published private(set) var isRefreshingWalletHistory = false
     @Published var walletHistoryMessage: String? = nil
@@ -1250,6 +1255,8 @@ private final class ChatDashboardModel: ObservableObject {
             textModelInstallStatus: installStatus,
             textModelPath: installedPath.isEmpty ? "Not set" : installedPath,
             modelRows: modelRows,
+            modelInstall: modelInstall,
+            modelInstallOutcome: modelInstallOutcome,
             hardwareSummary: budget.map(SettingsHardwareSummary.init),
             selectableContextTokens: ModelFitEvaluator.selectableContexts(
                 profile: catalog.entries.first { $0.id == activeModelID }?.profile,
@@ -2501,10 +2508,70 @@ private final class ChatDashboardModel: ObservableObject {
         activeModelName = selection.displayName
     }
 
+    /// Starts an install and owns its progress until it ends.
+    ///
+    /// Fire-and-forget by design: the caller is a view that may be gone long
+    /// before the download is, so it gets no continuation to await. Everything
+    /// observable about the install — the phase, and the sentence it ends with —
+    /// lands on `modelInstall` / `modelInstallOutcome`, which any later view can
+    /// re-read. Returns false when an install is already in flight, so a second
+    /// press is a no-op rather than a `downloadAlreadyInProgress` error thrown at
+    /// whoever happened to be on screen.
+    @discardableResult
+    func startModelInstall(_ request: ModelDownloadRequest) -> Bool {
+        guard modelInstall == nil else { return false }
+        modelInstall = ModelInstallProgress(
+            modelID: request.modelID,
+            displayName: request.displayName,
+            phase: .downloading(0)
+        )
+        modelInstallOutcome = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.modelInstall = nil }
+            do {
+                let text = try await self.downloadModel(request) { [weak self] phase in
+                    guard let self, var install = self.modelInstall, install.modelID == request.modelID
+                    else { return }
+                    // Throttled to whole percents, which is all the row renders
+                    // (`Int(value * 100)`). Unlike the view state this replaced,
+                    // publishing here recomputes `settingsSnapshot` — which walks the
+                    // model catalog and stats a file per row — and URLSession reports
+                    // progress once per received chunk, hundreds of times a second on
+                    // a fast link. Un-throttled that is a filesystem call per chunk.
+                    if case .downloading(let updated) = phase,
+                       case .downloading(let current) = install.phase,
+                       Int(updated * 100) == Int(current * 100) {
+                        return
+                    }
+                    install.phase = phase
+                    self.modelInstall = install
+                }
+                self.modelInstallOutcome = ModelInstallOutcome(isFailure: false, text: text)
+            } catch {
+                self.modelInstallOutcome = ModelInstallOutcome(
+                    isFailure: true,
+                    text: error.localizedDescription
+                )
+            }
+        }
+        return true
+    }
+
+    @discardableResult
+    func startCuratedModelInstall(id: String) -> Bool {
+        guard let model = LocalAIModel.curated.first(where: { $0.id == id }) else { return false }
+        return startModelInstall(ModelDownloadRequest(model: model))
+    }
+
+    func clearModelInstallOutcome() {
+        modelInstallOutcome = nil
+    }
+
     /// Downloads a model and then actually tries it: arithmetic proposes the fit,
     /// a real load disposes. The test result is appended to the download message
     /// rather than gating anything — the model is installed either way.
-    func downloadModel(
+    private func downloadModel(
         _ request: ModelDownloadRequest,
         progress: @escaping @MainActor (ModelInstallPhase) -> Void
     ) async throws -> String {
@@ -2571,16 +2638,6 @@ private final class ChatDashboardModel: ObservableObject {
     /// checksum come from `LocalAIModel`, not from the user, so there is no repo to
     /// resolve first — otherwise this is the same path as a Hugging Face add, self
     /// test included.
-    func downloadCuratedModel(
-        id: String,
-        progress: @escaping @MainActor (ModelInstallPhase) -> Void
-    ) async throws -> String {
-        guard let model = LocalAIModel.curated.first(where: { $0.id == id }) else {
-            throw AppError.modelNotInstalled
-        }
-        return try await downloadModel(ModelDownloadRequest(model: model), progress: progress)
-    }
-
     @discardableResult
     func removeModel(id: String) throws -> String {
         try walletModel.removeModel(id: id)
@@ -4645,8 +4702,8 @@ struct LocalWalletChatDashboardView: View {
             onSelectModel: { id in
                 try model.selectModel(id: id)
             },
-            onDownloadModel: { request, progress in
-                try await model.downloadModel(request, progress: progress)
+            onStartModelInstall: { request in
+                model.startModelInstall(request)
             },
             onRemoveModel: { id in
                 try model.removeModel(id: id)
@@ -4657,8 +4714,11 @@ struct LocalWalletChatDashboardView: View {
             onInspectRemoteFile: { file in
                 await model.inspectRemoteModel(file)
             },
-            onDownloadCuratedModel: { id, progress in
-                try await model.downloadCuratedModel(id: id, progress: progress)
+            onStartCuratedModelInstall: { id in
+                model.startCuratedModelInstall(id: id)
+            },
+            onClearModelInstallOutcome: {
+                model.clearModelInstallOutcome()
             },
             onCancelModelDownload: {
                 model.cancelModelDownload()

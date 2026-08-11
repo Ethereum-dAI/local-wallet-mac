@@ -9,6 +9,31 @@ enum ModelInstallPhase: Equatable, Sendable {
     case testing
 }
 
+/// The install in flight — which model, and how far along.
+///
+/// Owned by the chat model, never by a view. It used to live as `@State` on
+/// `LocalWalletSettingsView`, and the mismatch was the bug: the download runs in
+/// an *unstructured* `Task`, which correctly outlives the view, but the progress
+/// state did not. Navigating away from Models and back reset it to nil, so the
+/// row fell back to "Download · not downloaded" while bytes kept arriving, the
+/// Cancel button (rendered only for the downloading row) vanished, and pressing
+/// Download again threw `downloadAlreadyInProgress` — an instruction to cancel
+/// something the UI no longer offered any way to cancel. Quitting the app was the
+/// only exit.
+struct ModelInstallProgress: Equatable {
+    let modelID: String
+    let displayName: String
+    var phase: ModelInstallPhase
+}
+
+/// How the last install ended. Also on the model rather than the view, for the
+/// same reason: the success/failure sentence is produced when the download
+/// finishes, which is routinely long after the user has navigated elsewhere.
+struct ModelInstallOutcome: Equatable {
+    let isFailure: Bool
+    let text: String
+}
+
 /// The sentence appended to the download message once the freshly installed model
 /// has been loaded for real. Pure, so the wording of each outcome is testable
 /// without a GPU.

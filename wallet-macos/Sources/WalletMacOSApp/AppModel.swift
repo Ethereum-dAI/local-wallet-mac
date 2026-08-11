@@ -728,8 +728,15 @@ final class AppModel: ObservableObject {
     /// attempt's outcome. Swallowing a deletion failure here would leave a
     /// multi-gigabyte file on disk with no remaining catalog row to find or
     /// delete it from, so a real failure is surfaced and the entry kept.
+    ///
+    /// What it removes is decided by `ModelRemovalPlanner.target`, not by the
+    /// presence of a store record. This used to open with `guard let installed =
+    /// installedModelStore.model(id: id) else { return }`, and that early return was
+    /// silent: a curated model whose file `ModelCatalog` had found through its
+    /// `localFileURL`/`bundledFileURL` fallbacks has no record, so Remove did
+    /// nothing at all while the caller went on to report success from a stale
+    /// `modelActionMessage`. Every outcome now either deletes something or throws.
     func removeModel(id: String) throws {
-        guard let installed = installedModelStore.model(id: id) else { return }
         guard !ModelRemovalPlanner.isBlockedBecauseActive(
             id: id,
             selectedModelID: onboardingSettingsStore.selectedModelID
@@ -737,29 +744,63 @@ final class AppModel: ObservableObject {
             throw AppError.localDaemonLaunchFailed("Switch to another model before removing this one.")
         }
 
-        let fileExistedBeforeAttempt = FileManager.default.fileExists(atPath: installed.path)
+        let curated = LocalAIModel.curated.first { $0.id == id }
+        let downloadedCopyPath = curated
+            .flatMap { try? modelDownloadManager.localFileURL(for: $0) }
+            .map(\.path)
+            .flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
+        let bundledCopyExists = curated
+            .flatMap { modelDownloadManager.bundledFileURL(for: $0) }
+            .map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+
+        switch ModelRemovalPlanner.target(
+            record: installedModelStore.model(id: id),
+            curated: curated,
+            downloadedCopyPath: downloadedCopyPath,
+            bundledCopyExists: bundledCopyExists
+        ) {
+        case .nothingToRemove:
+            throw AppError.localDaemonLaunchFailed(
+                "There is nothing to remove — no file for this model is on disk."
+            )
+        case .bundledOnly(let displayName):
+            throw AppError.localDaemonLaunchFailed(
+                "\(displayName) ships inside the app bundle, so it cannot be removed here."
+            )
+        case .tracked(let path, let displayName):
+            try deleteModelFile(at: path, displayName: displayName)
+            installedModelStore.remove(id: id)
+            modelActionMessage = "\(displayName) removed."
+            appendLog("models: removed \(id)")
+        case .untracked(let path, let displayName):
+            try deleteModelFile(at: path, displayName: displayName)
+            modelActionMessage = "\(displayName) removed."
+            appendLog("models: removed untracked file for \(id) at \(path)")
+        }
+    }
+
+    /// Deletes a model file, treating an already-missing file as success so a stale
+    /// record can still be cleared, and surfacing a real failure so the caller never
+    /// forgets an entry whose gigabytes are still on disk.
+    private func deleteModelFile(at path: String, displayName: String) throws {
+        let fileExistedBeforeAttempt = FileManager.default.fileExists(atPath: path)
         var deletionError: Error?
         if fileExistedBeforeAttempt {
             do {
-                try FileManager.default.removeItem(atPath: installed.path)
+                try FileManager.default.removeItem(atPath: path)
             } catch {
                 deletionError = error
             }
         }
-
         guard ModelRemovalPlanner.mayForgetEntry(
             fileExistedBeforeAttempt: fileExistedBeforeAttempt,
             deletionSucceeded: deletionError == nil
         ) else {
             throw AppError.localDaemonLaunchFailed(
-                "Could not delete \(installed.displayName) at \(installed.path): "
+                "Could not delete \(displayName) at \(path): "
                     + (deletionError?.localizedDescription ?? "unknown error")
             )
         }
-
-        installedModelStore.remove(id: id)
-        modelActionMessage = "\(installed.displayName) removed."
-        appendLog("models: removed \(id)")
     }
 
     func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {

@@ -17,7 +17,7 @@ The macOS app, the protocol SDK, and the daemon all live in one repository, `loc
 Install these before opening the app in Xcode:
 
 - macOS 15.0 or newer on Apple Silicon.
-- 16 GB RAM minimum for the local Gemma 4 E4B model setup.
+- 16 GB RAM minimum for the local model setup (a wallet fine-tune of Gemma 4 E4B).
 - Xcode 16 or newer, with Command Line Tools installed. Use the latest stable Xcode when possible; the app target is built with Swift 6.
 - An Apple Development team selected in Xcode for local app signing.
 - Homebrew, for `cbindgen` and `xcodegen`. (Not for llama.cpp — see below.)
@@ -210,7 +210,9 @@ Local Xcode development does not require the GGUF model to be embedded in the ap
 
 If the model is already present there, the app will reuse it. Packaged demo builds may embed the model, but normal Xcode development should treat the model as a local runtime asset installed during setup.
 
-The recommended Gemma 4 E4B Q4_0 GGUF is a 4.59 GB download and local setup is blocked on Macs with less than 16 GB RAM. It is installed as `gemma-4-E4B-it-Q4_0.gguf`, which is the path every bench/test default expects. If you onboarded before the Q4_K_M pin broke, the app will download the Q4_0 file rather than reuse the old `gemma-4-E4B-it-Q4_K_M.gguf`; delete the stale file to reclaim the disk.
+The default model — `gemma-4-E4B-wallet-ft.Q4_K_M.gguf`, a wallet fine-tune of Gemma 4 E4B — is a 5.34 GB download, and 16 GB of RAM is the practical floor for it.
+
+The `local-llm` bench and the model-backed Swift tests still default to the **untuned base**, `gemma-4-E4B-it-Q4_0.gguf`, and self-skip when it is absent. If you want to run them, install the base from Settings › Models as well (it is still curated), or point them at another GGUF with `--model`. If you onboarded before the Q4_K_M pin broke, the app downloads the Q4_0 base rather than reusing the old `gemma-4-E4B-it-Q4_K_M.gguf`; delete the stale file to reclaim the disk.
 
 ## Optional Hosted Bundler Endpoint
 

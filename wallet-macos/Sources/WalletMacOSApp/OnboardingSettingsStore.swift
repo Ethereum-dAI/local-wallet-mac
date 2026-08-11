@@ -174,11 +174,53 @@ struct LocalAIModel: Identifiable, Equatable {
     /// not from a guess: `gemma4.context_length` is 131072.
     var maxContextTokens: Int { memoryProfile.trainedContextTokens }
 
+    /// The shipped default: Gemma 4 E4B with a LoRA fine-tune on wallet tool calls
+    /// merged in, quantised to Q4_K_M.
+    ///
+    /// It is the default because the base model could not do the job. On the
+    /// 307-case tool-calling evaluation set, scored by exact match on every field
+    /// of every call, the base scores 9.8% and this scores 80.1% — a wallet that
+    /// mis-encodes an amount or picks the wrong tool nine times in ten is not a
+    /// wallet. Same architecture as the base (the GGUF header is identical apart
+    /// from weight size), so the Gemma 4 DSL parsing, chat template and context
+    /// presets all apply unchanged.
+    ///
+    /// `gemma4Base` stays in `curated`, so anyone who onboarded before this
+    /// keeps resolving their stored `selectedModelID` and is never force-migrated
+    /// into a second multi-gigabyte download.
     static let recommended = LocalAIModel(
+        id: "ef-dai-team/gemma-4-E4B-wallet-ft",
+        name: "Gemma 4 E4B (wallet-tuned)",
+        size: "5.34 GB",
+        detail: "Gemma 4 E4B fine-tuned on 1,739 wallet tool-calling examples, as a Q4_K_M GGUF. Scores 80.1% on the 307-case tool-call evaluation, against 9.8% for the untuned base.",
+        tag: "GGUF",
+        systemImage: "sparkles",
+        artifactRepo: "ef-dai-team/gemma-4-E4B-wallet-ft",
+        artifactFileName: "gemma-4-E4B-wallet-ft.Q4_K_M.gguf",
+        artifactURL: URL(string: "https://huggingface.co/ef-dai-team/gemma-4-E4B-wallet-ft/resolve/main/gemma-4-E4B-wallet-ft.Q4_K_M.gguf?download=true")!,
+        sha256: "fdf5c30e86d83c0391bed5e005af85bd2af2eb1ef7455a64b9a463d4d8ced16b",
+        // Read from the GGUF header of the pinned artifact: the merge changes the
+        // weights, not the shape — gemma4.block_count=42, head_count_kv=2,
+        // key/value_length=512, context_length=131072 → the same 168 KiB of KV
+        // cache per token as the base, over 745 MB more weights.
+        memoryProfile: ModelMemoryProfile(
+            weightBytes: 5_335_292_160,
+            blockCount: 42,
+            kvHeadCount: 2,
+            keyLength: 512,
+            valueLength: 512,
+            trainedContextTokens: 131_072
+        )
+    )
+
+    /// The untuned base the default is built from. No longer the default, but kept
+    /// in `curated` — it is what every existing install is pointed at, and it is
+    /// the honest comparison for anyone who wants to see what the fine-tune bought.
+    static let gemma4Base = LocalAIModel(
         id: "google/gemma-4-E4B-it",
         name: "Gemma 4 E4B",
         size: "4.59 GB",
-        detail: "Instruction-tuned Gemma 4 E4B, downloaded as a Q4_0 GGUF for local llama.cpp inference.",
+        detail: "Instruction-tuned Gemma 4 E4B, downloaded as a Q4_0 GGUF for local llama.cpp inference. The base the wallet's default model is fine-tuned from; much weaker at tool calls.",
         tag: "GGUF",
         systemImage: "sparkles",
         artifactRepo: "ggml-org/gemma-4-E4B-it-GGUF",
@@ -231,6 +273,7 @@ struct LocalAIModel: Identifiable, Equatable {
     /// table for resolving a persisted `selectedModelID` back to its pinned profile.
     static let curated: [LocalAIModel] = [
         recommended,
+        gemma4Base,
         qwen3,
     ]
 

@@ -49,6 +49,30 @@ enum ModelActivationPlanner {
 ///    still clear the stale entry. A real deletion failure must keep the entry:
 ///    the model stays visible and removable later, rather than the app silently
 ///    losing track of a multi-gigabyte file still sitting on disk.
+/// What a Remove press should actually act on.
+///
+/// The third case is the bug this type exists to close. `ModelCatalog` reports a
+/// curated model as installed whenever its file is on disk — including via the
+/// `bundledFileURL` / `localFileURL` fallbacks, which need no `InstalledModelStore`
+/// record. Removal, meanwhile, started with `guard let installed =
+/// installedModelStore.model(id:) else { return }`: a silent early return that let
+/// the caller report "removed" while the file sat untouched on disk. That state is
+/// not exotic — it is what an onboarding install, or a legacy record cleared by
+/// hand, leaves behind.
+enum ModelRemovalTarget: Equatable {
+    /// A tracked install: delete the file, then forget the record.
+    case tracked(path: String, displayName: String)
+    /// A curated model whose file is on disk with no store record. Delete the
+    /// file; there is no record to forget.
+    case untracked(path: String, displayName: String)
+    /// Only the copy embedded in the .app exists. Deleting that would vandalise
+    /// the application bundle, so it is refused rather than attempted.
+    case bundledOnly(displayName: String)
+    /// Nothing on disk and nothing recorded — Remove must say so, not claim
+    /// success.
+    case nothingToRemove
+}
+
 enum ModelRemovalPlanner {
     static func isBlockedBecauseActive(id: String, selectedModelID: String) -> Bool {
         id == selectedModelID
@@ -56,5 +80,23 @@ enum ModelRemovalPlanner {
 
     static func mayForgetEntry(fileExistedBeforeAttempt: Bool, deletionSucceeded: Bool) -> Bool {
         !fileExistedBeforeAttempt || deletionSucceeded
+    }
+
+    /// `downloadedCopyPath` is the curated destination path **only when a file is
+    /// actually there** — the caller does that existence check, so this stays pure.
+    static func target(
+        record: InstalledModel?,
+        curated: LocalAIModel?,
+        downloadedCopyPath: String?,
+        bundledCopyExists: Bool
+    ) -> ModelRemovalTarget {
+        if let record {
+            return .tracked(path: record.path, displayName: record.displayName)
+        }
+        guard let curated else { return .nothingToRemove }
+        if let downloadedCopyPath {
+            return .untracked(path: downloadedCopyPath, displayName: curated.name)
+        }
+        return bundledCopyExists ? .bundledOnly(displayName: curated.name) : .nothingToRemove
     }
 }

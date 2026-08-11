@@ -115,4 +115,90 @@ struct ModelRemovalPlannerTests {
         // disk — the entry stays so it is still visible and still removable later.
         #expect(!ModelRemovalPlanner.mayForgetEntry(fileExistedBeforeAttempt: true, deletionSucceeded: false))
     }
+
+    private func record(path: String) -> InstalledModel {
+        InstalledModel(
+            id: "Qwen/Qwen3-8B",
+            displayName: "Qwen3 8B",
+            repoID: "Qwen/Qwen3-8B-GGUF",
+            fileName: "Qwen3-8B-Q4_K_M.gguf",
+            path: path,
+            sizeBytes: 1,
+            sha256: nil,
+            profile: nil
+        )
+    }
+
+    @Test func aTrackedInstallIsRemovedByItsRecordedPath() {
+        #expect(ModelRemovalPlanner.target(
+            record: record(path: "/tmp/tracked.gguf"),
+            curated: .qwen3,
+            downloadedCopyPath: "/tmp/curated-destination.gguf",
+            bundledCopyExists: false
+        ) == .tracked(path: "/tmp/tracked.gguf", displayName: "Qwen3 8B"))
+    }
+
+    /// The regression this exists for: a curated model whose file `ModelCatalog`
+    /// found through its `localFileURL` fallback has no store record, and removal
+    /// used to `return` silently on exactly that — reporting success while leaving
+    /// gigabytes on disk.
+    @Test func aCuratedFileWithNoRecordIsStillRemoved() {
+        #expect(ModelRemovalPlanner.target(
+            record: nil,
+            curated: .gemma4Base,
+            downloadedCopyPath: "/tmp/gemma-4-E4B-it-Q4_0.gguf",
+            bundledCopyExists: false
+        ) == .untracked(path: "/tmp/gemma-4-E4B-it-Q4_0.gguf", displayName: LocalAIModel.gemma4Base.name))
+    }
+
+    /// Deleting the copy inside `Contents/Resources/Models` would damage the running
+    /// application, so a bundled-only model is refused — with a reason, not silently.
+    @Test func aBundledOnlyModelIsRefusedRatherThanDeleted() {
+        #expect(ModelRemovalPlanner.target(
+            record: nil,
+            curated: .recommended,
+            downloadedCopyPath: nil,
+            bundledCopyExists: true
+        ) == .bundledOnly(displayName: LocalAIModel.recommended.name))
+    }
+
+    @Test func nothingOnDiskAndNothingRecordedRemovesNothing() {
+        #expect(ModelRemovalPlanner.target(
+            record: nil,
+            curated: .recommended,
+            downloadedCopyPath: nil,
+            bundledCopyExists: false
+        ) == .nothingToRemove)
+        // An id that is neither curated nor installed — a row that outlived its model.
+        #expect(ModelRemovalPlanner.target(
+            record: nil,
+            curated: nil,
+            downloadedCopyPath: nil,
+            bundledCopyExists: false
+        ) == .nothingToRemove)
+    }
+}
+
+/// The install in flight belongs to the chat model, not to the Settings view: the
+/// download outlives any single appearance of that view, so its progress has to as
+/// well. These pin the shape that makes re-attachment possible — a row can ask
+/// "is this install mine?" without holding any state of its own.
+struct ModelInstallProgressTests {
+    @Test func progressIsAddressedByModelIDSoARowCanClaimIt() {
+        var install = ModelInstallProgress(
+            modelID: "ef-dai-team/gemma-4-E4B-wallet-ft",
+            displayName: "Gemma 4 E4B (wallet-tuned)",
+            phase: .downloading(0)
+        )
+        #expect(install.modelID == LocalAIModel.recommended.id)
+        install.phase = .downloading(0.5)
+        #expect(install.phase == .downloading(0.5))
+        install.phase = .testing
+        #expect(install.phase == .testing)
+    }
+
+    @Test func anOutcomeCarriesWhetherItFailed() {
+        #expect(ModelInstallOutcome(isFailure: false, text: "ok").isFailure == false)
+        #expect(ModelInstallOutcome(isFailure: true, text: "boom") != ModelInstallOutcome(isFailure: false, text: "boom"))
+    }
 }

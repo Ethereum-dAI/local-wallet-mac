@@ -827,15 +827,22 @@ struct LocalWalletSettingsView: View {
                                 Button("Cancel") { onCancelModelDownload() }
                                     .buttonStyle(SettingsSecondaryButtonStyle())
                             }
-                        } else if row.isActive {
-                            SettingsBadge(text: "In use", tint: SettingsPalette.blue)
-                        } else if row.isDownloadable {
-                            Button("Download") { install(row.id) }
-                                .buttonStyle(SettingsSecondaryButtonStyle())
-                                .disabled(installingModelID != nil)
-                        } else if row.isInstalled {
-                            Button("Use") { runModelAction { try onSelectModel(row.id) } }
-                                .buttonStyle(SettingsPrimaryButtonStyle())
+                        } else {
+                            // Precedence lives on the row (`primaryControl`), not in
+                            // this chain, so it can be asserted without a view.
+                            switch row.primaryControl {
+                            case .download:
+                                Button("Download") { install(row.id) }
+                                    .buttonStyle(SettingsSecondaryButtonStyle())
+                                    .disabled(installingModelID != nil)
+                            case .inUse:
+                                SettingsBadge(text: "In use", tint: SettingsPalette.blue)
+                            case .use:
+                                Button("Use") { runModelAction { try onSelectModel(row.id) } }
+                                    .buttonStyle(SettingsPrimaryButtonStyle())
+                            case .none:
+                                EmptyView()
+                            }
                         }
                         if row.isRemovable {
                             Button("Remove") { runModelAction { try onRemoveModel(row.id) } }
@@ -3407,6 +3414,17 @@ private struct AddHuggingFaceModelForm: View {
     let onCancelModelDownload: () -> Void
 
     @State private var repoID: String = ""
+    /// The repo the listed `files` actually came from, in its validated,
+    /// normalised form.
+    ///
+    /// `download()` must key the install off this and never off `repoID`, which
+    /// is live, editable, and unvalidated. Editing the field after "Find models"
+    /// (or clearing it) previously downloaded the right bytes but stored them
+    /// under the new text: wrong `repoID` on the row, a destination named after a
+    /// repo the file did not come from, and a `modelID` that no longer matches
+    /// the real repo — so re-adding it later installed a second multi-gigabyte
+    /// copy instead of recognising the existing one.
+    @State private var resolvedRepoID: String = ""
     @State private var files: [HuggingFaceGGUFFile] = []
     @State private var selectedPath: String = ""
     @State private var message: SettingsMessage?
@@ -3475,6 +3493,17 @@ private struct AddHuggingFaceModelForm: View {
         // is non-empty, and an `onChange` that appears at the same moment its
         // value is set does not fire for that first assignment.
         .onChange(of: selectedPath) { _, _ in inspect() }
+        // Editing the repository after resolving it makes the listed files stale.
+        // `download()` is keyed off `resolvedRepoID` so it could not install the
+        // wrong thing either way, but showing another repo's file list under a
+        // changed name invites exactly that misreading.
+        .onChange(of: repoID) { _, newValue in
+            guard newValue != resolvedRepoID, !files.isEmpty else { return }
+            files = []
+            selectedPath = ""
+            resolvedRepoID = ""
+            fit = nil
+        }
     }
 
     /// The pre-download verdict. Advisory: it never disables "Download & add".
@@ -3526,7 +3555,9 @@ private struct AddHuggingFaceModelForm: View {
         Task { @MainActor in
             defer { isResolving = false }
             do {
-                let info = try await onResolveRepo(repoID)
+                let normalised = try HuggingFaceRepository.validate(repoID: repoID)
+                let info = try await onResolveRepo(normalised)
+                resolvedRepoID = normalised
                 files = info.files
                 let firstPath = info.files.first { !$0.isAuxiliary }?.path ?? ""
                 // Re-resolving the same repo leaves `selectedPath` unchanged, so
@@ -3541,6 +3572,7 @@ private struct AddHuggingFaceModelForm: View {
                 )
             } catch {
                 files = []
+                resolvedRepoID = ""
                 selectedPath = ""
                 fit = nil
                 message = SettingsMessage(kind: .error, text: error.localizedDescription)
@@ -3549,8 +3581,10 @@ private struct AddHuggingFaceModelForm: View {
     }
 
     private func download() {
-        guard let file = files.first(where: { $0.path == selectedPath }) else { return }
-        let request = ModelDownloadRequest(repoID: repoID.trimmingCharacters(in: .whitespaces), file: file)
+        guard let file = files.first(where: { $0.path == selectedPath }),
+              !resolvedRepoID.isEmpty
+        else { return }
+        let request = ModelDownloadRequest(repoID: resolvedRepoID, file: file)
         phase = .downloading(0)
         Task { @MainActor in
             do {

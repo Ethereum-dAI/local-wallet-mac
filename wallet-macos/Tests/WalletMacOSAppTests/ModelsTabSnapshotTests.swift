@@ -140,3 +140,52 @@ struct ModelDownloadCancellationTests {
         #expect(LocalAIModelDownloadManager().cancelActiveDownload() == false)
     }
 }
+
+/// Which single control a row offers. The ordering is the fix: `selectedModelID`
+/// defaults to the recommended model, so the default row is active before it is
+/// ever downloaded.
+struct SettingsModelRowControlTests {
+    private func row(
+        source: ModelSource = .curated,
+        isInstalled: Bool,
+        isActive: Bool,
+        isDefault: Bool = false
+    ) -> SettingsModelRow {
+        SettingsModelRow(
+            id: "id",
+            displayName: "name",
+            detail: "detail",
+            source: source,
+            verdict: .fits,
+            estimatedBytes: 1,
+            isInstalled: isInstalled,
+            isActive: isActive,
+            isDefault: isDefault
+        )
+    }
+
+    /// The regression: selected-but-missing showed "In use" and nothing else, and
+    /// the default is never removable — so Settings offered no way back while
+    /// every message failed with `modelNotInstalled`.
+    @Test func theDefaultRowOffersDownloadEvenWhileItIsSelected() {
+        let missing = row(isInstalled: false, isActive: true, isDefault: true)
+        #expect(missing.isRemovable == false)
+        #expect(missing.primaryControl == .download)
+    }
+
+    @Test func anInstalledActiveRowSaysInUse() {
+        #expect(row(isInstalled: true, isActive: true).primaryControl == .inUse)
+    }
+
+    @Test func anInstalledInactiveRowOffersUse() {
+        #expect(row(isInstalled: true, isActive: false).primaryControl == .use)
+    }
+
+    /// A Hugging Face row has no URL the app can re-fetch from, so there is
+    /// genuinely nothing to offer rather than a button that cannot work.
+    @Test func aMissingHuggingFaceRowOffersNothingToPress() {
+        let row = row(source: .huggingFace, isInstalled: false, isActive: false)
+        #expect(row.isDownloadable == false)
+        #expect(row.primaryControl == .none)
+    }
+}

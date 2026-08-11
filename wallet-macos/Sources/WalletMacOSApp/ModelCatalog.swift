@@ -124,6 +124,32 @@ struct SettingsModelRow: Identifiable, Equatable {
     /// downloaded, so there is nothing to fetch.
     var isDownloadable: Bool { source == .curated && !isInstalled }
 
+    /// The one control the row offers, alongside its badges.
+    enum PrimaryControl: Equatable {
+        case download
+        case use
+        /// No control: the row is already the running model.
+        case inUse
+        /// No control available — a Hugging Face row whose file has gone missing
+        /// has no URL the app can re-fetch from.
+        case none
+    }
+
+    /// Download outranks "In use", and that order is the whole point.
+    ///
+    /// `selectedModelID` defaults to the recommended model, so the default row is
+    /// active from first launch — before it is downloaded, and again if its file
+    /// is deleted from disk. Ranking `isActive` first left that row showing an
+    /// "In use" badge, no Download button, and (since the default is never
+    /// removable) no Remove either, while every message failed with
+    /// `modelNotInstalled`. There was no route back inside the app.
+    var primaryControl: PrimaryControl {
+        if isDownloadable { return .download }
+        if isActive { return .inUse }
+        if isInstalled { return .use }
+        return .none
+    }
+
     var estimatedText: String {
         ByteCountFormatter.string(fromByteCount: Int64(estimatedBytes), countStyle: .file)
     }

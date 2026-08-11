@@ -57,3 +57,55 @@ struct ModelDownloadRequestTests {
         }
     }
 }
+
+/// Verification has to survive a Hugging Face entry with no LFS oid: the tree
+/// API does not always carry one, and skipping the check outright turned a
+/// truncated transfer into a "successful" install that only failed later, inside
+/// llama.cpp's GGUF parse, with nothing pointing back at the download.
+struct ModelDownloadIntegrityTests {
+    private func file(sha256: String?, sizeBytes: UInt64) -> HuggingFaceGGUFFile {
+        HuggingFaceGGUFFile(
+            path: "Qwen3-8B-Q4_K_M.gguf",
+            sizeBytes: sizeBytes,
+            sha256: sha256,
+            downloadURL: URL(string: "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf")!
+        )
+    }
+
+    @Test func aDigestlessEntryFallsBackToItsByteCount() {
+        let request = ModelDownloadRequest(repoID: "Qwen/Qwen3-8B-GGUF", file: file(sha256: nil, sizeBytes: 4_920_000_000))
+        #expect(request.expectedSHA256 == nil)
+        #expect(request.expectedSizeBytes == 4_920_000_000)
+    }
+
+    /// A missing `size` decodes as 0, which is a absent field rather than an empty
+    /// file — checking against it would reject every real download.
+    @Test func anAbsentByteCountLeavesNothingToCheck() {
+        let request = ModelDownloadRequest(repoID: "Qwen/Qwen3-8B-GGUF", file: file(sha256: nil, sizeBytes: 0))
+        #expect(request.expectedSizeBytes == nil)
+    }
+
+    /// A digest subsumes a size check, so curated models carry no size expectation
+    /// — their `sizeBytes` is a memory-profile estimate, not a byte-exact figure.
+    @Test func aPinnedCuratedModelReliesOnItsDigestAlone() {
+        let request = ModelDownloadRequest(model: .recommended)
+        #expect(request.expectedSHA256?.isEmpty == false)
+        #expect(request.expectedSizeBytes == nil)
+    }
+
+    @Test func aTruncatedFileIsReportedWithBothSizes() {
+        let error = LocalAIModelDownloadError.sizeMismatch(expected: 4_920_000_000, actual: 12_000)
+        let message = try! #require(error.errorDescription)
+        #expect(message.contains("incomplete"))
+        #expect(message.contains("Try downloading it again."))
+    }
+
+    @Test func fileSizeReadsTheActualBytesOnDisk() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("size-check-\(UUID().uuidString).bin")
+        try Data(repeating: 0xAB, count: 4096).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(try LocalAIModelDownloadManager.fileSize(of: url) == 4096)
+    }
+}

@@ -15,6 +15,13 @@ struct ModelDownloadRequest: Equatable {
     let url: URL
     let expectedSHA256: String?
     let sizeBytes: UInt64
+    /// The exact on-disk byte count the source promised, when it promised one.
+    ///
+    /// Only meaningful as an integrity check: it is the fallback for a file with
+    /// no digest, where otherwise nothing at all is verified. Distinct from
+    /// `sizeBytes`, which curated models fill from the memory profile's weight
+    /// estimate for display and which is not a byte-exact figure.
+    let expectedSizeBytes: UInt64?
 
     init(model: LocalAIModel) {
         modelID = model.id
@@ -25,6 +32,8 @@ struct ModelDownloadRequest: Equatable {
         url = model.artifactURL
         expectedSHA256 = model.sha256
         sizeBytes = model.memoryProfile.weightBytes
+        // Curated models are pinned by digest, which subsumes a size check.
+        expectedSizeBytes = nil
     }
 
     init(repoID: String, file: HuggingFaceGGUFFile) {
@@ -38,6 +47,9 @@ struct ModelDownloadRequest: Equatable {
         url = file.downloadURL
         expectedSHA256 = file.sha256
         sizeBytes = file.sizeBytes
+        // The tree API's byte count, which is exact. Zero means the field was
+        // absent, not that the file is empty.
+        expectedSizeBytes = file.sizeBytes > 0 ? file.sizeBytes : nil
     }
 }
 
@@ -45,6 +57,7 @@ enum LocalAIModelDownloadError: LocalizedError {
     case invalidResponse
     case httpStatus(Int)
     case checksumMismatch(expected: String, actual: String)
+    case sizeMismatch(expected: UInt64, actual: UInt64)
     case missingDownload
     case insufficientDisk(neededBytes: UInt64, availableBytes: UInt64)
     case downloadAlreadyInProgress
@@ -58,6 +71,10 @@ enum LocalAIModelDownloadError: LocalizedError {
             return "Hugging Face model download failed with HTTP \(status)."
         case .checksumMismatch:
             return "The downloaded model did not pass verification. Try downloading it again."
+        case .sizeMismatch(let expected, let actual):
+            let expectedText = ByteCountFormatter.string(fromByteCount: Int64(expected), countStyle: .file)
+            let actualText = ByteCountFormatter.string(fromByteCount: Int64(actual), countStyle: .file)
+            return "The download is incomplete — \(actualText) of \(expectedText) arrived. Try downloading it again."
         case .missingDownload:
             return "The downloaded model file could not be found."
         case .insufficientDisk(let needed, let available):
@@ -114,6 +131,9 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
 
     private struct ActiveDownload {
         let expectedSHA256: String?
+        /// Checked only when there is no digest — see the verification block in
+        /// `didFinishDownloadingTo`.
+        let expectedSizeBytes: UInt64?
         let destinationURL: URL
         let progressHandler: ProgressHandler
         let continuation: CheckedContinuation<URL, Error>
@@ -224,6 +244,7 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
         return try await withCheckedThrowingContinuation { continuation in
             let activeDownload = ActiveDownload(
                 expectedSHA256: model.sha256,
+                expectedSizeBytes: nil,
                 destinationURL: destinationURL,
                 progressHandler: progress,
                 continuation: continuation
@@ -253,6 +274,7 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
         return try await withCheckedThrowingContinuation { continuation in
             let activeDownload = ActiveDownload(
                 expectedSHA256: request.expectedSHA256,
+                expectedSizeBytes: request.expectedSizeBytes,
                 destinationURL: destinationURL,
                 progressHandler: progress,
                 continuation: continuation
@@ -310,6 +332,13 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
             }
             try FileManager.default.moveItem(at: location, to: activeDownload.destinationURL)
 
+            // A digest is the real check. Without one — Hugging Face's tree API
+            // omits the LFS oid for some entries — fall back to the byte count
+            // rather than accepting the transfer unverified: `URLSession`'s
+            // completion says nothing about content, so a proxy or CDN that
+            // truncated the body would otherwise be reported as a successful
+            // install and only fail later, inside llama.cpp's GGUF parse, with
+            // nothing pointing at the download.
             if let expected = activeDownload.expectedSHA256?.lowercased() {
                 let actualChecksum = try Self.sha256Hex(of: activeDownload.destinationURL)
                 guard actualChecksum == expected else {
@@ -317,6 +346,15 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
                     throw LocalAIModelDownloadError.checksumMismatch(
                         expected: expected,
                         actual: actualChecksum
+                    )
+                }
+            } else if let expectedSize = activeDownload.expectedSizeBytes {
+                let actualSize = try Self.fileSize(of: activeDownload.destinationURL)
+                guard actualSize == expectedSize else {
+                    try? FileManager.default.removeItem(at: activeDownload.destinationURL)
+                    throw LocalAIModelDownloadError.sizeMismatch(
+                        expected: expectedSize,
+                        actual: actualSize
                     )
                 }
             }
@@ -363,6 +401,12 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
             .appendingPathComponent("Models", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+
+    /// The fallback integrity check for a file the source gave no digest for.
+    static func fileSize(of url: URL) throws -> UInt64 {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        return UInt64(values.fileSize ?? 0)
     }
 
     private static func sha256Hex(of url: URL) throws -> String {

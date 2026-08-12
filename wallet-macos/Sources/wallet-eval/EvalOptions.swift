@@ -9,9 +9,14 @@ struct EvalOptions {
     var verbose: Bool = false
 }
 
+/// The app's default model, so `swift run wallet-eval` scores what the wallet
+/// actually ships. It must track `LocalAIModel.recommended.artifactFileName` —
+/// hardcoded rather than imported because `WalletMacOSApp` is an executable target
+/// and cannot be linked from here. Pointing this at the untuned base meant the
+/// harness silently reported the base's 9.8% as the app's tool-call score.
 func defaultModelPath() -> String {
     let home = NSHomeDirectory()
-    return "\(home)/Library/Application Support/LocalWallet/Models/gemma-4-E4B-it-Q4_0.gguf"
+    return "\(home)/Library/Application Support/LocalWallet/Models/gemma-4-E4B-wallet-ft.Q4_K_M.gguf"
 }
 
 func parseEvalOptions(_ args: [String]) -> EvalOptions {

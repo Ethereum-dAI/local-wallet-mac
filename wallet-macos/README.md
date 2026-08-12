@@ -14,7 +14,7 @@ What this demo currently exercises:
 - debug logging for bootstrap, inspection, gas estimation, signing, submission, and receipt polling
 - on-device chat (wallet-tuned Gemma 4 E4B by default) with streaming, tool intent recognition (transfer / swap), slash commands, and an in-chat review card — the chat layer is documented in [Chat layer](#chat-layer) and [Tool layer](#tool-layer) below
 
-The package also contains `SpawnHelper`, the process-launch shim for the local `wallet-node` daemon. Confirmed chat intents use the daemon for Helios-backed reads, gas estimation, UserOperation submission, receipt polling, swap quotes, and relayer-key admin flows (rotate/export/delete the bundler EOA via admin challenges).
+The package also contains `SpawnHelper`, the process-launch shim for the local `wallet-node` daemon and `railgun-helper` privacy sidecar. Confirmed chat intents use `wallet-node` for Helios-backed reads, gas estimation, UserOperation submission, receipt polling, swap quotes, and relayer-key admin flows (rotate/export/delete the bundler EOA via admin challenges). Privacy intents start `railgun-helper` lazily.
 
 This app must be run as a signed macOS app bundle.
 
@@ -155,7 +155,7 @@ cd wallet-macos
 swift test --filter SpawnHelperTests
 ```
 
-Set `WALLET_NODE_BIN=/absolute/path/to/wallet-node` to point at a non-default daemon binary location. The fd-3 ready / fd-4 alive contract used by the spawn helper is documented in [`Sources/Spawn/README.md`](Sources/Spawn/README.md).
+For local development, a **Debug** build accepts `WALLET_NODE_BIN=/absolute/path/to/wallet-node` to point at a non-default daemon binary. Release builds ignore executable overrides and source-tree fallbacks; they use only the signed, manifested helper inside the app bundle. The fd-3 ready / fd-4 alive / fd-5 secret contract is documented in [`Sources/Spawn/README.md`](Sources/Spawn/README.md).
 
 ## Legacy Hosted Bundler Configuration
 
@@ -171,7 +171,9 @@ For packaged demo builds, use the same variable when running the package script:
 LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..." ./scripts/package-macos-demo.sh
 ```
 
-The package script builds the in-repo `wallet-node` daemon, embeds it at `Contents/Resources/bin/wallet-node`, copies llama.cpp/ggml dynamic libraries into `Contents/Frameworks`, verifies embedded Mach-O deployment targets, injects the URL into the built app's `Info.plist` when set, re-signs that copied app bundle, and checks that the final signature has the application identifier entitlement required by Secure Enclave. For testers outside your own Macs, use the Developer ID notarization path in `scripts/README.md` (`LOCAL_WALLET_NOTARIZE=1` plus a Developer ID Application identity and notarytool credentials) so Gatekeeper accepts the app without per-user Terminal re-signing. Removing quarantine from a trusted copy is less destructive than ad-hoc re-signing; ad-hoc re-signing breaks the entitlement identity needed for wallet creation.
+The package script builds the in-repo `wallet-node` daemon and `railgun-helper` sidecar, embeds them under `Contents/Resources/bin`, copies llama.cpp/ggml dynamic libraries into `Contents/Frameworks`, verifies embedded Mach-O deployment targets, injects the URL into the built app's `Info.plist` when set, re-signs that copied app bundle, and checks that the final signature has the application identifier entitlement required by Secure Enclave. Both helpers receive stable hardened-runtime identities and are pinned by path, signing identifier, Team ID, and CDHash in the outer-signature-sealed `Contents/Resources/trusted-helpers.json`. Packaging fails if either helper, the manifest, or the outer app identity disagrees; ad-hoc release packaging is not supported.
+
+For testers outside your own Macs, use the Developer ID notarization path in `scripts/README.md` (`LOCAL_WALLET_NOTARIZE=1` plus a Developer ID Application identity and notarytool credentials) so Gatekeeper accepts the app without per-user Terminal re-signing. Removing quarantine from a trusted copy is less destructive than ad-hoc re-signing; ad-hoc re-signing invalidates the helper trust chain and breaks the entitlement identity needed for wallet creation.
 
 The v0.1 alpha zip targets macOS 15+ on Apple Silicon and does not embed the recommended GGUF model by default; onboarding installs the model during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` only for a large self-contained demo build. If the bundler URL variable is not set, the app still builds and the chat tool path can use local `wallet-node`; hosted composer submission is disabled. llama.cpp/ggml come from the pinned prefix (`local-llm/LLAMA_CPP_PIN`), whose dylibs are built `minos 13.3`, so packaging needs no macOS 15-compatible hand-built prefix.
 

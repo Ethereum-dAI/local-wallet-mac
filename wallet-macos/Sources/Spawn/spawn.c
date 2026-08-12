@@ -2,7 +2,9 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdlib.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #if defined(__APPLE__)
@@ -25,6 +27,15 @@ int posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t *file_actions,
                                      int newfiledes);
 int posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *file_actions);
 int posix_spawn_file_actions_init(posix_spawn_file_actions_t *file_actions);
+int posix_spawnattr_destroy(posix_spawnattr_t *attr);
+int posix_spawnattr_init(posix_spawnattr_t *attr);
+int posix_spawnattr_setflags(posix_spawnattr_t *attr, short flags);
+
+#if defined(__APPLE__)
+enum {
+    WALLET_NODE_POSIX_SPAWN_START_SUSPENDED = 0x0080,
+};
+#endif
 
 enum {
     WALLET_NODE_READY_FD = 3,
@@ -58,10 +69,22 @@ static int add_close_if_extra(posix_spawn_file_actions_t *actions, int fd) {
     return posix_spawn_file_actions_addclose(actions, fd);
 }
 
+static void abort_spawned_child(pid_t pid) {
+    if (pid <= 0) {
+        return;
+    }
+
+    (void)kill(pid, SIGKILL);
+    int status = 0;
+    while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {
+    }
+}
+
 int wallet_node_spawn_helper(const char *exec_path,
                              int ready_write_fd,
                              int alive_read_fd,
                              int secret_read_fd,
+                             int start_suspended,
                              pid_t *out_pid) {
     if (exec_path == NULL || exec_path[0] == '\0' || out_pid == NULL ||
         ready_write_fd < 0 || alive_read_fd < 0 || secret_read_fd < 0 ||
@@ -114,6 +137,7 @@ int wallet_node_spawn_helper(const char *exec_path,
     }
 
     err = posix_spawn_file_actions_adddup2(&actions, spawn_ready_fd, WALLET_NODE_READY_FD);
+    pid_t spawned_pid = 0;
     if (err == 0) {
         err = posix_spawn_file_actions_adddup2(&actions, spawn_alive_fd, WALLET_NODE_ALIVE_FD);
     }
@@ -130,6 +154,22 @@ int wallet_node_spawn_helper(const char *exec_path,
         err = add_close_if_extra(&actions, spawn_secret_fd);
     }
 
+    posix_spawnattr_t attributes;
+    int attributes_initialized = 0;
+    if (err == 0 && start_suspended) {
+#if defined(__APPLE__)
+        err = posix_spawnattr_init(&attributes);
+        if (err == 0) {
+            attributes_initialized = 1;
+            err = posix_spawnattr_setflags(
+                &attributes,
+                (short)WALLET_NODE_POSIX_SPAWN_START_SUSPENDED);
+        }
+#else
+        err = ENOTSUP;
+#endif
+    }
+
     if (err == 0) {
         char *const argv[] = {
             (char *)exec_path,
@@ -142,13 +182,20 @@ int wallet_node_spawn_helper(const char *exec_path,
             NULL,
         };
 
-        pid_t pid = 0;
-        err = posix_spawn(&pid, exec_path, &actions, NULL, argv, WALLET_NODE_ENVIRON);
-        if (err == 0) {
-            *out_pid = pid;
-        }
+        const posix_spawnattr_t *attributes_pointer =
+            attributes_initialized ? &attributes : NULL;
+        err = posix_spawn(
+            &spawned_pid,
+            exec_path,
+            &actions,
+            attributes_pointer,
+            argv,
+            WALLET_NODE_ENVIRON);
     }
 
+    int attributes_destroy_err = attributes_initialized
+        ? posix_spawnattr_destroy(&attributes)
+        : 0;
     int destroy_err = posix_spawn_file_actions_destroy(&actions);
     if (owned_ready_fd != -1) {
         close(owned_ready_fd);
@@ -163,5 +210,15 @@ int wallet_node_spawn_helper(const char *exec_path,
     if (err != 0) {
         return err;
     }
-    return destroy_err;
+    if (attributes_destroy_err != 0) {
+        abort_spawned_child(spawned_pid);
+        return attributes_destroy_err;
+    }
+    if (destroy_err != 0) {
+        abort_spawned_child(spawned_pid);
+        return destroy_err;
+    }
+
+    *out_pid = spawned_pid;
+    return 0;
 }

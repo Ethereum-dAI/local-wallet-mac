@@ -343,7 +343,15 @@ final class WalletNodeDaemon: @unchecked Sendable {
         heliosVerificationEnabled: Bool,
         environment: [String: String]
     ) throws -> WalletNodeDaemon {
-        let execPath = try resolveExecutablePath(environment: environment)
+        let executable: TrustedHelperExecutable
+        do {
+            executable = try TrustedHelperExecutableResolver.resolve(
+                .walletNode,
+                environment: environment
+            )
+        } catch {
+            throw AppError.localDaemonLaunchFailed(error.localizedDescription)
+        }
         try writeDaemonConfig(
             chain: chain,
             gasPolicy: gasPolicy,
@@ -381,17 +389,30 @@ final class WalletNodeDaemon: @unchecked Sendable {
 
             spawnedPID = try withWalletNodeLoggingEnvironment(environment) {
                 try spawnHelper(
-                    execPath: execPath,
+                    execPath: executable.path,
                     readyWrite: readyPipe[1],
                     aliveRead: alivePipe[0],
-                    secretRead: secretPipe[0]
+                    secretRead: secretPipe[0],
+                    startSuspended: true
                 )
             }
             closeIfOpen(&readyPipe[1])
             closeIfOpen(&alivePipe[0])
             closeIfOpen(&secretPipe[0])
-            try writeSecretPayload(bundlerSecrets, to: secretPipe[1])
-            closeIfOpen(&secretPipe[1])
+            do {
+                try TrustedHelperLaunchGate.authenticateDeliverAndResume(
+                    pid: spawnedPID,
+                    executable: executable
+                ) {
+                    defer { closeIfOpen(&secretPipe[1]) }
+                    try writeSecretPayload(bundlerSecrets, to: secretPipe[1])
+                }
+            } catch {
+                // The gate owns and reaps a rejected suspended process. Prevent the outer
+                // cleanup path from ever signalling a PID that the kernel could later reuse.
+                spawnedPID = -1
+                throw AppError.localDaemonLaunchFailed(error.localizedDescription)
+            }
 
             let readyData = try readLineWithTimeout(
                 fd: readyPipe[0],
@@ -422,43 +443,6 @@ final class WalletNodeDaemon: @unchecked Sendable {
             }
             throw error
         }
-    }
-
-    private static func resolveExecutablePath(environment: [String: String]) throws -> String {
-        var candidates: [String] = []
-        if let path = environment["LOCAL_WALLET_NODE_BIN"] {
-            candidates.append(path)
-        }
-        if let path = environment["WALLET_NODE_BIN"] {
-            candidates.append(path)
-        }
-        if let path = Bundle.main.url(forResource: "wallet-node", withExtension: nil, subdirectory: "bin")?.path {
-            candidates.append(path)
-        }
-        if let path = Bundle.main.url(forResource: "wallet-node", withExtension: nil)?.path {
-            candidates.append(path)
-        }
-        candidates.append(sourceRootWalletNodePath(profile: "release"))
-        candidates.append(sourceRootWalletNodePath(profile: "debug"))
-
-        for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
-            return candidate
-        }
-
-        throw AppError.localDaemonLaunchFailed("wallet-node binary was not found. Set WALLET_NODE_BIN (or LOCAL_WALLET_NODE_BIN) to an absolute path, or build wallet-node in the in-repo local-wallet-daemon workspace.")
-    }
-
-    private static func sourceRootWalletNodePath(profile: String) -> String {
-        // #filePath = <repo-root>/wallet-macos/Sources/WalletMacOSApp/WalletNodeDaemon.swift
-        // Walk up 4 levels to reach the repo root, then descend into the
-        // in-repo daemon directory's build output.
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()  // .../WalletMacOSApp
-            .deletingLastPathComponent()  // .../Sources
-            .deletingLastPathComponent()  // .../wallet-macos
-            .deletingLastPathComponent()  // <repo-root>
-            .appendingPathComponent("local-wallet-daemon/target/\(profile)/wallet-node")
-            .path
     }
 
     private static func writeDaemonConfig(

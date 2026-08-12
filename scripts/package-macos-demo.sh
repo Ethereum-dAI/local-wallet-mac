@@ -19,6 +19,10 @@ NOTARY_PASSWORD="${LOCAL_WALLET_NOTARY_PASSWORD:-}"
 NOTARY_TEAM_ID="${LOCAL_WALLET_NOTARY_TEAM_ID:-}"
 BUNDLER_URL="${LOCAL_WALLET_SEPOLIA_BUNDLER_URL:-}"
 DAEMON_REPO="${LOCAL_WALLET_DAEMON_REPO:-$REPO_ROOT/local-wallet-daemon}"
+RAILGUN_REPO="${LOCAL_WALLET_RAILGUN_REPO:-$REPO_ROOT/local-wallet-railgun}"
+WALLET_NODE_SIGNING_IDENTIFIER="ai.ethereum.localwallet.wallet-node"
+RAILGUN_HELPER_SIGNING_IDENTIFIER="ai.ethereum.localwallet.railgun-helper"
+TRUSTED_HELPERS_MANIFEST_NAME="trusted-helpers.json"
 EMBED_MODEL="${LOCAL_WALLET_EMBED_MODEL:-0}"
 # Must stay the model `LocalAIModel.recommended` names: the app only looks in
 # Contents/Resources/Models for the default model's own file name, so embedding
@@ -138,6 +142,39 @@ resolve_wallet_node_binary() {
     exit 1
   fi
   printf '%s\n' "$wallet_node_bin"
+}
+
+resolve_railgun_helper_binary() {
+  local railgun_helper_bin="${LOCAL_WALLET_RAILGUN_HELPER_BIN:-${RAILGUN_HELPER_BIN:-${LOCAL_WALLET_PRIVACY_BIN:-}}}"
+  if [[ -n "$railgun_helper_bin" ]]; then
+    if [[ ! -x "$railgun_helper_bin" ]]; then
+      echo "railgun-helper is not executable: $railgun_helper_bin" >&2
+      exit 1
+    fi
+    printf '%s\n' "$railgun_helper_bin"
+    return
+  fi
+
+  if [[ ! -f "$RAILGUN_REPO/Cargo.toml" ]]; then
+    echo "Missing RAILGUN helper checkout at $RAILGUN_REPO" >&2
+    echo "Set LOCAL_WALLET_RAILGUN_REPO, LOCAL_WALLET_RAILGUN_HELPER_BIN," >&2
+    echo "RAILGUN_HELPER_BIN, or LOCAL_WALLET_PRIVACY_BIN." >&2
+    exit 1
+  fi
+
+  echo "=== Building railgun-helper sidecar ===" >&2
+  (
+    cd "$RAILGUN_REPO"
+    export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
+    cargo build --release --bins
+  )
+
+  railgun_helper_bin="$RAILGUN_REPO/target/release/railgun-helper"
+  if [[ ! -x "$railgun_helper_bin" ]]; then
+    echo "Could not find built railgun-helper at $railgun_helper_bin" >&2
+    exit 1
+  fi
+  printf '%s\n' "$railgun_helper_bin"
 }
 
 find_dylib() {
@@ -434,6 +471,199 @@ verify_secure_enclave_entitlements() {
   fi
 }
 
+code_signing_field() {
+  local code_path="$1"
+  local field="$2"
+  local signing_details
+  if ! signing_details="$(codesign -d --verbose=4 "$code_path" 2>&1)"; then
+    echo "Could not read code signature: $code_path" >&2
+    return 1
+  fi
+  printf '%s\n' "$signing_details" | awk -F= -v field="$field" '
+    $1 == field && !found {
+      sub(/^[^=]*=/, "")
+      print
+      found = 1
+    }
+  '
+}
+
+verify_runtime_code_signature() {
+  local code_path="$1"
+  local signing_details
+  if ! codesign --verify --strict --verbose=2 "$code_path"; then
+    echo "Invalid code signature: $code_path" >&2
+    return 1
+  fi
+  if ! signing_details="$(codesign -d --verbose=4 "$code_path" 2>&1)"; then
+    echo "Could not read code signature: $code_path" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$signing_details" | awk '
+    /^CodeDirectory .*flags=.*runtime/ { found = 1 }
+    END { exit(found ? 0 : 1) }
+  '; then
+    echo "Hardened runtime is missing from code signature: $code_path" >&2
+    return 1
+  fi
+}
+
+trusted_helper_manifest_value() {
+  local manifest_path="$1"
+  local key_path="$2"
+  plutil -extract "$key_path" raw -o - "$manifest_path" 2>/dev/null
+}
+
+create_trusted_helpers_manifest() {
+  local packaged_app="$1"
+  local bin_dir="$packaged_app/Contents/Resources/bin"
+  local manifest_path="$packaged_app/Contents/Resources/$TRUSTED_HELPERS_MANIFEST_NAME"
+  local wallet_node="$bin_dir/wallet-node"
+  local railgun_helper="$bin_dir/railgun-helper"
+  local wallet_node_team wallet_node_cdhash
+  local railgun_helper_team railgun_helper_cdhash
+
+  verify_runtime_code_signature "$wallet_node"
+  verify_runtime_code_signature "$railgun_helper"
+
+  if [[ "$(code_signing_field "$wallet_node" Identifier)" != "$WALLET_NODE_SIGNING_IDENTIFIER" ]]; then
+    echo "wallet-node was not signed with the required identifier $WALLET_NODE_SIGNING_IDENTIFIER" >&2
+    return 1
+  fi
+  if [[ "$(code_signing_field "$railgun_helper" Identifier)" != "$RAILGUN_HELPER_SIGNING_IDENTIFIER" ]]; then
+    echo "railgun-helper was not signed with the required identifier $RAILGUN_HELPER_SIGNING_IDENTIFIER" >&2
+    return 1
+  fi
+
+  wallet_node_team="$(code_signing_field "$wallet_node" TeamIdentifier)"
+  railgun_helper_team="$(code_signing_field "$railgun_helper" TeamIdentifier)"
+  wallet_node_cdhash="$(code_signing_field "$wallet_node" CDHash | tr '[:upper:]' '[:lower:]')"
+  railgun_helper_cdhash="$(code_signing_field "$railgun_helper" CDHash | tr '[:upper:]' '[:lower:]')"
+
+  if [[ ! "$wallet_node_team" =~ ^[A-Z0-9]{10}$ ]]; then
+    echo "wallet-node has no valid Apple Team ID; ad-hoc helper signatures are rejected." >&2
+    return 1
+  fi
+  if [[ "$railgun_helper_team" != "$wallet_node_team" ]]; then
+    echo "Trusted helpers were signed by different teams." >&2
+    echo "wallet-node:    $wallet_node_team" >&2
+    echo "railgun-helper: $railgun_helper_team" >&2
+    return 1
+  fi
+  if [[ ! "$wallet_node_cdhash" =~ ^[0-9a-f]{40}$ || ! "$railgun_helper_cdhash" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "Could not read valid helper CDHashes for the trust manifest." >&2
+    return 1
+  fi
+
+  # The outer app is signed after this file is created, sealing these exact helper
+  # identities and CDHashes into the app's resource envelope.
+  printf '%s\n' \
+    '{' \
+    '  "schemaVersion": 1,' \
+    '  "helpers": {' \
+    '    "wallet-node": {' \
+    '      "relativePath": "bin/wallet-node",' \
+    "      \"identifier\": \"$WALLET_NODE_SIGNING_IDENTIFIER\"," \
+    "      \"cdHash\": \"$wallet_node_cdhash\"," \
+    "      \"teamIdentifier\": \"$wallet_node_team\"" \
+    '    },' \
+    '    "railgun-helper": {' \
+    '      "relativePath": "bin/railgun-helper",' \
+    "      \"identifier\": \"$RAILGUN_HELPER_SIGNING_IDENTIFIER\"," \
+    "      \"cdHash\": \"$railgun_helper_cdhash\"," \
+    "      \"teamIdentifier\": \"$railgun_helper_team\"" \
+    '    }' \
+    '  }' \
+    '}' >"$manifest_path"
+
+  # plutil's key extraction parses both JSON and plist input. Extract every required
+  # field now so malformed or incomplete output cannot proceed to outer signing.
+  trusted_helper_manifest_value "$manifest_path" schemaVersion >/dev/null
+  trusted_helper_manifest_value "$manifest_path" helpers.wallet-node.relativePath >/dev/null
+  trusted_helper_manifest_value "$manifest_path" helpers.wallet-node.identifier >/dev/null
+  trusted_helper_manifest_value "$manifest_path" helpers.wallet-node.cdHash >/dev/null
+  trusted_helper_manifest_value "$manifest_path" helpers.wallet-node.teamIdentifier >/dev/null
+  trusted_helper_manifest_value "$manifest_path" helpers.railgun-helper.relativePath >/dev/null
+  trusted_helper_manifest_value "$manifest_path" helpers.railgun-helper.identifier >/dev/null
+  trusted_helper_manifest_value "$manifest_path" helpers.railgun-helper.cdHash >/dev/null
+  trusted_helper_manifest_value "$manifest_path" helpers.railgun-helper.teamIdentifier >/dev/null
+}
+
+verify_trusted_helpers() {
+  local packaged_app="$1"
+  local manifest_path="$packaged_app/Contents/Resources/$TRUSTED_HELPERS_MANIFEST_NAME"
+  local app_team
+
+  if [[ ! -f "$manifest_path" || -L "$manifest_path" ]]; then
+    echo "Trusted-helper manifest is missing or is a symlink: $manifest_path" >&2
+    return 1
+  fi
+  if [[ "$(trusted_helper_manifest_value "$manifest_path" schemaVersion)" != "1" ]]; then
+    echo "Unsupported trusted-helper manifest schema." >&2
+    return 1
+  fi
+
+  codesign --verify --deep --strict --verbose=2 "$packaged_app"
+  verify_runtime_code_signature "$packaged_app"
+  app_team="$(code_signing_field "$packaged_app" TeamIdentifier)"
+  if [[ ! "$app_team" =~ ^[A-Z0-9]{10}$ ]]; then
+    echo "Packaged app has no valid Apple Team ID; trusted helpers cannot be authenticated." >&2
+    return 1
+  fi
+
+  local helper_name
+  for helper_name in wallet-node railgun-helper; do
+    local expected_relative_path expected_identifier
+    case "$helper_name" in
+      wallet-node)
+        expected_relative_path="bin/wallet-node"
+        expected_identifier="$WALLET_NODE_SIGNING_IDENTIFIER"
+        ;;
+      railgun-helper)
+        expected_relative_path="bin/railgun-helper"
+        expected_identifier="$RAILGUN_HELPER_SIGNING_IDENTIFIER"
+        ;;
+    esac
+
+    local relative_path identifier manifest_cdhash manifest_team helper_path
+    local actual_cdhash actual_team
+    relative_path="$(trusted_helper_manifest_value "$manifest_path" "helpers.$helper_name.relativePath")"
+    identifier="$(trusted_helper_manifest_value "$manifest_path" "helpers.$helper_name.identifier")"
+    manifest_cdhash="$(trusted_helper_manifest_value "$manifest_path" "helpers.$helper_name.cdHash" | tr '[:upper:]' '[:lower:]')"
+    manifest_team="$(trusted_helper_manifest_value "$manifest_path" "helpers.$helper_name.teamIdentifier")"
+
+    if [[ "$relative_path" != "$expected_relative_path" || "$identifier" != "$expected_identifier" ]]; then
+      echo "Untrusted $helper_name path or identifier in $TRUSTED_HELPERS_MANIFEST_NAME." >&2
+      return 1
+    fi
+
+    helper_path="$packaged_app/Contents/Resources/$relative_path"
+    if [[ ! -f "$helper_path" || ! -x "$helper_path" || -L "$helper_path" ]]; then
+      echo "Trusted helper is missing, non-executable, or a symlink: $helper_path" >&2
+      return 1
+    fi
+
+    verify_runtime_code_signature "$helper_path"
+    actual_cdhash="$(code_signing_field "$helper_path" CDHash | tr '[:upper:]' '[:lower:]')"
+    actual_team="$(code_signing_field "$helper_path" TeamIdentifier)"
+
+    if [[ "$(code_signing_field "$helper_path" Identifier)" != "$expected_identifier" ]]; then
+      echo "$helper_name signing identifier does not match its pinned identifier." >&2
+      return 1
+    fi
+    if [[ "$manifest_cdhash" != "$actual_cdhash" ]]; then
+      echo "$helper_name CDHash does not match $TRUSTED_HELPERS_MANIFEST_NAME." >&2
+      return 1
+    fi
+    if [[ "$manifest_team" != "$actual_team" || "$actual_team" != "$app_team" ]]; then
+      echo "$helper_name and the outer app were not signed by the same Apple Team." >&2
+      return 1
+    fi
+  done
+
+  echo "Trusted helper verification passed for wallet-node and railgun-helper (Team $app_team)."
+}
+
 sign_packaged_app() {
   local source_app="$1"
   local packaged_app="$2"
@@ -452,14 +682,14 @@ sign_packaged_app() {
     fi
   fi
   if [[ -z "$signing_identity" ]]; then
-    if is_truthy "$NOTARIZE"; then
-      echo "LOCAL_WALLET_NOTARIZE=1 requires a Developer ID Application certificate." >&2
-      echo "Install the certificate or set CODESIGN_IDENTITY explicitly." >&2
-      exit 1
-    else
-      echo "Could not determine signing identity from built app. Falling back to ad-hoc signing."
-      signing_identity="-"
-    fi
+    echo "Could not determine an Apple code-signing identity from the built app." >&2
+    echo "Set CODESIGN_IDENTITY explicitly; ad-hoc signing cannot establish trusted helper identity." >&2
+    exit 1
+  fi
+  if [[ "$signing_identity" == "-" ]]; then
+    echo "CODESIGN_IDENTITY=- is not allowed for a release package." >&2
+    echo "wallet-node and railgun-helper must share a real Apple Team ID with the outer app." >&2
+    exit 1
   fi
 
   if is_truthy "$NOTARIZE" && [[ "$signing_identity" != Developer\ ID\ Application:* ]]; then
@@ -486,15 +716,26 @@ sign_packaged_app() {
     if is_mach_o_file "$mach_o_file"; then
       codesign "${nested_codesign_args[@]}" "$mach_o_file"
     fi
-  done < <(find "$packaged_app/Contents/Frameworks" "$packaged_app/Contents/Resources/bin" -type f -print0 2>/dev/null || true)
+  done < <(find "$packaged_app/Contents/Frameworks" -type f -print0 2>/dev/null || true)
 
+  codesign "${nested_codesign_args[@]}" \
+    --identifier "$WALLET_NODE_SIGNING_IDENTIFIER" \
+    "$packaged_app/Contents/Resources/bin/wallet-node"
+  codesign "${nested_codesign_args[@]}" \
+    --identifier "$RAILGUN_HELPER_SIGNING_IDENTIFIER" \
+    "$packaged_app/Contents/Resources/bin/railgun-helper"
+
+  create_trusted_helpers_manifest "$packaged_app"
+
+  # Sign the outer app only after every nested binary and the helper manifest are
+  # final. Nothing inside the code/resource envelope may be mutated after this.
   if [[ -f "$entitlements_plist" ]]; then
     codesign "${codesign_args[@]}" --entitlements "$entitlements_plist" "$packaged_app"
   else
     codesign "${codesign_args[@]}" "$packaged_app"
   fi
 
-  codesign --verify --deep --strict --verbose=2 "$packaged_app"
+  verify_trusted_helpers "$packaged_app"
   codesign -dvv "$packaged_app" 2>&1 | grep -E "Authority=|TeamIdentifier=|Runtime Version|flags=" || true
   verify_secure_enclave_entitlements "$packaged_app"
 }
@@ -552,6 +793,7 @@ notarize_packaged_app() {
 
 echo "=== Resolving embedded assets ==="
 WALLET_NODE_BIN_PATH="$(resolve_wallet_node_binary)"
+RAILGUN_HELPER_BIN_PATH="$(resolve_railgun_helper_binary)"
 MODEL_PATH=""
 if [[ "$EMBED_MODEL" == "1" || "$EMBED_MODEL" == "true" || "$EMBED_MODEL" == "yes" ]]; then
   MODEL_PATH="$(resolve_model_file)"
@@ -593,10 +835,12 @@ echo "=== Copying app ==="
 cp -R "$APP_PATH" "$PRODUCTS_DIR/"
 PACKAGED_APP="$PRODUCTS_DIR/$APP_NAME"
 
-echo "=== Embedding wallet-node daemon ==="
+echo "=== Embedding trusted helper executables ==="
 mkdir -p "$PACKAGED_APP/Contents/Resources/bin"
 cp "$WALLET_NODE_BIN_PATH" "$PACKAGED_APP/Contents/Resources/bin/wallet-node"
 chmod 755 "$PACKAGED_APP/Contents/Resources/bin/wallet-node"
+cp "$RAILGUN_HELPER_BIN_PATH" "$PACKAGED_APP/Contents/Resources/bin/railgun-helper"
+chmod 755 "$PACKAGED_APP/Contents/Resources/bin/railgun-helper"
 
 if [[ -n "$MODEL_PATH" ]]; then
   echo "=== Embedding local AI model ==="

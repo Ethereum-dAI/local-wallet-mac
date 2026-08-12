@@ -65,11 +65,15 @@ final class RailgunHelperDaemon: @unchecked Sendable {
         secrets: RailgunSecrets,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) async throws -> RailgunHelperDaemon {
-        let helperBin = try resolveBinary(
-            name: "railgun-helper",
-            envKeys: ["RAILGUN_HELPER_BIN", "LOCAL_WALLET_PRIVACY_BIN"],
-            environment: environment
-        )
+        let executable: TrustedHelperExecutable
+        do {
+            executable = try TrustedHelperExecutableResolver.resolve(
+                .railgunHelper,
+                environment: environment
+            )
+        } catch {
+            throw DaemonError.binaryNotFound(error.localizedDescription)
+        }
 
         // A stable, persistent directory (NOT the per-launch temp dir) — it holds the
         // per-exit rotation counter (`<state_dir>/exit-index`) the sidecar reads/writes on
@@ -91,11 +95,30 @@ final class RailgunHelperDaemon: @unchecked Sendable {
         var readyPipe: [Int32] = [-1, -1]
         var alivePipe: [Int32] = [-1, -1]
         var secretPipe: [Int32] = [-1, -1]
-        guard pipe(&readyPipe) == 0, pipe(&alivePipe) == 0, pipe(&secretPipe) == 0 else {
+        guard pipe(&readyPipe) == 0 else {
             throw DaemonError.launchFailed("pipe() errno \(errno)")
         }
-        for fd in [readyPipe[0], readyPipe[1], alivePipe[0], alivePipe[1], secretPipe[0], secretPipe[1]] {
-            setCloseOnExec(fd)
+        guard pipe(&alivePipe) == 0 else {
+            closeAndInvalidate(&readyPipe[0])
+            closeAndInvalidate(&readyPipe[1])
+            throw DaemonError.launchFailed("pipe() errno \(errno)")
+        }
+        guard pipe(&secretPipe) == 0 else {
+            closeAndInvalidate(&readyPipe[0])
+            closeAndInvalidate(&readyPipe[1])
+            closeAndInvalidate(&alivePipe[0])
+            closeAndInvalidate(&alivePipe[1])
+            throw DaemonError.launchFailed("pipe() errno \(errno)")
+        }
+        do {
+            for fd in readyPipe + alivePipe + secretPipe {
+                try setCloseOnExec(fd)
+            }
+        } catch {
+            for index in readyPipe.indices { closeAndInvalidate(&readyPipe[index]) }
+            for index in alivePipe.indices { closeAndInvalidate(&alivePipe[index]) }
+            for index in secretPipe.indices { closeAndInvalidate(&secretPipe[index]) }
+            throw DaemonError.launchFailed(error.localizedDescription)
         }
 
         // The helper reads config from env; set the RAILGUN_* vars around the spawn (the C
@@ -116,13 +139,21 @@ final class RailgunHelperDaemon: @unchecked Sendable {
         let restore = setEnvironment(childEnv)
         defer { restore() }
 
-        let pid: pid_t
+        let secretJSON = try JSONSerialization.data(
+            withJSONObject: [
+                "entropyHex": secrets.entropyHex,
+            ],
+            options: [.sortedKeys]
+        )
+
+        var pid: pid_t = -1
         do {
             pid = try spawnHelper(
-                execPath: helperBin,
+                execPath: executable.path,
                 readyWrite: readyPipe[1],
                 aliveRead: alivePipe[0],
-                secretRead: secretPipe[0]
+                secretRead: secretPipe[0],
+                startSuspended: true
             )
         } catch {
             for fd in [readyPipe[0], readyPipe[1], alivePipe[0], alivePipe[1], secretPipe[0], secretPipe[1]] where fd >= 0 {
@@ -132,26 +163,45 @@ final class RailgunHelperDaemon: @unchecked Sendable {
         }
 
         // Parent closes the child ends.
-        close(readyPipe[1])
-        close(alivePipe[0])
-        close(secretPipe[0])
-        close(readyPipe[0]) // helper doesn't emit an fd-3 token; we poll the socket instead
+        closeAndInvalidate(&readyPipe[1])
+        closeAndInvalidate(&alivePipe[0])
+        closeAndInvalidate(&secretPipe[0])
+        closeAndInvalidate(&readyPipe[0]) // helper doesn't emit an fd-3 token; we poll the socket instead
 
-        // Deliver the fd-5 secret (HelperFd5 = entropy only), then close so the child reads EOF.
-        let secretJSON = try JSONSerialization.data(
-            withJSONObject: [
-                "entropyHex": secrets.entropyHex,
-            ],
-            options: [.sortedKeys]
-        )
-        writeAll(secretPipe[1], secretJSON)
-        close(secretPipe[1])
+        // Authenticate this exact suspended PID before delivering HelperFd5 entropy. The gate
+        // kills and reaps on rejection, so no unauthenticated process receives a secret byte.
+        do {
+            try TrustedHelperLaunchGate.authenticateDeliverAndResume(
+                pid: pid,
+                executable: executable
+            ) {
+                defer {
+                    closeAndInvalidate(&secretPipe[1])
+                }
+                try writeAll(secretPipe[1], secretJSON)
+            }
+        } catch {
+            pid = -1
+            closeAndInvalidate(&alivePipe[1])
+            throw DaemonError.launchFailed(error.localizedDescription)
+        }
+
+        // From here until ownership moves into ManagedDaemonLifetime, all thrown paths —
+        // including task cancellation — must close the lifetime fd and reap the child.
+        var didTransferLifetime = false
+        defer {
+            if !didTransferLifetime {
+                closeAndInvalidate(&alivePipe[1])
+                terminateAndReap(pid: pid)
+            }
+        }
 
         // Wait for the helper socket to accept connections (it builds the RAILGUN provider
         // first, so allow a generous window).
         let deadline = Date().addingTimeInterval(45)
         while Date() < deadline {
             if socketAccepts(path: helperSocket) {
+                didTransferLifetime = true
                 return RailgunHelperDaemon(
                     socketPath: helperSocket,
                     token: helperToken,
@@ -161,8 +211,6 @@ final class RailgunHelperDaemon: @unchecked Sendable {
             }
             try await Task.sleep(nanoseconds: 250_000_000)
         }
-        close(alivePipe[1])
-        kill(pid, SIGTERM)
         throw DaemonError.notReady("helper socket \(helperSocket) did not come up in 45s")
     }
 
@@ -174,24 +222,51 @@ final class RailgunHelperDaemon: @unchecked Sendable {
         return bytes.map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func setCloseOnExec(_ fd: Int32) {
+    private static func setCloseOnExec(_ fd: Int32) throws {
         let flags = fcntl(fd, F_GETFD)
-        if flags >= 0 { _ = fcntl(fd, F_SETFD, flags | FD_CLOEXEC) }
+        guard flags >= 0, fcntl(fd, F_SETFD, flags | FD_CLOEXEC) >= 0 else {
+            throw DaemonError.launchFailed("failed to mark pipe close-on-exec: errno \(errno)")
+        }
     }
 
-    private static func writeAll(_ fd: Int32, _ data: Data) {
-        data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
+    private static func closeAndInvalidate(_ fd: inout Int32) {
+        if fd >= 0 {
+            close(fd)
+            fd = -1
+        }
+    }
+
+    private static func writeAll(_ fd: Int32, _ data: Data) throws {
+        try data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
             var off = 0
             while off < buf.count {
                 let n = write(fd, buf.baseAddress!.advanced(by: off), buf.count - off)
                 if n < 0 {
                     if errno == EINTR { continue }
-                    break
+                    throw DaemonError.launchFailed("secret pipe write failed: errno \(errno)")
                 }
-                if n == 0 { break }
+                if n == 0 {
+                    throw DaemonError.launchFailed("secret pipe write made no progress")
+                }
                 off += n
             }
         }
+    }
+
+    private static func terminateAndReap(pid: pid_t) {
+        guard pid > 0 else { return }
+        if kill(pid, SIGTERM) != 0, errno != ESRCH { return }
+        let deadline = ProcessInfo.processInfo.systemUptime + 1
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            var status: Int32 = 0
+            let result = waitpid(pid, &status, WNOHANG)
+            if result == pid || (result == -1 && errno == ECHILD) { return }
+            if result == -1 && errno != EINTR { return }
+            usleep(10_000)
+        }
+        if kill(pid, SIGKILL) != 0, errno != ESRCH { return }
+        var status: Int32 = 0
+        while waitpid(pid, &status, 0) == -1, errno == EINTR {}
     }
 
     private static func socketAccepts(path: String) -> Bool {
@@ -246,39 +321,4 @@ final class RailgunHelperDaemon: @unchecked Sendable {
         return dir
     }
 
-    private static func resolveBinary(
-        name: String,
-        envKeys: [String],
-        environment: [String: String]
-    ) throws -> String {
-        var candidates: [String] = []
-        for key in envKeys {
-            if let path = environment[key] { candidates.append(path) }
-        }
-        if let path = Bundle.main.url(forResource: name, withExtension: nil, subdirectory: "bin")?.path {
-            candidates.append(path)
-        }
-        if let path = Bundle.main.url(forResource: name, withExtension: nil)?.path {
-            candidates.append(path)
-        }
-        candidates.append(sourceRootBinary(name: name, profile: "release"))
-        candidates.append(sourceRootBinary(name: name, profile: "debug"))
-        for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
-            return candidate
-        }
-        throw DaemonError.binaryNotFound(
-            "\(name) — set \(envKeys.first ?? "the env override") to an absolute path, or build it in local-wallet-railgun (`cargo build --release --bins`)."
-        )
-    }
-
-    private static func sourceRootBinary(name: String, profile: String) -> String {
-        // #filePath = <repo-root>/wallet-macos/Sources/WalletMacOSApp/RailgunHelperDaemon.swift
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent() // WalletMacOSApp
-            .deletingLastPathComponent() // Sources
-            .deletingLastPathComponent() // wallet-macos
-            .deletingLastPathComponent() // <repo-root>
-            .appendingPathComponent("local-wallet-railgun/target/\(profile)/\(name)")
-            .path
-    }
 }

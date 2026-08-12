@@ -4,6 +4,87 @@ import SpawnHelper
 import XCTest
 
 final class SpawnHelperTests: XCTestCase {
+    func testSuspendedSpawnDoesNotExecuteUntilResumed() throws {
+        let temporaryDirectory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("spawn-helper-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: temporaryDirectory,
+            withIntermediateDirectories: true
+        )
+        defer {
+            try? FileManager.default.removeItem(at: temporaryDirectory)
+        }
+
+        let scriptURL = temporaryDirectory.appendingPathComponent("ready-helper.sh")
+        let script = """
+        #!/bin/sh
+        printf 'ready\\n' >&3
+        cat <&5 >/dev/null
+        cat <&4 >/dev/null
+        """
+        try Data(script.utf8).write(to: scriptURL, options: .atomic)
+        XCTAssertEqual(chmod(scriptURL.path, S_IRUSR | S_IWUSR | S_IXUSR), 0)
+
+        var readyPipe: [Int32] = [-1, -1]
+        var alivePipe: [Int32] = [-1, -1]
+        var secretPipe: [Int32] = [-1, -1]
+        XCTAssertEqual(pipe(&readyPipe), 0)
+        XCTAssertEqual(pipe(&alivePipe), 0)
+        XCTAssertEqual(pipe(&secretPipe), 0)
+
+        var childPid: pid_t = -1
+        var childReaped = false
+        defer {
+            closeIfOpen(&readyPipe[0])
+            closeIfOpen(&readyPipe[1])
+            closeIfOpen(&alivePipe[0])
+            closeIfOpen(&alivePipe[1])
+            closeIfOpen(&secretPipe[0])
+            closeIfOpen(&secretPipe[1])
+
+            if childPid > 0 && !childReaped {
+                kill(childPid, SIGKILL)
+                _ = waitChildWithTimeout(pid: childPid, timeout: 1)
+            }
+        }
+
+        try setCloseOnExec(readyPipe[0])
+        try setCloseOnExec(readyPipe[1])
+        try setCloseOnExec(alivePipe[0])
+        try setCloseOnExec(alivePipe[1])
+        try setCloseOnExec(secretPipe[0])
+        try setCloseOnExec(secretPipe[1])
+
+        childPid = try spawnHelper(
+            execPath: scriptURL.path,
+            readyWrite: readyPipe[1],
+            aliveRead: alivePipe[0],
+            secretRead: secretPipe[0],
+            startSuspended: true
+        )
+
+        closeIfOpen(&readyPipe[1])
+        closeIfOpen(&alivePipe[0])
+        closeIfOpen(&secretPipe[0])
+
+        XCTAssertFalse(
+            hasReadableData(fd: readyPipe[0], timeoutMilliseconds: 150),
+            "a suspended helper must not execute before validation and resume"
+        )
+        var status: Int32 = 0
+        XCTAssertEqual(waitpid(childPid, &status, WNOHANG), 0)
+
+        try resumeHelper(pid: childPid)
+        let readyData = readLineWithTimeout(fd: readyPipe[0], timeout: 2)
+        XCTAssertEqual(String(data: readyData, encoding: .utf8), "ready\n")
+
+        closeIfOpen(&secretPipe[1])
+        closeIfOpen(&alivePipe[1])
+        let exitStatus = waitChildWithTimeout(pid: childPid, timeout: 2)
+        childReaped = true
+        XCTAssertEqual(exitStatus, 0)
+    }
+
     func testSpawnDaemonAndReceiveReadyEvent() throws {
         let daemonBinPath = defaultDaemonBinPath()
         guard FileManager.default.isExecutableFile(atPath: daemonBinPath) else {
@@ -91,6 +172,17 @@ final class SpawnHelperTests: XCTestCase {
         let status = waitChildWithTimeout(pid: childPid, timeout: 3)
         childReaped = true
         XCTAssertEqual(status, 0, "wallet-node should exit successfully after alive pipe EOF")
+    }
+}
+
+private func hasReadableData(fd: Int32, timeoutMilliseconds: Int32) -> Bool {
+    var pollFd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+    while true {
+        let result = poll(&pollFd, 1, timeoutMilliseconds)
+        if result == -1 && errno == EINTR {
+            continue
+        }
+        return result > 0 && (pollFd.revents & Int16(POLLIN | POLLHUP)) != 0
     }
 }
 

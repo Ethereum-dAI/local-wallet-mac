@@ -12,7 +12,7 @@ What this demo currently exercises:
 - Secure Enclave passkey signing, session-key signing for in-policy actions, and local `wallet-node` submission through the app-owned bundler EOA
 - session-key policy controls for ETH caps, ERC-20 token caps, SwapRouter02 approvals, rate limits, gas budget, session duration, and inactivity timeout
 - debug logging for bootstrap, inspection, gas estimation, signing, submission, and receipt polling
-- on-device Gemma 4 E4B chat with streaming, tool intent recognition (transfer / swap), slash commands, and an in-chat review card — the chat layer is documented in [Chat layer](#chat-layer) and [Tool layer](#tool-layer) below
+- on-device chat (wallet-tuned Gemma 4 E4B by default) with streaming, tool intent recognition (transfer / swap), slash commands, and an in-chat review card — the chat layer is documented in [Chat layer](#chat-layer) and [Tool layer](#tool-layer) below
 
 The package also contains `SpawnHelper`, the process-launch shim for the local `wallet-node` daemon. Confirmed chat intents use the daemon for Helios-backed reads, gas estimation, UserOperation submission, receipt polling, swap quotes, and relayer-key admin flows (rotate/export/delete the bundler EOA via admin challenges).
 
@@ -178,7 +178,7 @@ The v0.1 alpha zip targets macOS 15+ on Apple Silicon and does not embed the rec
 
 ## Chat layer
 
-The chat dashboard is the primary entry point of the demo app. It runs a streaming conversation against an on-device Gemma 4 E4B GGUF model loaded by the sibling `local-llm` Swift package (`LlamaRuntime`).
+The chat dashboard is the primary entry point of the demo app. It runs a streaming conversation against an on-device GGUF model loaded by the sibling `local-llm` Swift package (`LlamaRuntime`) — by default `gemma-4-E4B-wallet-ft.Q4_K_M.gguf`, a wallet tool-calling fine-tune of Gemma 4 E4B.
 
 Highlights of the current UX:
 
@@ -235,7 +235,7 @@ Shared flags:
 
 | Flag                 | Default                  | Notes                                  |
 |----------------------|--------------------------|----------------------------------------|
-| `--model PATH`       | onboarding-installed GGUF | Path to a Gemma 4 GGUF                 |
+| `--model PATH`       | the app's default model (`gemma-4-E4B-wallet-ft.Q4_K_M.gguf` under Application Support) | Path to a Gemma 4 GGUF |
 | `--repeats N`        | `3`                      | Per-case repetitions                   |
 | `--seed S`           | `0xC0DEFEED`             | Hex or decimal                         |
 | `--json PATH`        | (none)                   | Structured `EvalEntry[]` report        |

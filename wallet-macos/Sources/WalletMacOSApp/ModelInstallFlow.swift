@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// What adding a model is doing right now, so the form can say so rather than
@@ -7,6 +8,106 @@ import Foundation
 enum ModelInstallPhase: Equatable, Sendable {
     case downloading(Double)
     case testing
+}
+
+extension ModelInstallPhase {
+    /// Whether moving to this phase changes anything the UI actually draws.
+    ///
+    /// Progress is rendered as whole percents (`Int(value * 100)`), and
+    /// `URLSession` reports progress once per received chunk — hundreds of times a
+    /// second on a fast link. Publishing every one of them redraws the same pixels
+    /// on the main actor for the length of a multi-gigabyte download.
+    func isVisibleChange(from current: ModelInstallPhase) -> Bool {
+        if case .downloading(let updated) = self, case .downloading(let existing) = current {
+            return Int(updated * 100) != Int(existing * 100)
+        }
+        return self != current
+    }
+}
+
+/// The install in flight — which model, and how far along.
+///
+/// Owned by the chat model, never by a view. It used to live as `@State` on
+/// `LocalWalletSettingsView`, and the mismatch was the bug: the download runs in
+/// an *unstructured* `Task`, which correctly outlives the view, but the progress
+/// state did not. Navigating away from Models and back reset it to nil, so the
+/// row fell back to "Download · not downloaded" while bytes kept arriving, the
+/// Cancel button (rendered only for the downloading row) vanished, and pressing
+/// Download again threw `downloadAlreadyInProgress` — an instruction to cancel
+/// something the UI no longer offered any way to cancel. Quitting the app was the
+/// only exit.
+struct ModelInstallProgress: Equatable {
+    let modelID: String
+    let displayName: String
+    var phase: ModelInstallPhase
+}
+
+extension ModelInstallProgress {
+    /// True when a Settings model row exists for this install, so that row is the
+    /// one drawing the progress and the Cancel button.
+    ///
+    /// The Hugging Face form has to ask this before drawing its own: a curated
+    /// download is not the form's to display — and emphatically not the form's to
+    /// cancel. Without the check, pressing Download on a curated row put a second
+    /// progress bar and a stray Cancel inside the "Add From Hugging Face" panel,
+    /// for a file the user never picked there.
+    func isClaimedByRow(ids: [String]) -> Bool { ids.contains(modelID) }
+}
+
+/// The install in flight and the last one's outcome, observable on its own.
+///
+/// Deliberately *not* `@Published` state on `ChatDashboardModel`. It started
+/// there, and every progress tick then invalidated the whole dashboard: with
+/// Settings open that re-derived `settingsSnapshot`, which walks the model catalog
+/// (a `FileManager` stat per row), recomputes a fit verdict per row, formats the
+/// chat database size and runs a SQLite count for the feedback-export row —
+/// roughly a hundred times per download, all on the main actor. Observed only by
+/// the view that renders it, the same state survives navigation without
+/// re-deriving the entire settings surface.
+@MainActor
+final class ModelInstallStore: ObservableObject {
+    @Published private(set) var install: ModelInstallProgress?
+    @Published private(set) var outcome: ModelInstallOutcome?
+
+    /// Returns false when an install is already in flight, so a second press is a
+    /// no-op rather than a `downloadAlreadyInProgress` thrown at whoever is on
+    /// screen. One at a time is the download manager's rule too.
+    func begin(modelID: String, displayName: String) -> Bool {
+        guard install == nil else { return false }
+        install = ModelInstallProgress(modelID: modelID, displayName: displayName, phase: .downloading(0))
+        outcome = nil
+        return true
+    }
+
+    /// Ignores a report for an install that is no longer the current one, and one
+    /// that would not change what is drawn.
+    func update(modelID: String, phase: ModelInstallPhase) {
+        guard var current = install, current.modelID == modelID else { return }
+        guard phase.isVisibleChange(from: current.phase) else { return }
+        current.phase = phase
+        install = current
+    }
+
+    func finish(_ outcome: ModelInstallOutcome) {
+        install = nil
+        self.outcome = outcome
+    }
+
+    /// The outcome outlives the view that would have shown it, which is the point
+    /// — and the reason it needs an explicit way out. Cleared when the user
+    /// dismisses the banner, when another model action reports something newer, and
+    /// when the next install starts.
+    func clearOutcome() {
+        outcome = nil
+    }
+}
+
+/// How the last install ended. Also on the model rather than the view, for the
+/// same reason: the success/failure sentence is produced when the download
+/// finishes, which is routinely long after the user has navigated elsewhere.
+struct ModelInstallOutcome: Equatable {
+    let isFailure: Bool
+    let text: String
 }
 
 /// The sentence appended to the download message once the freshly installed model

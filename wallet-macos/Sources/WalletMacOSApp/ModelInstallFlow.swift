@@ -6,20 +6,19 @@ import Foundation
 /// one generation, which can take a minute — long enough that it needs its own
 /// phase.
 enum ModelInstallPhase: Equatable, Sendable {
-    case downloading(Double)
+    case downloading(ModelDownloadProgress)
     case testing
 }
 
 extension ModelInstallPhase {
     /// Whether moving to this phase changes anything the UI actually draws.
     ///
-    /// Progress is rendered as whole percents (`Int(value * 100)`), and
     /// `URLSession` reports progress once per received chunk — hundreds of times a
-    /// second on a fast link. Publishing every one of them redraws the same pixels
-    /// on the main actor for the length of a multi-gigabyte download.
+    /// second on a fast link. Publishing updates whose formatted percent, bytes,
+    /// speed, and ETA are unchanged redraws the same pixels for no benefit.
     func isVisibleChange(from current: ModelInstallPhase) -> Bool {
         if case .downloading(let updated) = self, case .downloading(let existing) = current {
-            return Int(updated * 100) != Int(existing * 100)
+            return updated.isVisibleChange(from: existing)
         }
         return self != current
     }
@@ -74,7 +73,11 @@ final class ModelInstallStore: ObservableObject {
     /// screen. One at a time is the download manager's rule too.
     func begin(modelID: String, displayName: String) -> Bool {
         guard install == nil else { return false }
-        install = ModelInstallProgress(modelID: modelID, displayName: displayName, phase: .downloading(0))
+        install = ModelInstallProgress(
+            modelID: modelID,
+            displayName: displayName,
+            phase: .downloading(ModelDownloadProgress(completedBytes: 0, totalBytes: 0, bytesPerSecond: nil))
+        )
         outcome = nil
         return true
     }

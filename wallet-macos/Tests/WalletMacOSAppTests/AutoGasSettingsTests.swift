@@ -28,10 +28,7 @@ private func freshStore() -> DemoSettingsStore {
 /// all. The migration is what unbricks it without the user editing Settings.
 @Test func previousSepoliaExecutionDefaultMigratesToPublicnode() {
     let suite = UserDefaults(suiteName: "auto-gas-tests-\(UUID().uuidString)")!
-    suite.set(
-        DemoNetworkSettings.previousDefaultSepoliaRPCURLs[0],
-        forKey: "com.localwallet.demo.sepolia-rpc-url"
-    )
+    suite.set("https://sepolia.drpc.org", forKey: "com.localwallet.demo.sepolia-rpc-url")
     let store = DemoSettingsStore(defaults: suite)
 
     #expect(store.networkSettings.sepoliaRPCURL == "https://ethereum-sepolia-rpc.publicnode.com")
@@ -48,17 +45,6 @@ private func freshStore() -> DemoSettingsStore {
 
         #expect(store.networkSettings.sepoliaConsensusRPCURL == "")
     }
-}
-
-@Test func previousMainnetConsensusDefaultMigratesToEmpty() {
-    let suite = UserDefaults(suiteName: "auto-gas-tests-\(UUID().uuidString)")!
-    suite.set(
-        DemoNetworkSettings.previousDefaultMainnetConsensusRPCURLs[0],
-        forKey: "com.localwallet.demo.mainnet-consensus-rpc-url"
-    )
-    let store = DemoSettingsStore(defaults: suite)
-
-    #expect(store.networkSettings.mainnetConsensusRPCURL == "")
 }
 
 @Test func customSepoliaRPCsArePreserved() {
@@ -119,7 +105,6 @@ private func freshStore() -> DemoSettingsStore {
 
 @Test func resolvedDaemonGasPolicyUsesManualCapsWhenAutoOff() {
     var settings = DemoNetworkSettings.defaults
-    settings.isTestnetModeEnabled = true
     settings.autoGasModeEnabled = false
     settings.sepoliaMaxFeePerGasGwei = "50"
     settings.sepoliaMaxPriorityFeePerGasGwei = "5"
@@ -196,21 +181,21 @@ private func freshStore() -> DemoSettingsStore {
     #expect(NetworkSettingsChangePolicy.requiresHeliosCheckpointResync(from: old, to: new) == false)
 }
 
-@Test func inactiveNetworkGasChangeDoesNotRequireWalletNodeRestart() {
-    var old = DemoNetworkSettings.defaults
-    old.isTestnetModeEnabled = true
-    var new = old
-    new.mainnetMaxFeePerGasGwei = "123"
-
-    #expect(NetworkSettingsChangePolicy.requiresWalletNodeRestart(from: old, to: new) == false)
-}
-
 @Test func autoCeilingIsValidAndGenerous() {
     let ceiling = WalletNodeDaemon.GasPolicy.autoCeiling
-    // priority <= max, and far above the mainnet default (10 gwei).
+    // Priority must not exceed max; the ceiling stays deliberately generous for live pricing.
     #expect(GasPricing.minWei(
         (try? Data.quantityString(ceiling.maxPriorityFeePerGas)) ?? Data(),
         (try? Data.quantityString(ceiling.maxFeePerGas)) ?? Data()
     ) == ((try? Data.quantityString(ceiling.maxPriorityFeePerGas).leftPadded(to: 32)) ?? Data()))
     #expect(Int(ceiling.maxFeePerGasGwei) ?? 0 >= 1000)
+}
+
+@Test func appNetworkIsAlwaysSepolia() {
+    let settings = DemoNetworkSettings.defaults
+
+    #expect(settings.activeChain.id == 11_155_111)
+    #expect(settings.activeNetworkName == "Ethereum Sepolia")
+    #expect(WalletTokenRegistry.tokens(on: 1).isEmpty)
+    #expect(SessionSwapRouterRegistry.routers(on: 1).isEmpty)
 }

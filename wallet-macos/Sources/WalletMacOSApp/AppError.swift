@@ -10,13 +10,13 @@ enum AppError: LocalizedError {
     case invalidPublicKeyFormat
     case invalidSignatureFormat
     case missingKeyReference
+    case walletKeyRecoveryRequired(WalletKeyRecoveryReason)
     case missingEntitlement
     case localDaemonNotConfigured
     case localDaemonLaunchFailed(String)
     case localRelayerKeyMissing
     case localRelayerKeyAuthorizationFailed
     case modelNotInstalled
-    case metadataKeyMismatch
     case corruptedMetadataStore
     case unsupportedSigningAlgorithm
     case walletOperationInProgress
@@ -27,6 +27,7 @@ enum AppError: LocalizedError {
     case userOperationTerminal(String)
     case userOperationReceiptReverted(String)
     case userAuthorizationCancelled
+    case privacyAccountLocked
     /// The account cannot cover EntryPoint's prefund floor for a consented
     /// gas-headroom `callGasLimit`. Thrown before the Secure Enclave is asked to
     /// sign; `ChatIntentExecutionStatus.prefundShortfall(from:)` turns it into a
@@ -53,6 +54,13 @@ enum AppError: LocalizedError {
             return "The generated signature is not a valid P-256 signature."
         case .missingKeyReference:
             return "The Secure Enclave key reference is missing from Keychain."
+        case let .walletKeyRecoveryRequired(reason):
+            switch reason {
+            case .missing:
+                return "The wallet's Secure Enclave key is unavailable to this app. Reset local wallet to create a new identity and continue."
+            case .mismatch:
+                return "The Secure Enclave key does not match this wallet's saved identity. Reset local wallet to create a new identity and continue."
+            }
         case .missingEntitlement:
             return "This Secure Enclave flow needs a signed macOS app bundle with an application identifier entitlement. Do not ad-hoc re-sign the app; use a properly signed packaged build, or open `LocalWallet.xcodeproj`, select a development team for `LocalWalletApp`, and run it from Xcode."
         case .localDaemonNotConfigured:
@@ -65,8 +73,6 @@ enum AppError: LocalizedError {
             return "Authorization for the local relayer key failed, so it could not be created or unlocked. Retry and approve the Touch ID prompt, or use your login password when offered. A relayer key created before this Mac's Touch ID enrollment changed may need to be replaced from Settings."
         case .modelNotInstalled:
             return "The selected local model file is not installed."
-        case .metadataKeyMismatch:
-            return "Stored wallet metadata does not match the loaded Secure Enclave key."
         case .corruptedMetadataStore:
             return "The wallet metadata file could not be decoded."
         case .unsupportedSigningAlgorithm:
@@ -87,6 +93,8 @@ enum AppError: LocalizedError {
             return reason
         case .userAuthorizationCancelled:
             return "Local authorization was cancelled or failed, so the action was not performed."
+        case .privacyAccountLocked:
+            return "Shielded balances are locked. Choose Unlock to view and approve local authentication."
         case let .prefundShortfall(report):
             // States the exact deficit rather than the daemon's
             // displayed_topup_minimum x1.2 figure (funding.rs:15): only one of the

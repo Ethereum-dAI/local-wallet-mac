@@ -123,7 +123,7 @@ private func gwei(_ data: Data) -> String { GasPricing.gweiText(fromWei: data) }
 }
 
 @Test func gweiTextKeepsSmallSubCentiGweiValues() {
-    // Mainnet's low-congestion priority floor is 0.001 gwei (1_000_000 wei).
+    // Very small priority fees such as 0.001 gwei (1_000_000 wei) remain visible.
     // It must NOT round to "0".
     #expect(GasPricing.gweiText(fromWei: Data.fromBigEndian(UInt64(1_000_000)).leftPadded(to: 32)) == "0.001")
     // Sub-gwei values keep up to 3 decimals.

@@ -72,7 +72,7 @@ final class SpawnHelperTests: XCTestCase {
         closeIfOpen(&readyPipe[1])
         closeIfOpen(&alivePipe[0])
         closeIfOpen(&secretPipe[0])
-        let payload = #"{"keys":[{"keyRef":"bundler-eoa:default:1:1","secret":"0x0101010101010101010101010101010101010101010101010101010101010101"}]}"#
+        let payload = #"{"keys":[]}"#
         writeAll(fd: secretPipe[1], data: Data(payload.utf8))
         closeIfOpen(&secretPipe[1])
 
@@ -194,10 +194,14 @@ private func defaultDaemonBinPath() -> String {
         .deletingLastPathComponent()
         .deletingLastPathComponent()
         .deletingLastPathComponent()
-    return packageRoot
+    let daemonTargetRoot = packageRoot
         .deletingLastPathComponent()
-        .appendingPathComponent("local-wallet-daemon/target/debug/wallet-node")
-        .path
+        .appendingPathComponent("local-wallet-daemon/target", isDirectory: true)
+    let candidates = [
+        daemonTargetRoot.appendingPathComponent("debug/wallet-node").path,
+        daemonTargetRoot.appendingPathComponent("release/wallet-node").path,
+    ]
+    return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? candidates[0]
 }
 
 private func setCloseOnExec(_ fd: Int32) throws {

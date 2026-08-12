@@ -138,6 +138,28 @@ async fn resolve_bundler_health(state: &DaemonState) -> Value {
         return bundler_not_ready(state, "bundler_eoa_missing");
     };
 
+    let key_loaded = match state.bundler_keys.is_key_loaded(&active.key_ref) {
+        Ok(key_loaded) => key_loaded,
+        Err(error) => {
+            tracing::warn!(error = %error, "bundler key-store lookup failed for health");
+            return bundler_not_ready(state, "bundler_key_store_unavailable");
+        }
+    };
+    if !key_loaded {
+        return json!({
+            "ready": false,
+            "entryPoints": state.config.bundler.entry_points,
+            "eoa": active.address,
+            "keyRef": active.key_ref,
+            "keyLoaded": false,
+            "balance": null,
+            "thresholdLow": THRESHOLD_LOW,
+            "needsTopup": false,
+            "lifecycle": active.lifecycle.as_str(),
+            "reason": "bundler_eoa_locked"
+        });
+    }
+
     let address = match active.address.parse() {
         Ok(address) => address,
         Err(error) => {
@@ -158,6 +180,8 @@ async fn resolve_bundler_health(state: &DaemonState) -> Value {
                 "ready": false,
                 "entryPoints": state.config.bundler.entry_points,
                 "eoa": active.address,
+                "keyRef": active.key_ref,
+                "keyLoaded": true,
                 "balance": null,
                 "thresholdLow": THRESHOLD_LOW,
                 "needsTopup": false,
@@ -217,6 +241,8 @@ async fn resolve_bundler_health(state: &DaemonState) -> Value {
         "ready": ready,
         "entryPoints": state.config.bundler.entry_points,
         "eoa": active.address,
+        "keyRef": active.key_ref,
+        "keyLoaded": true,
         "balance": wallet_bundler::gas::u256_hex(balance),
         "thresholdLow": THRESHOLD_LOW,
         "needsTopup": balance < threshold,
@@ -236,9 +262,11 @@ fn bundler_not_ready(state: &DaemonState, reason: &str) -> Value {
         "ready": false,
         "entryPoints": state.config.bundler.entry_points,
         "eoa": null,
+        "keyRef": null,
+        "keyLoaded": false,
         "balance": null,
         "thresholdLow": THRESHOLD_LOW,
-        "needsTopup": reason == "bundler_eoa_missing",
+        "needsTopup": false,
         "reason": reason
     })
 }
@@ -521,6 +549,8 @@ fn phase_one_starting_response(state: &DaemonState) -> Value {
             "ready": false,
             "entryPoints": [],
             "eoa": null,
+            "keyRef": null,
+            "keyLoaded": false,
             "balance": null,
             "thresholdLow": null,
             "needsTopup": false,
@@ -884,14 +914,43 @@ mod tests {
             .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
             .await
             .unwrap();
+        state.bundler_keys.create_key("bundler-eoa:1").unwrap();
         state.mark_state_override_smoke_passed();
 
         let value = handle(&state).await;
 
         assert_eq!(value["status"], STATUS_BUNDLER_READY);
         assert_eq!(value["bundler"]["ready"], true);
+        assert_eq!(value["bundler"]["keyLoaded"], true);
         assert_eq!(value["bundler"]["eoa"], bundler_eoa);
         assert_eq!(value["bundler"]["needsTopup"], false);
+    }
+
+    #[tokio::test]
+    async fn health_reports_funded_relayer_as_locked_when_ram_key_is_absent() {
+        let bundler_eoa = "0xbeef000000000000000000000000000000000000";
+        let address: Address = bundler_eoa.parse().unwrap();
+        let chain = synced_chain(100, 105);
+        chain.set_balance(
+            address,
+            BlockTag::Latest,
+            U256::from(5_000_000_000_000_000_u64),
+        );
+        let state = test_state(chain);
+        state
+            .store
+            .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
+            .await
+            .unwrap();
+        state.mark_state_override_smoke_passed();
+
+        let value = handle(&state).await;
+
+        assert_eq!(value["status"], STATUS_VERIFIED_READS_READY);
+        assert_eq!(value["bundler"]["ready"], false);
+        assert_eq!(value["bundler"]["keyLoaded"], false);
+        assert_eq!(value["bundler"]["reason"], "bundler_eoa_locked");
+        assert_eq!(value["bundler"]["eoa"], bundler_eoa);
     }
 
     #[tokio::test]
@@ -910,6 +969,7 @@ mod tests {
             .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
             .await
             .unwrap();
+        state.bundler_keys.create_key("bundler-eoa:1").unwrap();
         state.mark_state_override_smoke_passed();
 
         let user_op_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -985,6 +1045,7 @@ mod tests {
             .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
             .await
             .unwrap();
+        state.bundler_keys.create_key("bundler-eoa:1").unwrap();
         state.mark_state_override_smoke_passed();
 
         let value = handle(&state).await;
@@ -1044,6 +1105,7 @@ mod tests {
             .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
             .await
             .unwrap();
+        state.bundler_keys.create_key("bundler-eoa:1").unwrap();
 
         let value = handle(&state).await;
 
@@ -1068,6 +1130,7 @@ mod tests {
             .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
             .await
             .unwrap();
+        state.bundler_keys.create_key("bundler-eoa:1").unwrap();
         state.mark_state_override_smoke_failed("state override unavailable");
 
         let value = handle(&state).await;

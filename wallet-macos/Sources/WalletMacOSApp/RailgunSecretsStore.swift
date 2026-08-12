@@ -11,12 +11,14 @@ struct RailgunSecrets: Equatable {
     let entropyHex: String
 }
 
-/// Stores the RAILGUN entropy in the Keychain, biometric-gated (`.biometryCurrentSet`,
-/// device-only), generating it once on first use. Replaces the prior plaintext-JSON store;
-/// a legacy `railgun-secrets.json` is deleted on first use.
+/// Stores the RAILGUN entropy in the device-only Keychain behind device-owner authentication,
+/// generating it once on first use. Replaces the prior plaintext-JSON store; a legacy
+/// `railgun-secrets.json` is deleted on first use.
 enum RailgunSecretsStore {
     static let defaultService = "com.localwallet.railgun-seed.app"
-    static let defaultAccount = "railgun-seed:v1"
+    static let defaultAccount = "railgun-seed:v2"
+    static let legacyBiometricAccount = "railgun-seed:v1"
+    static let secretAccessFlags: SecAccessControlCreateFlags = [.userPresence]
 
     enum StoreError: LocalizedError {
         case entropy(String)
@@ -32,12 +34,51 @@ enum RailgunSecretsStore {
     static func loadOrCreate(
         directory: URL? = nil,
         service: String = defaultService,
-        account: String = defaultAccount
+        account: String = defaultAccount,
+        authenticationContext: LAContext? = nil
     ) throws -> RailgunSecrets {
         deleteLegacyFile(directory: directory)
-        if let hex = try readEntropyHex(service: service, account: account) {
+        let ownsContext = authenticationContext == nil
+        let context = authenticationContext ?? LAContext()
+        if ownsContext {
+            context.localizedReason = "Unlock your RAILGUN privacy account"
+        }
+        defer {
+            if ownsContext {
+                context.invalidate()
+            }
+        }
+
+        if let hex = try readEntropyHex(
+            service: service,
+            account: account,
+            authenticationContext: context
+        ) {
             return RailgunSecrets(entropyHex: hex)
         }
+
+        // v1 used `.biometryCurrentSet`. Keep that item until a v2 `.userPresence` copy has
+        // been written and read back through the same action context, so a failed migration
+        // cannot destroy the user's privacy seed.
+        if account == defaultAccount,
+           let legacyHex = try readEntropyHex(
+               service: service,
+               account: legacyBiometricAccount,
+               authenticationContext: context
+           ) {
+            try addEntropyHex(legacyHex, service: service, account: account)
+            guard try readEntropyHex(
+                service: service,
+                account: account,
+                authenticationContext: context
+            ) == legacyHex else {
+                try? delete(service: service, account: account)
+                throw StoreError.entropy("privacy-seed migration verification failed")
+            }
+            try delete(service: service, account: legacyBiometricAccount)
+            return RailgunSecrets(entropyHex: legacyHex)
+        }
+
         let hex = try makeEntropyHex()
         try addEntropyHex(hex, service: service, account: account)
         return RailgunSecrets(entropyHex: hex)
@@ -49,9 +90,9 @@ enum RailgunSecretsStore {
         account: String = defaultAccount
     ) throws {
         deleteLegacyFile(directory: directory)
-        let status = SecItemDelete(baseQuery(service: service, account: account) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw StoreError.keychain(status)
+        try delete(service: service, account: account)
+        if account == defaultAccount {
+            try delete(service: service, account: legacyBiometricAccount)
         }
     }
 
@@ -85,7 +126,7 @@ enum RailgunSecretsStore {
         guard let access = SecAccessControlCreateWithFlags(
             nil,
             kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            [.biometryCurrentSet],
+            secretAccessFlags,
             &accessError
         ) else {
             throw accessError!.takeRetainedValue() as Error
@@ -94,45 +135,55 @@ enum RailgunSecretsStore {
         query[kSecValueData as String] = Data(hex.utf8)
         query[kSecAttrAccessControl as String] = access
         let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else { throw StoreError.keychain(status) }
+        guard status == errSecSuccess else { throw mapSecurityStatus(status) }
     }
 
     private static func readEntropyHex(
         service: String = defaultService,
-        account: String = defaultAccount
+        account: String = defaultAccount,
+        authenticationContext: LAContext
     ) throws -> String? {
         // Attribute-only presence check first (never prompts).
         var presence = baseQuery(service: service, account: account)
         presence[kSecMatchLimit as String] = kSecMatchLimitOne
         let hasItem = SecItemCopyMatching(presence as CFDictionary, nil)
         if hasItem == errSecItemNotFound { return nil }
-        guard hasItem == errSecSuccess else { throw StoreError.keychain(hasItem) }
-
-        // Biometric-gated read, with a context created and dropped inside this
-        // call: no reuse window, so every read of the spending entropy prompts.
-        //
-        // Deliberately NOT a `BiometricAuthenticationContexts` domain. This is the
-        // root every ephemeral per-exit sender is derived from, and it is read
-        // once per sidecar launch — so a reuse window would suppress almost no
-        // prompts while leaving a five-minute period in which spending material
-        // could be unlocked with nobody present. See `Domain` for the bar.
-        let reason = "Unlock your RAILGUN privacy account"
-        BiometricPromptLog.shared.record(reason: reason, reusable: false)
-        let context = LAContext()
-        context.localizedReason = reason
+        guard hasItem == errSecSuccess else { throw mapSecurityStatus(hasItem) }
 
         var query = baseQuery(service: service, account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
-        query[kSecUseAuthenticationContext as String] = context
+        query[kSecUseAuthenticationContext as String] = authenticationContext
 
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         guard status == errSecSuccess, let data = result as? Data,
               let hex = String(data: data, encoding: .utf8) else {
-            throw StoreError.keychain(status)
+            throw mapSecurityStatus(status)
         }
         return hex
+    }
+
+    private static func delete(service: String, account: String) throws {
+        let status = SecItemDelete(baseQuery(service: service, account: account) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw mapSecurityStatus(status)
+        }
+    }
+
+    static func describeSecurityStatus(_ status: OSStatus) -> Error {
+        switch status {
+        case errSecMissingEntitlement:
+            return AppError.missingEntitlement
+        case errSecUserCanceled, errSecAuthFailed:
+            return AppError.userAuthorizationCancelled
+        default:
+            return StoreError.keychain(status)
+        }
+    }
+
+    private static func mapSecurityStatus(_ status: OSStatus) -> Error {
+        describeSecurityStatus(status)
     }
 
     static func deleteLegacyFile(directory: URL? = nil) {

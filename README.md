@@ -147,7 +147,7 @@ The current demo exercises two complementary layers — wallet plumbing and a lo
 - Local UserOperation building for native ETH transfers, ERC-20 transfers, exact-input Uniswap v3 swaps, and approval+swap batches when ERC-20 input swaps need allowance
 - Session-key policy settings for ETH caps, ERC-20 token caps, SwapRouter02 approvals, rate limits, gas budget, session duration, and inactivity timeout
 - Touch ID approval to enable or revoke session-key permissions, with the first in-policy action lazily installing the permission on-chain when needed
-- Local `wallet-node` submission through the app-owned bundler EOA on Sepolia or mainnet
+- Local `wallet-node` submission through the app-owned bundler EOA on Sepolia; Mainnet is coming soon in the macOS product
 - Local daemon integration for bundler EOA admin (rotate/export/delete), Helios-backed reads, gas estimation, submission, and receipt polling
 
 **Local LLM and tool intent layer:**

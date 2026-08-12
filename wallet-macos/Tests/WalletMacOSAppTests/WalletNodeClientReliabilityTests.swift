@@ -232,6 +232,47 @@ private func stubbedClient() -> WalletNodeClient {
     #expect(status.replacement == nil)
 }
 
+@Test func decodesManagedDaemonRelayerLockState() throws {
+    let json: [String: Any] = [
+        "ready": false,
+        "keyLoaded": false,
+        "ownerScope": "default",
+        "chainId": 11_155_111,
+        "networkProfile": "sepolia",
+        "eoa": "0xabc",
+        "balance": "0x1",
+        "thresholdLow": "0x0",
+        "needsTopup": false,
+        "lifecycle": "active",
+    ]
+    let status = try WalletNodeClient.RelayerStatus(json: json)
+    #expect(status.keyLoaded == false)
+    #expect(status.ready == false)
+    #expect(status.reason == nil)
+}
+
+@Test func decodesFreshReadOnlyDaemonWithoutAnActiveRelayer() throws {
+    let json: [String: Any] = [
+        "ready": false,
+        "reason": "bundler_eoa_missing",
+        "keyLoaded": false,
+        "ownerScope": "default",
+        "chainId": 11_155_111,
+        "networkProfile": "sepolia",
+        "eoa": NSNull(),
+        "keyRef": NSNull(),
+        "balance": "unavailable",
+        "thresholdLow": "0x11c37937e08000",
+        "needsTopup": false,
+        "lifecycle": NSNull(),
+    ]
+    let status = try WalletNodeClient.RelayerStatus(json: json)
+    #expect(status.eoa == "Not available")
+    #expect(status.lifecycle == "missing")
+    #expect(status.keyLoaded == false)
+    #expect(status.reason == "bundler_eoa_missing")
+}
+
 @Test func cancelPendingOperationSendsRpcAndReturnsTxHash() async throws {
     let txHash = try await stubbedClient().cancelPendingOperation(userOpHash: "0xbeef")
     #expect(txHash == "0xcancelTx")

@@ -13,8 +13,46 @@ import Testing
     #expect(timing.hasTimedOut(elapsed: 1_800) == true)
 }
 
-@Test func onboardingRelayerUnlockCacheCoversSyncTimeoutHandoff() {
-    #expect(BundlerSecretPromptReusePolicy.onboardingHandoffCacheTTL >= OnboardingChainReadinessTiming.default.timeout)
+@Test func onboardingReadinessLaunchesReadOnlyWithoutReadingProtectedRelayerKeys() throws {
+    let source = try appSource(named: "OnboardingChainReadiness.swift")
+
+    #expect(source.contains("bundlerSecrets: []"))
+    #expect(source.contains("BundlerKeyStore.shared") == false)
+    #expect(source.contains("unlockAllForOnboardingDaemonLaunch") == false)
+}
+
+@Test func walletNodeDaemonAcceptsAnEmptyReadOnlySecretPayload() throws {
+    let source = try appSource(named: "WalletNodeDaemon.swift")
+    let data = try WalletNodeDaemon.secretPayloadData([])
+    let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    let keys = try #require(object["keys"] as? [Any])
+
+    #expect(keys.isEmpty)
+    #expect(source.contains("guard !bundlerSecrets.isEmpty") == false)
+}
+
+@Test func onboardingReadinessCopyDescribesReadOnlyStartupWithoutAuthenticationWarning() throws {
+    let source = try appSource(named: "OnboardingView.swift")
+
+    #expect(source.contains("Starting wallet-node in read-only mode."))
+    #expect(source.contains("Unlocking the bundler key and starting the local daemon.") == false)
+    #expect(source.contains("macOS may ask for biometric authentication to unlock the local bundler key.") == false)
+}
+
+@Test func onboardingShowsMainnetAsComingSoonButCannotSelectIt() {
+    #expect(OnboardingNetworkOption.sepolia.isEnabled)
+    #expect(OnboardingNetworkOption.sepolia.badge == nil)
+    #expect(OnboardingNetworkOption.mainnet.isEnabled == false)
+    #expect(OnboardingNetworkOption.mainnet.badge == "Coming soon")
+}
+
+@Test func onboardingRPCFieldsExposeRequirementAndHelpMetadata() {
+    #expect(OnboardingRPCField.execution.isRequired)
+    #expect(OnboardingRPCField.consensus.isRequired == false)
+    #expect(OnboardingRPCField.archive.isRequired == false)
+    #expect(OnboardingRPCField.execution.helpText.contains("transaction preparation"))
+    #expect(OnboardingRPCField.consensus.helpText.contains("Helios verified reads"))
+    #expect(OnboardingRPCField.archive.helpText.contains("historical reads"))
 }
 
 @Test func networkStatusDecodesHeliosReadyHealthShape() throws {
@@ -60,8 +98,8 @@ import Testing
 @Test func networkStatusDecodesP256PrecompileAvailable() throws {
     let status = try WalletNodeClient.NetworkStatus(json: [
         "status": "bundler_ready",
-        "chainId": 1,
-        "networkProfile": "mainnet",
+        "chainId": 11_155_111,
+        "networkProfile": "sepolia",
         "helios": [
             "ready": true,
             "checkpointLoaded": true,
@@ -80,8 +118,8 @@ import Testing
 @Test func networkStatusDecodesP256PrecompileUnavailableWithReason() throws {
     let status = try WalletNodeClient.NetworkStatus(json: [
         "status": "bundler_ready",
-        "chainId": 1,
-        "networkProfile": "mainnet",
+        "chainId": 11_155_111,
+        "networkProfile": "sepolia",
         "helios": [
             "ready": true,
             "checkpointLoaded": true,
@@ -101,8 +139,8 @@ import Testing
 @Test func networkStatusTreatsMissingP256PrecompileAsNil() throws {
     let status = try WalletNodeClient.NetworkStatus(json: [
         "status": "bundler_ready",
-        "chainId": 1,
-        "networkProfile": "mainnet",
+        "chainId": 11_155_111,
+        "networkProfile": "sepolia",
         "helios": [
             "ready": true,
             "checkpointLoaded": true,
@@ -115,8 +153,8 @@ import Testing
 @Test func networkStatusDecodesSyncingHealthShape() throws {
     let status = try WalletNodeClient.NetworkStatus(json: [
         "status": "syncing_consensus",
-        "chainId": 1,
-        "networkProfile": "mainnet",
+        "chainId": 11_155_111,
+        "networkProfile": "sepolia",
         "helios": [
             "ready": false,
             "checkpointLoaded": false,
@@ -132,8 +170,8 @@ import Testing
     ])
 
     #expect(status.status == "syncing_consensus")
-    #expect(status.chainId == 1)
-    #expect(status.networkProfile == "mainnet")
+    #expect(status.chainId == 11_155_111)
+    #expect(status.networkProfile == "sepolia")
     #expect(status.readVerification.mode == "helios")
     #expect(status.readVerification.verified)
     #expect(status.helios.ready == false)
@@ -178,4 +216,15 @@ import Testing
     #expect(summary.contains("head=#7654321"))
     #expect(summary.contains("bundler.reason=bundler_eoa_needs_topup"))
     #expect(summary.contains("reason=helios_lagging"))
+}
+
+private func appSource(named fileName: String) throws -> String {
+    let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let fileURL = packageRoot
+        .appendingPathComponent("Sources/WalletMacOSApp", isDirectory: true)
+        .appendingPathComponent(fileName)
+    return try String(contentsOf: fileURL, encoding: .utf8)
 }

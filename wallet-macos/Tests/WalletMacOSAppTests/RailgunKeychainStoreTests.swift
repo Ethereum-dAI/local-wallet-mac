@@ -1,4 +1,5 @@
 import XCTest
+import Security
 @testable import WalletMacOSApp
 
 // Non-prompting coverage only: SecItemAdd/Delete and attribute-only queries do not evaluate
@@ -22,6 +23,29 @@ final class RailgunKeychainStoreTests: XCTestCase {
     func testClearIsIdempotentWhenAbsent() throws {
         try RailgunSecretsStore.clear(service: Self.testService)
         try RailgunSecretsStore.clear(service: Self.testService) // must not throw when nothing is stored
+    }
+
+    func testPrivacySeedAllowsDeviceOwnerAuthenticationFallback() {
+        let flags = RailgunSecretsStore.secretAccessFlags
+        XCTAssertTrue(flags.contains(.userPresence))
+        XCTAssertFalse(flags.contains(.biometryCurrentSet))
+        XCTAssertNotEqual(
+            RailgunSecretsStore.defaultAccount,
+            RailgunSecretsStore.legacyBiometricAccount
+        )
+    }
+
+    func testPrivacyAuthenticationCancellationHasFriendlyError() {
+        guard case .userAuthorizationCancelled? = RailgunSecretsStore
+            .describeSecurityStatus(errSecUserCanceled) as? AppError
+        else {
+            return XCTFail("Cancellation should map to the shared friendly authorization error")
+        }
+        guard case .userAuthorizationCancelled? = RailgunSecretsStore
+            .describeSecurityStatus(errSecAuthFailed) as? AppError
+        else {
+            return XCTFail("Authentication failure should map to the shared friendly error")
+        }
     }
 
     func testLegacyPlaintextFileIsDeleted() throws {

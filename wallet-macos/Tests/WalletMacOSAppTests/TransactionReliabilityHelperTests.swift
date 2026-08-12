@@ -5,8 +5,8 @@ import Testing
 
 private func record(_ hash: String, status: WalletTransactionStatus = .submitted) -> WalletTransactionRecord {
     WalletTransactionRecord(
-        chainID: 1,
-        chainName: "Ethereum Mainnet",
+        chainID: 11_155_111,
+        chainName: "Ethereum Sepolia",
         accountAddress: "0xabc0000000000000000000000000000000000000",
         operation: .transfer,
         status: status,
@@ -287,22 +287,6 @@ private func userOpStatus(
         retryAfter: retryAfter
     ) == false)
     #expect(WalletNodeLaunchFailureGate.retryAfter(now: now, cooldown: 4) == retryAfter)
-}
-
-@Test func bundlerSecretPromptReusePolicyUsesShortWindows() {
-    let now = Date(timeIntervalSince1970: 200)
-    let expiresAt = BundlerSecretPromptReusePolicy.expiry(now: now, ttl: 10)
-    let retryAfter = BundlerSecretPromptReusePolicy.retryAfter(now: now, cooldown: 4)
-
-    #expect(BundlerSecretPromptReusePolicy.shouldUseCached(
-        now: Date(timeIntervalSince1970: 209),
-        expiresAt: expiresAt
-    ))
-    #expect(BundlerSecretPromptReusePolicy.shouldUseCached(
-        now: Date(timeIntervalSince1970: 210),
-        expiresAt: expiresAt
-    ) == false)
-    #expect(retryAfter == Date(timeIntervalSince1970: 204))
 }
 
 @Test func clampPrefersHigherOptimisticNonce() {

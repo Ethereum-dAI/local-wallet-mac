@@ -47,6 +47,31 @@ import Testing
     #expect(aggregated?.failures.first?.step == "secure-enclave-key")
 }
 
+@Test func demoFactoryResetClearsOnlyWalletNodeSQLiteState() throws {
+    let fileManager = FileManager.default
+    let support = fileManager.temporaryDirectory
+        .appendingPathComponent("wallet-node-reset-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fileManager.removeItem(at: support) }
+    let daemonDirectory = support
+        .appendingPathComponent("Local Wallet", isDirectory: true)
+        .appendingPathComponent("wallet-node", isDirectory: true)
+    try fileManager.createDirectory(at: daemonDirectory, withIntermediateDirectories: true)
+
+    for fileName in WalletNodeManagedStoreCleanup.databaseFileNames + ["config.toml"] {
+        try Data(fileName.utf8).write(to: daemonDirectory.appendingPathComponent(fileName))
+    }
+
+    try WalletNodeManagedStoreCleanup.clear(
+        fileManager: fileManager,
+        applicationSupportDirectory: support
+    )
+
+    for fileName in WalletNodeManagedStoreCleanup.databaseFileNames {
+        #expect(!fileManager.fileExists(atPath: daemonDirectory.appendingPathComponent(fileName).path))
+    }
+    #expect(fileManager.fileExists(atPath: daemonDirectory.appendingPathComponent("config.toml").path))
+}
+
 @Test func resetWarnsWhenUnexpiredOnchainSessionPermissionExists() {
     let now = Date(timeIntervalSince1970: 1_700_000_000)
     let active = SessionRecord(
@@ -86,30 +111,6 @@ import Testing
     #expect(SessionResetPolicy.unexpiredSessionWarning(records: [], now: now) == nil)
     #expect(SessionResetPolicy.unexpiredSessionWarning(records: [expired], now: now) == nil)
     #expect(SessionResetPolicy.unexpiredSessionWarning(records: [neverInstalled], now: now) == nil)
-}
-
-// MARK: - Daemon launch installs every stored relayer key for the chain (B-1)
-
-@Test func launchKeyRefsFilterToChainAndSortByIndex() {
-    let available = [
-        "bundler-eoa:default:11155111:2",
-        "bundler-eoa:default:1:1",
-        "bundler-eoa:default:11155111:1",
-        "bundler-eoa:default:11155111:10",
-        "session-key:11155111:0xabc",
-        "bundler-eoa:default:11155111",
-        "bundler-eoa:default:11155111:x",
-    ]
-
-    #expect(BundlerLaunchKeyPolicy.launchKeyRefs(chainId: 11_155_111, available: available) == [
-        "bundler-eoa:default:11155111:1",
-        "bundler-eoa:default:11155111:2",
-        "bundler-eoa:default:11155111:10",
-    ])
-    #expect(BundlerLaunchKeyPolicy.launchKeyRefs(chainId: 1, available: available) == [
-        "bundler-eoa:default:1:1",
-    ])
-    #expect(BundlerLaunchKeyPolicy.launchKeyRefs(chainId: 5, available: available).isEmpty)
 }
 
 @Test func chainIdParsesOnlyFromWellFormedBundlerKeyRefs() {
@@ -160,7 +161,6 @@ import Testing
     let listed = try store.listKeyRefs()
     #expect(listed.contains(first))
     #expect(listed.contains(second))
-    #expect(BundlerLaunchKeyPolicy.launchKeyRefs(chainId: chainId, available: listed) == [first, second])
 }
 
 // MARK: - Relayer identity cache is chain-scoped (B-2)
@@ -181,8 +181,8 @@ private func withTestDefaults(_ body: (UserDefaults) throws -> Void) rethrows {
 
         #expect(store.bundlerKeyRef(chainId: 11_155_111) == "bundler-eoa:default:11155111:1")
         #expect(store.bundlerAddress(chainId: 11_155_111) == "0x1111111111111111111111111111111111111111")
-        #expect(store.bundlerKeyRef(chainId: 1) == nil)
-        #expect(store.bundlerAddress(chainId: 1) == nil)
+        #expect(store.bundlerKeyRef(chainId: 31_337) == nil)
+        #expect(store.bundlerAddress(chainId: 31_337) == nil)
     }
 }
 
@@ -192,8 +192,8 @@ private func withTestDefaults(_ body: (UserDefaults) throws -> Void) rethrows {
         defaults.set("0xabcabcabcabcabcabcabcabcabcabcabcabcabca", forKey: "com.localwallet.demo.onboarding.bundler-address")
         let store = OnboardingSettingsStore(defaults: defaults)
 
-        #expect(store.bundlerKeyRef(chainId: 1) == nil)
-        #expect(store.bundlerAddress(chainId: 1) == nil)
+        #expect(store.bundlerKeyRef(chainId: 31_337) == nil)
+        #expect(store.bundlerAddress(chainId: 31_337) == nil)
 
         #expect(store.bundlerKeyRef(chainId: 11_155_111) == "bundler-eoa:default:11155111:1")
         #expect(store.bundlerAddress(chainId: 11_155_111) == "0xabcabcabcabcabcabcabcabcabcabcabcabcabca")
@@ -206,15 +206,15 @@ private func withTestDefaults(_ body: (UserDefaults) throws -> Void) rethrows {
 @Test func clearBundlerCacheRemovesPerChainAndLegacyEntries() {
     withTestDefaults { defaults in
         let store = OnboardingSettingsStore(defaults: defaults)
-        store.setBundlerKeyRef("bundler-eoa:default:1:1", chainId: 1)
-        store.setBundlerAddress("0x1111111111111111111111111111111111111111", chainId: 1)
+        store.setBundlerKeyRef("bundler-eoa:default:31337:1", chainId: 31_337)
+        store.setBundlerAddress("0x1111111111111111111111111111111111111111", chainId: 31_337)
         defaults.set("bundler-eoa:default:11155111:1", forKey: "com.localwallet.demo.onboarding.bundler-key-ref")
         defaults.set("0xabcabcabcabcabcabcabcabcabcabcabcabcabca", forKey: "com.localwallet.demo.onboarding.bundler-address")
 
-        store.clearBundlerCache(chainIds: [1, 11_155_111])
+        store.clearBundlerCache(chainIds: [31_337, 11_155_111])
 
-        #expect(store.bundlerKeyRef(chainId: 1) == nil)
-        #expect(store.bundlerAddress(chainId: 1) == nil)
+        #expect(store.bundlerKeyRef(chainId: 31_337) == nil)
+        #expect(store.bundlerAddress(chainId: 31_337) == nil)
         #expect(store.bundlerKeyRef(chainId: 11_155_111) == nil)
         #expect(store.bundlerAddress(chainId: 11_155_111) == nil)
         #expect(defaults.string(forKey: "com.localwallet.demo.onboarding.bundler-key-ref") == nil)

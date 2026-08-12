@@ -1,11 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Scheme
    LastUpgradeVersion = "1430"
-   version = "1.7">
+   version = "1.3">
    <BuildAction
       parallelizeBuildables = "YES"
-      buildImplicitDependencies = "YES"
-      runPostActionsOnFailure = "NO">
+      buildImplicitDependencies = "YES">
       <BuildActionEntries>
          <BuildActionEntry
             buildForTesting = "YES"
@@ -16,7 +15,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "E452B96A10C6DDCB48F775D4"
-               BuildableName = "LocalWalletApp.app"
+               BuildableName = "Local Wallet.app"
                BlueprintName = "LocalWalletApp"
                ReferencedContainer = "container:LocalWallet.xcodeproj">
             </BuildableReference>
@@ -27,13 +26,12 @@
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
-      shouldUseLaunchSchemeArgsEnv = "YES"
-      onlyGenerateCoverageForSpecifiedTargets = "NO">
+      shouldUseLaunchSchemeArgsEnv = "YES">
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "E452B96A10C6DDCB48F775D4"
-            BuildableName = "LocalWalletApp.app"
+            BuildableName = "Local Wallet.app"
             BlueprintName = "LocalWalletApp"
             ReferencedContainer = "container:LocalWallet.xcodeproj">
          </BuildableReference>
@@ -56,13 +54,11 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "E452B96A10C6DDCB48F775D4"
-            BuildableName = "LocalWalletApp.app"
+            BuildableName = "Local Wallet.app"
             BlueprintName = "LocalWalletApp"
             ReferencedContainer = "container:LocalWallet.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
-      <CommandLineArguments>
-      </CommandLineArguments>
       <EnvironmentVariables>
          <EnvironmentVariable
             key = "LOCAL_WALLET_NODE_BIN"
@@ -87,7 +83,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "E452B96A10C6DDCB48F775D4"
-            BuildableName = "LocalWalletApp.app"
+            BuildableName = "Local Wallet.app"
             BlueprintName = "LocalWalletApp"
             ReferencedContainer = "container:LocalWallet.xcodeproj">
          </BuildableReference>

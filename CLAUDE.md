@@ -109,7 +109,7 @@ Send path order inside the daemon: parse → policy/allowlist/gas-cap → same-b
 
 - **ZeroDev Kernel v3.3** smart account, **WebAuthn/passkey (P-256) root validator** (Secure Enclave). Generic Kernel addresses live in `local-wallet-protocol/crates/wallet-addresses`; the **app-pinned** factory/impl/validator allowlist lives in `local-wallet-daemon/crates/wallet-bundler/src/allowlist.rs`.
 - **Session keys** = the `permission(0x02)` modular-permission module: a local ECDSA key (Keychain, used by the LLM agent) granted a scoped, time/budget-bounded permission. Encoding (policy helpers, `permission_id`, `encode_enable_data`, `enable_digest`, nonce-key, revocation) is in `wallet-kernel`/`wallet-signature` `permission.rs`.
-- **Chains: Ethereum Mainnet (1) and Sepolia (11155111) only.** No paymasters; `nonce key = 0`; ETH transfer is the only fork-tested execution path. Enforced in both `wallet-node` config and Swift `SmartAccountConfiguration`.
+- **Chains:** the macOS product is Sepolia-only (`11155111`); Mainnet is disabled and marked coming soon in onboarding. The lower-level `wallet-node` and protocol layers retain Ethereum Mainnet (`1`) support and fork coverage. No paymasters; `nonce key = 0`; ETH transfer is the only fork-tested execution path.
 
 ### Daemon internals worth knowing
 

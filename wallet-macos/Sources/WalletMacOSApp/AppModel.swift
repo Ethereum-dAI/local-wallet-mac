@@ -1,5 +1,4 @@
 import Foundation
-import LocalAuthentication
 import WalletToolLayer
 import WalletSignature
 
@@ -21,6 +20,15 @@ enum SessionSigningPasskeyReason: Equatable {
 enum SessionSigningPreview: Equatable {
     case session(SessionSigningPreviewMode)
     case passkey(SessionSigningPasskeyReason)
+}
+
+enum WalletResetDestination: Equatable {
+    case dashboard
+    case onboarding
+
+    var recreatesRelayer: Bool { self == .dashboard }
+    var rebootstrapsWallet: Bool { self == .dashboard }
+    var marksOnboardingIncomplete: Bool { self == .onboarding }
 }
 
 // AppModel drives the signed macOS demo shell. It is intentionally opinionated
@@ -48,6 +56,7 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var walletRecord: WalletRecord?
+    @Published private(set) var walletRecoveryReason: WalletKeyRecoveryReason?
     @Published private(set) var bridgeStatus = "Not checked"
     @Published private(set) var lastError: String?
     @Published private(set) var isBootstrapping = false
@@ -55,6 +64,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var isRefreshingBalance = false
     @Published private(set) var isBuildingUserOperation = false
     @Published private(set) var isSendingUserOperation = false
+    @Published private(set) var isResettingWallet = false
     @Published private(set) var configuration: DemoAppConfiguration
     @Published private(set) var accountInspection: AccountInspection?
     @Published private(set) var transactionComposer = TransactionComposerState()
@@ -66,11 +76,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var debugLogText = ""
     @Published private(set) var localRelayerStatus: WalletNodeClient.RelayerStatus?
     @Published private(set) var localRelayerMessage = "Local daemon not connected"
+    @Published private(set) var relayerAccessState: RelayerAccessState = .locked
     @Published private(set) var isRefreshingLocalRelayer = false
     @Published private(set) var isRotatingLocalRelayer = false
     @Published private(set) var isExportingLocalRelayer = false
     @Published private(set) var isDeletingLocalRelayer = false
-    @Published private(set) var unlockRelayerOnLaunch: Bool
+    @Published private(set) var isReplacingPendingOperation = false
     @Published private(set) var swapSlippageBps: UInt64
     @Published private(set) var liveGasPrice: WalletNodeClient.UserOperationGasPrice?
     @Published private(set) var liveBaseFeeWei: Data?
@@ -104,7 +115,7 @@ final class AppModel: ObservableObject {
     /// five-flag condition — it was open-coded in three places plus `WalletIdleGate`, so a sixth
     /// in-flight flag would have had to be added to each of them.
     var isWalletIdle: Bool {
-        WalletIdleGate.allowed(
+        !isResettingWallet && WalletIdleGate.allowed(
             isBootstrapping: isBootstrapping,
             isRunningDemo: isRunningDemo,
             isRefreshingBalance: isRefreshingBalance,
@@ -118,6 +129,7 @@ final class AppModel: ObservableObject {
     }
 
     private let keyStore: KeyStore
+    private let walletKeyValidator: WalletKeyValidator
     private let metadataStore: WalletMetadataStore
     private let settingsStore: DemoSettingsStore
     private let onboardingSettingsStore: OnboardingSettingsStore
@@ -125,11 +137,17 @@ final class AppModel: ObservableObject {
     private var walletNodeClient: WalletNodeClient?
     private var walletNodeDaemon: WalletNodeDaemon?
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
+    private var walletNodeLaunchID: UUID?
     private var walletNodeLaunchFailure: WalletNodeLaunchFailure?
+    private var walletNodeGeneration: UInt64 = 0
+    private var relayerInstallTask: Task<WalletNodeClient, Error>?
+    private var relayerStatusRefreshToken = UUID()
     private var optimisticNextNonce: [String: UInt64] = [:]
     private var pendingSessionInstallByUserOpHash: [String: SessionRecord] = [:]
     private var pendingSessionRevokeByUserOpHash: [String: SessionRecord] = [:]
     private var reconcilerTask: Task<Void, Never>?
+    private var secretResetQuiescenceHandler: (@MainActor () async throws -> Void)?
+    private var secretRuntimeLockHandler: (@MainActor () async -> Void)?
     /// Last event-driven balance read, for the coalescing floor in `refreshAccountBalanceQuietly`.
     private var lastBackgroundBalanceReadAt: Date?
     private var lastGasIndicatorReadAt: Date?
@@ -182,6 +200,7 @@ final class AppModel: ObservableObject {
         metadataStore: WalletMetadataStore = WalletMetadataStore(),
         settingsStore: DemoSettingsStore = DemoSettingsStore(),
         onboardingSettingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
+        walletKeyValidator: WalletKeyValidator? = nil,
         kernelAccountAddressPredictor: KernelAccountAddressPredictor = KernelAccountAddressPredictor(),
         walletNodeClient: WalletNodeClient? = WalletNodeClient.Configuration.fromEnvironment().map {
             WalletNodeClient(configuration: $0)
@@ -190,6 +209,7 @@ final class AppModel: ObservableObject {
         walletHistoryStore: WalletTransactionHistoryStore = WalletTransactionHistoryStore()
     ) {
         self.keyStore = keyStore
+        self.walletKeyValidator = walletKeyValidator ?? WalletKeyValidator(keyStore: keyStore)
         self.metadataStore = metadataStore
         self.settingsStore = settingsStore
         self.onboardingSettingsStore = onboardingSettingsStore
@@ -198,7 +218,6 @@ final class AppModel: ObservableObject {
         self.userOperationBuilder = userOperationBuilder
         self.walletHistoryStore = walletHistoryStore
         self.configuration = DemoAppConfiguration(networkSettings: settingsStore.networkSettings)
-        self.unlockRelayerOnLaunch = settingsStore.unlockRelayerOnLaunch
         self.swapSlippageBps = settingsStore.swapSlippageBps
         self.localRelayerMessage = walletNodeClient == nil
             ? "Local wallet-node daemon will start on refresh."
@@ -213,6 +232,7 @@ final class AppModel: ObservableObject {
         appendSection("Bootstrap")
 
         isBootstrapping = true
+        walletRecoveryReason = nil
         lastError = nil
         accountInspection = nil
         builtUserOperationDraft = nil
@@ -232,32 +252,13 @@ final class AppModel: ObservableObject {
             if let existing = try metadataStore.load() {
                 appendLog("bootstrap: loaded wallet metadata for \(existing.walletId.uuidString)")
 
-                if existing.keyTag != keyStore.keyTag {
-                    appendLog("bootstrap: stored metadata does not match the current Secure Enclave key")
-
-                    let hasExistingKey = try keyStore.loadKey() != nil
-                    guard !hasExistingKey else {
-                        appendLog("bootstrap: refusing automatic recovery because an existing key was loaded")
-                        throw AppError.metadataKeyMismatch
-                    }
-
-                    let coordinates = try keyStore.createOrLoadPublicKeyCoordinates()
-                    appendLog("bootstrap: public key x=\(coordinates.x.shortHex) y=\(coordinates.y.shortHex)")
-
-                    appendLog("bootstrap: replacing stale metadata for the newly created key")
-                    try metadataStore.clear()
-
-                    let created = try createFreshWalletRecord(coordinates: coordinates, now: now)
-                    try metadataStore.save(created)
-                    walletRecord = created
-                        appendLog("bootstrap: stored new wallet record with predicted account \(created.kernelAccountAddress ?? "unavailable")")
-                    shouldInspectAfterBootstrap = true
-                } else {
+                switch try walletKeyValidator.validate(existing) {
+                case .available:
                     let coordinates = PublicKeyCoordinates(
                         x: existing.pubkeyX,
                         y: existing.pubkeyY
                     )
-                    appendLog("bootstrap: using cached public key x=\(coordinates.x.shortHex) y=\(coordinates.y.shortHex)")
+                    appendLog("bootstrap: validated accessible wallet key x=\(coordinates.x.shortHex) y=\(coordinates.y.shortHex)")
 
                     let predictedAddress = try kernelAccountAddressPredictor.predictedAddress(
                         chain: activeChain,
@@ -284,6 +285,11 @@ final class AppModel: ObservableObject {
                     walletRecord = refreshed
                     appendLog("bootstrap: refreshed predicted account \(predictedAddress)")
                     shouldInspectAfterBootstrap = true
+                case let .recoveryRequired(reason):
+                    walletRecord = nil
+                    walletRecoveryReason = reason
+                    appendLog("bootstrap: wallet key validation requires explicit recovery")
+                    throw AppError.walletKeyRecoveryRequired(reason)
                 }
             } else {
                 appendLog("bootstrap: metadata store empty; creating the first wallet record")
@@ -319,11 +325,7 @@ final class AppModel: ObservableObject {
         if shouldInspectAfterBootstrap {
             runDemo()
         }
-        if unlockRelayerOnLaunch {
-            refreshLocalRelayerStatus()
-        } else {
-            localRelayerMessage = "Local relayer unlock on launch is disabled."
-        }
+        localRelayerMessage = "Local relayer locked until a transaction needs it."
     }
 
     private func createFreshWalletRecord(coordinates: PublicKeyCoordinates, now: Date) throws -> WalletRecord {
@@ -352,10 +354,78 @@ final class AppModel: ObservableObject {
     }
 
     func resetDemoWallet() {
-        guard isWalletIdle else {
-            appendLog("reset: ignored because another wallet operation is still running")
-            return
+        Task {
+            do {
+                try await resetDemoWalletAuthorized()
+            } catch {
+                lastError = error.localizedDescription
+                bridgeStatus = "Demo wallet reset cancelled"
+                appendLog("reset: authorization failed — \(error.localizedDescription)")
+            }
         }
+    }
+
+    /// The dashboard owns privacy-sidecar state, while this model owns the wallet-node sidecar.
+    /// Registering one quiescence hook keeps every reset entry point (settings and app menu)
+    /// on the same destructive-reset path without making either model retain the other.
+    func registerSecretResetQuiescenceHandler(
+        _ handler: @escaping @MainActor () async throws -> Void
+    ) {
+        secretResetQuiescenceHandler = handler
+    }
+
+    func registerSecretRuntimeLockHandler(
+        _ handler: @escaping @MainActor () async -> Void
+    ) {
+        secretRuntimeLockHandler = handler
+    }
+
+    /// A real macOS session lock is a security boundary; an ordinary app focus change is not.
+    /// Drop only in-memory secrets here. Durable metadata and Keychain items remain intact, so
+    /// the next explicit money action can unlock once and continue normally.
+    func lockSecretRuntimesForSystemSession() async {
+        await secretRuntimeLockHandler?()
+        walletNodeLaunchTask?.cancel()
+        walletNodeLaunchTask = nil
+        walletNodeLaunchID = nil
+        walletNodeLaunchFailure = nil
+        relayerInstallTask?.cancel()
+        relayerInstallTask = nil
+        relayerStatusRefreshToken = UUID()
+        isRefreshingLocalRelayer = false
+        let daemon = walletNodeDaemon
+        walletNodeDaemon = nil
+        walletNodeClient = WalletNodeClient.Configuration.fromEnvironment().map {
+            WalletNodeClient(configuration: $0)
+        }
+        walletNodeGeneration &+= 1
+        relayerAccessState = .locked
+        localRelayerStatus = nil
+        localRelayerMessage = "Local relayer locked after the macOS session was secured."
+        do {
+            try await daemon?.terminateAndWait()
+        } catch {
+            daemon?.terminate()
+            appendLog("security: wallet-node shutdown after session lock was not confirmed — \(error.localizedDescription)")
+        }
+    }
+
+    func resetDemoWalletAuthorized() async throws {
+        try await resetDemoWalletAuthorized(destination: .dashboard)
+    }
+
+    func resetWalletForRecoveryAuthorized() async throws {
+        try await resetDemoWalletAuthorized(destination: .onboarding)
+    }
+
+    private func resetDemoWalletAuthorized(destination: WalletResetDestination) async throws {
+        guard !isResettingWallet, hasNoSecretResetConflict else {
+            appendLog("reset: ignored because another wallet operation is still running")
+            throw AppError.walletOperationInProgress
+        }
+
+        isResettingWallet = true
+        defer { isResettingWallet = false }
 
         appendSection("Reset Demo Wallet")
 
@@ -366,7 +436,35 @@ final class AppModel: ObservableObject {
             appendLog("reset: warning — \(warning)")
         }
 
+        // Static ownership validation is non-secret. Do it before Touch ID so an external
+        // sidecar that this app cannot securely erase never causes a pointless prompt.
+        try WalletResetPreflight.ensureNoOtherLocalWalletInstance()
+        try WalletResetPreflight.ensureNoExternalSecretRuntimes()
+
+        let authentication = DeviceOwnerAuthenticationSession(
+            reason: "Reset this wallet and delete its local keys"
+        )
+        defer { authentication.invalidate() }
+        try await authentication.authorize()
+
+        // Authentication suspends this actor. Recheck before crossing the destructive boundary
+        // in case an operation was already queued when reset claimed its gate.
+        guard hasNoSecretResetConflict else {
+            appendLog("reset: cancelled because a wallet operation started during authorization")
+            throw AppError.walletOperationInProgress
+        }
+        var localCleanupStarted = false
         do {
+            try await secretResetQuiescenceHandler?()
+            try await quiesceManagedWalletNodeForSecretReset()
+
+            // This is explicitly a Demo Wallet factory reset. The daemon database contains the
+            // old relayer address/keyRef mapping; preserving it while replacing the Keychain
+            // secret makes the replacement impossible to install. Clear only its SQLite store
+            // (not logs/config/Helios data) after the managed process has been terminated.
+            try WalletNodeManagedStoreCleanup.clear()
+
+            localCleanupStarted = true
             try WalletResetCleanup.standard(
                 keyStore: keyStore,
                 metadataStore: metadataStore,
@@ -375,28 +473,108 @@ final class AppModel: ObservableObject {
                 appendLog("reset: cleared \(step)")
             }
 
-            walletRecord = nil
-            accountInspection = nil
-            builtUserOperationDraft = nil
-            lastUserOperationBuildError = nil
-            lastSubmittedUserOperationHash = nil
-            lastBundledTransactionHash = nil
-            activeBundlerStatus = "Bundler not checked"
+            if destination.recreatesRelayer {
+                // The user remains past onboarding after a settings reset. Recreate the relayer
+                // identity inside this already-authorized action so the next transaction does not
+                // dead-end with an empty Keychain and no funding address.
+                let replacementRelayerKeyRef = "bundler-eoa:default:\(activeChain.id):1"
+                let replacementRelayer = try BundlerKeyStore.shared.createIfNeeded(
+                    keyRef: replacementRelayerKeyRef,
+                    reason: authentication.reason,
+                    authenticationContext: authentication.context
+                )
+                syncUnlockedRelayerAddress(
+                    keyRef: replacementRelayerKeyRef,
+                    secret: replacementRelayer.secret
+                )
+                appendLog("reset: created fresh relayer identity")
+            }
+
+            clearInMemoryWalletStateAfterReset()
+            if destination.marksOnboardingIncomplete {
+                onboardingSettingsStore.markIncomplete()
+            }
+            if destination == .dashboard {
+                walletRecoveryReason = nil
+            }
             lastError = nil
-            bridgeStatus = "Demo wallet reset. Creating a fresh Secure Enclave key…"
-            appendLog("reset: starting fresh bootstrap")
+            bridgeStatus = destination == .dashboard
+                ? "Demo wallet reset. Creating a fresh Secure Enclave key…"
+                : "Local wallet reset. Return to onboarding to create a new identity."
+            appendLog(
+                destination == .dashboard
+                    ? "reset: starting fresh bootstrap"
+                    : "reset: returning to onboarding without creating replacement keys"
+            )
         } catch {
+            // The cleanup runner is intentionally best-effort. Once any irreversible local-key
+            // deletion has started, never leave the old wallet record presented as usable.
+            if localCleanupStarted {
+                clearInMemoryWalletStateAfterReset()
+            }
             lastError = error.localizedDescription
             bridgeStatus = "Demo wallet reset failed"
             appendLog("reset: failed — \(error.localizedDescription)")
-            return
+            throw error
         }
 
-        bootstrap()
+        if destination.rebootstrapsWallet {
+            bootstrap()
+        }
+    }
+
+    private var hasNoSecretResetConflict: Bool {
+        WalletIdleGate.allowed(
+            isBootstrapping: isBootstrapping,
+            isRunningDemo: isRunningDemo,
+            isRefreshingBalance: isRefreshingBalance,
+            isBuildingUserOperation: isBuildingUserOperation,
+            isSendingUserOperation: isSendingUserOperation
+        ) && !isRotatingLocalRelayer
+            && !isExportingLocalRelayer
+            && !isDeletingLocalRelayer
+            && !isReplacingPendingOperation
+    }
+
+    private func quiesceManagedWalletNodeForSecretReset() async throws {
+        stopUserOperationReconciler()
+        walletNodeLaunchTask?.cancel()
+        walletNodeLaunchTask = nil
+        walletNodeLaunchID = nil
+        relayerInstallTask?.cancel()
+        relayerInstallTask = nil
+        relayerStatusRefreshToken = UUID()
+        isRefreshingLocalRelayer = false
+        try await walletNodeDaemon?.terminateAndWait()
+        walletNodeDaemon = nil
+        walletNodeGeneration &+= 1
+        relayerAccessState = .locked
+        walletNodeClient = WalletNodeClient.Configuration.fromEnvironment().map {
+            WalletNodeClient(configuration: $0)
+        }
+        walletNodeLaunchFailure = nil
+        localRelayerStatus = nil
+        localRelayerMessage = "Local relayer locked until a transaction needs it."
+        optimisticNextNonce.removeAll()
+    }
+
+    private func clearInMemoryWalletStateAfterReset() {
+        walletRecord = nil
+        accountInspection = nil
+        builtUserOperationDraft = nil
+        lastUserOperationBuildError = nil
+        lastSubmittedUserOperationHash = nil
+        lastBundledTransactionHash = nil
+        activeBundlerStatus = "Bundler not checked"
+        relayerInstallTask?.cancel()
+        relayerInstallTask = nil
+        relayerStatusRefreshToken = UUID()
+        isRefreshingLocalRelayer = false
+        relayerAccessState = .locked
     }
 
     func runDemo() {
-        guard !isRunningDemo, !isRefreshingBalance, walletRecord != nil else {
+        guard !isResettingWallet, !isRunningDemo, !isRefreshingBalance, walletRecord != nil else {
             return
         }
 
@@ -454,28 +632,6 @@ final class AppModel: ObservableObject {
         appendSection("Refresh Onchain Status")
         refreshBalance()
         refreshLocalRelayerStatus()
-    }
-
-    func setTestnetModeEnabled(_ isEnabled: Bool) {
-        guard configuration.isTestnetModeEnabled != isEnabled else {
-            return
-        }
-
-        appendSection("Switch Chain")
-        appendLog("chain: toggled testnet mode \(isEnabled ? "on" : "off")")
-
-        var settings = networkSettings
-        settings.isTestnetModeEnabled = isEnabled
-        settingsStore.setNetworkSettings(settings)
-        configuration = DemoAppConfiguration(networkSettings: settings)
-        resetWalletNodeConnectionAfterNetworkChange()
-        accountInspection = nil
-        builtUserOperationDraft = nil
-        lastUserOperationBuildError = nil
-        activeBundlerStatus = "Bundler not checked"
-        lastSubmittedUserOperationHash = nil
-        lastBundledTransactionHash = nil
-        bootstrap()
     }
 
     func updateNetworkSettings(_ settings: DemoNetworkSettings) throws {
@@ -687,7 +843,7 @@ final class AppModel: ObservableObject {
     /// profile surfaces later as the "Size unknown" verdict, by design.
     func downloadModel(
         _ request: ModelDownloadRequest,
-        progress: @escaping @MainActor (Double) -> Void
+        progress: @escaping LocalAIModelDownloadProgressHandler
     ) async throws {
         if let hardwareBudget {
             try LocalAIModelDownloadManager.assertDiskSpace(neededBytes: request.sizeBytes, budget: hardwareBudget)
@@ -812,20 +968,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
-        guard unlockRelayerOnLaunch != isEnabled else {
-            return
-        }
-        settingsStore.setUnlockRelayerOnLaunch(isEnabled)
-        unlockRelayerOnLaunch = isEnabled
-        appendLog("security: unlock relayer on launch \(isEnabled ? "enabled" : "disabled")")
-        if isEnabled, localRelayerStatus == nil {
-            refreshLocalRelayerStatus()
-        } else if !isEnabled, localRelayerStatus == nil {
-            localRelayerMessage = "Local relayer unlock on launch is disabled."
-        }
-    }
-
     func testNetworkSettings(_ settings: DemoNetworkSettings) async throws -> String {
         let validated = try settings.validated()
         let chain = validated.activeChain
@@ -839,8 +981,16 @@ final class AppModel: ObservableObject {
     private func resetWalletNodeConnectionAfterNetworkChange() {
         walletNodeLaunchTask?.cancel()
         walletNodeLaunchTask = nil
+        walletNodeLaunchID = nil
         walletNodeLaunchFailure = nil
+        walletNodeDaemon?.terminate()
         walletNodeDaemon = nil
+        walletNodeGeneration &+= 1
+        relayerInstallTask?.cancel()
+        relayerInstallTask = nil
+        relayerStatusRefreshToken = UUID()
+        isRefreshingLocalRelayer = false
+        relayerAccessState = .locked
         walletNodeClient = WalletNodeClient.Configuration.fromEnvironment().map {
             WalletNodeClient(configuration: $0)
         }
@@ -853,7 +1003,7 @@ final class AppModel: ObservableObject {
         lastGasIndicatorReadAt = nil
         localRelayerStatus = nil
         localRelayerMessage = walletNodeClient == nil
-            ? "Local wallet-node daemon will restart with the selected network."
+            ? "Local wallet-node will restart read-only; relayer stays locked until needed."
             : "External wallet-node is configured from environment."
     }
 
@@ -978,8 +1128,10 @@ final class AppModel: ObservableObject {
 
     private func debugBundlerStatusLines() async -> [String] {
         do {
-            let status = try await fetchLocalRelayerStatusWithBalanceRetry()
-            localRelayerStatus = status
+            let (status, generation) = try await fetchLocalRelayerStatusWithBalanceRetry()
+            guard publishLocalRelayerStatus(status, expectedGeneration: generation) else {
+                throw AppError.localDaemonLaunchFailed("wallet-node status became stale")
+            }
             localRelayerMessage = status.ready
                 ? "Local relayer ready on \(status.networkProfile)."
                 : "Local relayer needs attention."
@@ -1036,34 +1188,36 @@ final class AppModel: ObservableObject {
     }
 
     func refreshLocalRelayerStatus() {
-        guard !isRefreshingLocalRelayer else {
+        guard !isRefreshingLocalRelayer, !isResettingWallet else {
             return
         }
 
+        let refreshToken = UUID()
+        relayerStatusRefreshToken = refreshToken
         isRefreshingLocalRelayer = true
         Task {
             do {
-                let status = try await fetchLocalRelayerStatusWithBalanceRetry()
-                localRelayerStatus = status
-                localRelayerMessage = status.ready
-                    ? "Local relayer ready on \(status.networkProfile)."
-                    : "Local relayer needs attention."
+                let (status, generation) = try await fetchLocalRelayerStatusWithBalanceRetry()
+                guard relayerStatusRefreshToken == refreshToken else { return }
+                guard publishLocalRelayerStatus(status, expectedGeneration: generation) else { return }
                 appendLog("relayer: status \(status.lifecycle) \(status.eoa.shortAddress)")
             } catch {
+                guard relayerStatusRefreshToken == refreshToken else { return }
                 localRelayerStatus = nil
-                localRelayerMessage = error.localizedDescription
+                localRelayerMessage = "Local relayer locked until a transaction needs it."
                 appendLog("relayer: status failed — \(error.localizedDescription)")
             }
-            isRefreshingLocalRelayer = false
+            if relayerStatusRefreshToken == refreshToken {
+                isRefreshingLocalRelayer = false
+            }
         }
     }
 
     func checkLocalRelayerStatusForDiagnostics() async throws -> WalletNodeClient.RelayerStatus {
-        let status = try await fetchLocalRelayerStatusWithBalanceRetry()
-        localRelayerStatus = status
-        localRelayerMessage = status.ready
-            ? "Local relayer ready on \(status.networkProfile)."
-            : "Local relayer needs attention."
+        let (status, generation) = try await fetchLocalRelayerStatusWithBalanceRetry()
+        guard publishLocalRelayerStatus(status, expectedGeneration: generation) else {
+            throw AppError.localDaemonLaunchFailed("wallet-node status became stale")
+        }
         appendLog("relayer: diagnostic status \(status.lifecycle) \(status.eoa.shortAddress)")
         return status
     }
@@ -1103,20 +1257,62 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func fetchLocalRelayerStatusWithBalanceRetry() async throws -> WalletNodeClient.RelayerStatus {
-        var status = try await withWalletNodeClient(operation: "status") { client in
+    private func fetchLocalRelayerStatusWithBalanceRetry() async throws -> (
+        status: WalletNodeClient.RelayerStatus,
+        generation: UInt64
+    ) {
+        var observation = try await withWalletNodeClientGeneration(operation: "status") { client in
             try await client.bundlerStatus()
         }
-        for delay in Self.relayerBalanceRetryDelays where Self.isRelayerBalanceUnavailable(status.balance) {
-            localRelayerStatus = status
-            localRelayerMessage = "Checking local relayer balance..."
-            appendLog("relayer: status returned without balance; retrying")
+        var status = observation.value
+        var generation = observation.generation
+        for delay in Self.relayerBalanceRetryDelays
+        where status.keyLoaded && Self.isRelayerBalanceUnavailable(status.balance) {
+            if RelayerGenerationGate.accepts(
+                resultGeneration: generation,
+                currentGeneration: walletNodeGeneration
+            ) {
+                publishLocalRelayerStatus(status, expectedGeneration: generation)
+                localRelayerMessage = "Checking local relayer balance..."
+                appendLog("relayer: status returned without balance; retrying")
+            }
             try await Task.sleep(nanoseconds: delay)
-            status = try await withWalletNodeClient(operation: "status retry") { client in
+            observation = try await withWalletNodeClientGeneration(operation: "status retry") { client in
                 try await client.bundlerStatus()
             }
+            status = observation.value
+            generation = observation.generation
         }
-        return status
+        return (status, generation)
+    }
+
+    @discardableResult
+    private func publishLocalRelayerStatus(
+        _ status: WalletNodeClient.RelayerStatus,
+        expectedGeneration: UInt64
+    ) -> Bool {
+        guard RelayerGenerationGate.accepts(
+            resultGeneration: expectedGeneration,
+            currentGeneration: walletNodeGeneration
+        ) else {
+            return false
+        }
+        localRelayerStatus = status
+        if !status.keyLoaded, case .installing = relayerAccessState {
+            // Do not let a racing passive poll overwrite an install already in progress.
+        } else if !status.keyLoaded {
+            relayerAccessState = .locked
+        }
+
+        switch status.reason {
+        case "bundler_eoa_missing", "bundler_eoa_locked":
+            localRelayerMessage = "Local relayer locked until a transaction needs it."
+        default:
+            localRelayerMessage = status.ready
+                ? "Local relayer ready on \(status.networkProfile)."
+                : "Local relayer needs funding or attention."
+        }
+        return true
     }
 
     func rotateLocalRelayerKey() async throws {
@@ -1134,8 +1330,14 @@ final class AppModel: ObservableObject {
             chainId: localRelayerStatus?.chainId ?? Int(activeChain.id),
             keyRef: keyRef
         )
-        try await authorizeLocalRelayerAdminAction(summary: challenge.summary)
-        let record = try BundlerKeyStore.shared.createIfNeeded(keyRef: keyRef)
+        let authentication = DeviceOwnerAuthenticationSession(reason: challenge.summary)
+        defer { authentication.invalidate() }
+        try await authentication.authorize()
+        let record = try BundlerKeyStore.shared.createIfNeeded(
+            keyRef: keyRef,
+            reason: challenge.summary,
+            authenticationContext: authentication.context
+        )
         let status = try await walletNodeClient.installBundlerEOA(
             keyRef: keyRef,
             secret: record.secret,
@@ -1166,6 +1368,9 @@ final class AppModel: ObservableObject {
         keyRef targetKeyRef: String? = nil,
         label targetLabel: String? = nil
     ) async throws -> String {
+        guard !isResettingWallet else {
+            throw AppError.walletOperationInProgress
+        }
         guard let status = localRelayerStatus, let keyRef = targetKeyRef ?? status.keyRef else {
             throw AppError.localRelayerKeyMissing
         }
@@ -1176,9 +1381,14 @@ final class AppModel: ObservableObject {
         isExportingLocalRelayer = true
         defer { isExportingLocalRelayer = false }
         appendSection("Export Local Relayer")
+        let authentication = DeviceOwnerAuthenticationSession(
+            reason: "Reveal the local relayer private key"
+        )
+        defer { authentication.invalidate() }
         let record = try BundlerKeyStore.shared.read(
             keyRef: keyRef,
-            reason: "Reveal the local relayer private key"
+            reason: authentication.reason,
+            authenticationContext: authentication.context
         )
         let privateKey = "0x" + record.secret.lowercaseHexString
         localRelayerMessage = "Relayer key exported after local authentication."
@@ -1208,7 +1418,9 @@ final class AppModel: ObservableObject {
             chainId: status.chainId,
             keyRef: keyRef
         )
-        try await authorizeLocalRelayerAdminAction(summary: challenge.summary)
+        let authentication = DeviceOwnerAuthenticationSession(reason: challenge.summary)
+        defer { authentication.invalidate() }
+        try await authentication.authorize()
         try await walletNodeClient.deleteBundlerEOA(
             keyRef: keyRef,
             unsafeReset: unsafeReset,
@@ -1218,6 +1430,9 @@ final class AppModel: ObservableObject {
             )
         )
         try BundlerKeyStore.shared.delete(keyRef: keyRef)
+        relayerInstallTask?.cancel()
+        relayerInstallTask = nil
+        relayerAccessState = .locked
         localRelayerStatus = nil
         localRelayerMessage = unsafeReset
             ? "Relayer key reset. Submissions stay blocked until a funded relayer exists."
@@ -1228,10 +1443,21 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func cancelPendingOperation(userOpHash: String) async -> Bool {
+        guard !isResettingWallet, !isReplacingPendingOperation else { return false }
+        isReplacingPendingOperation = true
+        defer { isReplacingPendingOperation = false }
         defer { refreshLocalRelayerStatus() }
         do {
             appendSection("Cancel Pending Operation")
-            let txHash = try await withWalletNodeClient(operation: "cancel pending") {
+            let authentication = DeviceOwnerAuthenticationSession(
+                reason: "Cancel the pending wallet operation"
+            )
+            defer { authentication.invalidate() }
+            try await authentication.authorize()
+            let txHash = try await withPrivilegedWalletNodeClient(
+                operation: "cancel pending",
+                authenticationSession: authentication
+            ) {
                 try await $0.cancelPendingOperation(userOpHash: userOpHash)
             }
             appendLog("relayer: cancel submitted tx \(txHash ?? "<none>")")
@@ -1271,10 +1497,21 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func speedUpPendingOperation(userOpHash: String) async -> Bool {
+        guard !isResettingWallet, !isReplacingPendingOperation else { return false }
+        isReplacingPendingOperation = true
+        defer { isReplacingPendingOperation = false }
         defer { refreshLocalRelayerStatus() }
         do {
             appendSection("Speed Up Pending Operation")
-            let txHash = try await withWalletNodeClient(operation: "speed up pending") {
+            let authentication = DeviceOwnerAuthenticationSession(
+                reason: "Speed up the pending wallet operation"
+            )
+            defer { authentication.invalidate() }
+            try await authentication.authorize()
+            let txHash = try await withPrivilegedWalletNodeClient(
+                operation: "speed up pending",
+                authenticationSession: authentication
+            ) {
                 try await $0.speedUpPendingOperation(userOpHash: userOpHash)
             }
             appendLog("relayer: speed-up submitted tx \(txHash ?? "<none>")")
@@ -1325,14 +1562,14 @@ final class AppModel: ObservableObject {
     }
 
     private func ensureWalletNodeClient() async throws -> WalletNodeClient {
+        guard !isResettingWallet else {
+            throw AppError.walletOperationInProgress
+        }
         if let walletNodeClient {
             return walletNodeClient
         }
-        if let walletNodeLaunchTask {
-            let daemon = try await walletNodeLaunchTask.value
-            walletNodeDaemon = daemon
-            walletNodeClient = daemon.client
-            return daemon.client
+        if let walletNodeLaunchTask, let walletNodeLaunchID {
+            return try await finishWalletNodeLaunch(walletNodeLaunchTask, launchID: walletNodeLaunchID)
         }
         if let walletNodeLaunchFailure {
             let now = Date()
@@ -1345,38 +1582,53 @@ final class AppModel: ObservableObject {
             self.walletNodeLaunchFailure = nil
         }
 
-        localRelayerMessage = "Starting local wallet-node daemon..."
+        localRelayerMessage = "Starting local wallet-node daemon in read-only mode..."
         let chain = activeChain
         let gasPolicy = networkSettings.resolvedDaemonGasPolicy
         let heliosVerificationEnabled = networkSettings.isHeliosVerificationActive
         let launchTask = Task {
-            let bundlerSecrets = try BundlerKeyStore.shared.unlockAllForDaemonLaunch(chainId: chain.id)
-            if let primary = bundlerSecrets.first {
-                syncUnlockedRelayerAddress(keyRef: primary.keyRef, secret: primary.secret)
-            }
             return try await WalletNodeDaemon.launch(
-                bundlerSecrets: bundlerSecrets,
+                bundlerSecrets: [],
                 chain: chain,
                 gasPolicy: gasPolicy,
                 heliosVerificationEnabled: heliosVerificationEnabled
             )
         }
+        let launchID = UUID()
         walletNodeLaunchTask = launchTask
+        walletNodeLaunchID = launchID
+        return try await finishWalletNodeLaunch(launchTask, launchID: launchID)
+    }
 
+    private func finishWalletNodeLaunch(
+        _ task: Task<WalletNodeDaemon, Error>,
+        launchID: UUID
+    ) async throws -> WalletNodeClient {
         do {
-            let daemon = try await launchTask.value
-            walletNodeLaunchTask = nil
-            walletNodeLaunchFailure = nil
-            walletNodeDaemon = daemon
-            walletNodeClient = daemon.client
-            localRelayerMessage = "Local wallet-node daemon connected."
-            appendLog("relayer: wallet-node daemon started")
-            if let logURL = WalletNodeDaemon.managedLogFileURL() {
-                appendLog("relayer: wallet-node logs \(logURL.path)")
+            let daemon = try await task.value
+
+            // A cancelled detached launch can still finish. Only the launch that still owns the
+            // current token may publish a daemon. Another waiter may already have adopted the
+            // exact same result, which is also safe.
+            guard walletNodeLaunchID == launchID || walletNodeDaemon === daemon else {
+                daemon.terminate()
+                throw AppError.localDaemonLaunchFailed(
+                    "wallet-node launch became stale after a connection reset"
+                )
+            }
+            if walletNodeDaemon !== daemon {
+                walletNodeLaunchTask = nil
+                walletNodeLaunchID = nil
+                walletNodeLaunchFailure = nil
+                adoptManagedWalletNodeDaemon(daemon)
             }
             return daemon.client
         } catch {
+            guard walletNodeLaunchID == launchID else {
+                throw error
+            }
             walletNodeLaunchTask = nil
+            walletNodeLaunchID = nil
             walletNodeLaunchFailure = WalletNodeLaunchFailure(
                 error: error,
                 retryAfter: WalletNodeLaunchFailureGate.retryAfter(
@@ -1386,6 +1638,137 @@ final class AppModel: ObservableObject {
             )
             throw error
         }
+    }
+
+    private func adoptManagedWalletNodeDaemon(_ daemon: WalletNodeDaemon) {
+        guard walletNodeDaemon !== daemon else { return }
+        walletNodeDaemon = daemon
+        walletNodeClient = daemon.client
+        walletNodeGeneration &+= 1
+        relayerInstallTask?.cancel()
+        relayerInstallTask = nil
+        relayerAccessState = .locked
+        localRelayerMessage = "Local wallet-node connected; relayer locked until needed."
+        appendLog("relayer: wallet-node daemon started read-only")
+        if let logURL = WalletNodeDaemon.managedLogFileURL() {
+            appendLog("relayer: wallet-node logs \(logURL.path)")
+        }
+    }
+
+    /// Installs only the relayer keys needed by the active daemon generation. The managed
+    /// daemon deliberately starts without secrets, so reads remain prompt-free; the first
+    /// privileged action supplies its short-lived authentication context here.
+    private func ensureRelayerUnlocked(
+        using authenticationSession: DeviceOwnerAuthenticationSession
+    ) async throws -> WalletNodeClient {
+        let (client, generation) = try await ensureWalletNodeClientWithGeneration()
+        guard client.usesUnixSocketTransport, walletNodeDaemon != nil else {
+            // An externally managed daemon owns its own relayer-key lifecycle.
+            return client
+        }
+        if relayerAccessState.isAvailable(for: walletNodeGeneration) {
+            return client
+        }
+        if let relayerInstallTask {
+            return try await relayerInstallTask.value
+        }
+
+        relayerAccessState = .installing(generation: generation)
+        localRelayerMessage = "Unlocking the local relayer for this action..."
+        let task = Task { @MainActor [self] in
+            let observedStatus = try await client.bundlerStatus()
+            guard walletNodeGeneration == generation else {
+                throw AppError.localDaemonLaunchFailed(
+                    "wallet-node restarted while the relayer was being unlocked. Retry the action."
+                )
+            }
+            publishLocalRelayerStatus(observedStatus, expectedGeneration: generation)
+
+            let keyRefs = relevantRelayerKeyRefs(status: observedStatus)
+            guard !keyRefs.isEmpty else {
+                throw AppError.localRelayerKeyMissing
+            }
+
+            var latestStatus = observedStatus
+            for keyRef in keyRefs {
+                try Task.checkCancellation()
+                guard walletNodeGeneration == generation else {
+                    throw AppError.localDaemonLaunchFailed(
+                        "wallet-node restarted while the relayer was being unlocked. Retry the action."
+                    )
+                }
+                let challenge = try await client.beginAdminAction(
+                    action: "install_bundler_eoa",
+                    chainId: Int(activeChain.id),
+                    keyRef: keyRef
+                )
+                let record = try BundlerKeyStore.shared.read(
+                    keyRef: keyRef,
+                    reason: authenticationSession.reason,
+                    authenticationContext: authenticationSession.context
+                )
+                // Only the first ref is the active identity. Retiring keys are loaded solely so
+                // pending replacements remain signable and must never overwrite the cached
+                // funding address shown before the next daemon has status metadata.
+                if keyRef == keyRefs.first {
+                    syncUnlockedRelayerAddress(keyRef: keyRef, secret: record.secret)
+                }
+                latestStatus = try await client.installBundlerEOA(
+                    keyRef: keyRef,
+                    secret: record.secret,
+                    authorization: WalletNodeClient.AdminAuthorization(
+                        adminActionId: challenge.adminActionId,
+                        nonce: challenge.nonce
+                    )
+                )
+            }
+
+            guard walletNodeGeneration == generation else {
+                throw AppError.localDaemonLaunchFailed(
+                    "wallet-node restarted while the relayer was being unlocked. Retry the action."
+                )
+            }
+            publishLocalRelayerStatus(latestStatus, expectedGeneration: generation)
+            relayerAccessState = .available(generation: generation)
+            localRelayerMessage = "Local relayer available for this wallet-node session."
+            appendLog("relayer: installed \(keyRefs.count) relevant key(s) for daemon generation \(generation)")
+            return client
+        }
+        relayerInstallTask = task
+
+        do {
+            let installedClient = try await task.value
+            relayerInstallTask = nil
+            return installedClient
+        } catch {
+            relayerInstallTask = nil
+            if walletNodeGeneration == generation {
+                relayerAccessState = .failed(
+                    generation: generation,
+                    message: error.localizedDescription
+                )
+                localRelayerMessage = error.localizedDescription
+            }
+            throw error
+        }
+    }
+
+    /// Active always comes first. A retiring key is still relevant while one of its submitted
+    /// transactions may need cancellation or replacement; pending-funding and retired keys are
+    /// intentionally left locked.
+    private func relevantRelayerKeyRefs(
+        status: WalletNodeClient.RelayerStatus?
+    ) -> [String] {
+        RelayerKeyInstallPolicy.relevantKeyRefs(
+            activeKeyRef: status?.keyRef,
+            fallbackKeyRef: onboardingSettingsStore.bundlerKeyRef(chainId: activeChain.id),
+            history: (status?.keyHistory ?? []).map {
+                RelayerKeyInstallPolicy.HistoryEntry(
+                    keyRef: $0.keyRef,
+                    lifecycle: $0.lifecycle
+                )
+            }
+        )
     }
 
     private func syncUnlockedRelayerAddress(keyRef: String, secret: Data) {
@@ -1410,14 +1793,46 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func ensureWalletNodeClientWithGeneration() async throws -> (
+        client: WalletNodeClient,
+        generation: UInt64
+    ) {
+        let client = try await ensureWalletNodeClient()
+        let generation = walletNodeGeneration
+        guard walletNodeClient?.hasSameConnection(as: client) == true else {
+            throw AppError.localDaemonLaunchFailed(
+                "wallet-node connection changed before the operation could start"
+            )
+        }
+        return (client, generation)
+    }
+
+    private func withWalletNodeClientGeneration<T: Sendable>(
+        operation: String,
+        _ body: (WalletNodeClient) async throws -> T
+    ) async throws -> (value: T, generation: UInt64) {
+        try await withWalletNodeClient(operation: operation) { client in
+            let value = try await body(client)
+            return (value, self.walletNodeGeneration)
+        }
+    }
+
     private func withWalletNodeClient<T: Sendable>(
         operation: String,
+        afterRelaunch: ((WalletNodeClient) async throws -> Void)? = nil,
         _ body: (WalletNodeClient) async throws -> T
     ) async throws -> T {
         let client = try await ensureWalletNodeClient()
+        let generation = walletNodeGeneration
 
         do {
-            return try await body(client)
+            let result = try await body(client)
+            guard walletNodeGeneration == generation else {
+                throw AppError.localDaemonLaunchFailed(
+                    "wallet-node connection changed while \(operation) was in flight"
+                )
+            }
+            return result
         } catch {
             guard client.usesUnixSocketTransport,
                   walletNodeDaemon != nil,
@@ -1428,12 +1843,43 @@ final class AppModel: ObservableObject {
 
             appendLog("relayer: \(operation) lost wallet-node socket; relaunching daemon and retrying once")
             walletNodeLaunchTask = nil
+            walletNodeLaunchID = nil
             walletNodeClient = nil
+            walletNodeDaemon?.terminate()
             walletNodeDaemon = nil
+            walletNodeGeneration &+= 1
+            relayerInstallTask?.cancel()
+            relayerInstallTask = nil
+            relayerAccessState = .locked
 
             let relaunchedClient = try await ensureWalletNodeClient()
-            return try await body(relaunchedClient)
+            let relaunchedGeneration = walletNodeGeneration
+            try await afterRelaunch?(relaunchedClient)
+            let result = try await body(relaunchedClient)
+            guard walletNodeGeneration == relaunchedGeneration else {
+                throw AppError.localDaemonLaunchFailed(
+                    "wallet-node connection changed while retrying \(operation)"
+                )
+            }
+            return result
         }
+    }
+
+    private func withPrivilegedWalletNodeClient<T: Sendable>(
+        operation: String,
+        authenticationSession: DeviceOwnerAuthenticationSession,
+        _ body: (WalletNodeClient) async throws -> T
+    ) async throws -> T {
+        _ = try await withWalletNodeClient(operation: "\(operation) relayer unlock") { _ in
+            try await self.ensureRelayerUnlocked(using: authenticationSession)
+        }
+        return try await withWalletNodeClient(
+            operation: operation,
+            afterRelaunch: { [self] _ in
+                _ = try await ensureRelayerUnlocked(using: authenticationSession)
+            },
+            body
+        )
     }
 
     private func withWalletNodeWarmupRetry<T: Sendable>(
@@ -1459,32 +1905,6 @@ final class AppModel: ObservableObject {
             }
         }
         throw lastError ?? AppError.localDaemonLaunchFailed("wallet-node warm-up retry ended without an error")
-    }
-
-    private func authorizeLocalRelayerAdminAction(summary: String) async throws {
-        try await authorizeDeviceOwner(reason: summary, fallbackError: AppError.localRelayerKeyMissing)
-    }
-
-    /// Prompt for local device-owner authentication (Touch ID, else password) and throw if
-    /// the user cancels or it fails. Use this to gate sensitive actions that do NOT otherwise
-    /// cross the Secure Enclave — a RAILGUN unshield is signed by the sidecar's exit key and
-    /// bundler-EOA admin actions touch only Keychain, so neither prompts on its own the way a
-    /// passkey-signed UserOp (transfer/shield) does. This restores the user-presence gate.
-    func authorizeDeviceOwner(
-        reason: String,
-        fallbackError: Error = AppError.userAuthorizationCancelled
-    ) async throws {
-        let context = LAContext()
-        context.localizedReason = reason
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, error in
-                if success {
-                    continuation.resume()
-                } else {
-                    continuation.resume(throwing: error ?? fallbackError)
-                }
-            }
-        }
     }
 
     func buildCurrentUserOperationDraft(isDeployedOverride: Bool? = nil) async throws -> UserOperationDraft {
@@ -1657,7 +2077,7 @@ final class AppModel: ObservableObject {
     }
 
     func buildUserOperationDraftPreview() {
-        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+        guard !isResettingWallet, !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
             appendLog("build: ignored because another wallet operation is still running")
             return
         }
@@ -1698,7 +2118,7 @@ final class AppModel: ObservableObject {
     }
 
     func sendCurrentUserOperation() {
-        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+        guard !isResettingWallet, !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
             appendLog("send: ignored because another wallet operation is still running")
             return
         }
@@ -1724,7 +2144,7 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func enableSessionKeys(now: Date = Date()) async throws -> SessionRecord {
-        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+        guard !isResettingWallet, !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
             throw AppError.walletOperationInProgress
         }
         if walletRecord == nil {
@@ -1793,7 +2213,7 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func revokeSessionKeys() async throws -> UserOperationSendResult {
-        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+        guard !isResettingWallet, !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
             throw AppError.walletOperationInProgress
         }
         if walletRecord == nil {
@@ -2165,7 +2585,8 @@ final class AppModel: ObservableObject {
         executions: [KernelExecutionRequest],
         logContext: String = "batch",
         signingReason: String? = nil,
-        acknowledgedCallGasLimit: UInt64? = nil
+        acknowledgedCallGasLimit: UInt64? = nil,
+        authenticationSession: DeviceOwnerAuthenticationSession? = nil
     ) async throws -> UserOperationSendResult {
         try await executeUserOperation(
             logContext: logContext,
@@ -2176,7 +2597,8 @@ final class AppModel: ObservableObject {
                 amount: String(executions.count),
                 token: executions.count == 1 ? "call" : "calls"
             ),
-            acknowledgedCallGasLimit: acknowledgedCallGasLimit
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit,
+            authenticationSession: authenticationSession
         ) { [self] buildContext in
             try await buildUserOperationDraft(
                 executions: executions,
@@ -2218,9 +2640,10 @@ final class AppModel: ObservableObject {
         historyDraft: WalletTransactionDraft?,
         afterSubmit: ((String) -> Void)? = nil,
         acknowledgedCallGasLimit: UInt64? = nil,
+        authenticationSession: DeviceOwnerAuthenticationSession? = nil,
         buildDraft: @escaping (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
-        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+        guard !isResettingWallet, !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
             throw AppError.walletOperationInProgress
         }
         if walletRecord == nil {
@@ -2245,6 +2668,7 @@ final class AppModel: ObservableObject {
                 historyDraft: historyDraft,
                 afterSubmit: afterSubmit,
                 acknowledgedCallGasLimit: acknowledgedCallGasLimit,
+                authenticationSession: authenticationSession,
                 buildDraft: buildDraft
             )
             isSendingUserOperation = false
@@ -2263,6 +2687,7 @@ final class AppModel: ObservableObject {
         historyDraft: WalletTransactionDraft?,
         afterSubmit: ((String) -> Void)? = nil,
         acknowledgedCallGasLimit: UInt64? = nil,
+        authenticationSession: DeviceOwnerAuthenticationSession? = nil,
         buildDraft: (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         appendLog("\(logContext): preparing transaction on \(activeChain.name)")
@@ -2341,6 +2766,20 @@ final class AppModel: ObservableObject {
             throw AppError.prefundShortfall(report)
         }
 
+        // Everything above is non-secret preflight. Only now, once the operation is known to be
+        // buildable and affordable, create the action context and make the relayer available.
+        // A session-key send with an already-running relayer therefore remains prompt-free;
+        // passkey sends reuse this same context for the Secure Enclave signature below.
+        let actionAuthentication = authenticationSession
+            ?? DeviceOwnerAuthenticationSession(reason: signingReason)
+        let ownsAuthenticationSession = authenticationSession == nil
+        defer {
+            if ownsAuthenticationSession {
+                actionAuthentication.invalidate()
+            }
+        }
+        _ = try await ensureRelayerUnlocked(using: actionAuthentication)
+
         let signatureResult: UserOperationSignatureResult
         do {
             signatureResult = try UserOperationSigning.signForSend(
@@ -2349,7 +2788,11 @@ final class AppModel: ObservableObject {
                 passkeySigner: { [self] preimage in
                     appendLog("\(logContext): computed signing preimage (\(preimage.count) bytes)")
                     appendLog("\(logContext): requesting Secure Enclave signature")
-                    let signature = try keyStore.sign(preimage: preimage, reason: signingReason)
+                    let signature = try keyStore.sign(
+                        preimage: preimage,
+                        reason: signingReason,
+                        authenticationContext: actionAuthentication.context
+                    )
                     appendLog("\(logContext): signature components r=\(signature.r.shortHex) s=\(signature.s.shortHex)")
                     return signature
                 },
@@ -2402,7 +2845,10 @@ final class AppModel: ObservableObject {
 
         let sentUserOpHash: String
         do {
-            sentUserOpHash = try await withWalletNodeClient(operation: "\(logContext) submit") { client in
+            sentUserOpHash = try await withPrivilegedWalletNodeClient(
+                operation: "\(logContext) submit",
+                authenticationSession: actionAuthentication
+            ) { client in
                 try await client.sendUserOperation(
                     draft: enrichedDraft,
                     signature: signatureResult.signature
@@ -3557,9 +4003,6 @@ enum NetworkSettingsChangePolicy {
         from old: DemoNetworkSettings,
         to new: DemoNetworkSettings
     ) -> Bool {
-        if old.isTestnetModeEnabled != new.isTestnetModeEnabled {
-            return true
-        }
         if old.activeRPCURL != new.activeRPCURL
             || old.activeArchiveNodeURL != new.activeArchiveNodeURL
             || old.activeConsensusRPCURL != new.activeConsensusRPCURL {
@@ -3580,7 +4023,6 @@ enum NetworkSettingsChangePolicy {
         }
         return old.activeConsensusRPCURL != new.activeConsensusRPCURL
             || old.isHeliosVerificationActive == false
-            || old.isTestnetModeEnabled != new.isTestnetModeEnabled
     }
 }
 

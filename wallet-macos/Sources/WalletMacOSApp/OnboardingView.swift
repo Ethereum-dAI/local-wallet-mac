@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-private enum OnboardingStep: Int, CaseIterable {
+enum OnboardingStep: Int, CaseIterable {
     case welcome
     case network
     case model
@@ -24,7 +24,7 @@ private enum OnboardingStep: Int, CaseIterable {
     }
 }
 
-private enum OnboardingNetwork: String, CaseIterable, Identifiable {
+enum OnboardingNetworkOption: String, CaseIterable, Identifiable {
     case sepolia = "Sepolia"
     case mainnet = "Mainnet"
 
@@ -32,21 +32,80 @@ private enum OnboardingNetwork: String, CaseIterable, Identifiable {
         rawValue
     }
 
-    var displayName: String {
+    var isEnabled: Bool {
+        self == .sepolia
+    }
+
+    var badge: String? {
+        self == .mainnet ? "Coming soon" : nil
+    }
+}
+
+enum OnboardingRPCField {
+    case execution
+    case consensus
+    case archive
+
+    var label: String {
         switch self {
-        case .sepolia:
-            return "Ethereum Sepolia"
-        case .mainnet:
-            return "Ethereum Mainnet"
+        case .execution:
+            return "Execution RPC URL"
+        case .consensus:
+            return "Consensus RPC URL"
+        case .archive:
+            return "Archive Node URL"
+        }
+    }
+
+    var isRequired: Bool {
+        self == .execution
+    }
+
+    var helpText: String {
+        switch self {
+        case .execution:
+            return "Used for current EVM state, transaction preparation, submission, balances, and receipts."
+        case .consensus:
+            return "Optional for Helios verified reads. Leave blank to skip sync and use execution RPC reads."
+        case .archive:
+            return "Optional endpoint for historical reads and richer wallet timelines."
         }
     }
 }
 
+enum LocalAIModelInstallationCandidate: Equatable {
+    case missing
+    case trusted(URL)
+    case needsVerification(URL)
+}
+
+enum LocalAIModelInstallationResolver {
+    static func resolve(
+        model: LocalAIModel,
+        installedModelID: String?,
+        installedModelPath: String?,
+        discoveredFileURL: URL?,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> LocalAIModelInstallationCandidate {
+        if installedModelID == model.id,
+           let installedModelPath,
+           installedModelPath.isEmpty == false,
+           fileExists(installedModelPath) {
+            return .trusted(URL(fileURLWithPath: installedModelPath))
+        }
+        if let discoveredFileURL {
+            return .needsVerification(discoveredFileURL)
+        }
+        return .missing
+    }
+}
+
 @MainActor
-private final class OnboardingState: ObservableObject {
+final class OnboardingState: ObservableObject {
     enum InstallState: Equatable {
         case idle
-        case installing(Double)
+        case verifying
+        case installing(ModelDownloadProgress)
         case installed
         case failed(String)
     }
@@ -68,10 +127,6 @@ private final class OnboardingState: ObservableObject {
     }
 
     @Published var step: OnboardingStep = .welcome
-    @Published var selectedNetworkID: String
-    @Published var mainnetRPCURL: String
-    @Published var mainnetArchiveNodeURL: String
-    @Published var mainnetConsensusRPCURL: String
     @Published var sepoliaRPCURL: String
     @Published var sepoliaArchiveNodeURL: String
     @Published var sepoliaConsensusRPCURL: String
@@ -87,19 +142,20 @@ private final class OnboardingState: ObservableObject {
     private let settingsStore: OnboardingSettingsStore
     private let networkSettingsStore: DemoSettingsStore
     private let provisioningService: OnboardingProvisioningService
-    private let downloadManager: LocalAIModelDownloadManager
+    private let downloadManager: any LocalAIModelManaging
     private let hardwareInspector: LocalHardwareInspector
     private let chainReadinessService: OnboardingChainReadinessService
     let chainReadinessTiming: OnboardingChainReadinessTiming
     private var chainReadinessTask: Task<Void, Never>?
     private var chainReadinessTimerTask: Task<Void, Never>?
     private var chainReadinessRunID: UUID?
+    private var modelVerificationTask: Task<Void, Never>?
 
     init(
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
         networkSettingsStore: DemoSettingsStore = DemoSettingsStore(),
         provisioningService: OnboardingProvisioningService = OnboardingProvisioningService(),
-        downloadManager: LocalAIModelDownloadManager = LocalAIModelDownloadManager(),
+        downloadManager: any LocalAIModelManaging = LocalAIModelDownloadManager(),
         hardwareInspector: LocalHardwareInspector = LocalHardwareInspector(),
         chainReadinessService: OnboardingChainReadinessService? = nil,
         chainReadinessTiming: OnboardingChainReadinessTiming = .default
@@ -110,15 +166,10 @@ private final class OnboardingState: ObservableObject {
         self.downloadManager = downloadManager
         self.hardwareInspector = hardwareInspector
         self.chainReadinessService = chainReadinessService ?? OnboardingChainReadinessService(
-            onboardingSettingsStore: settingsStore,
             networkSettingsStore: networkSettingsStore
         )
         self.chainReadinessTiming = chainReadinessTiming
         let networkSettings = networkSettingsStore.networkSettings
-        self.selectedNetworkID = OnboardingNetwork.sepolia.rawValue
-        self.mainnetRPCURL = networkSettings.mainnetRPCURL
-        self.mainnetArchiveNodeURL = networkSettings.mainnetArchiveNodeURL
-        self.mainnetConsensusRPCURL = networkSettings.mainnetConsensusRPCURL
         self.sepoliaRPCURL = networkSettings.sepoliaRPCURL
         self.sepoliaArchiveNodeURL = networkSettings.sepoliaArchiveNodeURL
         self.sepoliaConsensusRPCURL = networkSettings.sepoliaConsensusRPCURL
@@ -126,10 +177,7 @@ private final class OnboardingState: ObservableObject {
         self.selectedModelID = LocalAIModel.onboardingOptions.contains { $0.id == storedModelID }
             ? storedModelID
             : LocalAIModel.recommended.id
-        let selectedModel = LocalAIModel.onboardingOptions.first { $0.id == self.selectedModelID } ?? .recommended
-        if settingsStore.installedModelID == selectedModel.id && downloadManager.isInstalled(selectedModel) {
-            self.installState = .installed
-        }
+        resolveSelectedModelInstallation()
 
         Task {
             hardwareProfile = await hardwareInspector.inspect()
@@ -138,6 +186,7 @@ private final class OnboardingState: ObservableObject {
     }
 
     deinit {
+        modelVerificationTask?.cancel()
         chainReadinessTask?.cancel()
         chainReadinessTimerTask?.cancel()
     }
@@ -146,17 +195,10 @@ private final class OnboardingState: ObservableObject {
         LocalAIModel.onboardingOptions.first { $0.id == selectedModelID } ?? .recommended
     }
 
-    var selectedNetwork: OnboardingNetwork {
-        OnboardingNetwork(rawValue: selectedNetworkID) ?? .sepolia
-    }
-
     var canContinueFromNetwork: Bool {
         Self.isValidRequiredURL(sepoliaRPCURL)
             && Self.isValidOptionalURL(sepoliaConsensusRPCURL)
             && Self.isValidOptionalURL(sepoliaArchiveNodeURL)
-            && Self.isValidRequiredURL(mainnetRPCURL)
-            && Self.isValidOptionalURL(mainnetConsensusRPCURL)
-            && Self.isValidOptionalURL(mainnetArchiveNodeURL)
     }
 
     var canContinueFromModel: Bool {
@@ -269,29 +311,115 @@ private final class OnboardingState: ObservableObject {
     }
 
     func installSelectedModel() {
-        guard installState != .installed else {
+        switch installState {
+        case .idle, .failed:
+            break
+        case .verifying, .installing, .installed:
             return
         }
         guard hardwareMeetsModelRequirement else {
             return
         }
 
-        settingsStore.selectedModelID = selectedModelID
-        installState = .installing(0.08)
+        let model = selectedModel
+        let modelID = model.id
+        settingsStore.selectedModelID = modelID
+        installState = .installing(ModelDownloadProgress(
+            completedBytes: 0,
+            totalBytes: Int64(model.memoryProfile.weightBytes),
+            bytesPerSecond: nil
+        ))
         Task {
             do {
-                let fileURL = try await downloadManager.download(selectedModel) { progress in
+                let fileURL = try await downloadManager.download(model) { [weak self] progress in
+                    guard let self, self.selectedModelID == modelID else {
+                        return
+                    }
+                    if case .installing(let current) = self.installState,
+                       progress.isVisibleChange(from: current) == false {
+                        return
+                    }
                     self.installState = .installing(progress)
                 }
-                settingsStore.installedModelID = selectedModelID
-                settingsStore.installedModelPath = fileURL.path
+                guard selectedModelID == modelID else {
+                    return
+                }
+                recordInstalledModel(modelID: modelID, fileURL: fileURL)
                 installState = .installed
             } catch {
-                settingsStore.installedModelID = nil
-                settingsStore.installedModelPath = nil
+                guard selectedModelID == modelID else {
+                    return
+                }
+                clearRecordedInstallation(for: modelID)
                 installState = .failed(error.localizedDescription)
             }
         }
+    }
+
+    func selectModel(_ model: LocalAIModel) {
+        guard selectedModelID != model.id else {
+            return
+        }
+        selectedModelID = model.id
+        resolveSelectedModelInstallation()
+    }
+
+    private func resolveSelectedModelInstallation() {
+        modelVerificationTask?.cancel()
+        modelVerificationTask = nil
+
+        let model = selectedModel
+        let candidate = LocalAIModelInstallationResolver.resolve(
+            model: model,
+            installedModelID: settingsStore.installedModelID,
+            installedModelPath: settingsStore.installedModelPath,
+            discoveredFileURL: downloadManager.existingFileURL(for: model)
+        )
+
+        switch candidate {
+        case .trusted:
+            installState = .installed
+        case .missing:
+            clearRecordedInstallation(for: model.id)
+            installState = .idle
+        case .needsVerification(let fileURL):
+            installState = .verifying
+            let modelManager = downloadManager
+            modelVerificationTask = Task { @MainActor [weak self] in
+                do {
+                    let verifiedURL = try await modelManager.verifyExistingFile(model, at: fileURL)
+                    try Task.checkCancellation()
+                    guard let self, self.selectedModelID == model.id else {
+                        return
+                    }
+                    self.recordInstalledModel(modelID: model.id, fileURL: verifiedURL)
+                    self.installState = .installed
+                    self.modelVerificationTask = nil
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard let self, self.selectedModelID == model.id else {
+                        return
+                    }
+                    self.clearRecordedInstallation(for: model.id)
+                    self.installState = .failed(error.localizedDescription)
+                    self.modelVerificationTask = nil
+                }
+            }
+        }
+    }
+
+    private func recordInstalledModel(modelID: String, fileURL: URL) {
+        settingsStore.installedModelID = modelID
+        settingsStore.installedModelPath = fileURL.path
+    }
+
+    private func clearRecordedInstallation(for modelID: String) {
+        guard settingsStore.installedModelID == modelID else {
+            return
+        }
+        settingsStore.installedModelID = nil
+        settingsStore.installedModelPath = nil
     }
 
     func provisionKeys() {
@@ -455,9 +583,6 @@ private final class OnboardingState: ObservableObject {
     }
 
     private func persistNetwork() {
-        let trimmedMainnetRPC = mainnetRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedMainnetArchive = mainnetArchiveNodeURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedMainnetConsensus = mainnetConsensusRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedSepoliaRPC = sepoliaRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedSepoliaArchive = sepoliaArchiveNodeURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedSepoliaConsensus = sepoliaConsensusRPCURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -466,10 +591,6 @@ private final class OnboardingState: ObservableObject {
         settingsStore.consensusRPCURL = trimmedSepoliaConsensus
 
         var networkSettings = networkSettingsStore.networkSettings
-        networkSettings.isTestnetModeEnabled = true
-        networkSettings.mainnetRPCURL = trimmedMainnetRPC
-        networkSettings.mainnetArchiveNodeURL = trimmedMainnetArchive
-        networkSettings.mainnetConsensusRPCURL = trimmedMainnetConsensus
         networkSettings.sepoliaRPCURL = trimmedSepoliaRPC
         networkSettings.sepoliaArchiveNodeURL = trimmedSepoliaArchive
         networkSettings.sepoliaConsensusRPCURL = trimmedSepoliaConsensus
@@ -674,12 +795,14 @@ struct LocalWalletOnboardingView: View {
         switch state.installState {
         case .idle:
             return "Local only for now. No account, no cloud, no data sent anywhere."
-        case .installing(let progress):
-            return "Downloading Gemma 4 E4B from Hugging Face. This can take some minutes. \(Int(progress * 100))%"
+        case .verifying:
+            return "Verifying the existing Gemma 4 E4B file before enabling it."
+        case .installing:
+            return "Keep Local Wallet open until the download finishes."
         case .installed:
             return "Gemma 4 E4B is installed locally and ready for llama.cpp wiring."
         case .failed:
-            return "Download failed. Check your connection and retry."
+            return "Model setup failed. Review the error and retry."
         }
     }
 
@@ -696,8 +819,10 @@ struct LocalWalletOnboardingView: View {
         switch state.installState {
         case .idle:
             return "Download & Install"
-        case .installing(let progress):
-            return "Downloading \(Int(progress * 100))%"
+        case .verifying:
+            return "Verifying Model"
+        case .installing:
+            return "Downloading"
         case .installed:
             return "Continue"
         case .failed:
@@ -709,10 +834,12 @@ struct LocalWalletOnboardingView: View {
         guard state.hardwareMeetsModelRequirement else {
             return false
         }
-        if case .installing = state.installState {
+        switch state.installState {
+        case .verifying, .installing:
             return false
+        case .idle, .installed, .failed:
+            return true
         }
-        return true
     }
 
     private func modelPrimaryAction() {
@@ -827,74 +954,100 @@ private struct WelcomeStep: View {
 
 private struct NetworkStep: View {
     @ObservedObject var state: OnboardingState
+    @State private var isAdvancedSetupExpanded = false
 
     var body: some View {
         OnboardingTwoColumn(
             illustration: .network,
             headline: "Choose your nodes",
-            bodyText: "Configure Sepolia and Mainnet RPCs for reads and submission prep. Add a consensus RPC only when you want Helios verification."
+            bodyText: "Connect to Sepolia with an execution RPC. Verification and historical-read endpoints are optional."
         ) {
             VStack(alignment: .leading, spacing: 18) {
                 OnboardingSegmentedControl(
-                    selection: $state.selectedNetworkID,
-                    options: OnboardingNetwork.allCases.map(\.rawValue)
+                    selection: .constant(OnboardingNetworkOption.sepolia.rawValue),
+                    options: OnboardingNetworkOption.allCases.map(\.rawValue),
+                    disabledOptions: Set(
+                        OnboardingNetworkOption.allCases
+                            .filter { !$0.isEnabled }
+                            .map(\.rawValue)
+                    ),
+                    badges: Dictionary(
+                        uniqueKeysWithValues: OnboardingNetworkOption.allCases.compactMap { option in
+                            option.badge.map { (option.rawValue, $0) }
+                        }
+                    )
                 )
                 .frame(height: 54)
 
                 VStack(alignment: .leading, spacing: 14) {
-                    Text(state.selectedNetwork.displayName)
+                    Text("Ethereum Sepolia")
                         .font(.system(size: 16, weight: .bold))
                         .foregroundStyle(OnboardingPalette.primaryText)
-                    networkFields(for: state.selectedNetwork)
-                }
+                    OnboardingTextField(
+                        field: .execution,
+                        placeholder: DemoNetworkSettings.defaults.sepoliaRPCURL,
+                        text: $state.sepoliaRPCURL
+                    )
 
-                OnboardingGlassCard {
-                    VStack(alignment: .leading, spacing: 10) {
-                        InfoRow(icon: "network", title: "Execution RPC", detail: "Used for current EVM state, transaction preparation, submission, balances, and receipts.")
-                        InfoRow(icon: "checkmark.shield", title: "Consensus RPC", detail: "Optional for Helios verified reads. Leave blank to skip sync and use execution RPC reads.")
-                        InfoRow(icon: "clock.arrow.circlepath", title: "Archive node", detail: "Optional endpoint for historical reads and richer wallet timelines.")
+                    VStack(alignment: .leading, spacing: 0) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                isAdvancedSetupExpanded.toggle()
+                            }
+                        } label: {
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(OnboardingPalette.secondaryText)
+                                    .rotationEffect(.degrees(isAdvancedSetupExpanded ? 90 : 0))
+                                    .frame(width: 14, height: 17, alignment: .center)
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Advanced setup")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundStyle(OnboardingPalette.primaryText)
+                                    Text("Consensus verification and historical reads")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(OnboardingPalette.secondaryText)
+                                }
+
+                                Spacer(minLength: 0)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Advanced setup")
+                        .accessibilityValue(isAdvancedSetupExpanded ? "Expanded" : "Collapsed")
+                        .accessibilityHint("Shows optional consensus and archive RPC settings")
+
+                        if isAdvancedSetupExpanded {
+                            VStack(alignment: .leading, spacing: 14) {
+                                OnboardingTextField(
+                                    field: .consensus,
+                                    placeholder: "Optional",
+                                    text: $state.sepoliaConsensusRPCURL
+                                )
+                                OnboardingTextField(
+                                    field: .archive,
+                                    placeholder: "Optional",
+                                    text: $state.sepoliaArchiveNodeURL
+                                )
+                            }
+                            .padding(.top, 14)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
                     }
                     .padding(16)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(OnboardingPalette.input)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .stroke(OnboardingPalette.border, lineWidth: 1.5)
+                            )
+                    )
                 }
             }
-        }
-    }
-
-    @ViewBuilder
-    private func networkFields(for network: OnboardingNetwork) -> some View {
-        switch network {
-        case .sepolia:
-            OnboardingTextField(
-                label: "Execution RPC URL",
-                placeholder: "Required",
-                text: $state.sepoliaRPCURL
-            )
-            OnboardingTextField(
-                label: "Consensus RPC URL",
-                placeholder: ChainConfiguration.ethereumSepolia.consensusRPCURL?.absoluteString ?? "",
-                text: $state.sepoliaConsensusRPCURL
-            )
-            OnboardingTextField(
-                label: "Archive Node URL",
-                placeholder: "Optional",
-                text: $state.sepoliaArchiveNodeURL
-            )
-        case .mainnet:
-            OnboardingTextField(
-                label: "Execution RPC URL",
-                placeholder: "Required",
-                text: $state.mainnetRPCURL
-            )
-            OnboardingTextField(
-                label: "Consensus RPC URL",
-                placeholder: ChainConfiguration.ethereum.consensusRPCURL?.absoluteString ?? "",
-                text: $state.mainnetConsensusRPCURL
-            )
-            OnboardingTextField(
-                label: "Archive Node URL",
-                placeholder: "Optional",
-                text: $state.mainnetArchiveNodeURL
-            )
         }
     }
 }
@@ -921,14 +1074,10 @@ private struct ModelStep: View {
                         ModelCard(
                             model: model,
                             verdict: state.fitVerdict(for: model),
-                            isSelected: state.selectedModelID == model.id,
-                            isInstalled: state.installState == .installed && state.selectedModelID == model.id
+                            isSelected: state.selectedModelID == model.id
                         ) {
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
-                                state.selectedModelID = model.id
-                                if state.installState == .installed {
-                                    state.installState = .idle
-                                }
+                                state.selectModel(model)
                             }
                         }
                     }
@@ -1103,7 +1252,7 @@ private struct SyncStep: View {
         case .idle:
             return "Waiting to start the local daemon."
         case .preparing:
-            return "Unlocking the bundler key and starting the local daemon."
+            return "Starting wallet-node in read-only mode."
         case .failed:
             return "Daemon startup or readiness check ended with an error."
         case .syncing, .ready, .timedOut:
@@ -1293,7 +1442,7 @@ private struct ReadinessStatusCard: View {
         case .idle:
             return "The app will start wallet-node before opening the dashboard."
         case .preparing:
-            return "macOS may ask for biometric authentication to unlock the local bundler key."
+            return "Readiness checks do not unlock transaction keys or request Mac authentication."
         case .syncing(let status):
             if let status {
                 return "wallet-node reports \(status.status.replacingOccurrences(of: "_", with: " ")) on \(status.networkProfile)."
@@ -1789,6 +1938,23 @@ private struct ModelInstallStatusCard: View {
                 }
                 .padding(16)
             }
+        case .verifying:
+            OnboardingGlassCard {
+                HStack(spacing: 12) {
+                    ProgressView()
+                        .scaleEffect(0.78)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Verifying existing model")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(OnboardingPalette.primaryText)
+                        Text("Checking the local GGUF SHA256 before enabling it.")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(OnboardingPalette.secondaryText)
+                    }
+                    Spacer()
+                }
+                .padding(16)
+            }
         case .installing(let progress):
             OnboardingGlassCard {
                 VStack(alignment: .leading, spacing: 14) {
@@ -1799,16 +1965,16 @@ private struct ModelInstallStatusCard: View {
                             Text("Downloading Gemma 4 E4B")
                                 .font(.system(size: 16, weight: .bold))
                                 .foregroundStyle(OnboardingPalette.primaryText)
-                            Text("This is a \(LocalAIModel.recommended.size) model file, so it can take some minutes.")
+                            Text(progress.statusText)
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(OnboardingPalette.secondaryText)
                         }
                         Spacer()
-                        Text("\(Int(progress * 100))%")
+                        Text("\(Int(progress.fractionCompleted * 100))%")
                             .font(.system(size: 18, weight: .black, design: .monospaced))
                             .foregroundStyle(OnboardingPalette.primaryText)
                     }
-                    ProgressView(value: progress)
+                    ProgressView(value: progress.fractionCompleted)
                         .progressViewStyle(.linear)
                         .tint(OnboardingPalette.accent)
                 }
@@ -1839,7 +2005,7 @@ private struct ModelInstallStatusCard: View {
                         .font(.system(size: 20, weight: .bold))
                         .foregroundStyle(OnboardingPalette.warning)
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("Download failed")
+                        Text("Model setup failed")
                             .font(.system(size: 16, weight: .bold))
                             .foregroundStyle(OnboardingPalette.primaryText)
                         Text(message)
@@ -1922,12 +2088,38 @@ private struct HardwareRequirementCard: View {
     }
 }
 
+struct OnboardingModelCardPresentation: Equatable {
+    let title: String
+    let detail: String
+    let fitBadge: String?
+
+    init(model: LocalAIModel, verdict: ModelFitVerdict) {
+        if model.id == LocalAIModel.recommended.id {
+            title = "Gemma 4 E4B"
+            detail = "Fine-tuned for wallet actions and reliable tool use."
+        } else {
+            title = model.name
+            detail = model.detail
+        }
+
+        switch verdict {
+        case .tight, .wontFit:
+            fitBadge = verdict.label
+        case .fits, .unknown:
+            fitBadge = nil
+        }
+    }
+}
+
 private struct ModelCard: View {
     let model: LocalAIModel
     let verdict: ModelFitVerdict
     let isSelected: Bool
-    let isInstalled: Bool
     let action: () -> Void
+
+    private var presentation: OnboardingModelCardPresentation {
+        OnboardingModelCardPresentation(model: model, verdict: verdict)
+    }
 
     private var verdictTint: Color {
         switch verdict {
@@ -1952,7 +2144,7 @@ private struct ModelCard: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 10) {
-                        Text(model.name)
+                        Text(presentation.title)
                             .font(.system(size: 21, weight: .bold))
                             .foregroundStyle(OnboardingPalette.primaryText)
                             .lineLimit(1)
@@ -1962,17 +2154,16 @@ private struct ModelCard: View {
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
                             .background(Capsule().fill(OnboardingPalette.deepPanel))
-                        Text(model.tag)
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(OnboardingPalette.mutedText)
-                        Text(verdict.label)
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
-                            .foregroundStyle(verdictTint)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Capsule().fill(verdictTint.opacity(0.14)))
+                        if let fitBadge = presentation.fitBadge {
+                            Text(fitBadge)
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .foregroundStyle(verdictTint)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(verdictTint.opacity(0.14)))
+                        }
                     }
-                    Text(model.detail)
+                    Text(presentation.detail)
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(OnboardingPalette.secondaryText)
                         .lineLimit(2)
@@ -2003,17 +2194,6 @@ private struct ModelCard: View {
             )
         }
         .buttonStyle(.plain)
-        .overlay(alignment: .topTrailing) {
-            if isInstalled {
-                Text("INSTALLED")
-                    .font(.system(size: 10, weight: .black))
-                    .foregroundStyle(OnboardingPalette.success)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(OnboardingPalette.success.opacity(0.12)))
-                    .padding(10)
-            }
-        }
     }
 }
 
@@ -2083,16 +2263,25 @@ private struct InfoRow: View {
 }
 
 private struct OnboardingTextField: View {
-    let label: String
+    let field: OnboardingRPCField
     let placeholder: String
-    var detail: String? = nil
     @Binding var text: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Text(label.uppercased())
-                .font(.system(size: 13, weight: .black, design: .monospaced))
-                .foregroundStyle(OnboardingPalette.mutedText)
+            HStack(spacing: 7) {
+                Text(field.label.uppercased())
+                    .font(.system(size: 13, weight: .black, design: .monospaced))
+                    .foregroundStyle(OnboardingPalette.mutedText)
+                OnboardingFieldInfoButton(field: field)
+                Spacer(minLength: 8)
+                Text(field.isRequired ? "REQUIRED" : "OPTIONAL")
+                    .font(.system(size: 10, weight: .black, design: .monospaced))
+                    .foregroundStyle(field.isRequired ? OnboardingPalette.warning : OnboardingPalette.secondaryText)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(OnboardingPalette.deepPanel))
+            }
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 20, weight: .semibold, design: .monospaced))
@@ -2107,12 +2296,36 @@ private struct OnboardingTextField: View {
                                 .stroke(OnboardingPalette.border, lineWidth: 1.5)
                         )
                 )
-            if let detail {
-                Text(detail)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(OnboardingPalette.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        }
+    }
+}
+
+private struct OnboardingFieldInfoButton: View {
+    let field: OnboardingRPCField
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            Image(systemName: "info.circle")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(OnboardingPalette.secondaryText)
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(field.helpText)
+        .accessibilityLabel("About \(field.label)")
+        .accessibilityHint(field.helpText)
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            Text(field.helpText)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(OnboardingPalette.primaryText)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 280, alignment: .leading)
+                .padding(14)
+                .background(OnboardingPalette.panel)
         }
     }
 }
@@ -2120,19 +2333,37 @@ private struct OnboardingTextField: View {
 private struct OnboardingSegmentedControl: View {
     @Binding var selection: String
     let options: [String]
+    var disabledOptions: Set<String> = []
+    var badges: [String: String] = [:]
 
     var body: some View {
         HStack(spacing: 0) {
             ForEach(options, id: \.self) { option in
                 Button {
+                    guard !disabledOptions.contains(option) else { return }
                     selection = option
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: systemImage(for: option))
                         Text(option)
+                        if let badge = badges[option] {
+                            Text(badge)
+                                .font(.system(size: 10, weight: .heavy))
+                                .foregroundStyle(OnboardingPalette.primaryText)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(
+                                    Capsule()
+                                        .fill(OnboardingPalette.border.opacity(0.85))
+                                )
+                        }
                     }
                     .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(selection == option ? .white : OnboardingPalette.secondaryText)
+                    .foregroundStyle(
+                        selection == option
+                            ? .white
+                            : OnboardingPalette.secondaryText
+                    )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -2141,6 +2372,11 @@ private struct OnboardingSegmentedControl: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .disabled(disabledOptions.contains(option))
+                .accessibilityLabel(
+                    badges[option].map { "\(option), \($0)" } ?? option
+                )
+                .accessibilityHint(disabledOptions.contains(option) ? "Unavailable" : "")
             }
         }
         .background(

@@ -116,21 +116,24 @@ pub async fn handle(
     };
     let was_active = account.lifecycle == BundlerLifecycle::Active;
 
-    if let Err(err) = state.bundler_keys.delete_key(&account.key_ref) {
-        let _ = super::relayer_audit::record(
-            state,
-            if params.unsafe_reset {
-                "relayer_key_reset_completed"
-            } else {
-                "relayer_key_deleted"
-            },
-            &account,
-            Some("delete_bundler_eoa"),
-            "failure",
-            Some("keychain_delete_failed"),
-        )
-        .await;
-        return Err(super::bundler_account::map_key_error(err));
+    match state.bundler_keys.delete_key(&account.key_ref) {
+        Ok(()) | Err(crate::bundler_keys::BundlerKeyError::KeyNotFound(_)) => {}
+        Err(err) => {
+            let _ = super::relayer_audit::record(
+                state,
+                if params.unsafe_reset {
+                    "relayer_key_reset_completed"
+                } else {
+                    "relayer_key_deleted"
+                },
+                &account,
+                Some("delete_bundler_eoa"),
+                "failure",
+                Some("keychain_delete_failed"),
+            )
+            .await;
+            return Err(super::bundler_account::map_key_error(err));
+        }
     }
     if state
         .store

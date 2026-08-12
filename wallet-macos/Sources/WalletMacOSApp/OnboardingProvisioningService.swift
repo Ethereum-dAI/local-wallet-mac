@@ -8,6 +8,7 @@ struct OnboardingProvisioningResult {
 
 struct OnboardingProvisioningService {
     private let keyStore: KeyStore
+    private let walletKeyValidator: WalletKeyValidator
     private let metadataStore: WalletMetadataStore
     private let settingsStore: OnboardingSettingsStore
     private let addressPredictor: KernelAccountAddressPredictor
@@ -16,11 +17,13 @@ struct OnboardingProvisioningService {
     init(
         keyStore: KeyStore = KeyStore(),
         metadataStore: WalletMetadataStore = WalletMetadataStore(),
+        walletKeyValidator: WalletKeyValidator? = nil,
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
         addressPredictor: KernelAccountAddressPredictor = KernelAccountAddressPredictor(),
         chain: ChainConfiguration = ChainConfiguration.ethereumSepolia
     ) {
         self.keyStore = keyStore
+        self.walletKeyValidator = walletKeyValidator ?? WalletKeyValidator(keyStore: keyStore)
         self.metadataStore = metadataStore
         self.settingsStore = settingsStore
         self.addressPredictor = addressPredictor
@@ -40,7 +43,14 @@ struct OnboardingProvisioningService {
     private func createOrLoadWalletRecord() throws -> WalletRecord {
         let now = Date()
 
-        if let existing = try metadataStore.load(), existing.keyTag == keyStore.keyTag {
+        if let existing = try metadataStore.load() {
+            switch try walletKeyValidator.validate(existing) {
+            case .available:
+                break
+            case let .recoveryRequired(reason):
+                throw AppError.walletKeyRecoveryRequired(reason)
+            }
+
             let coordinates = PublicKeyCoordinates(x: existing.pubkeyX, y: existing.pubkeyY)
             let predictedAddress = try addressPredictor.predictedAddress(
                 chain: chain,

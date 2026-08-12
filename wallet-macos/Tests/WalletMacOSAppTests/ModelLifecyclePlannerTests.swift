@@ -305,11 +305,11 @@ struct ModelInstallProgressTests {
         var install = ModelInstallProgress(
             modelID: "ef-dai-team/gemma-4-E4B-wallet-ft",
             displayName: "Gemma 4 E4B (wallet-tuned)",
-            phase: .downloading(0)
+            phase: .downloading(progress(0))
         )
         #expect(install.modelID == LocalAIModel.recommended.id)
-        install.phase = .downloading(0.5)
-        #expect(install.phase == .downloading(0.5))
+        install.phase = .downloading(progress(0.5))
+        #expect(install.phase == .downloading(progress(0.5)))
         install.phase = .testing
         #expect(install.phase == .testing)
     }
@@ -326,22 +326,38 @@ struct ModelInstallProgressTests {
         let install = ModelInstallProgress(
             modelID: LocalAIModel.recommended.id,
             displayName: LocalAIModel.recommended.name,
-            phase: .downloading(0.3)
+            phase: .downloading(progress(0.3))
         )
         #expect(install.isClaimedByRow(ids: LocalAIModel.curated.map(\.id)))
         // A Hugging Face add has no row until `InstalledModelStore` has a record,
         // so nothing else can be drawing it.
-        let custom = ModelInstallProgress(modelID: "owner/repo#f.gguf", displayName: "f", phase: .downloading(0))
+        let custom = ModelInstallProgress(
+            modelID: "owner/repo#f.gguf",
+            displayName: "f",
+            phase: .downloading(progress(0))
+        )
         #expect(!custom.isClaimedByRow(ids: LocalAIModel.curated.map(\.id)))
     }
 
-    /// URLSession reports progress per received chunk; the UI renders whole
-    /// percents. Publishing every chunk is a redraw that changes no pixels.
-    @Test func onlyWholePercentChangesAreWorthPublishing() {
-        #expect(!ModelInstallPhase.downloading(0.5012).isVisibleChange(from: .downloading(0.5049)))
-        #expect(ModelInstallPhase.downloading(0.51).isVisibleChange(from: .downloading(0.50)))
-        #expect(ModelInstallPhase.testing.isVisibleChange(from: .downloading(0.999)))
+    /// URLSession reports progress per received chunk; publishing an update that
+    /// formats identically is a redraw that changes no pixels.
+    @Test func onlyRenderedTelemetryChangesAreWorthPublishing() {
+        #expect(!ModelInstallPhase.downloading(progress(0.5012)).isVisibleChange(
+            from: .downloading(progress(0.5014))
+        ))
+        #expect(ModelInstallPhase.downloading(progress(0.51)).isVisibleChange(
+            from: .downloading(progress(0.50))
+        ))
+        #expect(ModelInstallPhase.testing.isVisibleChange(from: .downloading(progress(0.999))))
         #expect(!ModelInstallPhase.testing.isVisibleChange(from: .testing))
+    }
+
+    private func progress(_ fraction: Double) -> ModelDownloadProgress {
+        ModelDownloadProgress(
+            completedBytes: Int64(fraction * 1_000_000),
+            totalBytes: 1_000_000,
+            bytesPerSecond: nil
+        )
     }
 }
 
@@ -357,10 +373,13 @@ struct ModelInstallStoreTests {
     @Test func progressForADifferentModelIsIgnored() {
         let store = ModelInstallStore()
         _ = store.begin(modelID: "a", displayName: "A")
-        store.update(modelID: "b", phase: .downloading(0.9))
-        #expect(store.install?.phase == .downloading(0))
-        store.update(modelID: "a", phase: .downloading(0.9))
-        #expect(store.install?.phase == .downloading(0.9))
+        let progress = ModelDownloadProgress(completedBytes: 900, totalBytes: 1_000, bytesPerSecond: nil)
+        store.update(modelID: "b", phase: .downloading(progress))
+        #expect(store.install?.phase == .downloading(
+            ModelDownloadProgress(completedBytes: 0, totalBytes: 0, bytesPerSecond: nil)
+        ))
+        store.update(modelID: "a", phase: .downloading(progress))
+        #expect(store.install?.phase == .downloading(progress))
     }
 
     /// Starting an install clears the previous outcome, and finishing replaces the

@@ -1,6 +1,33 @@
 import AppKit
 import Combine
+import LocalAuthentication
 import SwiftUI
+
+private final class WorkspaceObserverTokenBag: @unchecked Sendable {
+    private let center: NotificationCenter
+    private let lock = NSLock()
+    private var tokens: [NSObjectProtocol] = []
+
+    init(center: NotificationCenter) {
+        self.center = center
+    }
+
+    func append(_ token: NSObjectProtocol) {
+        lock.lock()
+        tokens.append(token)
+        lock.unlock()
+    }
+
+    deinit {
+        lock.lock()
+        let ownedTokens = tokens
+        tokens.removeAll()
+        lock.unlock()
+        for token in ownedTokens {
+            center.removeObserver(token)
+        }
+    }
+}
 import UniformTypeIdentifiers
 import WalletToolLayer
 
@@ -80,7 +107,6 @@ enum ChainIDFormatting {
 private struct ChatAccountIdentity: Equatable {
     let chainName: String
     let chainID: UInt64
-    let isTestnet: Bool
     let kernelAddress: String
     let kernelBalance: String
     let kernelState: String
@@ -99,7 +125,6 @@ private struct ChatAccountIdentity: Equatable {
         ChatAccountIdentity(
             chainName: chain.name,
             chainID: chain.id,
-            isTestnet: chain.isTestnet,
             kernelAddress: kernelAddress,
             kernelBalance: "Balance unavailable",
             kernelState: "Not inspected",
@@ -876,6 +901,24 @@ private enum ChatSidebarBucket: String, CaseIterable {
     }
 }
 
+enum PrivacyBalanceRefreshFailurePolicy {
+    static func requiresHelperReload(_ error: Error) -> Bool {
+        if let appError = error as? AppError,
+           case .privacyAccountLocked = appError {
+            return true
+        }
+        if let clientError = error as? RailgunHelperClient.ClientError,
+           case .connectFailed = clientError {
+            return true
+        }
+        return false
+    }
+
+    static func nextUnlockState(after error: Error) -> PrivacyUnlockState {
+        requiresHelperReload(error) ? .locked : .loaded
+    }
+}
+
 @MainActor
 private final class ChatDashboardModel: ObservableObject {
     @Published var inputText = "" {
@@ -924,6 +967,7 @@ private final class ChatDashboardModel: ObservableObject {
     // `pending` = deposited but not yet included by the pool's approval set.
     @Published private(set) var shieldedConfirmed: String?
     @Published private(set) var shieldedPending: String?
+    @Published private(set) var privacyUnlockState: PrivacyUnlockState = .locked
     @Published private(set) var isRefreshingShieldedBalance = false
     @Published private(set) var shieldedBalanceError: String?
     // Populated by the Max affordance (`fillMaxUnshieldAmount()`): the "you will receive"
@@ -953,6 +997,9 @@ private final class ChatDashboardModel: ObservableObject {
     private var gasWarmupTask: Task<Void, Never>?
     private var sessionActivityEventMonitor: Any?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
+    private let workspaceSecurityObservers = WorkspaceObserverTokenBag(
+        center: NSWorkspace.shared.notificationCenter
+    )
     private let inferenceService: EmbeddedLlamaInferenceService
     private let chatStore: ChatSQLiteStore
     private let walletHistoryStore: WalletTransactionHistoryStore
@@ -967,6 +1014,7 @@ private final class ChatDashboardModel: ObservableObject {
     // changes (e.g. the user switches providers), the spawned helper is still bound to the old
     // RPC, so we must tear it down and re-spawn — see `railgunHelperClient()`.
     private var railgunDaemonRPC: String?
+    private var privacyRuntimeGeneration: UInt64 = 0
     private var lastTokenBalanceKey: String?
     private var lastTokenBalanceAttemptKey: String?
     private var lastTokenBalanceAttemptAt: Date?
@@ -1035,8 +1083,30 @@ private final class ChatDashboardModel: ObservableObject {
                 self?.refreshTokenBalancesIfNeeded()
             }
         }
+        self.walletModel.registerSecretResetQuiescenceHandler { [weak self] in
+            try await self?.resetPrivacyRuntime()
+        }
+        self.walletModel.registerSecretRuntimeLockHandler { [weak self] in
+            await self?.lockPrivacyRuntimeForSystemSession()
+        }
+        let workspaceNotifications = NSWorkspace.shared.notificationCenter
+        for name in [
+            NSWorkspace.sessionDidResignActiveNotification,
+            NSWorkspace.screensDidSleepNotification,
+        ] {
+            workspaceSecurityObservers.append(
+                workspaceNotifications.addObserver(
+                    forName: name,
+                    object: nil,
+                    queue: OperationQueue.main
+                ) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        await self?.walletModel.lockSecretRuntimesForSystemSession()
+                    }
+                }
+            )
+        }
         refreshAccountIdentity()
-        self.walletModel.bootstrap()
         // One warm-up, not a poll. The header pill would otherwise read "— gwei"
         // until first tapped; after this it is refreshed by the things that precede
         // looking at or acting on gas (tapping the pill, returning to the app).
@@ -1053,6 +1123,52 @@ private final class ChatDashboardModel: ObservableObject {
         backfillWalletHistoryFromChat()
         reloadWalletHistory()
         refreshTokenBalancesIfNeeded()
+    }
+
+    private func resetPrivacyRuntime() async throws {
+        guard executingIntentIDs.isEmpty, fundingHelperAddress == nil else {
+            throw AppError.walletOperationInProgress
+        }
+        let daemon = detachPrivacyRuntime(clearAccountIdentity: true)
+        try await daemon?.terminateAndWait()
+    }
+
+    private func lockPrivacyRuntimeForSystemSession() async {
+        let daemon = detachPrivacyRuntime(clearAccountIdentity: false)
+        do {
+            try await daemon?.terminateAndWait()
+        } catch {
+            daemon?.terminate()
+        }
+    }
+
+    private func detachPrivacyRuntime(clearAccountIdentity: Bool) -> RailgunHelperDaemon? {
+        privacyRuntimeGeneration &+= 1
+        let daemon = railgunDaemon
+        railgunDaemon = nil
+        railgunDaemonRPC = nil
+        privacyUnlockState = .locked
+        shieldedConfirmed = nil
+        shieldedPending = nil
+        shieldedBalanceError = nil
+        isRefreshingShieldedBalance = false
+        maxUnshieldableBreakdown = nil
+        maxUnshieldableError = nil
+        isFetchingMaxUnshieldable = false
+        lastMaxFillComposerText = nil
+        if clearAccountIdentity {
+            accountIdentity = ChatAccountIdentity.placeholder(
+                chain: walletModel.activeChain,
+                kernelAddress: "Not available",
+                bundlerAddress: "Not available"
+            )
+        }
+        kernelTokenBalances = []
+        bundlerTokenBalances = []
+        lastTokenBalanceKey = nil
+        lastTokenBalanceAttemptKey = nil
+        lastTokenBalanceAttemptAt = nil
+        return daemon
     }
 
     deinit {
@@ -1171,7 +1287,7 @@ private final class ChatDashboardModel: ObservableObject {
             appDidBecomeActiveObserver = NotificationCenter.default.addObserver(
                 forName: NSApplication.didBecomeActiveNotification,
                 object: nil,
-                queue: .main
+                queue: OperationQueue.main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     self?.walletModel.handleAppBecameActive()
@@ -1303,9 +1419,8 @@ private final class ChatDashboardModel: ObservableObject {
             walletNodeLogPath: WalletNodeClient.Configuration.fromEnvironment() == nil
                 ? LocalWalletSettingsSnapshot.walletNodeLogPath()
                 : "External wallet-node; inspect that daemon's configured logs directory.",
-            unlockRelayerOnLaunch: walletModel.unlockRelayerOnLaunch,
-            walletKeyPolicy: "Secure Enclave P-256 key; local user presence required for signing.",
-            relayerKeyPolicy: "Keychain generic password protected by current biometric set.",
+            walletKeyPolicy: "Secure Enclave P-256 key; approve only when a wallet signature is required. In-policy session-key sends remain prompt-free.",
+            relayerKeyPolicy: "Keychain item protected by Touch ID or your Mac login password; locked until a transaction or relayer action needs it.",
             session: LocalWalletSessionSettingsSnapshot(
                 isEnabled: walletModel.sessionKeysEnabled,
                 configuredPolicy: walletModel.sessionPolicy,
@@ -1512,7 +1627,7 @@ private final class ChatDashboardModel: ObservableObject {
         }
         let chain = walletModel.activeChain
         let kernelAddress = walletModel.walletRecord?.kernelAccountAddress ?? accountIdentity.kernelAddress
-        let bundlerAddress = walletModel.localRelayerStatus?.eoa ?? accountIdentity.bundlerAddress
+        let bundlerAddress = walletModel.localRelayerStatus?.availableEOA ?? accountIdentity.bundlerAddress
         guard kernelAddress.hasPrefix("0x"), bundlerAddress.hasPrefix("0x") else {
             return
         }
@@ -1709,7 +1824,7 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     var executionStatusText: String {
-        hasExecutingIntent ? walletModel.bridgeStatus : runtimeStatus
+        walletModel.bridgeStatus
     }
 
     var isRefreshingAccountIdentity: Bool {
@@ -2025,7 +2140,7 @@ private final class ChatDashboardModel: ObservableObject {
     /// (e.g. smaller-batch) attempt can only be raised, never trusted as-is.
     /// Do not "optimize" this into passing stale cached preflight state.
     func retryIntentWithGasHeadroom(_ intent: ToolIntent, callGasLimit: UInt64) {
-        Task { await executeIfSupported(intent, acknowledgedCallGasLimit: callGasLimit) }
+        Task { executeIfSupported(intent, acknowledgedCallGasLimit: callGasLimit) }
     }
 
     func rejectIntent(_ message: ChatMessage) {
@@ -2832,10 +2947,10 @@ private final class ChatDashboardModel: ObservableObject {
             : "Relayer key deleted. Submissions stay blocked until a funded relayer exists."
     }
 
-    func resetWalletFromSettings() throws -> String {
-        walletModel.resetDemoWallet()
+    func resetWalletFromSettings() async throws -> String {
+        try await walletModel.resetDemoWalletAuthorized()
         refreshAccountIdentity()
-        return "Wallet reset requested. Local wallet, relayer, and session keys were deleted; the app will create fresh key material."
+        return "Wallet reset complete. Local wallet, relayer, privacy, and session keys were deleted; fresh key material was created."
     }
 
     func debugSessionReportFromSettings() async -> String {
@@ -2844,11 +2959,6 @@ private final class ChatDashboardModel: ObservableObject {
 
     func clearDebugLogFromSettings() {
         walletModel.clearDebugLog()
-    }
-
-    func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
-        walletModel.setUnlockRelayerOnLaunch(isEnabled)
-        refreshAccountIdentity()
     }
 
     func setSwapSlippageBps(_ bps: UInt64) {
@@ -2884,10 +2994,10 @@ private final class ChatDashboardModel: ObservableObject {
     private func refreshAccountIdentity() {
         let chain = walletModel.activeChain
         let kernelAddress = walletModel.walletRecord?.kernelAccountAddress
-            ?? accountIdentity.kernelAddress
+            ?? "Not available"
         let kernelBalance = walletModel.accountInspection?.balanceDisplay ?? "Balance unavailable"
         let kernelState = walletModel.accountInspection?.stateTitle ?? "Not inspected"
-        let bundlerAddress = walletModel.localRelayerStatus?.eoa
+        let bundlerAddress = walletModel.localRelayerStatus?.availableEOA
             ?? onboardingSettingsStore.bundlerAddress(chainId: chain.id)
             ?? "Not available"
         let bundlerBalance = Self.displayETHBalance(walletModel.localRelayerStatus?.balance)
@@ -2900,9 +3010,13 @@ private final class ChatDashboardModel: ObservableObject {
         if let status = walletModel.localRelayerStatus {
             // "Out of gas — can't send" over "Needs top-up": under the threshold every send is
             // refused, and the badge is the only place that says so before the user tries.
-            bundlerState = status.ready
-                ? "Ready"
-                : bundlerGas.needsGas ? bundlerGas.badgeText : status.lifecycle.capitalized
+            if status.reason == "bundler_eoa_missing" || status.reason == "bundler_eoa_locked" {
+                bundlerState = "Locked until needed"
+            } else {
+                bundlerState = status.ready
+                    ? "Ready"
+                    : bundlerGas.needsGas ? bundlerGas.badgeText : status.lifecycle.capitalized
+            }
         } else {
             bundlerState = walletModel.localRelayerMessage
         }
@@ -2910,7 +3024,6 @@ private final class ChatDashboardModel: ObservableObject {
         accountIdentity = ChatAccountIdentity(
             chainName: chain.name,
             chainID: chain.id,
-            isTestnet: chain.isTestnet,
             kernelAddress: kernelAddress,
             kernelBalance: kernelBalance,
             kernelState: kernelState,
@@ -3050,55 +3163,159 @@ private final class ChatDashboardModel: ObservableObject {
         return intent
     }
 
-    /// Resolve a client for the railgun-helper sidecar (the wallet's privacy entry point).
-    /// Configured via env for now (`LOCAL_WALLET_PRIVACY_SOCKET` / `_TOKEN`); the in-app
-    /// sidecar-spawn + live (non-fork) mode are the next integration step.
-    private func railgunHelperClient() async throws -> RailgunHelperClient {
-        // Env override points at a manually-run sidecar (e.g. an anvil fork); otherwise the
-        // app spawns + owns one on its active chain.
+    /// Return a helper only when this model has already been explicitly unlocked. This path is
+    /// used by refresh/polling and therefore must never touch a protected Keychain item.
+    private func loadedRailgunHelperClient() throws -> RailgunHelperClient {
+        guard !walletModel.isResettingWallet, privacyUnlockState == .loaded else {
+            throw AppError.privacyAccountLocked
+        }
         let env = ProcessInfo.processInfo.environment
         if let socket = env["LOCAL_WALLET_PRIVACY_SOCKET"],
            let token = env["LOCAL_WALLET_PRIVACY_TOKEN"] {
             return RailgunHelperClient(socketPath: socket, bearerToken: token)
         }
         let currentRPC = walletModel.activeChain.rpcURL.absoluteString
-        // Reuse the spawned sidecar only if it was launched on the CURRENT active-chain RPC.
-        // If the RPC changed under it (e.g. the user switched providers to escape rate limits),
-        // the helper is still bound to the old RPC — tear it down (deinit SIGTERMs it) and
-        // re-spawn on the new RPC.
-        if let daemon = railgunDaemon, railgunDaemonRPC == currentRPC {
-            return daemon.client
+        guard let daemon = railgunDaemon, railgunDaemonRPC == currentRPC else {
+            railgunDaemon = nil
+            railgunDaemonRPC = nil
+            privacyUnlockState = .locked
+            throw AppError.privacyAccountLocked
         }
+        return daemon.client
+    }
+
+    /// Start (or reuse) the helper with the caller's one-action context. The caller decides
+    /// whether explicit evaluation is required; Keychain and subsequent wallet signing receive
+    /// this same context so one approval covers the complete action.
+    private func railgunHelperClient(
+        using authentication: DeviceOwnerAuthenticationSession
+    ) async throws -> RailgunHelperClient {
+        guard !walletModel.isResettingWallet else {
+            throw AppError.walletOperationInProgress
+        }
+        let generation = privacyRuntimeGeneration
+        if privacyUnlockState == .loaded,
+           let loaded = try? loadedRailgunHelperClient() {
+            return loaded
+        }
+
+        let env = ProcessInfo.processInfo.environment
+        if let socket = env["LOCAL_WALLET_PRIVACY_SOCKET"],
+           let token = env["LOCAL_WALLET_PRIVACY_TOKEN"] {
+            privacyUnlockState = .loaded
+            return RailgunHelperClient(socketPath: socket, bearerToken: token)
+        }
+
+        let currentRPC = walletModel.activeChain.rpcURL.absoluteString
         railgunDaemon = nil
         railgunDaemonRPC = nil
-        let secrets = try RailgunSecretsStore.loadOrCreate()
+        let secrets = try RailgunSecretsStore.loadOrCreate(
+            authenticationContext: authentication.context
+        )
+        guard generation == privacyRuntimeGeneration, !walletModel.isResettingWallet else {
+            throw AppError.walletOperationInProgress
+        }
         let daemon = try await RailgunHelperDaemon.launch(
             rpcURL: currentRPC,
             secrets: secrets
         )
+        guard generation == privacyRuntimeGeneration, !walletModel.isResettingWallet else {
+            try? await daemon.terminateAndWait()
+            throw AppError.walletOperationInProgress
+        }
         railgunDaemon = daemon
         railgunDaemonRPC = currentRPC
+        privacyUnlockState = .loaded
         return daemon.client
     }
 
-    /// Fetch the shielded (RAILGUN) balance from the sidecar and publish it split into
-    /// confirmed (cleared/spendable) vs pending (deposited, awaiting pool inclusion).
+    /// Explicit user entry point from the locked balance row.
+    func unlockShieldedBalance() {
+        guard !walletModel.isResettingWallet,
+              privacyUnlockState != .unlocking,
+              !isRefreshingShieldedBalance else { return }
+        let generation = privacyRuntimeGeneration
+        privacyUnlockState = .unlocking
+        isRefreshingShieldedBalance = true
+        shieldedBalanceError = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.privacyRuntimeGeneration == generation {
+                    self.isRefreshingShieldedBalance = false
+                }
+            }
+            let authentication = DeviceOwnerAuthenticationSession(
+                reason: "Unlock shielded balances"
+            )
+            defer { authentication.invalidate() }
+            do {
+                try await authentication.authorize()
+                let client = try await self.railgunHelperClient(using: authentication)
+                let split = try await client.balance()
+                guard self.privacyRuntimeGeneration == generation,
+                      !self.walletModel.isResettingWallet else { return }
+                self.shieldedConfirmed = WeiFormatter.ethDisplayString(fromHexWei: split.valid)
+                self.shieldedPending = WeiFormatter.ethDisplayString(fromHexWei: split.pending)
+                self.privacyUnlockState = .loaded
+                self.shieldedBalanceError = nil
+            } catch {
+                guard self.privacyRuntimeGeneration == generation else { return }
+                self.privacyUnlockState = Self.isAuthenticationCancellation(error)
+                    ? .locked
+                    : .failed(error.localizedDescription)
+                self.shieldedBalanceError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Refresh an already-unlocked helper. View lifecycle and background settlement polling use
+    /// this method, so failure relocks or reports an error but never asks for authentication.
     func refreshShieldedBalance() {
-        guard !isRefreshingShieldedBalance else { return }
+        guard !walletModel.isResettingWallet,
+              privacyUnlockState == .loaded,
+              !isRefreshingShieldedBalance else { return }
+        let generation = privacyRuntimeGeneration
         isRefreshingShieldedBalance = true
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.isRefreshingShieldedBalance = false }
+            defer {
+                if self.privacyRuntimeGeneration == generation {
+                    self.isRefreshingShieldedBalance = false
+                }
+            }
             do {
-                let client = try await self.railgunHelperClient()
+                let client = try self.loadedRailgunHelperClient()
                 let split = try await client.balance()
+                guard self.privacyRuntimeGeneration == generation,
+                      !self.walletModel.isResettingWallet else { return }
                 self.shieldedConfirmed = WeiFormatter.ethDisplayString(fromHexWei: split.valid)
                 self.shieldedPending = WeiFormatter.ethDisplayString(fromHexWei: split.pending)
                 self.shieldedBalanceError = nil
             } catch {
+                guard self.privacyRuntimeGeneration == generation else { return }
+                let requiresReload = PrivacyBalanceRefreshFailurePolicy.requiresHelperReload(error)
+                if requiresReload {
+                    // A missing socket means the in-memory helper is gone. Drop the stale owner
+                    // so the next explicit unlock can reload the protected seed and relaunch it.
+                    self.railgunDaemon = nil
+                    self.railgunDaemonRPC = nil
+                }
+                // RPC, decoding, and in-helper I/O failures do not revoke the already-unlocked
+                // seed. Keep those failures refreshable without another device-owner prompt.
+                self.privacyUnlockState = PrivacyBalanceRefreshFailurePolicy.nextUnlockState(after: error)
                 self.shieldedBalanceError = error.localizedDescription
             }
         }
+    }
+
+    private nonisolated static func isAuthenticationCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if case AppError.userAuthorizationCancelled = error { return true }
+        guard let localAuthenticationError = error as? LAError else { return false }
+        return localAuthenticationError.code == .userCancel
+            || localAuthenticationError.code == .appCancel
+            || localAuthenticationError.code == .systemCancel
     }
 
     /// After a shield/unshield, the RAILGUN pool (Subsquid index + note scan) lags the chain,
@@ -3106,10 +3323,13 @@ private final class ChatDashboardModel: ObservableObject {
     /// window, refreshing each pass, until the confirmed/pending split changes from what it was
     /// when the operation completed (or the window elapses).
     func refreshShieldedBalanceUntilSettled(attempts: Int = 12, interval: TimeInterval = 3) {
+        let generation = privacyRuntimeGeneration
         Task { @MainActor [weak self] in
             guard let self else { return }
             let baseline = [self.shieldedConfirmed, self.shieldedPending]
             for _ in 0..<max(1, attempts) {
+                guard self.privacyRuntimeGeneration == generation,
+                      !self.walletModel.isResettingWallet else { return }
                 self.refreshShieldedBalance()
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 if [self.shieldedConfirmed, self.shieldedPending] != baseline {
@@ -3134,14 +3354,23 @@ private final class ChatDashboardModel: ObservableObject {
     /// a ready-to-send `/unshield` command at `maxValueWei`, alongside the breakdown showing what
     /// the recipient would actually net (`receivableAtMaxWei`) and the gas reserve held back.
     func fillMaxUnshieldAmount() {
-        guard !isFetchingMaxUnshieldable else { return }
+        guard !walletModel.isResettingWallet,
+              privacyUnlockState == .loaded,
+              !isFetchingMaxUnshieldable else { return }
+        let generation = privacyRuntimeGeneration
         isFetchingMaxUnshieldable = true
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.isFetchingMaxUnshieldable = false }
+            defer {
+                if self.privacyRuntimeGeneration == generation {
+                    self.isFetchingMaxUnshieldable = false
+                }
+            }
             do {
-                let client = try await self.railgunHelperClient()
+                let client = try self.loadedRailgunHelperClient()
                 let max = try await client.maxUnshieldable()
+                guard self.privacyRuntimeGeneration == generation,
+                      !self.walletModel.isResettingWallet else { return }
                 let amountText = ChatDashboardModel.decimalETHAmount(
                     fromHexWei: RailgunExitCopy.maxUnshieldFillAmountWei(max)
                 )
@@ -3173,6 +3402,7 @@ private final class ChatDashboardModel: ObservableObject {
                 self.inputText = filled
                 NotificationCenter.default.post(name: .chatComposerFocusRequested, object: nil)
             } catch {
+                guard self.privacyRuntimeGeneration == generation else { return }
                 self.maxUnshieldableError = error.localizedDescription
             }
         }
@@ -3183,7 +3413,7 @@ private final class ChatDashboardModel: ObservableObject {
     /// works once the bundler already has enough gas to relay one op; when it's empty, its
     /// card's copy-address button is the external fallback.
     func fundHelper(address: String, amountETH: String, label: String) {
-        guard fundingHelperAddress == nil else { return }
+        guard !walletModel.isResettingWallet, fundingHelperAddress == nil else { return }
         let amount = amountETH.trimmingCharacters(in: .whitespaces)
         guard address.hasPrefix("0x"), address.count == 42 else {
             setHelperFundError("\(label) has no address to fund yet.", address: address)
@@ -3305,16 +3535,23 @@ private final class ChatDashboardModel: ObservableObject {
     /// `/shield <amount>` — deposit ETH into the RAILGUN pool. The sidecar builds the pool
     /// deposit tx(s); the OWNER self-submits them as a Kernel `execute` UserOp (passkey).
     private func executeShield(intent: ToolIntent, acknowledgedCallGasLimit: UInt64? = nil) async throws {
+        guard !walletModel.isResettingWallet else { throw AppError.walletOperationInProgress }
         guard let amount = intent.args["amount"] else { throw AppError.invalidAmount }
         let amountWei = try EtherAmountParser.weiDecimalString(fromETHString: amount)
-        let client = try await railgunHelperClient()
+        let authentication = DeviceOwnerAuthenticationSession(
+            reason: "Authorize shielding \(amount) ETH into the RAILGUN pool on \(walletModel.activeChain.name)"
+        )
+        defer { authentication.invalidate() }
+        try await authentication.authorize()
+        let client = try await railgunHelperClient(using: authentication)
         let txs = try await client.prepareShield(amountWei: amountWei)
         let executions = try txs.map { try Self.kernelExecution(from: $0) }
         let result = try await walletModel.executeBatch(
             executions: executions,
             logContext: "chat-shield",
-            signingReason: "Authorize shielding \(amount) ETH into the RAILGUN pool on \(walletModel.activeChain.name)",
-            acknowledgedCallGasLimit: acknowledgedCallGasLimit
+            signingReason: authentication.reason,
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit,
+            authenticationSession: authentication
         )
         appendShieldExecutionResult(result, amount: amount, for: intent)
         refreshShieldedBalanceUntilSettled()
@@ -3325,6 +3562,7 @@ private final class ChatDashboardModel: ObservableObject {
     /// submitted by a PUBLIC bundler, so the user needs no gas of their own. Async: the sidecar
     /// returns a jobId while it proves + submits; we poll for the op hash, then for inclusion.
     private func executeUnshield(intent: ToolIntent) async throws {
+        guard !walletModel.isResettingWallet else { throw AppError.walletOperationInProgress }
         guard let amount = intent.args["amount"], let to = intent.args["to"] else {
             throw AppError.invalidAmount
         }
@@ -3335,13 +3573,14 @@ private final class ChatDashboardModel: ObservableObject {
             )
         }
         let amountWei = try EtherAmountParser.weiDecimalString(fromETHString: amount)
-        // The exit is signed by the sidecar's own exit key and never crosses the Secure
-        // Enclave, so — unlike shield/transfer — it wouldn't prompt on its own. Require an
-        // explicit device-owner (biometric) authorization before moving funds out of the pool.
-        try await walletModel.authorizeDeviceOwner(
+        // The exit is signed by the helper, so explicitly gate the action even when the helper
+        // is already warm. The same context unlocks a cold privacy seed without a second prompt.
+        let authentication = DeviceOwnerAuthenticationSession(
             reason: "Authorize unshielding \(amount) ETH from the RAILGUN pool to \(to) on \(walletModel.activeChain.name)"
         )
-        let client = try await railgunHelperClient()
+        defer { authentication.invalidate() }
+        try await authentication.authorize()
+        let client = try await railgunHelperClient(using: authentication)
         let jobId = try await client.unshield(amountWei: amountWei, to: to)
         // The sidecar accepted the job and is proving + submitting (tens of seconds). Show an
         // immediate "submitted" card now; the exit is not a daemon UserOp, so nothing
@@ -3710,6 +3949,7 @@ private final class ChatDashboardModel: ObservableObject {
             || intent.tool == .shield || intent.tool == .unshield else {
             return
         }
+        guard !walletModel.isResettingWallet else { return }
         guard !executingIntentIDs.contains(intent.id) else {
             return
         }
@@ -4364,9 +4604,8 @@ private enum WalletHistoryFilter: String, CaseIterable, Identifiable {
 }
 
 struct LocalWalletChatDashboardView: View {
-    @StateObject private var model = ChatDashboardModel()
+    @StateObject private var model: ChatDashboardModel
     @State private var conversationPendingDeletion: ChatConversation?
-    @State private var isToolsPopoverPresented = false
     @State private var isGasPopoverPresented = false
     @State private var isSessionPopoverPresented = false
     @State private var isSessionActionInProgress = false
@@ -4381,6 +4620,10 @@ struct LocalWalletChatDashboardView: View {
     @State private var selectedSection: DashboardSection = .chat
     @State private var settingsInitialTab: LocalWalletSettingsTab = .info
     @State private var historyFilter: WalletHistoryFilter = .all
+
+    init(walletModel: AppModel) {
+        _model = StateObject(wrappedValue: ChatDashboardModel(walletModel: walletModel))
+    }
 
     private var filteredHistoryRecords: [WalletTransactionRecord] {
         model.walletHistoryRecords.filter(historyFilter.includes)
@@ -4723,7 +4966,7 @@ struct LocalWalletChatDashboardView: View {
                 try await model.deleteLocalRelayerKeyFromSettings(unsafe: unsafe)
             },
             onResetWallet: {
-                try model.resetWalletFromSettings()
+                try await model.resetWalletFromSettings()
             },
             onEnableSessionKeys: {
                 try await model.enableSessionKeysFromSettings()
@@ -4739,9 +4982,6 @@ struct LocalWalletChatDashboardView: View {
             },
             onClearDebugLog: {
                 model.clearDebugLogFromSettings()
-            },
-            onSetUnlockRelayerOnLaunch: { isEnabled in
-                model.setUnlockRelayerOnLaunch(isEnabled)
             },
             onSetSwapSlippageBps: { bps in
                 model.setSwapSlippageBps(bps)
@@ -4862,7 +5102,6 @@ struct LocalWalletChatDashboardView: View {
                         subtitle: "Relays your account's transactions",
                         address: model.accountIdentity.bundlerAddress,
                         balance: model.accountIdentity.bundlerBalance,
-                        state: model.accountIdentity.bundlerState,
                         isFunding: model.fundingHelperAddress == model.accountIdentity.bundlerAddress,
                         fundError: model.helperFundErrorAddress == model.accountIdentity.bundlerAddress ? model.helperFundError : nil,
                         tokenBalances: model.bundlerTokenBalances,
@@ -4909,46 +5148,52 @@ struct LocalWalletChatDashboardView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                if let confirmed = model.shieldedConfirmed {
+                if model.privacyUnlockState == .loaded,
+                   let confirmed = model.shieldedConfirmed {
                     Text("Confirmed \(confirmed) · Pending \(model.shieldedPending ?? "0 ETH")")
                         .font(.caption.monospacedDigit())
                         .help("Confirmed = cleared and spendable. Pending = deposited but not yet included by the pool's approval set.")
-                } else if model.isRefreshingShieldedBalance {
+                } else if model.privacyUnlockState == .unlocking {
                     Text("Loading… (syncing the pool)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else if model.shieldedBalanceError != nil {
-                    Text("unavailable")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .help(model.shieldedBalanceError ?? "")
                 } else {
-                    Text("—")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Button {
-                    model.fillMaxUnshieldAmount()
-                } label: {
-                    if model.isFetchingMaxUnshieldable {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Text("Max")
-                            .font(.caption.bold())
+                    Button {
+                        model.unlockShieldedBalance()
+                    } label: {
+                        Label(
+                            model.privacyUnlockState == .locked ? "Unlock to view" : "Retry unlock",
+                            systemImage: "touchid"
+                        )
+                        .font(.caption.bold())
                     }
+                    .buttonStyle(.plain)
+                    .help(model.shieldedBalanceError ?? "Authenticate only when you want to view shielded funds.")
                 }
-                .buttonStyle(.plain)
-                .disabled(model.isFetchingMaxUnshieldable)
-                .help("Fill the composer with the most you can currently unshield")
-                Button {
-                    model.refreshShieldedBalance()
-                } label: {
-                    Image(systemName: model.isRefreshingShieldedBalance ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
+                if model.privacyUnlockState == .loaded {
+                    Button {
+                        model.fillMaxUnshieldAmount()
+                    } label: {
+                        if model.isFetchingMaxUnshieldable {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("Max")
+                                .font(.caption.bold())
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.isFetchingMaxUnshieldable)
+                    .help("Fill the composer with the most you can currently unshield")
+                    Button {
+                        model.refreshShieldedBalance()
+                    } label: {
+                        Image(systemName: model.isRefreshingShieldedBalance ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.isRefreshingShieldedBalance)
+                    .help("Refresh shielded balance")
                 }
-                .buttonStyle(.plain)
-                .disabled(model.isRefreshingShieldedBalance)
-                .help("Refresh shielded balance")
             }
             if let breakdown = model.maxUnshieldableBreakdown {
                 Text(breakdown)
@@ -4967,13 +5212,6 @@ struct LocalWalletChatDashboardView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.top, 2)
-        .task {
-            // Auto-load once when the account header first shows this row, so the balance
-            // is visible without hunting for the refresh button. (Starts the sidecar.)
-            if model.shieldedConfirmed == nil && model.shieldedBalanceError == nil {
-                model.refreshShieldedBalance()
-            }
-        }
     }
 
     private func explorerAddressURL(_ address: String) -> URL? {
@@ -4984,10 +5222,7 @@ struct LocalWalletChatDashboardView: View {
     }
 
     private var explorerBaseURL: URL {
-        if model.accountIdentity.chainID == 11_155_111 {
-            return URL(string: "https://sepolia.etherscan.io")!
-        }
-        return URL(string: "https://etherscan.io")!
+        URL(string: "https://sepolia.etherscan.io")!
     }
 
     @ViewBuilder
@@ -5457,11 +5692,13 @@ struct LocalWalletChatDashboardView: View {
                 StatusPill(icon: model.thinkingEnabled ? "brain" : "brain.head.profile", text: model.thinkingEnabled ? "Thinking on" : "Thinking off")
             }
             .buttonStyle(.plain)
-            StatusPill(
-                icon: model.hasExecutingIntent ? "arrow.triangle.2.circlepath" : "slider.horizontal.3",
-                text: model.executionStatusText,
-                tint: model.hasExecutingIntent ? ChatPalette.accent : ChatPalette.secondaryText
-            )
+            if model.hasExecutingIntent {
+                StatusPill(
+                    icon: "arrow.triangle.2.circlepath",
+                    text: model.executionStatusText,
+                    tint: ChatPalette.accent
+                )
+            }
             Button {
                 isSessionPopoverPresented.toggle()
                 sessionPopoverMessage = nil
@@ -5507,30 +5744,6 @@ struct LocalWalletChatDashboardView: View {
                 GasBreakdownPopover(display: model.gasBreakdown)
             }
             .help("Current network gas price")
-            Button {
-                isToolsPopoverPresented.toggle()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "slash.circle.fill")
-                        .font(.system(size: 11, weight: .black))
-                        .foregroundStyle(ChatPalette.accent)
-                    Text("Tools")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(ChatPalette.secondaryText)
-                }
-                .padding(.horizontal, 11)
-                .frame(height: 32)
-                .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 0.8)))
-            }
-            .buttonStyle(.plain)
-            .popover(isPresented: $isToolsPopoverPresented, arrowEdge: .top) {
-                SlashCommandPalette { command in
-                    model.insertSlashCommand(command)
-                    isToolsPopoverPresented = false
-                }
-                .frame(width: 420)
-            }
-            .help("Browse slash commands")
             Spacer()
             Text(model.contextStatsText)
                 .font(.system(size: 12, weight: .bold))
@@ -5857,21 +6070,21 @@ private struct ChainStatusStrip: View {
     var body: some View {
         Button(action: onToggle) {
             HStack(spacing: 10) {
-                Image(systemName: identity.isTestnet ? "testtube.2" : "network")
+                Image(systemName: "testtube.2")
                     .font(.system(size: 13, weight: .black))
-                    .foregroundStyle(identity.isTestnet ? ChatPalette.warning : ChatPalette.success)
+                    .foregroundStyle(ChatPalette.warning)
                 Text(identity.chainName)
                     .font(.system(size: 13, weight: .heavy))
                     .foregroundStyle(ChatPalette.primaryText)
                 Text("Chain \(ChainIDFormatting.text(identity.chainID))")
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .foregroundStyle(ChatPalette.secondaryText)
-                Text(identity.isTestnet ? "Testnet" : "Mainnet")
+                Text("Testnet")
                     .font(.system(size: 11, weight: .black))
-                    .foregroundStyle(identity.isTestnet ? ChatPalette.warning : ChatPalette.success)
+                    .foregroundStyle(ChatPalette.warning)
                     .padding(.horizontal, 8)
                     .frame(height: 22)
-                    .background(Capsule().fill((identity.isTestnet ? ChatPalette.warning : ChatPalette.success).opacity(0.12)))
+                    .background(Capsule().fill(ChatPalette.warning.opacity(0.12)))
 
                 Spacer(minLength: 0)
 
@@ -6054,7 +6267,6 @@ private struct FundableAccountCard: View {
     let subtitle: String
     let address: String
     let balance: String
-    let state: String
     let isFunding: Bool
     let fundError: String?
     let tokenBalances: [ChatTokenBalance]
@@ -6071,13 +6283,6 @@ private struct FundableAccountCard: View {
     private var hasAddress: Bool { address.hasPrefix("0x") && address.count == 42 }
     /// Out of gas by the daemon's own threshold — the in-app Fund control cannot work.
     private var isOutOfGas: Bool { gasWarning?.needsGas == true }
-    private var needsFunding: Bool {
-        if isOutOfGas {
-            return true
-        }
-        let s = state.lowercased()
-        return s.contains("need") || s.contains("top")
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -6105,8 +6310,6 @@ private struct FundableAccountCard: View {
 
                 trailingIcons
             }
-
-            stateBadge
 
             if let gasWarning, isOutOfGas {
                 externalFundingControl(gasWarning)
@@ -6158,26 +6361,6 @@ private struct FundableAccountCard: View {
                 .help("Open in explorer")
             }
         }
-    }
-
-    private var stateBadge: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(needsFunding ? ChatPalette.warning : ChatPalette.success)
-                .frame(width: 6, height: 6)
-            Text(state)
-                .font(.system(size: 10, weight: .black))
-                .foregroundStyle(needsFunding ? ChatPalette.warning : ChatPalette.success)
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 9)
-        .frame(height: 20)
-        .background(
-            Capsule().fill((needsFunding ? ChatPalette.warning : ChatPalette.success).opacity(0.14))
-        )
-        .overlay(
-            Capsule().stroke((needsFunding ? ChatPalette.warning : ChatPalette.success).opacity(0.35), lineWidth: 1)
-        )
     }
 
     /// Shown instead of `fundControl` while the bundler is under the daemon's threshold: the
@@ -7035,11 +7218,13 @@ private extension WalletTransactionRecord {
     }
 
     var transactionExplorerURL: URL? {
-        guard let transactionHash, transactionHash.hasPrefix("0x") else {
+        guard chainID == 11_155_111,
+              let transactionHash,
+              transactionHash.hasPrefix("0x")
+        else {
             return nil
         }
-        let host = chainID == 11_155_111 ? "https://sepolia.etherscan.io" : "https://etherscan.io"
-        return URL(string: "\(host)/tx/\(transactionHash)")
+        return URL(string: "https://sepolia.etherscan.io/tx/\(transactionHash)")
     }
 }
 
@@ -7382,11 +7567,10 @@ private struct OnchainTransactionCard: View {
     }
 
     private func explorerTransactionURL(_ hash: String) -> URL? {
-        guard hash.hasPrefix("0x") else {
+        guard summary.chainID == 11_155_111, hash.hasPrefix("0x") else {
             return nil
         }
-        let host = summary.chainID == 11_155_111 ? "https://sepolia.etherscan.io" : "https://etherscan.io"
-        return URL(string: "\(host)/tx/\(hash)")
+        return URL(string: "https://sepolia.etherscan.io/tx/\(hash)")
     }
 }
 
@@ -7872,74 +8056,6 @@ private struct SlashSuggestionRowStyle: ButtonStyle {
                     ? ChatPalette.selectedPanel.opacity(0.8)
                     : Color.clear
             )
-    }
-}
-
-private struct SlashCommandPalette: View {
-    let onSelect: (SlashCommand) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "slash.circle.fill")
-                    .font(.system(size: 13, weight: .black))
-                    .foregroundStyle(ChatPalette.accent)
-                Text("Slash commands")
-                    .font(.system(size: 13, weight: .heavy))
-                    .foregroundStyle(ChatPalette.primaryText)
-                Spacer()
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 12)
-            .padding(.bottom, 6)
-
-            Text("Click a command to insert a ready-to-edit scaffold into the composer. Replace the placeholders (in <angle brackets>) with your values.")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(ChatPalette.mutedText)
-                .padding(.horizontal, 14)
-                .padding(.bottom, 8)
-
-            Rectangle()
-                .fill(ChatPalette.border.opacity(0.4))
-                .frame(height: 0.5)
-
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(SlashCatalog.all.enumerated()), id: \.element.id) { index, command in
-                    Button {
-                        onSelect(command)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 8) {
-                                Text(command.displayName)
-                                    .font(.system(size: 13, weight: .heavy, design: .monospaced))
-                                    .foregroundStyle(ChatPalette.accent)
-                                Text(command.signature)
-                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                    .foregroundStyle(ChatPalette.mutedText)
-                                Spacer(minLength: 0)
-                            }
-                            Text(command.summary)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(ChatPalette.secondaryText)
-                                .multilineTextAlignment(.leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(SlashSuggestionRowStyle())
-
-                    if index < SlashCatalog.all.count - 1 {
-                        Rectangle()
-                            .fill(ChatPalette.border.opacity(0.4))
-                            .frame(height: 0.5)
-                    }
-                }
-            }
-        }
-        .padding(.bottom, 6)
     }
 }
 

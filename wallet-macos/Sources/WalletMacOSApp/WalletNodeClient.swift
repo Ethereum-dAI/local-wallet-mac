@@ -82,6 +82,10 @@ struct WalletNodeClient {
         }
 
         let ready: Bool
+        /// Whether the active relayer secret is present in wallet-node's in-memory key store.
+        /// Durable metadata and a funded address are not enough to submit after a daemon restart.
+        let keyLoaded: Bool
+        let reason: String?
         let ownerScope: String
         let chainId: Int
         let networkProfile: String
@@ -97,6 +101,11 @@ struct WalletNodeClient {
         let keyHistory: [KeyHistoryEntry]
         let latestAuditEvent: String?
         let replacement: ReplacementStatus?
+
+        var availableEOA: String? {
+            guard eoa.hasPrefix("0x"), eoa.count == 42 else { return nil }
+            return eoa
+        }
     }
 
     struct NetworkStatus: Equatable {
@@ -276,6 +285,18 @@ struct WalletNodeClient {
             return true
         }
         return false
+    }
+
+    func hasSameConnection(as other: WalletNodeClient) -> Bool {
+        guard configuration.bearerToken == other.configuration.bearerToken else { return false }
+        switch (configuration.transport, other.configuration.transport) {
+        case let (.http(lhs), .http(rhs)):
+            return lhs == rhs
+        case let (.unixSocket(lhs), .unixSocket(rhs)):
+            return lhs == rhs
+        default:
+            return false
+        }
     }
 
     static func isRecoverableUnixSocketFailure(_ error: Error) -> Bool {
@@ -1031,14 +1052,18 @@ extension WalletNodeClient.RelayerStatus {
               let ownerScope = json["ownerScope"] as? String,
               let chainId = json["chainId"] as? Int,
               let networkProfile = json["networkProfile"] as? String,
-              let eoa = json["eoa"] as? String,
               let balance = json["balance"] as? String,
               let thresholdLow = json["thresholdLow"] as? String,
-              let needsTopup = json["needsTopup"] as? Bool,
-              let lifecycle = json["lifecycle"] as? String
+              let needsTopup = json["needsTopup"] as? Bool
         else {
             throw WalletNodeClient.ClientError.invalidResponse
         }
+
+        // A fresh read-only daemon intentionally has no active relayer row. The managed daemon
+        // returns nulls for those two fields; decoding that ordinary locked state must not turn
+        // a passive status read into an error.
+        let eoa = json["eoa"] as? String ?? "Not available"
+        let lifecycle = json["lifecycle"] as? String ?? "missing"
 
         let rotation = json["rotation"] as? [String: Any]
         let pendingFunding = rotation?["pendingFunding"] as? [[String: Any]] ?? []
@@ -1054,6 +1079,10 @@ extension WalletNodeClient.RelayerStatus {
 
         self.init(
             ready: ready,
+            // Older externally managed daemons do not expose this field. Preserve compatibility
+            // there; the managed daemon always sends the authoritative value.
+            keyLoaded: json["keyLoaded"] as? Bool ?? true,
+            reason: json["reason"] as? String,
             ownerScope: ownerScope,
             chainId: chainId,
             networkProfile: networkProfile,

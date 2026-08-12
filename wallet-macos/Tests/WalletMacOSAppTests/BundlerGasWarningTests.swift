@@ -13,6 +13,8 @@ import WalletToolLayer
     ) -> WalletNodeClient.RelayerStatus {
         WalletNodeClient.RelayerStatus(
             ready: !needsTopup,
+            keyLoaded: true,
+            reason: nil,
             ownerScope: "owner",
             chainId: 11_155_111,
             networkProfile: "sepolia",
@@ -44,7 +46,7 @@ import WalletToolLayer
         #expect(status.declineDetail.contains("0.005 ETH"))
         #expect(status.declineDetail.contains("0x7A3f000000000000000000000000000000009C21"))
         #expect(status.cardDetail.contains("can't fund itself"))
-        // Testnet gets a faucet route; mainnet has none to offer.
+        // The Sepolia-only app always provides its faucet route.
         #expect(status.faucetURL != nil)
     }
 
@@ -89,18 +91,6 @@ import WalletToolLayer
         )
         #expect(disconnected.needsGas == false)
         #expect(disconnected.address == "0x7A3f000000000000000000000000000000009C21")
-    }
-
-    @Test func mainnetDropsTheFaucetRoute() throws {
-        let status = BundlerGasStatus.from(
-            relayer: Self.relayer(balance: "0x0", needsTopup: true),
-            fallbackAddress: nil,
-            chain: .ethereum
-        )
-
-        #expect(status.faucetURL == nil)
-        #expect(status.cardDetail.contains("faucet") == false)
-        #expect(status.cardDetail.contains("from another wallet"))
     }
 
     @Test func declinesOnlyPendingIntentsTheBundlerRelays() throws {

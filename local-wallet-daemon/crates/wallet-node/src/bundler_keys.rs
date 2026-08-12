@@ -27,6 +27,7 @@ pub(crate) enum BundlerKeyError {
 pub(crate) trait BundlerKeyStore: Send + Sync {
     fn create_key(&self, key_ref: &str) -> Result<Address, BundlerKeyError>;
     fn install_key(&self, key_ref: &str, secret: [u8; 32]) -> Result<Address, BundlerKeyError>;
+    fn is_key_loaded(&self, key_ref: &str) -> Result<bool, BundlerKeyError>;
     #[cfg(test)]
     fn address_for_key(&self, key_ref: &str) -> Result<Address, BundlerKeyError>;
     fn delete_key(&self, key_ref: &str) -> Result<(), BundlerKeyError>;
@@ -149,6 +150,14 @@ impl BundlerKeyStore for InMemoryBundlerKeyStore {
         Ok(address)
     }
 
+    fn is_key_loaded(&self, key_ref: &str) -> Result<bool, BundlerKeyError> {
+        Ok(self
+            .keys
+            .lock()
+            .map_err(|_| BundlerKeyError::KeychainUnavailable("lock poisoned".to_string()))?
+            .contains_key(key_ref))
+    }
+
     #[cfg(test)]
     fn address_for_key(&self, key_ref: &str) -> Result<Address, BundlerKeyError> {
         let keys = self
@@ -227,6 +236,14 @@ impl BundlerKeyStore for MemoryBundlerKeyStore {
         Ok(address)
     }
 
+    fn is_key_loaded(&self, key_ref: &str) -> Result<bool, BundlerKeyError> {
+        Ok(self
+            .keys
+            .lock()
+            .map_err(|_| BundlerKeyError::KeychainUnavailable("lock poisoned".to_string()))?
+            .contains_key(key_ref))
+    }
+
     fn address_for_key(&self, key_ref: &str) -> Result<Address, BundlerKeyError> {
         let keys = self
             .keys
@@ -291,7 +308,9 @@ mod tests {
     #[test]
     fn memory_key_store_creates_address_and_signs_payload() {
         let store = MemoryBundlerKeyStore::new();
+        assert!(!store.is_key_loaded("bundler-eoa:1").unwrap());
         let address = store.create_key("bundler-eoa:1").unwrap();
+        assert!(store.is_key_loaded("bundler-eoa:1").unwrap());
         assert_eq!(store.address_for_key("bundler-eoa:1").unwrap(), address);
         let sig = store
             .sign_eip1559_payload("bundler-eoa:1", &Bytes::from_static(&[0x02, 0xc0]))
@@ -299,6 +318,7 @@ mod tests {
         assert!(!sig.r.is_zero());
         assert!(!sig.s.is_zero());
         store.delete_key("bundler-eoa:1").unwrap();
+        assert!(!store.is_key_loaded("bundler-eoa:1").unwrap());
         assert!(matches!(
             store.address_for_key("bundler-eoa:1"),
             Err(BundlerKeyError::KeyNotFound(_))
@@ -308,9 +328,11 @@ mod tests {
     #[test]
     fn in_memory_store_signs_with_supplied_secret_and_rejects_create() {
         let store = InMemoryBundlerKeyStore::new();
+        assert!(!store.is_key_loaded("bundler-eoa:default:1:1").unwrap());
         let address = store
             .install_key("bundler-eoa:default:1:1", [1u8; 32])
             .unwrap();
+        assert!(store.is_key_loaded("bundler-eoa:default:1:1").unwrap());
         assert_ne!(address, Address::ZERO);
 
         let sig = store

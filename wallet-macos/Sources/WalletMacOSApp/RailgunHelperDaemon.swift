@@ -20,8 +20,7 @@ import SpawnHelper
 final class RailgunHelperDaemon: @unchecked Sendable {
     let socketPath: String
     let token: String
-    private let pid: pid_t
-    private let aliveWriteFD: Int32
+    private let lifetime: ManagedDaemonLifetime
 
     var client: RailgunHelperClient {
         RailgunHelperClient(socketPath: socketPath, bearerToken: token)
@@ -30,15 +29,22 @@ final class RailgunHelperDaemon: @unchecked Sendable {
     private init(socketPath: String, token: String, pid: pid_t, aliveWriteFD: Int32) {
         self.socketPath = socketPath
         self.token = token
-        self.pid = pid
-        self.aliveWriteFD = aliveWriteFD
+        self.lifetime = ManagedDaemonLifetime(pid: pid, aliveWriteFD: aliveWriteFD)
     }
 
     deinit {
-        // Closing the alive pipe + SIGTERM stops the helper. No child process to follow it —
-        // the paymaster exit has no local broadcaster.
-        if aliveWriteFD >= 0 { close(aliveWriteFD) }
-        if pid > 0 { kill(pid, SIGTERM) }
+        terminate()
+    }
+
+    /// Stop the helper immediately and discard its in-memory privacy seed.
+    /// Safe to call repeatedly or concurrently with deinitialization.
+    func terminate() {
+        lifetime.terminate()
+    }
+
+    /// Stop and reap the privacy helper before destructive key cleanup continues.
+    func terminateAndWait(timeout: TimeInterval = 2) async throws {
+        try await lifetime.terminateAndWait(timeout: timeout)
     }
 
     enum DaemonError: LocalizedError {

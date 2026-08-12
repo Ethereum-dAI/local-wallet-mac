@@ -1795,6 +1795,183 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn install_bundler_eoa_rebinds_idle_stale_key_ref() {
+        let (handler, auth_header, state) = test_handler(Arc::new(MockChainAdapter::new()));
+        let key_ref = "bundler-eoa:default:1:99";
+        let old_secret = [0x01; 32];
+        let old_address = format!(
+            "{:#x}",
+            crate::bundler_keys::address_for_secret(key_ref, &old_secret).unwrap()
+        );
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                "default",
+                1,
+                &old_address,
+                key_ref,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        let challenge =
+            begin_admin(&handler, &auth_header, "install_bundler_eoa", Some(key_ref)).await;
+
+        let installed = call_rpc(
+            &handler,
+            &auth_header,
+            "wallet_installBundlerEOA",
+            json!([{
+                "keyRef": key_ref,
+                "secret": format!("0x{}", "02".repeat(32)),
+                "authorization": admin_auth(&challenge)
+            }]),
+        )
+        .await;
+
+        assert!(installed.get("result").is_some(), "{installed}");
+        assert_eq!(installed["result"]["keyRef"], key_ref);
+        assert_eq!(installed["result"]["lifecycle"], "active");
+        let installed_address = installed["result"]["eoa"].as_str().unwrap();
+        let accounts = state
+            .store
+            .bundler_account_list_for_owner("default", 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            accounts
+                .iter()
+                .filter(|account| account.lifecycle == BundlerLifecycle::Active)
+                .count(),
+            1
+        );
+        assert!(accounts.iter().any(|account| {
+            account.key_ref == key_ref
+                && account.address.eq_ignore_ascii_case(installed_address)
+                && account.lifecycle == BundlerLifecycle::Active
+        }));
+        assert!(accounts.iter().any(|account| {
+            account.address.eq_ignore_ascii_case(&old_address)
+                && account.lifecycle == BundlerLifecycle::Retired
+        }));
+        let audit_events = state
+            .store
+            .relayer_key_audit_list("default", 1, 10)
+            .await
+            .unwrap();
+        assert!(audit_events.iter().any(|event| {
+            event.event_type == "relayer_key_rebound"
+                && event.result == "success"
+                && event.key_ref.as_deref() == Some(key_ref)
+        }));
+    }
+
+    #[tokio::test]
+    async fn install_bundler_eoa_rejects_stale_key_ref_with_live_work() {
+        let (handler, auth_header, state) = test_handler(Arc::new(MockChainAdapter::new()));
+        let key_ref = "bundler-eoa:default:1:99";
+        let old_secret = [0x01; 32];
+        let old_address = format!(
+            "{:#x}",
+            crate::bundler_keys::address_for_secret(key_ref, &old_secret).unwrap()
+        );
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                "default",
+                1,
+                &old_address,
+                key_ref,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .reserve_next_nonce(1, &old_address, 0)
+            .await
+            .unwrap();
+        let challenge =
+            begin_admin(&handler, &auth_header, "install_bundler_eoa", Some(key_ref)).await;
+
+        let rejected = call_rpc(
+            &handler,
+            &auth_header,
+            "wallet_installBundlerEOA",
+            json!([{
+                "keyRef": key_ref,
+                "secret": format!("0x{}", "02".repeat(32)),
+                "authorization": admin_auth(&challenge)
+            }]),
+        )
+        .await;
+
+        assert_eq!(
+            rejected["error"]["data"]["reason"],
+            "relayer_key_ref_address_mismatch_live_work"
+        );
+        let accounts = state
+            .store
+            .bundler_account_list_for_owner("default", 1)
+            .await
+            .unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert!(accounts[0].address.eq_ignore_ascii_case(&old_address));
+        assert_eq!(accounts[0].lifecycle, BundlerLifecycle::Active);
+        assert!(state.bundler_keys.address_for_key(key_ref).is_err());
+    }
+
+    #[tokio::test]
+    async fn install_bundler_eoa_restores_previous_active_account_when_rebind_install_fails() {
+        let keys = Arc::new(CountingInstallBundlerKeyStore::new(true));
+        let (handler, auth_header, state) =
+            test_handler_with_bundler_keys(Arc::new(MockChainAdapter::new()), keys);
+        let key_ref = "bundler-eoa:default:1:99";
+        let old_address = format!(
+            "{:#x}",
+            crate::bundler_keys::address_for_secret(key_ref, &[0x01; 32]).unwrap()
+        );
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                "default",
+                1,
+                &old_address,
+                key_ref,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        let challenge =
+            begin_admin(&handler, &auth_header, "install_bundler_eoa", Some(key_ref)).await;
+
+        let failed = call_rpc(
+            &handler,
+            &auth_header,
+            "wallet_installBundlerEOA",
+            json!([{
+                "keyRef": key_ref,
+                "secret": format!("0x{}", "02".repeat(32)),
+                "authorization": admin_auth(&challenge)
+            }]),
+        )
+        .await;
+
+        assert_eq!(
+            failed["error"]["data"]["reason"],
+            "bundler_keychain_unavailable"
+        );
+        let active = state
+            .store
+            .bundler_account_active_for_owner("default", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(active.address.eq_ignore_ascii_case(&old_address));
+        assert_eq!(active.key_ref, key_ref);
+    }
+
+    #[tokio::test]
     async fn install_bundler_eoa_consumes_admin_challenge_once() {
         let (handler, auth_header, _state) = test_handler(Arc::new(MockChainAdapter::new()));
         let key_ref = "bundler-eoa:default:1:98";
@@ -2334,6 +2511,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_bundler_eoa_is_idempotent_when_ram_key_is_not_loaded() {
+        let (handler, auth_header, state) = test_handler(Arc::new(MockChainAdapter::new()));
+        let key_ref = "bundler-eoa:default:1:1";
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                "default",
+                1,
+                "0x1111000000000000000000000000000000000000",
+                key_ref,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        assert!(!state.bundler_keys.is_key_loaded(key_ref).unwrap());
+        let challenge =
+            begin_admin(&handler, &auth_header, "delete_bundler_eoa", Some(key_ref)).await;
+
+        let deleted = call_rpc(
+            &handler,
+            &auth_header,
+            "wallet_deleteBundlerEOA",
+            json!([{
+                "keyRef": key_ref,
+                "authorization": admin_auth(&challenge)
+            }]),
+        )
+        .await;
+
+        assert!(deleted.get("error").is_none(), "{deleted}");
+        assert_eq!(deleted["result"]["lifecycle"], "deleted");
+        let stored = state
+            .store
+            .bundler_account_list_for_owner("default", 1)
+            .await
+            .unwrap();
+        assert_eq!(stored[0].lifecycle, BundlerLifecycle::Deleted);
+    }
+
+    #[tokio::test]
     async fn delete_bundler_eoa_blocks_pending_without_unsafe_reset() {
         let chain = Arc::new(MockChainAdapter::new());
         let (handler, auth_header, state) = test_handler(chain);
@@ -2711,6 +2928,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bundler_status_on_empty_store_is_read_only() {
+        let (handler, auth_header, state) = test_handler(Arc::new(MockChainAdapter::new()));
+
+        let value = call_rpc(&handler, &auth_header, "wallet_bundlerStatus", json!([])).await;
+
+        assert!(value.get("error").is_none(), "{value}");
+        assert_eq!(value["result"]["ready"], false);
+        assert_eq!(value["result"]["reason"], "bundler_eoa_missing");
+        assert_eq!(value["result"]["keyLoaded"], false);
+        assert_eq!(value["result"]["eoa"], Value::Null);
+        assert!(state
+            .store
+            .bundler_account_list_for_owner("default", 1)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn bundler_status_reports_funded_metadata_without_ram_key_as_locked() {
+        let chain = Arc::new(MockChainAdapter::with_synced(true));
+        let bundler_eoa = "0xbeef000000000000000000000000000000000000";
+        chain.set_balance(
+            bundler_eoa.parse().unwrap(),
+            BlockTag::Latest,
+            U256::from(0x11c37937e08000_u64),
+        );
+        let (handler, auth_header, state) = test_handler(chain);
+        state
+            .store
+            .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
+            .await
+            .unwrap();
+
+        let value = call_rpc(&handler, &auth_header, "wallet_bundlerStatus", json!([])).await;
+
+        assert!(value.get("error").is_none(), "{value}");
+        assert_eq!(value["result"]["ready"], false);
+        assert_eq!(value["result"]["reason"], "bundler_eoa_locked");
+        assert_eq!(value["result"]["keyLoaded"], false);
+        assert_eq!(value["result"]["eoa"], bundler_eoa);
+    }
+
+    #[tokio::test]
     async fn bundler_status_surfaces_replacement_candidate() {
         let chain = Arc::new(MockChainAdapter::with_synced(true));
         let bundler_eoa = "0xbeef000000000000000000000000000000000000";
@@ -2734,6 +2995,7 @@ mod tests {
             .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
             .await
             .unwrap();
+        state.bundler_keys.create_key("bundler-eoa:1").unwrap();
         state
             .store
             .submitted_tx_insert(SubmittedTransaction {
@@ -2796,6 +3058,7 @@ mod tests {
             .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
             .await
             .unwrap();
+        state.bundler_keys.create_key("bundler-eoa:1").unwrap();
 
         let user_op_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let raw_op = json!({
@@ -2892,6 +3155,7 @@ mod tests {
             .bundler_account_insert(1, active_eoa, "bundler-eoa:2")
             .await
             .unwrap();
+        state.bundler_keys.create_key("bundler-eoa:2").unwrap();
 
         let value = call_rpc(&handler, &auth_header, "wallet_bundlerStatus", json!([])).await;
 
@@ -2920,6 +3184,7 @@ mod tests {
             .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
             .await
             .unwrap();
+        state.bundler_keys.create_key("bundler-eoa:1").unwrap();
 
         let value = call_rpc(&handler, &auth_header, "wallet_bundlerStatus", json!([])).await;
 
@@ -4341,6 +4606,14 @@ mod tests {
             self.create_key(key_ref)
         }
 
+        fn is_key_loaded(&self, key_ref: &str) -> Result<bool, BundlerKeyError> {
+            Ok(self
+                .keys
+                .lock()
+                .map_err(|_| BundlerKeyError::KeychainUnavailable("lock poisoned".to_string()))?
+                .contains(key_ref))
+        }
+
         fn address_for_key(&self, key_ref: &str) -> Result<Address, BundlerKeyError> {
             let keys = self
                 .keys
@@ -4426,6 +4699,14 @@ mod tests {
                 .map_err(|_| BundlerKeyError::KeychainUnavailable("lock poisoned".to_string()))?
                 .insert(key_ref.to_string(), secret);
             Ok(address)
+        }
+
+        fn is_key_loaded(&self, key_ref: &str) -> Result<bool, BundlerKeyError> {
+            Ok(self
+                .keys
+                .lock()
+                .map_err(|_| BundlerKeyError::KeychainUnavailable("lock poisoned".to_string()))?
+                .contains_key(key_ref))
         }
 
         fn address_for_key(&self, key_ref: &str) -> Result<Address, BundlerKeyError> {

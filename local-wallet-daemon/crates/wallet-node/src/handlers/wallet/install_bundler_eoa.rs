@@ -3,6 +3,9 @@ use serde_json::Value;
 use wallet_node_store::{BundlerAccount, BundlerLifecycle};
 
 use crate::admin_challenge::AdminAuthorization;
+use crate::bundler_account_reconciliation::{
+    self, ReconciliationError, ReconciliationMutation, SuppliedBundlerKey,
+};
 use crate::state::DaemonState;
 
 #[derive(Debug, Deserialize)]
@@ -60,44 +63,67 @@ pub async fn handle(
     } else {
         BundlerLifecycle::Active
     };
-    let response_lifecycle = if let Some(existing) = accounts
-        .iter()
-        .find(|account| account.key_ref == params.key_ref)
-    {
-        if !existing.address.eq_ignore_ascii_case(&address_hex) {
-            return Err(super::admin_action::invalid(
-                "relayer_key_ref_address_mismatch",
-            ));
-        }
-        if let Err(err) = install_key(state, &params.key_ref, secret, address).await {
+    let outcome = bundler_account_reconciliation::reconcile(
+        &state.store,
+        SuppliedBundlerKey {
+            owner_scope: wallet_node_store::DEFAULT_OWNER_SCOPE,
+            chain_id: state.config.network.chain_id,
+            key_ref: &params.key_ref,
+            address: &address_hex,
+        },
+        lifecycle,
+    )
+    .await
+    .map_err(map_reconciliation_error)?;
+    if let Err(err) = install_key(state, &params.key_ref, secret, address).await {
+        if matches!(outcome.mutation, ReconciliationMutation::Rebound { .. }) {
+            if let Err(rollback_error) =
+                bundler_account_reconciliation::rollback_rebound(&state.store, &outcome).await
+            {
+                tracing::error!(
+                    error = ?rollback_error,
+                    key_ref = %params.key_ref,
+                    "failed to restore previous relayer metadata after RAM key install failure"
+                );
+                record_install_audit_failure(
+                    state,
+                    "relayer_key_repair_needed",
+                    &outcome.current,
+                    "metadata_rollback_failed_after_keychain_install_failure",
+                    "failed to record relayer metadata rollback failure",
+                )
+                .await;
+            }
+        } else {
             record_install_failure(
                 state,
-                &existing.address,
+                &outcome.current.address,
                 &params.key_ref,
-                existing.lifecycle,
+                outcome.current.lifecycle,
             )
             .await;
-            return Err(err);
         }
-        existing.lifecycle
-    } else {
-        state
-            .store
-            .bundler_account_insert_for_owner(
-                wallet_node_store::DEFAULT_OWNER_SCOPE,
-                state.config.network.chain_id,
-                &address_hex,
-                &params.key_ref,
-                lifecycle,
-            )
-            .await
-            .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
-        if let Err(err) = install_key(state, &params.key_ref, secret, address).await {
-            record_install_failure(state, &address_hex, &params.key_ref, lifecycle).await;
-            return Err(err);
+        return Err(err);
+    }
+    let response_lifecycle = outcome.current.lifecycle;
+    if matches!(outcome.mutation, ReconciliationMutation::Rebound { .. }) {
+        if let Err(error) = super::relayer_audit::record(
+            state,
+            "relayer_key_rebound",
+            &outcome.current,
+            Some("install_bundler_eoa"),
+            "success",
+            None,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = ?error,
+                key_ref = %params.key_ref,
+                "failed to record successful relayer metadata rebind"
+            );
         }
-        lifecycle
-    };
+    }
 
     Ok(serde_json::json!({
         "ownerScope": wallet_node_store::DEFAULT_OWNER_SCOPE,
@@ -106,6 +132,23 @@ pub async fn handle(
         "keyRef": params.key_ref,
         "lifecycle": response_lifecycle.as_str()
     }))
+}
+
+fn map_reconciliation_error(error: ReconciliationError) -> wallet_node_api::JsonRpcError {
+    match error {
+        ReconciliationError::LiveLocalWork => {
+            super::admin_action::invalid("relayer_key_ref_address_mismatch_live_work")
+        }
+        ReconciliationError::AddressRegisteredUnderDifferentKeyRef
+        | ReconciliationError::SuppliedAccountNotActive
+        | ReconciliationError::ActiveAccountDiffers => {
+            super::admin_action::invalid("relayer_key_ref_address_mismatch")
+        }
+        ReconciliationError::Store(error) => {
+            tracing::error!(error = ?error, "failed to reconcile supplied relayer metadata");
+            wallet_node_api::JsonRpcError::internal()
+        }
+    }
 }
 
 async fn install_key(

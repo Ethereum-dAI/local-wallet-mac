@@ -7,7 +7,7 @@ What this demo currently exercises:
 - Secure Enclave + Keychain persistence for the device-bound P-256 signing key
 - public-key derivation and local wallet metadata persistence
 - precomputed Kernel smart-account address derivation
-- balance/deployment inspection on Ethereum Sepolia or mainnet
+- balance/deployment inspection on Ethereum Sepolia
 - local ERC-4337 UserOperation building for native ETH transfers, ERC-20 transfers, exact-input Uniswap v3 swaps, and approval+swap batches when ERC-20 input swaps need allowance
 - Secure Enclave passkey signing, session-key signing for in-policy actions, and local `wallet-node` submission through the app-owned bundler EOA
 - session-key policy controls for ETH caps, ERC-20 token caps, SwapRouter02 approvals, rate limits, gas budget, session duration, and inactivity timeout
@@ -89,7 +89,7 @@ xcodegen generate
 - `DemoModels.swift`
   - View-model structs used by the current demo dashboard and transaction composer.
 - `DemoSettingsStore.swift`
-  - Persistent demo-time settings (e.g., testnet-mode toggle).
+  - Persistent Sepolia endpoint, gas, and verification settings.
 - `WalletNodeClient.swift`
   - JSON-RPC client for the local `wallet-node` daemon over Unix socket or HTTP, including Helios-backed chain reads, admin-authorized rotate/export/delete bundler-EOA flows, ENS resolution, and Uniswap v3 swap quotes.
 - `WalletNodeDaemon.swift`
@@ -130,7 +130,7 @@ xcodegen generate
 
 ## Current Limits
 
-- Mainnet and Sepolia are the supported app chains.
+- Sepolia is the only supported app chain. Mainnet is shown during onboarding as disabled and coming soon.
 - The chat tool path supports native ETH transfers, ERC-20 transfers from the local token registry, and exact-input Uniswap v3 swaps.
 - ERC-20 input swaps can include an approval+swap batch when allowance is missing. Session policy limits approvals to known SwapRouter02 spenders by default and caps approval amounts by token.
 - Session keys require a deployed Kernel account. If the account is not deployed, or if an intent is outside the active policy, the app falls back to Secure Enclave passkey approval.
@@ -139,7 +139,8 @@ xcodegen generate
 
 ## Daemon Spawn Test
 
-The daemon binary comes from the in-repo `local-wallet-daemon` directory. Build it first:
+The Xcode app target builds the release daemon automatically. When running the Swift package's
+spawn test directly, build the daemon from the in-repo `local-wallet-daemon` directory first:
 
 ```bash
 cd local-wallet-daemon
@@ -205,7 +206,7 @@ Two ways to surface a card:
 
 Transfers support native ETH, ERC-20 tokens in `WalletTokenRegistry`, `0x` recipients, and ENS names. ENS resolution runs through `wallet-node`, including CCIP Read when required by the resolver. The review card shows the resolved address before signing.
 
-Swaps support exact-input Uniswap v3 routes on mainnet and Sepolia. The app asks `wallet-node` for an on-chain quote using local token metadata, direct pools, one-hop intermediate routes, the configured Uniswap v3 factory, QuoterV2, and SwapRouter02 addresses. ETH input swaps can execute directly; ERC-20 input swaps that need more allowance are submitted as an approval + swap batch UserOperation, policy-bounded to known SwapRouter02 spenders.
+Swaps support exact-input Uniswap v3 routes on Sepolia. The app asks `wallet-node` for an on-chain quote using local token metadata, direct pools, one-hop intermediate routes, the configured Uniswap v3 factory, QuoterV2, and SwapRouter02 addresses. ETH input swaps can execute directly; ERC-20 input swaps that need more allowance are submitted as an approval + swap batch UserOperation, policy-bounded to known SwapRouter02 spenders.
 
 When the user acts on the card, a synthetic `.toolResponse` `ChatMessage` (role `.tool`) is appended to the conversation so the *next* model turn sees the disposition (`acknowledged` / `acknowledged + edited` / `rejected`) and continues coherently. Successful submissions also append an on-chain summary card with copy actions and an Etherscan link. The user can rate the recognition with thumbs-up / thumbs-down (with an optional note on thumbs-down); ratings are stored in the `tool_intent_feedback` table (`ChatSQLiteMigration` v1→v2) keyed by conversation + message + intent, reload with the conversation, and can be exported as a single JSON file via the chat-header gear menu's **Download rankings** action.
 

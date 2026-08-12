@@ -119,7 +119,7 @@ enum GasPricing {
 
     /// Compact gwei text from a big-endian wei value, e.g. "24", "1.5", "1.23",
     /// "0.001". Precision scales with magnitude: 2 decimals at/above 1 gwei, 3
-    /// below so small tips (mainnet's 0.001 gwei priority floor) stay visible.
+    /// below so small priority fees stay visible.
     /// A non-zero value too small for that precision renders as "<0.001", never "0".
     static func gweiText(fromWei data: Data) -> String {
         let trimmed = Data(data.drop { $0 == 0 })

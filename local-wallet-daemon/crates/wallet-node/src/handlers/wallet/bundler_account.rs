@@ -162,7 +162,7 @@ async fn create_bundler_account(
     Ok(account)
 }
 
-async fn maybe_activate_pending_funding(
+pub(crate) async fn maybe_activate_pending_funding(
     state: &DaemonState,
 ) -> Result<(), wallet_node_api::JsonRpcError> {
     let Some(pending) = state

@@ -24,10 +24,8 @@ struct BundlerGasStatus: Equatable {
     let balance: String?
     /// Human form of the daemon's low-balance threshold, e.g. `0.005 ETH`.
     let thresholdDisplay: String?
-    /// Short, user-facing network name — `Sepolia`, `Ethereum`. Testnets go by their short
-    /// name so the copy reads "Send Sepolia ETH", not "Send Ethereum Sepolia ETH".
+    /// Short, user-facing network name used in funding instructions.
     let networkLabel: String
-    let isTestnet: Bool
     /// `true` when the daemon would refuse a send with `bundler_eoa_needs_topup`.
     ///
     /// Mirrors `wallet_bundlerStatus.needsTopup`, which is `false` when the balance could not
@@ -45,13 +43,12 @@ struct BundlerGasStatus: Equatable {
         fallbackAddress: String?,
         chain: ChainConfiguration
     ) -> BundlerGasStatus {
-        let address = relayer?.eoa ?? fallbackAddress
+        let address = relayer?.availableEOA ?? fallbackAddress
         return BundlerGasStatus(
             address: (address?.hasPrefix("0x") == true) ? address : nil,
             balance: displayETH(relayer?.balance),
             thresholdDisplay: displayETH(relayer?.thresholdLow),
-            networkLabel: chain.isTestnet ? chain.shortName.capitalized : chain.name,
-            isTestnet: chain.isTestnet,
+            networkLabel: chain.shortName.capitalized,
             needsGas: relayer?.needsTopup ?? false
         )
     }
@@ -95,18 +92,17 @@ struct BundlerGasStatus: Equatable {
         return sentences.joined(separator: " ")
     }
 
-    /// Faucet for the active testnet. `nil` on mainnet, where the only route is another wallet.
+    /// Faucet for Sepolia, the only supported app network.
     var faucetURL: URL? {
-        guard isTestnet else { return nil }
         return URL(string: "https://cloud.google.com/application/web3/faucet/ethereum/sepolia")
     }
 
     private var sendInstruction: String {
-        isTestnet ? "Send \(networkLabel) ETH" : "Send ETH"
+        "Send \(networkLabel) ETH"
     }
 
     private var faucetSuffix: String {
-        isTestnet ? " or a faucet" : ""
+        " or a faucet"
     }
 
     private static func displayETH(_ rawHexWei: String?) -> String? {

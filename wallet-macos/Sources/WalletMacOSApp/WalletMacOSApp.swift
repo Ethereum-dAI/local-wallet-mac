@@ -7,9 +7,10 @@ import SwiftUI
 // and UserOperation flows rather than the final wallet product interface.
 @main
 enum WalletMacOSApp {
-    static func main() {
+    @MainActor
+    static func main() async {
         if CommandLine.arguments.contains("--reset-demo-wallet") {
-            resetDemoWalletAndExit()
+            await resetDemoWalletAndExit()
         }
 
         let app = NSApplication.shared
@@ -21,10 +22,22 @@ enum WalletMacOSApp {
         app.run()
     }
 
-    private static func resetDemoWalletAndExit() -> Never {
+    @MainActor
+    private static func resetDemoWalletAndExit() async -> Never {
         do {
+            // Reject external sidecars before Touch ID: this process cannot prove that they
+            // dropped the old secrets, so a successful-looking reset would be dishonest.
+            try WalletResetPreflight.ensureNoOtherLocalWalletInstance()
+            try WalletResetPreflight.ensureNoExternalSecretRuntimes()
+            let authentication = DeviceOwnerAuthenticationSession(
+                reason: "Reset this wallet and delete its local keys"
+            )
+            defer { authentication.invalidate() }
+            try await authentication.authorize()
+            try WalletNodeManagedStoreCleanup.clear()
             try WalletResetCleanup.standard().run()
-            print("Deleted Local Wallet demo key, local relayer keys, local session keys, and metadata.")
+            OnboardingSettingsStore().markIncomplete()
+            print("Deleted Local Wallet demo keys, wallet-node state, and wallet metadata.")
             exit(0)
         } catch {
             fputs("Failed to reset Local Wallet demo wallet: \(error.localizedDescription)\n", stderr)
@@ -83,9 +96,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         // mode (otherwise intent-card text + balances become unreadable).
         NSApp.appearance = NSAppearance(named: .darkAqua)
 
-        let model = AppModel()
-        self.model = model
-
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 740),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -106,6 +116,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showOnboarding() {
+        model = nil
         window?.contentViewController = NSHostingController(
             rootView: LocalWalletOnboardingView { [weak self] in
                 self?.showDashboard()
@@ -114,7 +125,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showDashboard() {
-        window?.contentViewController = NSHostingController(rootView: LocalWalletChatDashboardView())
+        // Build the one shared model only after onboarding has committed its network settings.
+        // The app-menu reset and the visible dashboard must own this exact same instance.
+        let model = AppModel()
+        self.model = model
+        model.bootstrap()
+        window?.contentViewController = NSHostingController(
+            rootView: WalletLaunchGateView(walletModel: model) { [weak self] in
+                self?.showOnboarding()
+            }
+        )
     }
 
     private func showLegacyDashboard() {
@@ -133,7 +153,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let alert = NSAlert()
         alert.messageText = "Reset demo wallet?"
-        alert.informativeText = "This deletes the local Secure Enclave key reference and wallet metadata for the demo app. The next reload creates a new key and a new precomputed account address."
+        alert.informativeText = "This is a destructive Sepolia demo reset. It deletes local wallet, relayer, session, and privacy keys plus wallet-node operation state. Any testnet funds or active onchain session permission can be stranded. The app then creates fresh local key material."
         alert.addButton(withTitle: "Reset")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
@@ -225,8 +245,6 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
 
     private let reloadButton = NSButton(title: "Reload", target: nil, action: nil)
     private let howItWorksButton = NSButton(title: "How it works", target: nil, action: nil)
-    private let testnetButton = NSButton(checkboxWithTitle: "Testnet Mode (Sepolia)", target: nil, action: nil)
-
     private let accountTitleLabel = NSTextField(labelWithString: "Smart Account")
     private let accountDetailLabel = NSTextField(labelWithString: "The app inspects deployment and balance automatically after bootstrap.")
     private let deploymentValueLabel = NSTextField(labelWithString: "Unknown")
@@ -377,12 +395,6 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         clearLogsButton.action = #selector(clearDebugLog)
         relayerHistoryPopup.target = self
         relayerHistoryPopup.action = #selector(selectRelayerHistoryEntry)
-
-        testnetButton.target = self
-        testnetButton.action = #selector(toggleTestnetMode)
-        testnetButton.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        testnetButton.contentTintColor = .white
-        testnetButton.isHidden = true
 
         accountTitleLabel.font = NSFont.systemFont(ofSize: 22, weight: .bold)
         accountTitleLabel.textColor = Palette.text
@@ -943,13 +955,10 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         refreshBalanceButton.isEnabled = canRefreshBalance
         refreshBalanceButton.title = model.isRefreshingBalance ? "Refreshing…" : "Refresh"
         styleButton(refreshBalanceButton, role: canRefreshBalance ? .quiet : .disabled)
-        testnetButton.isEnabled = !model.isBootstrapping && !model.isRunningDemo && !model.isRefreshingBalance && !model.isBuildingUserOperation && !model.isSendingUserOperation
-        testnetButton.state = model.configuration.isTestnetModeEnabled ? .on : .off
-
         networkLabel.stringValue = model.activeChain.name.uppercased()
         stateLabel.stringValue = badgeStateTitle()
         tintBadge(stateLabel, color: badgeStateColor())
-        tintBadge(networkLabel, color: model.activeChain.isTestnet ? Palette.orange : Palette.blue)
+        tintBadge(networkLabel, color: Palette.orange)
 
         statusHeadlineLabel.stringValue = model.bridgeStatus
         rpcLabel.stringValue = "RPC  \(model.activeChain.rpcURL.absoluteString)"
@@ -1210,11 +1219,6 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
     @objc
     private func refreshBalance() {
         model.refreshBalance()
-    }
-
-    @objc
-    private func toggleTestnetMode() {
-        model.setTestnetModeEnabled(testnetButton.state == .on)
     }
 
     @objc

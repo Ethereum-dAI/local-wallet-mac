@@ -45,7 +45,7 @@ import WalletToolLayer
     let now = Date(timeIntervalSince1970: 1_780_000_000)
     let updatedAt = now.addingTimeInterval(100)
     let sepoliaRecord = makeRevokeSessionRecord(chainID: 11_155_111, keyRef: "session:sepolia")
-    let mainnetRecord = makeRevokeSessionRecord(chainID: 1, keyRef: "session:mainnet")
+    let otherChainRecord = makeRevokeSessionRecord(chainID: 31_337, keyRef: "session:other-chain")
     let record = WalletRecord(
         walletId: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!,
         keyTag: "wallet-key",
@@ -55,7 +55,7 @@ import WalletToolLayer
         kernelAccountAddress: "0x000000000000000000000000000000000000dEaD",
         authenticatorIdHash: Data(repeating: 0x03, count: 32),
         kernelSalt: Data(repeating: 0x04, count: 32),
-        sessionRecords: [sepoliaRecord, mainnetRecord],
+        sessionRecords: [sepoliaRecord, otherChainRecord],
         isDeployed: true,
         createdAt: now,
         updatedAt: now
@@ -67,7 +67,7 @@ import WalletToolLayer
         updatedAt: updatedAt
     )
 
-    #expect(refreshed.sessionRecords == [mainnetRecord])
+    #expect(refreshed.sessionRecords == [otherChainRecord])
     #expect(refreshed.isDeployed)
     #expect(refreshed.createdAt == now)
     #expect(refreshed.updatedAt == updatedAt)

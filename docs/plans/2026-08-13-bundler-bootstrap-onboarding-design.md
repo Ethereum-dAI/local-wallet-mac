@@ -34,7 +34,7 @@ The screen is a required gate for an unfunded bundler. It presents:
 - a separate `Open Sepolia faucet` action with no hidden clipboard side effect;
 - a passive status row that checks the balance automatically.
 
-Recommend sending `0.01 Sepolia ETH` to provide a useful buffer. The readiness authority remains the daemon-compatible minimum of `0.005 ETH`; a balance at or above that threshold passes even if it is below the recommendation.
+Recommend sending `0.01 Sepolia ETH` to provide a useful buffer. The readiness authority remains the daemon-compatible minimum of `0.005 ETH`; a balance at or above that threshold passes even if it is below the recommendation. This is the bootstrap admission floor, not a promise that the bundler can relay every future operation at every gas price.
 
 Do not show a Kernel-funded action, chat composer, QR code, manual `I've funded it` confirmation, bundler key details, or raw daemon status on this step.
 
@@ -44,7 +44,7 @@ The activation state is explicit rather than deriving safety from optional data:
 
 1. `checking`: the app knows the address and is querying its balance. Funding actions remain available, but Continue is disabled.
 2. `needsExternalFunding(balance?)`: show the two funding actions and `Waiting for funds`. Poll while the step is visible.
-3. `ready(balance)`: show success and enable or automatically perform the normal step transition.
+3. `ready(balance)`: show success and enable Continue; do not navigate unexpectedly.
 4. `checkFailed(message)`: keep both funding actions available, explain that the app could not verify the balance, and provide Retry. Never interpret an unavailable balance as funded.
 
 Poll the selected execution RPC at a modest interval while this step is visible and perform an immediate check when the app becomes active again. Cancel polling when the user leaves the step. Balance reads must not start a privileged relayer session or request Touch ID.
@@ -55,11 +55,11 @@ If an existing or restored bundler is already funded, the check should recognize
 
 The dashboard should not show a routine funding control or healthy-status banner. It should surface bundler funding only when actionable:
 
-- while the bundler is still operational but approaching the relay floor, offer an explicit Kernel-funded top-up;
+- while the bundler is still operational but approaching the recommended balance, offer a `Top up from Kernel` candidate action;
 - below the relay floor, remove the impossible Kernel-funded action and show external recovery actions using the same address-copy and faucet-link components;
 - while status is unknown, show checking or unavailable state rather than assuming internal funding is possible.
 
-The proactive warning must leave enough balance for the bundler to relay the top-up operation. The daemon remains authoritative about whether submission is allowed.
+The fixed `0.005 ETH` floor alone does not prove that a specific top-up can be relayed. When the user clicks the Kernel candidate action, the app must build and estimate that exact operation, fetch a fresh public bundler status, and verify the daemon-equivalent outer transaction maximum cost before any authentication or protected-key read. If the live preflight fails, replace the candidate with the external Copy/Faucet actions without requesting Touch ID. The daemon remains authoritative at submission time to cover balance races.
 
 ## Error handling
 

@@ -6,6 +6,7 @@ enum OnboardingStep: Int, CaseIterable {
     case network
     case model
     case keys
+    case activation
     case sync
 
     var title: String? {
@@ -18,6 +19,8 @@ enum OnboardingStep: Int, CaseIterable {
             return "Configure your AI"
         case .keys:
             return "Create your wallet"
+        case .activation:
+            return "Activate transactions"
         case .sync:
             return "Prepare verified reads"
         }
@@ -133,6 +136,7 @@ final class OnboardingState: ObservableObject {
     @Published var selectedModelID: String
     @Published var installState: InstallState = .idle
     @Published var keyState: KeyState = .idle
+    @Published var bundlerActivationState: OnboardingBundlerActivationState = .idle
     @Published var chainReadinessState: ChainReadinessState = .idle
     @Published var chainReadinessElapsed: TimeInterval = 0
     @Published var chainReadinessLog: [String] = []
@@ -146,6 +150,10 @@ final class OnboardingState: ObservableObject {
     private let hardwareInspector: LocalHardwareInspector
     private let chainReadinessService: OnboardingChainReadinessService
     let chainReadinessTiming: OnboardingChainReadinessTiming
+    private let bundlerActivationService: OnboardingBundlerActivationService
+    private let bundlerActivationTiming: OnboardingBundlerActivationTiming
+    private var bundlerActivationTask: Task<Void, Never>?
+    private var bundlerActivationRunID: UUID?
     private var chainReadinessTask: Task<Void, Never>?
     private var chainReadinessTimerTask: Task<Void, Never>?
     private var chainReadinessRunID: UUID?
@@ -158,7 +166,9 @@ final class OnboardingState: ObservableObject {
         downloadManager: any LocalAIModelManaging = LocalAIModelDownloadManager(),
         hardwareInspector: LocalHardwareInspector = LocalHardwareInspector(),
         chainReadinessService: OnboardingChainReadinessService? = nil,
-        chainReadinessTiming: OnboardingChainReadinessTiming = .default
+        chainReadinessTiming: OnboardingChainReadinessTiming = .default,
+        bundlerActivationService: OnboardingBundlerActivationService = .init(),
+        bundlerActivationTiming: OnboardingBundlerActivationTiming = .default
     ) {
         self.settingsStore = settingsStore
         self.networkSettingsStore = networkSettingsStore
@@ -169,6 +179,8 @@ final class OnboardingState: ObservableObject {
             networkSettingsStore: networkSettingsStore
         )
         self.chainReadinessTiming = chainReadinessTiming
+        self.bundlerActivationService = bundlerActivationService
+        self.bundlerActivationTiming = bundlerActivationTiming
         let networkSettings = networkSettingsStore.networkSettings
         self.sepoliaRPCURL = networkSettings.sepoliaRPCURL
         self.sepoliaArchiveNodeURL = networkSettings.sepoliaArchiveNodeURL
@@ -187,6 +199,7 @@ final class OnboardingState: ObservableObject {
 
     deinit {
         modelVerificationTask?.cancel()
+        bundlerActivationTask?.cancel()
         chainReadinessTask?.cancel()
         chainReadinessTimerTask?.cancel()
     }
@@ -230,8 +243,20 @@ final class OnboardingState: ObservableObject {
         )
     }
 
-    var canComplete: Bool {
-        if case .ready = keyState {
+    var visibleSteps: [OnboardingStep] {
+        var steps: [OnboardingStep] = [.welcome, .network, .model, .keys, .activation]
+        if shouldSkipChainReadiness == false {
+            steps.append(.sync)
+        }
+        return steps
+    }
+
+    var currentVisibleIndex: Int {
+        visibleSteps.firstIndex(of: step) ?? 0
+    }
+
+    var canContinueFromActivation: Bool {
+        if case .ready = bundlerActivationState {
             return true
         }
         return false
@@ -283,13 +308,14 @@ final class OnboardingState: ObservableObject {
     }
 
     func back() {
-        guard step.rawValue > 0 else {
-            return
-        }
         if step == .sync {
             cancelChainReadiness(reset: true)
         }
-        step = OnboardingStep(rawValue: step.rawValue - 1) ?? .welcome
+        if step == .activation {
+            cancelBundlerActivation(reset: false)
+        }
+        guard currentVisibleIndex > 0 else { return }
+        step = visibleSteps[currentVisibleIndex - 1]
     }
 
     func advance() {
@@ -298,15 +324,14 @@ final class OnboardingState: ObservableObject {
             persistNetwork()
         case .model:
             settingsStore.selectedModelID = selectedModelID
-        case .welcome, .keys, .sync:
+        case .welcome, .keys, .activation, .sync:
             break
         }
 
-        guard step.rawValue < OnboardingStep.allCases.count - 1 else {
-            return
-        }
+        let steps = visibleSteps
+        guard let index = steps.firstIndex(of: step), index + 1 < steps.count else { return }
         withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
-            step = OnboardingStep(rawValue: step.rawValue + 1) ?? step
+            step = steps[index + 1]
         }
     }
 
@@ -427,6 +452,7 @@ final class OnboardingState: ObservableObject {
             return
         }
 
+        cancelBundlerActivation(reset: true)
         cancelChainReadiness(reset: true)
         keyState = .creating
         Task {
@@ -439,6 +465,80 @@ final class OnboardingState: ObservableObject {
             } catch {
                 keyState = .failed(error.localizedDescription)
             }
+        }
+    }
+
+    func startBundlerActivationIfNeeded(force: Bool = false) {
+        guard step == .activation else { return }
+        if bundlerActivationTask != nil && force == false { return }
+        if canContinueFromActivation && force == false { return }
+        guard case let .ready(_, bundlerAddress) = keyState else {
+            bundlerActivationState = .failed(
+                "Create the wallet keys before activating transactions."
+            )
+            return
+        }
+        guard Self.isValidEthereumAddress(bundlerAddress) else {
+            cancelBundlerActivation(reset: true)
+            keyState = .failed(
+                "The local relayer address is unavailable. Create the wallet keys again."
+            )
+            step = .keys
+            return
+        }
+
+        persistNetwork()
+        let chain = networkSettingsStore.networkSettings.activeChain
+        let runID = UUID()
+        cancelBundlerActivation(reset: false)
+        bundlerActivationRunID = runID
+        bundlerActivationState = .checking
+        let service = bundlerActivationService
+        let timing = bundlerActivationTiming
+
+        bundlerActivationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let readyBalance = try await service.waitUntilReady(
+                    address: bundlerAddress,
+                    rpcURL: chain.rpcURL,
+                    expectedChainID: chain.id,
+                    timing: timing,
+                    onBalance: { [weak self] balance in
+                        guard let self,
+                              self.bundlerActivationRunID == runID,
+                              Task.isCancelled == false else {
+                            return
+                        }
+                        self.bundlerActivationState = .waiting(balanceWeiHex: balance)
+                    }
+                )
+                guard self.bundlerActivationRunID == runID,
+                      Task.isCancelled == false else {
+                    return
+                }
+                self.bundlerActivationState = .ready(balanceWeiHex: readyBalance)
+                self.bundlerActivationTask = nil
+            } catch is CancellationError {
+            } catch {
+                guard self.bundlerActivationRunID == runID else { return }
+                self.bundlerActivationState = .failed(error.localizedDescription)
+                self.bundlerActivationTask = nil
+            }
+        }
+    }
+
+    func refreshBundlerActivationNow() {
+        guard step == .activation else { return }
+        startBundlerActivationIfNeeded(force: true)
+    }
+
+    func cancelBundlerActivation(reset: Bool) {
+        bundlerActivationRunID = nil
+        bundlerActivationTask?.cancel()
+        bundlerActivationTask = nil
+        if reset {
+            bundlerActivationState = .idle
         }
     }
 
@@ -530,11 +630,18 @@ final class OnboardingState: ObservableObject {
         }
     }
 
-    func complete() {
+    @discardableResult
+    func complete() -> Bool {
+        guard case .ready = keyState,
+              case .ready = bundlerActivationState else {
+            return false
+        }
+        cancelBundlerActivation(reset: false)
         cancelChainReadiness(reset: false)
         persistNetwork()
         settingsStore.selectedModelID = selectedModelID
         settingsStore.markCompleted()
+        return true
     }
 
     private func cancelChainReadiness(reset: Bool) {
@@ -613,6 +720,16 @@ final class OnboardingState: ObservableObject {
             return true
         }
         guard let url = URL(string: trimmed), url.scheme != nil, url.host != nil else {
+            return false
+        }
+        return true
+    }
+
+    private static func isValidEthereumAddress(_ value: String) -> Bool {
+        guard value.count == 42,
+              value.hasPrefix("0x"),
+              let bytes = try? Data(hexString: value),
+              bytes.count == 20 else {
             return false
         }
         return true
@@ -700,6 +817,9 @@ struct LocalWalletOnboardingView: View {
             case .keys:
                 KeysStep(state: state)
                     .transition(stepTransition)
+            case .activation:
+                BundlerActivationStep(state: state)
+                    .transition(stepTransition)
             case .sync:
                 SyncStep(state: state)
                     .transition(stepTransition)
@@ -741,6 +861,13 @@ struct LocalWalletOnboardingView: View {
                     enabled: keysButtonEnabled,
                     action: keysPrimaryAction
                 )
+            case .activation:
+                wizardFooter(
+                    caption: activationFooterCaption,
+                    primaryTitle: "Continue",
+                    enabled: state.canContinueFromActivation,
+                    action: activationPrimaryAction
+                )
             case .sync:
                 wizardFooter(
                     caption: syncFooterCaption,
@@ -769,7 +896,10 @@ struct LocalWalletOnboardingView: View {
         action: @escaping () -> Void
     ) -> some View {
         VStack(spacing: 18) {
-            OnboardingStepIndicator(current: state.step.rawValue + 1, total: onboardingStepCount)
+            OnboardingStepIndicator(
+                current: state.currentVisibleIndex + 1,
+                total: state.visibleSteps.count
+            )
             Text(caption)
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(OnboardingPalette.secondaryText)
@@ -804,10 +934,6 @@ struct LocalWalletOnboardingView: View {
         case .failed:
             return "Model setup failed. Review the error and retry."
         }
-    }
-
-    private var onboardingStepCount: Int {
-        state.shouldSkipChainReadiness ? OnboardingStep.allCases.count - 1 : OnboardingStep.allCases.count
     }
 
     private var modelButtonTitle: String {
@@ -866,15 +992,33 @@ struct LocalWalletOnboardingView: View {
     }
 
     private func keysPrimaryAction() {
-        if state.canComplete {
-            if state.shouldSkipChainReadiness {
-                state.complete()
-                onComplete()
-            } else {
-                state.advance()
-            }
+        if case .ready = state.keyState {
+            state.advance()
         } else {
             state.provisionKeys()
+        }
+    }
+
+    private func activationPrimaryAction() {
+        guard state.canContinueFromActivation else { return }
+        if state.shouldSkipChainReadiness {
+            if state.complete() {
+                onComplete()
+            }
+        } else {
+            state.cancelBundlerActivation(reset: false)
+            state.advance()
+        }
+    }
+
+    private var activationFooterCaption: String {
+        switch state.bundlerActivationState {
+        case .ready:
+            return "The local relayer is funded. Continue when you are ready."
+        case .failed:
+            return "Funding actions still work; retry the public balance check to continue."
+        case .idle, .checking, .waiting:
+            return "The balance updates automatically while this screen is open."
         }
     }
 
@@ -922,8 +1066,9 @@ struct LocalWalletOnboardingView: View {
 
     private func syncPrimaryAction() {
         if state.canOpenWalletAfterReadiness {
-            state.complete()
-            onComplete()
+            if state.complete() {
+                onComplete()
+            }
         } else {
             state.startChainReadinessIfNeeded(force: true)
         }
@@ -1199,6 +1344,112 @@ private struct KeysStep: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(OnboardingPalette.warning.opacity(0.12))
         )
+    }
+}
+
+private struct BundlerActivationStep: View {
+    @ObservedObject var state: OnboardingState
+
+    private var bundlerAddress: String {
+        guard case let .ready(_, bundlerAddress) = state.keyState else { return "" }
+        return bundlerAddress
+    }
+
+    var body: some View {
+        OnboardingTwoColumn(
+            illustration: .activation,
+            headline: "Activate transactions",
+            bodyText: "Fund the local relayer once so it can submit your wallet's transactions. No account or app backend is involved."
+        ) {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Send \(BundlerFundingPolicy.recommendedBalanceDisplay)")
+                    .font(.system(size: 21, weight: .bold))
+                    .foregroundStyle(OnboardingPalette.primaryText)
+                Text("Use another wallet or the Sepolia faucet. The wallet becomes ready as soon as at least 0.005 ETH is detected.")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(OnboardingPalette.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                BundlerExternalFundingActions(
+                    address: bundlerAddress,
+                    faucetURL: BundlerFundingPolicy.sepoliaFaucetURL,
+                    accent: OnboardingPalette.accent,
+                    secondaryText: OnboardingPalette.secondaryText,
+                    inputBackground: OnboardingPalette.input,
+                    border: OnboardingPalette.border
+                )
+
+                activationStatus
+            }
+        }
+        .task {
+            state.startBundlerActivationIfNeeded()
+        }
+        .onDisappear {
+            state.cancelBundlerActivation(reset: false)
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: NSApplication.didBecomeActiveNotification
+            )
+        ) { _ in
+            state.refreshBundlerActivationNow()
+        }
+    }
+
+    @ViewBuilder
+    private var activationStatus: some View {
+        OnboardingGlassCard {
+            HStack(alignment: .top, spacing: 12) {
+                switch state.bundlerActivationState {
+                case .idle, .checking:
+                    ProgressView()
+                        .controlSize(.small)
+                    statusText(
+                        title: "Checking balance",
+                        detail: "Reading the public relayer balance from your execution RPC."
+                    )
+                case .waiting(let balance):
+                    ProgressView()
+                        .controlSize(.small)
+                    statusText(
+                        title: "Waiting for funds",
+                        detail: balance.map {
+                            "Detected \(WeiFormatter.ethDisplayString(fromHexWei: $0)); at least 0.005 ETH is required."
+                        } ?? "No funded balance has been detected yet."
+                    )
+                case .ready(let balance):
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(OnboardingPalette.success)
+                    statusText(
+                        title: "Transactions activated",
+                        detail: "Detected \(WeiFormatter.ethDisplayString(fromHexWei: balance))."
+                    )
+                case .failed(let message):
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(OnboardingPalette.warning)
+                    statusText(title: "Balance check failed", detail: message)
+                    Spacer()
+                    Button("Retry check") {
+                        state.refreshBundlerActivationNow()
+                    }
+                    .buttonStyle(OnboardingTextButtonStyle())
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    private func statusText(title: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(OnboardingPalette.primaryText)
+            Text(detail)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(OnboardingPalette.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -1600,6 +1851,7 @@ private enum EthereumIllustrationKind {
     case network
     case model
     case keys
+    case activation
     case sync
 }
 
@@ -1659,6 +1911,8 @@ private struct EthereumIllustration: View {
                 ModelCore()
             case .keys:
                 KeyOrbit()
+            case .activation:
+                ActivationOrbit()
             case .sync:
                 SyncOrbit()
             }
@@ -1673,6 +1927,8 @@ private struct EthereumIllustration: View {
             return OnboardingPalette.ethereumViolet
         case .keys:
             return OnboardingPalette.ethereumGold
+        case .activation:
+            return OnboardingPalette.accent
         case .sync:
             return OnboardingPalette.success
         }
@@ -1806,6 +2062,32 @@ private struct KeyOrbit: View {
             }
             .rotationEffect(.degrees(-18))
             .offset(x: 62, y: 96)
+        }
+    }
+}
+
+private struct ActivationOrbit: View {
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(
+                    OnboardingPalette.accent.opacity(0.55),
+                    style: StrokeStyle(lineWidth: 3, dash: [8, 12])
+                )
+                .frame(width: 268, height: 268)
+            Circle()
+                .fill(OnboardingPalette.panel)
+                .overlay(Circle().stroke(OnboardingPalette.accent, lineWidth: 2))
+                .frame(width: 62, height: 62)
+                .offset(x: 122, y: -56)
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 25, weight: .bold))
+                .foregroundStyle(OnboardingPalette.accent)
+                .offset(x: 122, y: -56)
+            Image(systemName: "key.fill")
+                .font(.system(size: 44, weight: .bold))
+                .foregroundStyle(OnboardingPalette.accent)
+                .offset(x: -105, y: 72)
         }
     }
 }

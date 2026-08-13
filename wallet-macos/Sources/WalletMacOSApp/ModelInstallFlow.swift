@@ -125,7 +125,7 @@ enum ModelSelfTestReport {
             return "It loaded and made a tool call at \(RemoteModelFitDescriber.tokenText(tokens))."
         case .steppedDown(let from, let to):
             return "It does not load at \(RemoteModelFitDescriber.tokenText(from)) on this Mac, only "
-                + "\(RemoteModelFitDescriber.tokenText(to)) — lower the context window before using it."
+                + "\(RemoteModelFitDescriber.tokenText(to)). Lower the context window before using it."
         case .noToolSupport:
             return "It loads, but did not answer with a tool call, so transfers and swaps may not work."
         case .failed(let reason):
@@ -175,12 +175,12 @@ enum RemoteModelFitDescriber {
         case .fits:
             return RemoteModelFit(
                 verdict: verdict,
-                summary: "Fits at \(tokenText(contextTokens)) — about \(need) of the \(available) this Mac can give a model."
+                summary: "Fits at \(tokenText(contextTokens)): about \(need) of the \(available) this Mac can give a model."
             )
         case .tight:
             return RemoteModelFit(
                 verdict: verdict,
-                summary: "Tight at \(tokenText(contextTokens)) — about \(need) of the \(available) available. Replies may be slow."
+                summary: "Tight at \(tokenText(contextTokens)): about \(need) of the \(available) available. Replies may be slow."
             )
         case .wontFit:
             let minimum = memoryText(ModelFitEvaluator.minimumMemoryBytes(
@@ -188,7 +188,7 @@ enum RemoteModelFitDescriber {
                 contextTokens: contextTokens,
                 comfortable: true
             ))
-            var summary = "Won't fit at \(tokenText(contextTokens)) — needs about \(need), and this Mac has \(available) for a model. "
+            var summary = "Won't fit at \(tokenText(contextTokens)): needs about \(need), and this Mac has \(available) for a model. "
                 + "It wants a Mac with about \(minimum)."
             if let smaller = ModelFitEvaluator.largestFittingContext(profile: profile, budget: budget) {
                 summary += " It does fit here at \(tokenText(smaller))."

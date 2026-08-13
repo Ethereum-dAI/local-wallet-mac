@@ -42,9 +42,28 @@ public enum ToolDefinitions {
         """#
     )
 
-    public static let phase1: [ToolDefinition] = [transfer, swap, shield, unshield]
+    public static let topUpBundler = ToolDefinition(
+        name: "top_up_bundler",
+        description: """
+        Add native ETH from the user's Kernel smart account to this app's local bundler. \
+        Use this only when the user asks to top up, fund, or refill the bundler. \
+        Provide only the amount. The app resolves the current bundler address from trusted local state.
+        """,
+        parametersJSONSchema: #"""
+        {"type":"object","properties":{"amount":{"type":"string","description":"Amount of ETH to add as a positive decimal string, for example 0.01."}},"required":["amount"],"additionalProperties":false}
+        """#
+    )
+
+    public static let phase1: [ToolDefinition] = [
+        transfer,
+        swap,
+        shield,
+        unshield,
+        topUpBundler,
+    ]
 
     public static let systemNudge: String = """
     When the user clearly expresses intent to perform an on-chain action (transfer, swap,     etc.), you MUST call the corresponding tool with structured arguments instead of     describing the action in prose. If essential information is missing, ask one short     clarifying question in natural language and wait for the answer before calling the     tool. Never invent recipient addresses, ENS names, contact names, token symbols, or     amounts that the user has not provided.
+    For a bundler top-up, call top_up_bundler with only the requested amount; never invent or request a destination address.
     """
 }

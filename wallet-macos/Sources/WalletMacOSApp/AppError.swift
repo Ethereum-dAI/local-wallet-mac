@@ -39,6 +39,10 @@ enum AppError: LocalizedError {
     /// `ChatIntentExecutionStatus.prefundShortfall(from:)` turns it into a
     /// recoverable card rather than a terminal failure.
     case prefundShortfall(PrefundPrecheck.Report)
+    /// A native-value operation cannot be funded by the smart account after
+    /// reserving the gas liability not covered by its EntryPoint deposit.
+    /// Thrown before any signing key is accessed.
+    case accountBalanceShortfall(PrefundPrecheck.AccountBalanceReport)
 
     var errorDescription: String? {
         switch self {
@@ -102,7 +106,7 @@ enum AppError: LocalizedError {
         case .privacyAccountLocked:
             return "Shielded balances are locked. Choose Unlock to view and approve local authentication."
         case .bundlerRelayPreflightUnavailable(let detail):
-            return "\(detail) No transaction was signed. Fund the local relayer from another wallet or the Sepolia faucet, then retry."
+            return "\(detail) No transaction was signed. Retry after checking wallet-node and the active network. Funding actions stay hidden until the app verifies the relayer identity."
         case .bundlerRelayShortfall(let report):
             return """
             The local relayer holds \(WeiFormatter.ethDisplayString(fromHexWei: report.balanceWeiHex)), but this top-up can require up to \(WeiFormatter.ethDisplayString(fromHexWei: report.requiredBalanceWeiHex)) to relay. No transaction was signed. Add at least \(WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)) from another wallet or the Sepolia faucet, then retry.
@@ -118,6 +122,20 @@ enum AppError: LocalizedError {
             \(WeiFormatter.ethDisplayString(fromHexWei: report.availableWeiHex)) available. \
             Top up at least \(WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)) and try again.
             """
+        case let .accountBalanceShortfall(report):
+            let callValue = WeiFormatter.ethDisplayString(fromHexWei: report.callValueWeiHex)
+            let gasBalanceRequired = WeiFormatter.ethDisplayString(
+                fromHexWei: report.gasBalanceRequiredWeiHex
+            )
+            let minimum = WeiFormatter.ethDisplayString(
+                fromHexWei: report.minimumAccountBalanceWeiHex
+            )
+            let balance = WeiFormatter.ethDisplayString(fromHexWei: report.accountBalanceWeiHex)
+            let deficit = WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)
+            if report.gasBalanceRequiredWeiHex == "0x" + String(repeating: "00", count: 32) {
+                return "This send transfers \(callValue), but the smart account holds \(balance). Top up at least \(deficit) and try again. No transaction was signed."
+            }
+            return "This send needs \(minimum) in the smart account: \(callValue) to transfer plus \(gasBalanceRequired) for gas not covered by its EntryPoint deposit. The account holds \(balance). Top up at least \(deficit) and try again. No transaction was signed."
         }
     }
 }

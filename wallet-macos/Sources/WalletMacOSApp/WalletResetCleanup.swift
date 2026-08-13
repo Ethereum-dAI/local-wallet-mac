@@ -204,7 +204,7 @@ struct WalletResetCleanupError: LocalizedError {
         let details = failures
             .map { "\($0.step): \($0.underlying.localizedDescription)" }
             .joined(separator: "; ")
-        return "Wallet reset finished with errors — \(details)"
+        return "Wallet reset finished with errors: \(details)"
     }
 }
 

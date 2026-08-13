@@ -33,7 +33,7 @@ enum WalletResetDestination: Equatable {
 
 private enum UserOperationExecutionPurpose {
     case standard
-    case bundlerTopUp(expectedEOA: String)
+    case bundlerTopUp(expectedIdentity: VerifiedRelayerIdentity)
 
     var allowsSessionSigning: Bool {
         if case .standard = self { return true }
@@ -326,7 +326,7 @@ final class AppModel: ObservableObject {
         } catch {
             lastError = error.localizedDescription
             bridgeStatus = "Bootstrap failed"
-            appendLog("bootstrap: failed — \(error.localizedDescription)")
+            appendLog("bootstrap: failed: \(error.localizedDescription)")
         }
 
         expireExpiredSessionIfNeeded(now: Date(), logContext: "bootstrap")
@@ -370,7 +370,7 @@ final class AppModel: ObservableObject {
             } catch {
                 lastError = error.localizedDescription
                 bridgeStatus = "Demo wallet reset cancelled"
-                appendLog("reset: authorization failed — \(error.localizedDescription)")
+                appendLog("reset: authorization failed: \(error.localizedDescription)")
             }
         }
     }
@@ -416,7 +416,7 @@ final class AppModel: ObservableObject {
             try await daemon?.terminateAndWait()
         } catch {
             daemon?.terminate()
-            appendLog("security: wallet-node shutdown after session lock was not confirmed — \(error.localizedDescription)")
+            appendLog("security: wallet-node shutdown after session lock was not confirmed: \(error.localizedDescription)")
         }
     }
 
@@ -443,7 +443,7 @@ final class AppModel: ObservableObject {
             records: walletRecord?.sessionRecords ?? [],
             now: Date()
         ) {
-            appendLog("reset: warning — \(warning)")
+            appendLog("reset: warning: \(warning)")
         }
 
         // Static ownership validation is non-secret. Do it before Touch ID so an external
@@ -524,7 +524,7 @@ final class AppModel: ObservableObject {
             }
             lastError = error.localizedDescription
             bridgeStatus = "Demo wallet reset failed"
-            appendLog("reset: failed — \(error.localizedDescription)")
+            appendLog("reset: failed: \(error.localizedDescription)")
             throw error
         }
 
@@ -604,7 +604,7 @@ final class AppModel: ObservableObject {
             } catch {
                 lastError = error.localizedDescription
                 bridgeStatus = "Account inspection failed"
-                appendLog("inspect: failed — \(error.localizedDescription)")
+                appendLog("inspect: failed: \(error.localizedDescription)")
             }
 
             isRunningDemo = false
@@ -631,7 +631,7 @@ final class AppModel: ObservableObject {
                 _ = try await refreshAccountInspection(logContext: "refresh-balance")
                 appendLog("refresh-balance: completed quietly")
             } catch {
-                appendLog("refresh-balance: failed — \(error.localizedDescription)")
+                appendLog("refresh-balance: failed: \(error.localizedDescription)")
             }
 
             isRefreshingBalance = false
@@ -931,7 +931,7 @@ final class AppModel: ObservableObject {
         ) {
         case .nothingToRemove:
             throw AppError.localDaemonLaunchFailed(
-                "There is nothing to remove — no file for this model is on disk."
+                "There is nothing to remove. No file for this model is on disk."
             )
         case .bundledOnly(let displayName):
             throw AppError.localDaemonLaunchFailed(
@@ -1218,7 +1218,7 @@ final class AppModel: ObservableObject {
                 guard relayerStatusRefreshToken == refreshToken else { return }
                 localRelayerStatus = nil
                 localRelayerMessage = "Local relayer locked until a transaction needs it."
-                appendLog("relayer: status failed — \(error.localizedDescription)")
+                appendLog("relayer: status failed: \(error.localizedDescription)")
             }
             if relayerStatusRefreshToken == refreshToken {
                 isRefreshingLocalRelayer = false
@@ -2123,7 +2123,7 @@ final class AppModel: ObservableObject {
                 lastUserOperationBuildError = error.localizedDescription
                 activeBundlerStatus = "Bundler check failed"
                 bridgeStatus = "UserOperation draft build failed"
-                appendLog("build: failed — \(error.localizedDescription)")
+                appendLog("build: failed: \(error.localizedDescription)")
             }
 
             isBuildingUserOperation = false
@@ -2148,7 +2148,7 @@ final class AppModel: ObservableObject {
                 lastError = error.localizedDescription
                 bridgeStatus = "UserOperation send failed"
                 activeBundlerStatus = "Submission failed"
-                appendLog("send: failed — \(error.localizedDescription)")
+                appendLog("send: failed: \(error.localizedDescription)")
             }
 
             isSendingUserOperation = false
@@ -2276,6 +2276,7 @@ final class AppModel: ObservableObject {
             logContext: "session-revoke",
             signingReason: "Revoke session keys for \(activeChain.name)",
             intent: nil,
+            callValue: UserOperationCallValue.zero,
             historyDraft: SessionRevokeAssembler.historyDraft(
                 accountAddress: accountAddress,
                 validationNonce: sessionRecord.validationNonce
@@ -2394,6 +2395,7 @@ final class AppModel: ObservableObject {
             logContext: "\(logContext) session-install",
             signingReason: "Activate session key for \(activeChain.name)",
             intent: nil,
+            callValue: UserOperationCallValue.zero,
             historyDraft: SessionInstallAssembler.historyDraft(
                 accountAddress: accountAddress,
                 validationNonce: installNonce
@@ -2464,17 +2466,145 @@ final class AppModel: ObservableObject {
     /// authentication, its finalized UserOperation is checked against a fresh
     /// daemon balance using the same outer-transaction gas formula as wallet-node.
     func executeBundlerTopUp(
-        recipient: String,
+        identity: VerifiedRelayerIdentity,
         amountETH: String,
         logContext: String,
         signingReason: String
     ) async throws -> UserOperationSendResult {
         try await executeTransfer(
-            intent: .nativeTransfer(recipient: recipient, amountETH: amountETH),
+            intent: .nativeTransfer(recipient: identity.address, amountETH: amountETH),
             logContext: logContext,
             signingReason: signingReason,
-            purpose: .bundlerTopUp(expectedEOA: recipient)
+            purpose: .bundlerTopUp(expectedIdentity: identity)
         )
+    }
+
+    struct BundlerTopUpSendResult: Equatable {
+        let recipient: String
+        let sendResult: UserOperationSendResult
+    }
+
+    /// Resolves the current relayer from trusted daemon state and refuses an
+    /// intent whose reviewed destination is no longer current. The delegated
+    /// send performs the exact relay-cost check again before authentication.
+    func executeCurrentBundlerTopUp(
+        expectedIdentity: VerifiedRelayerIdentity,
+        amountETH: String,
+        logContext: String,
+        signingReason: String
+    ) async throws -> BundlerTopUpSendResult {
+        guard expectedIdentity.chainID == activeChain.id,
+              try BundlerKeyStore.shared.verifiedIdentity(
+                  forKeyRef: expectedIdentity.keyRef
+              ) == expectedIdentity else {
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "The reviewed relayer identity is no longer available in Keychain."
+            )
+        }
+        let observation = try await fetchLocalRelayerStatusWithBalanceRetry()
+        guard publishLocalRelayerStatus(
+            observation.status,
+            expectedGeneration: observation.generation
+        ) else {
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "The local relayer status changed while preparing the top-up."
+            )
+        }
+        do {
+            try RelayerIdentityBindingPolicy.verify(
+                status: observation.status,
+                against: expectedIdentity
+            )
+        } catch {
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "The local relayer identity changed while preparing the top-up."
+            )
+        }
+
+        let sendResult = try await executeBundlerTopUp(
+            identity: expectedIdentity,
+            amountETH: amountETH,
+            logContext: logContext,
+            signingReason: signingReason
+        )
+        return BundlerTopUpSendResult(
+            recipient: expectedIdentity.address,
+            sendResult: sendResult
+        )
+    }
+
+    /// One authoritative gate shared before and after authentication. The second call catches
+    /// daemon restarts, relayer rotation, compromise flags, and balance movement during the
+    /// Touch ID window without duplicating the identity or relay-cost policy.
+    private func verifiedBundlerRelayDecision(
+        expectedIdentity: VerifiedRelayerIdentity,
+        gasPlan: UserOperationGasPlan,
+        requiredPrefund: Data,
+        logContext: String,
+        phase: String
+    ) async throws -> BundlerRelayPrecheck.Decision {
+        do {
+            guard expectedIdentity.chainID == activeChain.id,
+                  try BundlerKeyStore.shared.verifiedIdentity(
+                      forKeyRef: expectedIdentity.keyRef
+                  ) == expectedIdentity else {
+                throw AppError.bundlerRelayPreflightUnavailable(
+                    "The reviewed relayer identity is no longer available in Keychain."
+                )
+            }
+        } catch let error as AppError {
+            throw error
+        } catch {
+            appendLog("\(logContext): \(phase) Keychain identity rejected: \(error.localizedDescription)")
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "The app could not verify the reviewed relayer identity in Keychain."
+            )
+        }
+
+        let observation: (status: WalletNodeClient.RelayerStatus, generation: UInt64)
+        do {
+            observation = try await fetchLocalRelayerStatusWithBalanceRetry()
+        } catch {
+            appendLog("\(logContext): \(phase) relayer status unavailable: \(error.localizedDescription)")
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "Could not verify the local relayer status."
+            )
+        }
+        guard publishLocalRelayerStatus(
+            observation.status,
+            expectedGeneration: observation.generation
+        ) else {
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "The local relayer status changed while checking the top-up."
+            )
+        }
+
+        do {
+            try RelayerIdentityBindingPolicy.verify(
+                status: observation.status,
+                against: expectedIdentity
+            )
+        } catch {
+            appendLog("\(logContext): \(phase) relayer identity rejected: \(String(describing: error))")
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "The local relayer identity or safety state changed."
+            )
+        }
+
+        do {
+            return try BundlerRelayPrecheck.evaluate(
+                gasPlan: gasPlan,
+                requiredPrefund: requiredPrefund,
+                status: observation.status,
+                expectedChainID: activeChain.id,
+                expectedEOA: expectedIdentity.address
+            )
+        } catch {
+            appendLog("\(logContext): \(phase) relay data rejected: \(String(describing: error))")
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "The local relayer returned inconsistent balance or gas data."
+            )
+        }
     }
 
     func executeERC20Transfer(
@@ -2617,10 +2747,12 @@ final class AppModel: ObservableObject {
         signingReason: String? = nil,
         acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationSendResult {
-        try await executeUserOperation(
+        let callValue = try UserOperationCallValue.wei(for: executions)
+        return try await executeUserOperation(
             logContext: logContext,
             signingReason: signingReason ?? "Authorize \(executions.count) transaction batch on \(activeChain.name)",
             intent: nil,
+            callValue: callValue,
             historyDraft: WalletTransactionDraft(
                 operation: .batch,
                 amount: String(executions.count),
@@ -2649,10 +2781,12 @@ final class AppModel: ObservableObject {
         if purpose.allowsSessionSigning {
             try await installSessionPermissionIfNeeded(for: intent, logContext: logContext)
         }
+        let callValue = try UserOperationCallValue.wei(for: intent)
         return try await executeUserOperation(
             logContext: logContext,
             signingReason: signingReason,
             intent: intent,
+            callValue: callValue,
             historyDraft: historyDraft(for: intent),
             purpose: purpose,
             acknowledgedCallGasLimit: acknowledgedCallGasLimit
@@ -2669,6 +2803,7 @@ final class AppModel: ObservableObject {
         logContext: String,
         signingReason: String,
         intent: TransactionIntent?,
+        callValue: Data,
         historyDraft: WalletTransactionDraft?,
         purpose: UserOperationExecutionPurpose = .standard,
         afterSubmit: ((String) -> Void)? = nil,
@@ -2697,6 +2832,7 @@ final class AppModel: ObservableObject {
                 logContext: logContext,
                 signingReason: signingReason,
                 intent: intent,
+                callValue: callValue,
                 historyDraft: historyDraft,
                 purpose: purpose,
                 afterSubmit: afterSubmit,
@@ -2716,6 +2852,7 @@ final class AppModel: ObservableObject {
         logContext: String,
         signingReason: String,
         intent: TransactionIntent?,
+        callValue: Data,
         historyDraft: WalletTransactionDraft?,
         purpose: UserOperationExecutionPurpose,
         afterSubmit: ((String) -> Void)? = nil,
@@ -2864,11 +3001,13 @@ final class AppModel: ObservableObject {
         builtUserOperationDraft = enrichedDraft
 
         // Every operation must be affordable at its locally authorized maximum
-        // liability before any signing key is touched. callGasLimit is inside
-        // the UserOperation hash, so nothing downstream can change it without
-        // invalidating the signature we are about to request.
+        // liability, including native value sent by the call, before any signing
+        // key is touched. callGasLimit is inside the UserOperation hash, so
+        // nothing downstream can change it without invalidating the signature
+        // we are about to request.
         switch await PrefundPrecheck.decision(
             requiredPrefund: enriched.requiredPrefund,
+            callValue: callValue,
             callGasLimit: enrichedDraft.gasPlan.callGasLimit,
             maxFeePerGas: enrichedDraft.gasPlan.maxFeePerGas,
             feeQuoteAtPolicyCeiling: false,
@@ -2890,64 +3029,34 @@ final class AppModel: ObservableObject {
             )
         case let .decline(report):
             appendLog(
-                "\(logContext): declining before signature — requiredPrefund=\(report.requiredPrefundWeiHex) available=\(report.availableWeiHex) deficit=\(report.deficitWeiHex)"
+                "\(logContext): declining before signature: requiredPrefund=\(report.requiredPrefundWeiHex) available=\(report.availableWeiHex) deficit=\(report.deficitWeiHex)"
             )
             clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
             throw AppError.prefundShortfall(report)
+        case let .accountBalanceDecline(report):
+            appendLog(
+                "\(logContext): declining native-value operation before signature: callValue=\(report.callValueWeiHex) gasBalanceRequired=\(report.gasBalanceRequiredWeiHex) minimumAccountBalance=\(report.minimumAccountBalanceWeiHex) accountBalance=\(report.accountBalanceWeiHex) deficit=\(report.deficitWeiHex)"
+            )
+            clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+            throw AppError.accountBalanceShortfall(report)
         }
 
-        if case let .bundlerTopUp(expectedEOA) = purpose {
-            let relayerObservation: (
-                status: WalletNodeClient.RelayerStatus,
-                generation: UInt64
-            )
-            do {
-                relayerObservation = try await fetchLocalRelayerStatusWithBalanceRetry()
-            } catch {
-                appendLog(
-                    "\(logContext): relayer preflight status unavailable — \(error.localizedDescription)"
-                )
-                clearPendingSessionInstallAfterPreSubmitFailure(
-                    sessionPlan,
-                    logContext: logContext
-                )
-                throw AppError.bundlerRelayPreflightUnavailable(
-                    "Could not verify the local relayer balance."
-                )
-            }
-            guard publishLocalRelayerStatus(
-                relayerObservation.status,
-                expectedGeneration: relayerObservation.generation
-            ) else {
-                clearPendingSessionInstallAfterPreSubmitFailure(
-                    sessionPlan,
-                    logContext: logContext
-                )
-                throw AppError.bundlerRelayPreflightUnavailable(
-                    "The local relayer status changed while checking the top-up."
-                )
-            }
-
+        if case let .bundlerTopUp(expectedIdentity) = purpose {
             let relayDecision: BundlerRelayPrecheck.Decision
             do {
-                relayDecision = try BundlerRelayPrecheck.evaluate(
+                relayDecision = try await verifiedBundlerRelayDecision(
+                    expectedIdentity: expectedIdentity,
                     gasPlan: enrichedDraft.gasPlan,
                     requiredPrefund: enriched.requiredPrefund,
-                    status: relayerObservation.status,
-                    expectedChainID: activeChain.id,
-                    expectedEOA: expectedEOA
+                    logContext: logContext,
+                    phase: "pre-auth"
                 )
             } catch {
-                appendLog(
-                    "\(logContext): relayer preflight data rejected — \(String(describing: error))"
-                )
                 clearPendingSessionInstallAfterPreSubmitFailure(
                     sessionPlan,
                     logContext: logContext
                 )
-                throw AppError.bundlerRelayPreflightUnavailable(
-                    "The local relayer returned inconsistent balance or gas data."
-                )
+                throw error
             }
 
             switch relayDecision {
@@ -2955,7 +3064,7 @@ final class AppModel: ObservableObject {
                 appendLog("\(logContext): exact relayer-cost preflight passed")
             case .externalFundingRequired(let report):
                 appendLog(
-                    "\(logContext): relayer preflight declined — balance=\(report.balanceWeiHex) required=\(report.requiredBalanceWeiHex) deficit=\(report.deficitWeiHex)"
+                    "\(logContext): relayer preflight declined: balance=\(report.balanceWeiHex) required=\(report.requiredBalanceWeiHex) deficit=\(report.deficitWeiHex)"
                 )
                 clearPendingSessionInstallAfterPreSubmitFailure(
                     sessionPlan,
@@ -2980,6 +3089,38 @@ final class AppModel: ObservableObject {
         let gasAwareSigningReason = actionAuthentication.reason
         defer { actionAuthentication.invalidate() }
         _ = try await ensureRelayerUnlocked(using: actionAuthentication)
+
+        if case let .bundlerTopUp(expectedIdentity) = purpose {
+            // Re-derive the destination from the protected secret with this action's context.
+            // This binds the owner signature below to secret material, not public metadata.
+            let record = try BundlerKeyStore.shared.read(
+                keyRef: expectedIdentity.keyRef,
+                reason: actionAuthentication.reason,
+                authenticationContext: actionAuthentication.context
+            )
+            let authenticatedIdentity = try VerifiedRelayerIdentity.derive(
+                keyRef: record.keyRef,
+                secret: record.secret
+            )
+            guard authenticatedIdentity == expectedIdentity else {
+                throw AppError.bundlerRelayPreflightUnavailable(
+                    "The authenticated relayer secret does not match the reviewed destination."
+                )
+            }
+
+            switch try await verifiedBundlerRelayDecision(
+                expectedIdentity: expectedIdentity,
+                gasPlan: enrichedDraft.gasPlan,
+                requiredPrefund: enriched.requiredPrefund,
+                logContext: logContext,
+                phase: "post-auth"
+            ) {
+            case .proceed:
+                appendLog("\(logContext): post-auth relayer identity and cost recheck passed")
+            case .externalFundingRequired(let report):
+                throw AppError.bundlerRelayShortfall(report)
+            }
+        }
 
         // Re-read the independent execution-RPC head after any relayer unlock or
         // biometric delay. UserOperationSigning repeats the time/block check
@@ -3145,7 +3286,7 @@ final class AppModel: ObservableObject {
                 reason: "cleared pending session key locally after pre-submit failure; no onchain permission was installed"
             )
         } catch {
-            appendLog("\(logContext): pending session key cleanup failed — \(error.localizedDescription)")
+            appendLog("\(logContext): pending session key cleanup failed: \(error.localizedDescription)")
         }
     }
 
@@ -3208,14 +3349,14 @@ final class AppModel: ObservableObject {
             }
             appendLog("\(logContext): \(reason.logLabel); disabled local session signing")
         } catch {
-            appendLog("\(logContext): failed to persist expired session cleanup — \(error.localizedDescription)")
+            appendLog("\(logContext): failed to persist expired session cleanup: \(error.localizedDescription)")
         }
 
         do {
             try SessionKeyStore.shared.delete(keyRef: sessionRecord.sessionKeyRef)
             appendLog("\(logContext): deleted expired session key from Keychain")
         } catch {
-            appendLog("\(logContext): expired session key cleanup failed — \(error.localizedDescription)")
+            appendLog("\(logContext): expired session key cleanup failed: \(error.localizedDescription)")
         }
     }
 
@@ -3256,7 +3397,7 @@ final class AppModel: ObservableObject {
                 appendLog("session: refreshed activity after \(source)")
             }
         } catch {
-            appendLog("session: failed to persist activity after \(source) — \(error.localizedDescription)")
+            appendLog("session: failed to persist activity after \(source): \(error.localizedDescription)")
         }
     }
 
@@ -3342,7 +3483,11 @@ final class AppModel: ObservableObject {
     /// app, confirming a transaction, opening the account cards, hitting Refresh — so the app
     /// never reads the chain on its own schedule. The known gap: ETH arriving from someone else
     /// while the app stays focused is not picked up until one of those happens.
-    func refreshAccountBalanceQuietly(logContext: String, now: Date = Date()) async {
+    func refreshAccountBalanceQuietly(
+        logContext: String,
+        now: Date = Date(),
+        bypassThrottle: Bool = false
+    ) async {
         guard walletRecord?.kernelAccountAddress != nil else { return }
         // Another operation already owns the daemon connection and will refresh the inspection
         // itself; skipping avoids a redundant chain read and a racing `accountInspection` write.
@@ -3350,7 +3495,8 @@ final class AppModel: ObservableObject {
         guard BackgroundBalanceReadGate.allowed(
             now: now,
             lastReadAt: lastBackgroundBalanceReadAt,
-            minInterval: Self.backgroundBalanceReadMinInterval
+            minInterval: Self.backgroundBalanceReadMinInterval,
+            bypassThrottle: bypassThrottle
         ) else { return }
         // Stamped BEFORE the await, so this is also the in-flight guard: two triggers firing
         // together (a receipt landing just as the app is activated) would otherwise issue
@@ -3373,7 +3519,7 @@ final class AppModel: ObservableObject {
             // `withWalletNodeClient` already logs its own attempt.
             if !suppressedBalanceReadFailure {
                 suppressedBalanceReadFailure = true
-                appendLog("\(logContext): balance read failed, will retry — \(error.localizedDescription)")
+                appendLog("\(logContext): balance read failed, will retry: \(error.localizedDescription)")
             }
         }
     }
@@ -3595,7 +3741,7 @@ final class AppModel: ObservableObject {
                 limit: limit
             )
         } catch {
-            appendLog("history: load failed — \(error.localizedDescription)")
+            appendLog("history: load failed: \(error.localizedDescription)")
             return []
         }
     }
@@ -3719,8 +3865,13 @@ final class AppModel: ObservableObject {
             attempt = ReconcilerLoopStep.nextAttempt(current: attempt, stillPending: stillPending)
             guard stillPending else {
                 // Everything this loop was watching has finalised, so the balance almost
-                // certainly moved. Pick it up now instead of at the next poll tick.
-                await refreshAccountBalanceQuietly(logContext: "balance-receipt")
+                // certainly moved. Pick up both sides of the relayed operation now instead of
+                // leaving the Kernel or bundler balance stale until a manual refresh.
+                await refreshAccountBalanceQuietly(
+                    logContext: "balance-receipt",
+                    bypassThrottle: true
+                )
+                refreshLocalRelayerStatus()
                 return
             }
             try? await Task.sleep(nanoseconds: Self.reconcilerDelay(forAttempt: attempt))
@@ -3743,7 +3894,7 @@ final class AppModel: ObservableObject {
             )
             appendLog("\(logContext): wallet history recorded submitted operation")
         } catch {
-            appendLog("\(logContext): wallet history record failed — \(error.localizedDescription)")
+            appendLog("\(logContext): wallet history record failed: \(error.localizedDescription)")
         }
     }
 
@@ -3778,7 +3929,7 @@ final class AppModel: ObservableObject {
                 logContext: logContext
             )
         } catch {
-            appendLog("\(logContext): wallet history receipt update failed — \(error.localizedDescription)")
+            appendLog("\(logContext): wallet history receipt update failed: \(error.localizedDescription)")
         }
     }
 
@@ -3814,7 +3965,7 @@ final class AppModel: ObservableObject {
             self.walletRecord = refreshed
             appendLog("\(logContext): marked session permission installed")
         } catch {
-            appendLog("\(logContext): session permission install update failed — \(error.localizedDescription)")
+            appendLog("\(logContext): session permission install update failed: \(error.localizedDescription)")
         }
     }
 
@@ -3850,11 +4001,11 @@ final class AppModel: ObservableObject {
             do {
                 try SessionKeyStore.shared.delete(keyRef: pendingRecord.sessionKeyRef)
             } catch {
-                appendLog("\(logContext): session key cleanup failed — \(error.localizedDescription)")
+                appendLog("\(logContext): session key cleanup failed: \(error.localizedDescription)")
             }
             appendLog("\(logContext): cleared local session-key state")
         } catch {
-            appendLog("\(logContext): session permission revoke cleanup failed — \(error.localizedDescription)")
+            appendLog("\(logContext): session permission revoke cleanup failed: \(error.localizedDescription)")
         }
     }
 
@@ -3863,7 +4014,7 @@ final class AppModel: ObservableObject {
             try walletHistoryStore.markPending(userOpHash: userOpHash, chainID: chainID)
             appendLog("\(logContext): wallet history left pending until receipt is available")
         } catch {
-            appendLog("\(logContext): wallet history pending update failed — \(error.localizedDescription)")
+            appendLog("\(logContext): wallet history pending update failed: \(error.localizedDescription)")
         }
     }
 
@@ -3883,7 +4034,7 @@ final class AppModel: ObservableObject {
             )
             appendLog("\(logContext): wallet history marked \(status.rawValue) without receipt")
         } catch {
-            appendLog("\(logContext): wallet history terminal update failed — \(error.localizedDescription)")
+            appendLog("\(logContext): wallet history terminal update failed: \(error.localizedDescription)")
         }
     }
 
@@ -4061,7 +4212,7 @@ final class AppModel: ObservableObject {
             )
             liveGasUpdatedAt = Date()
         } catch {
-            appendLog("gas: live price refresh failed — \(error.localizedDescription)")
+            appendLog("gas: live price refresh failed: \(error.localizedDescription)")
         }
     }
 
@@ -4208,7 +4359,13 @@ enum GasIndicatorRefreshGate {
 }
 
 enum BackgroundBalanceReadGate {
-    static func allowed(now: Date, lastReadAt: Date?, minInterval: TimeInterval) -> Bool {
+    static func allowed(
+        now: Date,
+        lastReadAt: Date?,
+        minInterval: TimeInterval,
+        bypassThrottle: Bool = false
+    ) -> Bool {
+        if bypassThrottle { return true }
         guard let lastReadAt else { return true }
         return now.timeIntervalSince(lastReadAt) >= minInterval
     }

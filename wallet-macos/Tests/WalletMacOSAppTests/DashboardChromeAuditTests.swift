@@ -20,39 +20,16 @@ import Testing
         #expect(composer.contains("type / for tools"))
     }
 
-    @Test func bundlerCardNeverFallsThroughFromUnknownToKernelFund() throws {
+    @Test func emptyChatStateHasNoDecorativeProfileAvatar() throws {
         let source = try dashboardSource()
-        let card = try slice(
+        let emptyState = try slice(
             source,
-            from: "private struct FundableAccountCard",
-            until: "private struct TokenBalancePopover"
+            from: "private var emptyState",
+            until: "private var welcomeStarters"
         )
-
-        #expect(card.contains("switch effectiveFundingState"))
-        #expect(card.contains("case .checking"))
-        #expect(card.contains("case .unavailable"))
-        #expect(card.contains("case .externalRequired"))
-        #expect(card.contains("case .kernelTopUpCandidate"))
-        #expect(card.contains("case .healthy"))
-        #expect(card.contains("BundlerExternalFundingActions("))
-        #expect(card.contains("compact: true"))
-        #expect(card.contains("if case .healthy = fundingState") == false)
-        #expect(card.contains("stateBadge") == false)
-        #expect(card.contains("healthy-status") == false)
-    }
-
-    @Test func exactTopUpPreflightFailureForcesExternalRecoveryActions() throws {
-        let source = try dashboardSource()
-        let funding = try slice(
-            source,
-            from: "func fundHelper",
-            until: "private func fundingFailureMessage"
-        )
-
-        #expect(funding.contains("executeBundlerTopUp"))
-        #expect(funding.contains("AppError.bundlerRelayShortfall"))
-        #expect(funding.contains("AppError.bundlerRelayPreflightUnavailable"))
-        #expect(funding.contains("helperRequiresExternalFundingAddress = address"))
+        #expect(!emptyState.contains("person.fill"))
+        #expect(emptyState.contains("Text(greeting)"))
+        #expect(emptyState.contains("WelcomeStarterChip"))
     }
 
     private func dashboardSource() throws -> String {

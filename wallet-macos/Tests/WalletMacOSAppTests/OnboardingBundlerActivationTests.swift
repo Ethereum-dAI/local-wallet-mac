@@ -98,7 +98,7 @@ import Testing
             < source.firstRange(of: "Open Sepolia faucet")!.lowerBound)
     }
 
-    @Test func activationScreenUsesCompactDashSeparatedStatus() throws {
+    @Test func activationScreenUsesCompactParentheticalStatus() throws {
         let source = try appSource(named: "OnboardingView.swift")
         let activation = try sourceSlice(
             source,
@@ -107,17 +107,17 @@ import Testing
         )
         let waiting = try sourceSlice(
             activation,
-            from: "case .waiting(let balance):",
+            from: "case .waiting:",
             until: "case .ready(let balance):"
         )
 
         #expect(activation.contains("OnboardingGlassCard") == false)
         #expect(activation.contains("statusText(") == false)
-        #expect(waiting.contains("Waiting for deposit —"))
-        #expect(waiting.contains(" detected — "))
-        #expect(waiting.contains(" required"))
+        #expect(waiting.contains("Waiting for deposit ("))
+        #expect(waiting.contains(#"\(BundlerFundingPolicy.minimumBalanceDisplay) required)"#))
+        #expect(!waiting.contains(" detected"))
         #expect(waiting.contains(" / ") == false)
-        #expect(activation.contains("Deposit detected —"))
+        #expect(activation.contains("Deposit detected:"))
         #expect(activation.contains("Retry check"))
         #expect(activation.contains("·") == false)
     }

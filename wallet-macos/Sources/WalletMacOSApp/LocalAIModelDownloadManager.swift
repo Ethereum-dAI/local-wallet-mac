@@ -86,7 +86,7 @@ struct ModelDownloadProgress: Equatable, Sendable {
         if let seconds = estimatedSecondsRemaining, seconds > 0 {
             parts.append(Self.etaText(seconds))
         }
-        return parts.joined(separator: " — ")
+        return parts.joined(separator: " - ")
     }
 
     func isVisibleChange(from current: ModelDownloadProgress) -> Bool {
@@ -242,7 +242,7 @@ enum LocalAIModelDownloadError: LocalizedError {
         case .sizeMismatch(let expected, let actual):
             let expectedText = ByteCountFormatter.string(fromByteCount: Int64(expected), countStyle: .file)
             let actualText = ByteCountFormatter.string(fromByteCount: Int64(actual), countStyle: .file)
-            return "The download is incomplete — \(actualText) of \(expectedText) arrived. Try downloading it again."
+            return "The download is incomplete: \(actualText) of \(expectedText) arrived. Try downloading it again."
         case .missingDownload:
             return "The downloaded model file could not be found."
         case .insufficientDisk(let needed, let available):

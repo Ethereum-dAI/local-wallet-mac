@@ -233,7 +233,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
     private let titleLabel = NSTextField(labelWithString: "Local Wallet")
     private let subtitleLabel = NSTextField(labelWithString: "A native macOS demo for Secure Enclave signing, Kernel smart-account precompute, and Sepolia transaction composition.")
     private let statusHeadlineLabel = NSTextField(labelWithString: "Bootstrapping local signer…")
-    private let addressLabel = NSTextField(labelWithString: "0x—")
+    private let addressLabel = NSTextField(labelWithString: "Unavailable")
     private let networkLabel = WalletViewController.makeBadge()
     private let stateLabel = WalletViewController.makeBadge()
     private let rpcLabel = NSTextField(labelWithString: "")
@@ -248,7 +248,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
     private let accountTitleLabel = NSTextField(labelWithString: "Smart Account")
     private let accountDetailLabel = NSTextField(labelWithString: "The app inspects deployment and balance automatically after bootstrap.")
     private let deploymentValueLabel = NSTextField(labelWithString: "Unknown")
-    private let balanceValueLabel = NSTextField(labelWithString: "—")
+    private let balanceValueLabel = NSTextField(labelWithString: "Unavailable")
     private let refreshBalanceButton = NSButton(title: "Refresh", target: nil, action: nil)
     private let qrImageView = NSImageView()
     private let fundingHintLabel = NSTextField(labelWithString: "")
@@ -267,8 +267,8 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
     private let submissionStatusLabel = NSTextField(labelWithString: "")
     private let relayerTitleLabel = NSTextField(labelWithString: "Local Relayer Key")
     private let relayerDetailLabel = NSTextField(labelWithString: "Local daemon not connected")
-    private let relayerAddressLabel = NSTextField(labelWithString: "—")
-    private let relayerBalanceLabel = NSTextField(labelWithString: "—")
+    private let relayerAddressLabel = NSTextField(labelWithString: "Unavailable")
+    private let relayerBalanceLabel = NSTextField(labelWithString: "Unavailable")
     private let relayerLifecycleLabel = WalletViewController.makeBadge()
     private let relayerAuditLabel = NSTextField(labelWithString: "")
     private let relayerHistoryPopup = NSPopUpButton()
@@ -979,7 +979,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         guard let record = model.walletRecord, let address = record.kernelAccountAddress else {
             accountDetailLabel.stringValue = "Wallet bootstrap has not finished yet."
             deploymentValueLabel.stringValue = "Loading"
-            balanceValueLabel.stringValue = "—"
+            balanceValueLabel.stringValue = "Unavailable"
             fundingHintLabel.stringValue = ""
             fundingAddressLabel.stringValue = ""
             qrImageView.image = nil
@@ -1065,8 +1065,8 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
             relayerHistoryPopup.removeAllItems()
             relayerHistoryPopup.addItem(withTitle: "No relayer history")
             relayerHistoryPopup.isEnabled = false
-            relayerAddressLabel.stringValue = "—"
-            relayerBalanceLabel.stringValue = "—"
+            relayerAddressLabel.stringValue = "Unavailable"
+            relayerBalanceLabel.stringValue = "Unavailable"
             relayerLifecycleLabel.stringValue = model.hasLocalRelayerClient ? "UNKNOWN" : "OFFLINE"
             tintBadge(relayerLifecycleLabel, color: Palette.faintText)
             relayerAuditLabel.stringValue = ""

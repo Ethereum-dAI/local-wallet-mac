@@ -410,12 +410,23 @@ async fn ensure_smart_account_gas_funded(
         .map_err(map_bundler_error)?;
     let entry_point_deposit = entry_point_deposit(state, entry_point, op.sender, block).await?;
     ensure_entry_point_deposit_management_unsupported(entry_point, op)?;
-    let call_value = wallet_bundler::decode_erc7579_single_execution(&op.call_data)
-        .map(|execution| execution.value)
-        .unwrap_or(U256::ZERO);
+    let call_value = wallet_bundler::total_erc7579_call_value(&op.call_data).map_err(|error| {
+        let reason = match error {
+            wallet_bundler::Erc7579CallValueError::MalformedExecutionCallData => {
+                "malformed_erc7579_execution_call_data"
+            }
+            wallet_bundler::Erc7579CallValueError::ArithmeticOverflow => {
+                "call_value_arithmetic_overflow"
+            }
+        };
+        JsonRpcError::simulation_failed(reason, None)
+    })?;
     let required_prefund = op.required_prefund().map_err(map_bundler_error)?;
     let minimum_account_balance =
-        wallet_bundler::minimum_account_balance(call_value, required_prefund, entry_point_deposit);
+        wallet_bundler::minimum_account_balance(call_value, required_prefund, entry_point_deposit)
+            .ok_or_else(|| {
+                JsonRpcError::simulation_failed("account_balance_arithmetic_overflow", None)
+            })?;
     if account_balance >= minimum_account_balance {
         return Ok(());
     }

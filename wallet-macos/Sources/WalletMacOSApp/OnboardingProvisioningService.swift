@@ -108,9 +108,9 @@ struct OnboardingProvisioningService {
         let keyRef = settingsStore.bundlerKeyRef(chainId: chain.id) ?? "bundler-eoa:default:\(chain.id):1"
         settingsStore.setBundlerKeyRef(keyRef, chainId: chain.id)
 
-        if try BundlerKeyStore.shared.hasKey(forKeyRef: keyRef),
-           let cachedAddress = settingsStore.bundlerAddress(chainId: chain.id) {
-            return cachedAddress
+        if let identity = try BundlerKeyStore.shared.verifiedIdentity(forKeyRef: keyRef) {
+            settingsStore.setBundlerAddress(identity.address, chainId: chain.id)
+            return identity.address
         }
 
         if try BundlerKeyStore.shared.hasKey(forKeyRef: keyRef) {
@@ -118,17 +118,22 @@ struct OnboardingProvisioningService {
                 keyRef: keyRef,
                 reason: "Show the local bundler address"
             )
-            let addressData = try WalletSignature.bundlerAddress(fromSecret: record.secret)
-            let address = "0x" + addressData.hexEncodedString
-            settingsStore.setBundlerAddress(address, chainId: chain.id)
-            return address
+            let identity = try VerifiedRelayerIdentity.derive(
+                keyRef: record.keyRef,
+                secret: record.secret
+            )
+            settingsStore.setBundlerAddress(identity.address, chainId: chain.id)
+            return identity.address
         }
 
         let generated = try WalletSignature.generateBundlerSecret()
         try BundlerKeyStore.shared.add(keyRef: keyRef, secret: generated.secret)
-        let address = "0x" + generated.address.hexEncodedString
-        settingsStore.setBundlerAddress(address, chainId: chain.id)
-        return address
+        let identity = try VerifiedRelayerIdentity.derive(
+            keyRef: keyRef,
+            secret: generated.secret
+        )
+        settingsStore.setBundlerAddress(identity.address, chainId: chain.id)
+        return identity.address
     }
 
 }

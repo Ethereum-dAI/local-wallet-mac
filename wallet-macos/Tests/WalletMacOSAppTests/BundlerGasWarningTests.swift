@@ -6,20 +6,32 @@ import WalletToolLayer
 /// its balance is under `thresholdLow`. These cover the app-side half: what the card says,
 /// which intents get declined before the passkey prompt, and the raw-error backstop.
 @Suite struct BundlerGasWarningTests {
+    private static let keyRef = "bundler-eoa:owner:11155111:1"
+
+    private static var identity: VerifiedRelayerIdentity {
+        try! VerifiedRelayerIdentity(
+            chainID: 11_155_111,
+            keyRef: keyRef,
+            address: "0x7A3f000000000000000000000000000000009C21"
+        )
+    }
+
     private static func relayer(
         balance: String,
         needsTopup: Bool,
         eoa: String = "0x7A3f000000000000000000000000000000009C21"
     ) -> WalletNodeClient.RelayerStatus {
         WalletNodeClient.RelayerStatus(
-            ready: !needsTopup,
+            ready: !needsTopup && balance != "unavailable",
             keyLoaded: true,
-            reason: nil,
+            reason: needsTopup
+                ? BundlerGasStatus.needsTopupReason
+                : balance == "unavailable" ? "bundler_balance_unavailable" : nil,
             ownerScope: "owner",
             chainId: 11_155_111,
             networkProfile: "sepolia",
             eoa: eoa,
-            keyRef: "key-1",
+            keyRef: keyRef,
             balance: balance,
             thresholdLow: "0x11c37937e08000", // 0.005 ETH — daemon's THRESHOLD_LOW
             needsTopup: needsTopup,
@@ -62,7 +74,7 @@ import WalletToolLayer
     @Test func missingAndUnreadableDaemonStatusNeverExposeKernelFunding() {
         let checking = BundlerGasStatus.from(
             relayer: nil,
-            fallbackAddress: "0x7A3f000000000000000000000000000000009C21",
+            verifiedIdentity: Self.identity,
             chain: .ethereumSepolia
         )
         #expect(checking.fundingState == .checking)
@@ -70,39 +82,55 @@ import WalletToolLayer
 
         let unreadable = BundlerGasStatus.from(
             relayer: Self.relayer(balance: "unavailable", needsTopup: false),
-            fallbackAddress: nil,
+            verifiedIdentity: Self.identity,
             chain: .ethereumSepolia
         )
         #expect(unreadable.fundingState == .unavailable)
         #expect(unreadable.fundingState.shouldOfferKernelTopUp == false)
     }
 
-    @Test func daemonNeedsTopupOverridesAContradictoryNumericBalance() {
-        let status = BundlerFundingPolicy.fromDaemonStatus(
-            Self.relayer(
+    @Test func contradictoryDaemonBalanceFailsClosed() {
+        let status = BundlerGasStatus.from(
+            relayer: Self.relayer(
                 balance: BundlerFundingPolicy.recommendedBalanceWeiHex,
                 needsTopup: true
-            )
+            ),
+            verifiedIdentity: Self.identity,
+            chain: .ethereumSepolia
         )
-        #expect(
-            status == .externalRequired(
-                balanceWeiHex: BundlerFundingPolicy.recommendedBalanceWeiHex
-            )
+        #expect(status.fundingState == .unavailable)
+        #expect(status.address == nil)
+    }
+
+    @Test func unboundDaemonIdentityNeverExposesAFundingAddress() {
+        let status = BundlerGasStatus.from(
+            relayer: Self.relayer(
+                balance: BundlerFundingPolicy.recommendedBalanceWeiHex,
+                needsTopup: false,
+                eoa: "0x2222222222222222222222222222222222222222"
+            ),
+            verifiedIdentity: Self.identity,
+            chain: .ethereumSepolia
         )
+
+        #expect(status.fundingState == .unavailable)
+        #expect(status.verifiedIdentity == nil)
+        #expect(status.address == nil)
     }
 
     @Test func mapsDaemonThresholdIntoHumanCopy() throws {
         let status = BundlerGasStatus.from(
             relayer: Self.relayer(balance: "0x0", needsTopup: true),
-            fallbackAddress: nil,
+            verifiedIdentity: Self.identity,
             chain: .ethereumSepolia
         )
 
         #expect(status.needsGas)
+        #expect(status.badgeText == "Out of gas. Can't send")
         #expect(status.balance == "0 ETH")
         #expect(status.thresholdDisplay == "0.005 ETH")
         #expect(status.declineDetail.contains("0.005 ETH"))
-        #expect(status.declineDetail.contains("0x7A3f000000000000000000000000000000009C21"))
+        #expect(status.declineDetail.contains(Self.identity.address))
         #expect(status.cardDetail.contains("can't fund itself"))
         // The Sepolia-only app always provides its faucet route.
         #expect(status.faucetURL != nil)
@@ -114,7 +142,7 @@ import WalletToolLayer
     @Test func blocksBelowThresholdEvenWithANonZeroBalance() throws {
         let status = BundlerGasStatus.from(
             relayer: Self.relayer(balance: "0xe35fa931a0000", needsTopup: true), // 0.004 ETH
-            fallbackAddress: nil,
+            verifiedIdentity: Self.identity,
             chain: .ethereumSepolia
         )
 
@@ -126,7 +154,7 @@ import WalletToolLayer
     @Test func doesNotBlockWhenFundedOrUnknown() throws {
         let funded = BundlerGasStatus.from(
             relayer: Self.relayer(balance: "0x2386f26fc10000", needsTopup: false), // 0.01 ETH
-            fallbackAddress: nil,
+            verifiedIdentity: Self.identity,
             chain: .ethereumSepolia
         )
         #expect(funded.needsGas == false)
@@ -135,7 +163,7 @@ import WalletToolLayer
         // so the app must not refuse locally on a read it could not make.
         let unreadable = BundlerGasStatus.from(
             relayer: Self.relayer(balance: "unavailable", needsTopup: false),
-            fallbackAddress: nil,
+            verifiedIdentity: Self.identity,
             chain: .ethereumSepolia
         )
         #expect(unreadable.needsGas == false)
@@ -144,17 +172,17 @@ import WalletToolLayer
         // No daemon status at all (pre-connect) is not a block either.
         let disconnected = BundlerGasStatus.from(
             relayer: nil,
-            fallbackAddress: "0x7A3f000000000000000000000000000000009C21",
+            verifiedIdentity: Self.identity,
             chain: .ethereumSepolia
         )
         #expect(disconnected.needsGas == false)
-        #expect(disconnected.address == "0x7A3f000000000000000000000000000000009C21")
+        #expect(disconnected.address == nil)
     }
 
     @Test func declinesOnlyPendingIntentsTheBundlerRelays() throws {
         let blocked = BundlerGasStatus.from(
             relayer: Self.relayer(balance: "0x0", needsTopup: true),
-            fallbackAddress: nil,
+            verifiedIdentity: Self.identity,
             chain: .ethereumSepolia
         )
 
@@ -180,7 +208,7 @@ import WalletToolLayer
     @Test func doesNotDeclineWhenTheBundlerHasGas() throws {
         let funded = BundlerGasStatus.from(
             relayer: Self.relayer(balance: "0x2386f26fc10000", needsTopup: false),
-            fallbackAddress: nil,
+            verifiedIdentity: Self.identity,
             chain: .ethereumSepolia
         )
 
@@ -190,7 +218,7 @@ import WalletToolLayer
     @Test func translatesTheDaemonRefusalAndLeavesOtherErrorsAlone() throws {
         let status = BundlerGasStatus.from(
             relayer: Self.relayer(balance: "0x0", needsTopup: true),
-            fallbackAddress: nil,
+            verifiedIdentity: Self.identity,
             chain: .ethereumSepolia
         )
         let refusal = WalletNodeClient.ClientError.rpcError(

@@ -42,16 +42,21 @@ struct ToolIntentCardView: View {
     let executionStatus: ChatIntentExecutionStatus
     let transferPreflightStatus: ChatTransferPreflightStatus?
     let swapPreflightStatus: ChatSwapPreflightStatus?
-    /// Non-nil when the bundler is out of gas and would refuse to relay this intent. The card
-    /// declines before the Secure Enclave prompt instead of letting the daemon reject a
-    /// UserOperation the user already signed.
+    /// Non-nil when trusted relayer state says this intent cannot currently be relayed. The
+    /// card declines before the Secure Enclave prompt instead of letting the daemon reject a
+    /// UserOperation the user already signed. Bundler top-ups also fail closed while status is
+    /// unknown because their destination and relay viability must both be verified first.
     let bundlerGasStatus: BundlerGasStatus?
+    /// Trusted local relayer address shown for a bundler top-up. This never comes from the
+    /// model or the parsed arguments.
+    let resolvedBundlerAddress: String?
     let signingPreview: ChatSigningPreview?
     let onConfirm: () -> Void
     let onReject: () -> Void
     let onEdit: ([String: String]) -> Void
     let onFeedback: (ToolIntentFeedback.Rating, String?) -> Void
     let onSubmitWithGasHeadroom: (UInt64) -> Void
+    let onRetryBundlerStatus: () -> Void
 
     @State private var showingEditSheet = false
     @State private var showingFeedbackSheet = false
@@ -74,13 +79,27 @@ struct ToolIntentCardView: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(intent.args.keys.sorted(), id: \.self) { key in
+                ForEach(displayedArgumentKeys, id: \.self) { key in
                     HStack(alignment: .firstTextBaseline) {
                         Text(key)
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
                             .frame(width: 96, alignment: .leading)
-                        Text(intent.args[key] ?? "—")
+                        Text(intent.args[key] ?? "Not available")
+                            .font(.body.monospaced())
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                }
+                if intent.tool == .topUpBundler,
+                   let resolvedBundlerAddress {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("to")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 96, alignment: .leading)
+                        Text(resolvedBundlerAddress)
                             .font(.body.monospaced())
                             .textSelection(.enabled)
                             .lineLimit(2)
@@ -118,7 +137,7 @@ struct ToolIntentCardView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(isExecutionRunning || !canConfirm)
                         .help(isBlockedByBundlerGas
-                              ? "\(BundlerGasStatus.warningTitle) — top it up to enable this."
+                              ? "\(bundlerBlockTitle). Use the recovery actions above."
                               : "Sign and submit this intent")
                 }
             case .confirmed:
@@ -176,6 +195,13 @@ struct ToolIntentCardView: View {
         return false
     }
 
+    /// The top-up contract is amount-only. Rendering arbitrary model keys next to a trusted
+    /// destination would make an injected `to` field look reviewed even though execution
+    /// correctly ignores it.
+    private var displayedArgumentKeys: [String] {
+        intent.tool == .topUpBundler ? ["amount"] : intent.args.keys.sorted()
+    }
+
     private var shouldShowSigningPreview: Bool {
         // Suppress while blocked: the signing preview promises a Secure Enclave prompt that
         // the bundler-gas row has just ruled out.
@@ -188,7 +214,25 @@ struct ToolIntentCardView: View {
         return false
     }
 
-    private var isBlockedByBundlerGas: Bool { bundlerGasStatus?.needsGas == true }
+    private var isBlockedByBundlerGas: Bool { bundlerGasStatus != nil }
+
+    private var bundlerBlockTitle: String {
+        guard let bundlerGasStatus else {
+            return BundlerGasStatus.warningTitle
+        }
+        return intent.tool == .topUpBundler
+            ? bundlerGasStatus.topUpBlockTitle
+            : BundlerGasStatus.warningTitle
+    }
+
+    private var bundlerBlockDetail: String {
+        guard let bundlerGasStatus else {
+            return "The bundler is not ready."
+        }
+        return intent.tool == .topUpBundler
+            ? bundlerGasStatus.topUpBlockDetail
+            : bundlerGasStatus.declineDetail
+    }
 
     private var canConfirm: Bool {
         if isBlockedByBundlerGas {
@@ -214,14 +258,8 @@ struct ToolIntentCardView: View {
         switch executionStatus {
         case .running:
             return "arrow.triangle.2.circlepath"
-        case .submitted(_, _, let success):
-            if success == true {
-                return "checkmark.circle.fill"
-            }
-            if success == false {
-                return "xmark.octagon.fill"
-            }
-            return "paperplane.circle.fill"
+        case .onchain(_, _, let status):
+            return status.icon
         case .failed:
             return "exclamationmark.triangle.fill"
         case .gasEstimationUnavailable, .prefundShortfall:
@@ -235,8 +273,8 @@ struct ToolIntentCardView: View {
         switch executionStatus {
         case .running:
             return .blue
-        case .submitted(_, _, let success):
-            return success == false ? .red : .green
+        case .onchain(_, _, let status):
+            return onchainTint(for: status)
         case .failed:
             return .orange
         case .gasEstimationUnavailable, .prefundShortfall:
@@ -250,20 +288,14 @@ struct ToolIntentCardView: View {
         switch executionStatus {
         case .running(let message):
             return runningExecutionMessage(from: message)
-        case .submitted(_, let txHash, let success):
-            if success == true {
-                return "Included onchain at \(Self.timeFormatter.string(from: intent.updatedAt))"
-            }
-            if success == false {
-                return "Submitted but reverted"
-            }
-            return txHash == nil ? "Submitted; receipt pending" : "Submitted onchain"
+        case .onchain(_, _, let status):
+            return status.title
         case .failed(let message):
             return message
         case .gasEstimationUnavailable:
-            return "Gas estimation unavailable — action required above."
+            return "Gas estimation unavailable. Action required above."
         case .prefundShortfall:
-            return "Not enough ETH for the gas headroom — action required above."
+            return "Not enough ETH for the gas headroom. Action required above."
         case .idle:
             return "Confirmed at \(Self.timeFormatter.string(from: intent.updatedAt))"
         }
@@ -378,23 +410,32 @@ struct ToolIntentCardView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
-                    Text(BundlerGasStatus.warningTitle)
+                    Text(bundlerBlockTitle)
                         .font(.caption.bold())
                         .foregroundStyle(.orange)
                 }
-                Text(bundlerGasStatus.declineDetail)
+                Text(bundlerBlockDetail)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
-                    if let address = bundlerGasStatus.address {
+                    if intent.tool == .topUpBundler,
+                       bundlerGasStatus.fundingState == .checking
+                        || bundlerGasStatus.fundingState == .unavailable {
+                        Button("Retry balance check", action: onRetryBundlerStatus)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    }
+                    if bundlerGasStatus.fundingState.needsExternalFunding,
+                       let address = bundlerGasStatus.address {
                         Button(copiedBundlerAddress ? "Copied" : "Copy bundler address") {
                             copyBundlerAddress(address)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
-                    if let faucetURL = bundlerGasStatus.faucetURL {
+                    if bundlerGasStatus.fundingState.needsExternalFunding,
+                       let faucetURL = bundlerGasStatus.faucetURL {
                         Link("Open \(bundlerGasStatus.networkLabel) faucet", destination: faucetURL)
                             .font(.caption2.bold())
                     }
@@ -455,11 +496,11 @@ struct ToolIntentCardView: View {
                 }
             }
             .padding(.vertical, 4)
-        case .submitted(let userOpHash, let transactionHash, let success):
+        case .onchain(let userOpHash, let transactionHash, let status):
             VStack(alignment: .leading, spacing: 4) {
-                Text(success == false ? "Execution reverted after submission." : "Onchain submission recorded.")
+                Label(status.title, systemImage: status.icon)
                     .font(.caption.bold())
-                    .foregroundStyle(success == false ? .red : .green)
+                    .foregroundStyle(onchainTint(for: status))
                 Text(transactionHash ?? userOpHash)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
@@ -478,7 +519,7 @@ struct ToolIntentCardView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
-                    Text("Gas estimation unavailable — check your RPC.")
+                    Text("Gas estimation unavailable. Check your RPC.")
                         .font(.caption.bold())
                         .foregroundStyle(.orange)
                 }
@@ -529,7 +570,7 @@ struct ToolIntentCardView: View {
                 // it. A top-up is still valid, just not the first thing to reach
                 // for, and a bare "top up 0.8 ETH" would read as the only option.
                 Text(report.feeQuoteAtPolicyCeiling
-                     ? "That fee is your configured gas cap — the live price is at or above it, so wallet-node quoted the ceiling. Raising the cap in Settings or waiting for gas to fall lowers this floor; funding the account does not. Topping up at least \(WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)) would let it send at the cap."
+                     ? "That fee is your configured gas cap. The live price is at or above it, so wallet-node quoted the ceiling. Raising the cap in Settings or waiting for gas to fall lowers this floor; funding the account does not. Topping up at least \(WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)) would let it send at the cap."
                      : "Top up at least \(WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)), then try again.")
                     .font(.caption2.bold())
                     .foregroundStyle(.secondary)
@@ -553,6 +594,19 @@ struct ToolIntentCardView: View {
                     .foregroundStyle(.secondary)
                     .italic()
             }
+        }
+    }
+
+    private func onchainTint(for status: OnchainTransactionSummary.Status) -> Color {
+        switch status {
+        case .included:
+            return .green
+        case .submitted, .pending:
+            return .blue
+        case .reverted:
+            return .red
+        case .cancelled:
+            return .orange
         }
     }
 
@@ -687,11 +741,23 @@ private struct ToolIntentEditSheet: View {
         self.intent = intent
         self.onSave = onSave
         self.onCancel = onCancel
-        _editedArgs = State(initialValue: intent.args)
-        _originalArgs = State(initialValue: intent.args)
+        let editableArgs = intent.tool == .topUpBundler
+            ? ["amount": intent.args["amount"] ?? ""]
+            : intent.args
+        _editedArgs = State(initialValue: editableArgs)
+        _originalArgs = State(initialValue: editableArgs)
     }
 
-    private var keysSorted: [String] { intent.args.keys.sorted() }
+    private var keysSorted: [String] {
+        intent.tool == .topUpBundler ? ["amount"] : intent.args.keys.sorted()
+    }
+
+    private var canSave: Bool {
+        if intent.tool == .topUpBundler {
+            return BundlerTopUpIntentValidator.validatedAmount(from: editedArgs) != nil
+        }
+        return !editedArgs.values.contains { $0.isEmpty }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -728,7 +794,7 @@ private struct ToolIntentEditSheet: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(editedArgs.values.contains { $0.isEmpty })
+                .disabled(!canSave)
             }
         }
         .padding(20)

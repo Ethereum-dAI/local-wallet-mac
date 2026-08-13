@@ -180,12 +180,20 @@ import Testing
 
     @Test func bundlerTopUpChecksExactRelayCostBeforeAuthentication() throws {
         let source = try appSource("AppModel.swift")
+        let relayGate = try slice(
+            source,
+            from: "private func verifiedBundlerRelayDecision",
+            until: "func executeERC20Transfer("
+        )
+        #expect(relayGate.contains("BundlerRelayPrecheck.evaluate"))
+        #expect(relayGate.contains("expectedEOA: expectedIdentity.address"))
+
         let send = try slice(
             source,
             from: "private func sendUserOperation",
             until: "private func activeSessionPlan"
         )
-        let precheck = try #require(send.range(of: "BundlerRelayPrecheck.evaluate"))
+        let precheck = try #require(send.range(of: "phase: \"pre-auth\""))
         let authentication = try #require(
             send.range(of: "DeviceOwnerAuthenticationSession.ownerUserOperation")
         )
@@ -197,7 +205,49 @@ import Testing
     @Test func bundlerTopUpCannotInstallOrUseASessionKey() throws {
         let source = try appSource("AppModel.swift")
         #expect(source.contains("purpose.allowsSessionSigning"))
-        #expect(source.contains("case bundlerTopUp(expectedEOA: String)"))
+        #expect(source.contains("case bundlerTopUp(expectedIdentity: VerifiedRelayerIdentity)"))
+    }
+
+    @Test func reviewedBundlerAddressIsRevalidatedBeforeOwnerOnlyTopUp() throws {
+        let source = try appSource("AppModel.swift")
+        let wrapper = try slice(
+            source,
+            from: "func executeCurrentBundlerTopUp(",
+            until: "func executeERC20Transfer("
+        )
+        #expect(wrapper.contains("fetchLocalRelayerStatusWithBalanceRetry()"))
+        #expect(wrapper.contains("BundlerKeyStore.shared.verifiedIdentity("))
+        #expect(wrapper.contains("RelayerIdentityBindingPolicy.verify("))
+        #expect(wrapper.contains("executeBundlerTopUp("))
+        #expect(wrapper.contains("identity: expectedIdentity"))
+        #expect(wrapper.contains("recipient: expectedIdentity.address"))
+        #expect(!wrapper.contains("executeNativeTransfer("))
+
+        let send = try slice(
+            source,
+            from: "private func sendUserOperation",
+            until: "private func activeSessionPlan"
+        )
+        let preAuthenticationCheck = try #require(send.range(of: "phase: \"pre-auth\""))
+        let authentication = try #require(
+            send.range(of: "DeviceOwnerAuthenticationSession.ownerUserOperation")
+        )
+        let unlock = try #require(send.range(of: "ensureRelayerUnlocked"))
+        let protectedSecretRead = try #require(
+            send.range(of: "let record = try BundlerKeyStore.shared.read")
+        )
+        let identityMatch = try #require(
+            send.range(of: "authenticatedIdentity == expectedIdentity")
+        )
+        let postAuthenticationCheck = try #require(send.range(of: "phase: \"post-auth\""))
+        let signing = try #require(send.range(of: "UserOperationSigning.signForSend"))
+
+        #expect(preAuthenticationCheck.lowerBound < authentication.lowerBound)
+        #expect(authentication.lowerBound < unlock.lowerBound)
+        #expect(unlock.lowerBound < protectedSecretRead.lowerBound)
+        #expect(protectedSecretRead.lowerBound < identityMatch.lowerBound)
+        #expect(identityMatch.lowerBound < postAuthenticationCheck.lowerBound)
+        #expect(postAuthenticationCheck.lowerBound < signing.lowerBound)
     }
 
     private func appSource(_ fileName: String) throws -> String {

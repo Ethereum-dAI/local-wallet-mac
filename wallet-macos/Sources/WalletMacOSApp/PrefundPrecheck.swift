@@ -11,6 +11,20 @@ import Foundation
 /// Arithmetic is byte-wise on big-endian `Data` rather than on `UInt64`: a real
 /// account balance can exceed `UInt64.max` wei (≈18.4 ETH).
 enum PrefundPrecheck {
+    enum ArithmeticError: LocalizedError {
+        case valueExceedsUInt256
+        case minimumAccountBalanceOverflow
+
+        var errorDescription: String? {
+            switch self {
+            case .valueExceedsUInt256:
+                return "The prefund affordability check received a value wider than uint256."
+            case .minimumAccountBalanceOverflow:
+                return "The call value plus uncovered gas liability exceeds uint256."
+            }
+        }
+    }
+
     struct Shortfall: Equatable {
         /// EntryPoint's balance floor for the op that would be signed.
         let requiredPrefund: Data
@@ -36,11 +50,39 @@ enum PrefundPrecheck {
         let effectiveCallGasLimit: UInt64
     }
 
+    /// The daemon's exact account-balance requirement for an operation that
+    /// sends native value:
+    ///
+    /// `callValue + max(requiredPrefund - entryPointDeposit, 0)`
+    ///
+    /// EntryPoint deposit can pay gas, but it cannot be transferred to the
+    /// operation's recipient. Keeping this distinct from `Report` prevents the
+    /// existing gas-only recovery card from presenting the deposit as spendable
+    /// ETH.
+    struct AccountBalanceReport: Equatable {
+        let callValueWeiHex: String
+        let gasBalanceRequiredWeiHex: String
+        let minimumAccountBalanceWeiHex: String
+        let accountBalanceWeiHex: String
+        let deficitWeiHex: String
+    }
+
+    struct AccountBalanceShortfall: Equatable {
+        let callValue: Data
+        let gasBalanceRequired: Data
+        let minimumAccountBalance: Data
+        let accountBalance: Data
+        let deficit: Data
+    }
+
     enum Outcome {
         /// Proceed to the Secure Enclave.
         case proceed
         /// Decline before signing, with the numbers to explain why.
         case decline(Report)
+        /// A native-value operation would leave the smart account unable to
+        /// cover both the transfer and the gas not covered by its deposit.
+        case accountBalanceDecline(AccountBalanceReport)
         /// The balance read failed. Callers must fail closed before key access.
         case statusUnavailable(Error)
     }
@@ -54,6 +96,7 @@ enum PrefundPrecheck {
     /// compile under Swift 6.
     static func decision(
         requiredPrefund: Data,
+        callValue: Data,
         callGasLimit: Data,
         maxFeePerGas: Data,
         feeQuoteAtPolicyCeiling: Bool,
@@ -66,12 +109,45 @@ enum PrefundPrecheck {
         } catch {
             return .statusUnavailable(error)
         }
+        let accountShortfall: AccountBalanceShortfall?
+        do {
+            accountShortfall = try evaluateAccountBalance(
+                requiredPrefund: requiredPrefund,
+                callValue: callValue,
+                accountBalance: status.accountBalance,
+                entryPointDeposit: status.entryPointDeposit
+            )
+        } catch {
+            return .statusUnavailable(error)
+        }
+
+        guard let accountShortfall else {
+            return .proceed
+        }
+
+        if accountShortfall.callValue.contains(where: { $0 != 0 }) {
+            return .accountBalanceDecline(
+                AccountBalanceReport(
+                    callValueWeiHex: "0x" + accountShortfall.callValue.hexEncodedString,
+                    gasBalanceRequiredWeiHex: "0x" + accountShortfall.gasBalanceRequired.hexEncodedString,
+                    minimumAccountBalanceWeiHex: "0x" + accountShortfall.minimumAccountBalance.hexEncodedString,
+                    accountBalanceWeiHex: "0x" + accountShortfall.accountBalance.hexEncodedString,
+                    deficitWeiHex: "0x" + accountShortfall.deficit.hexEncodedString
+                )
+            )
+        }
+
+        // With zero call value, the daemon formula is algebraically equivalent
+        // to the original balance + deposit gas check. Preserve that report and
+        // its dedicated recovery UI for existing operations and persisted rows.
         guard let shortfall = evaluate(
             requiredPrefund: requiredPrefund,
             accountBalance: status.accountBalance,
             entryPointDeposit: status.entryPointDeposit
         ) else {
-            return .proceed
+            // `evaluateAccountBalance` already found a deficit, so reaching this
+            // branch would mean the two implementations drifted. Fail closed.
+            return .statusUnavailable(ArithmeticError.valueExceedsUInt256)
         }
         return .decline(
             Report(
@@ -123,6 +199,55 @@ enum PrefundPrecheck {
         )
     }
 
+    /// Mirrors wallet-node's pre-sign account-balance formula exactly. The
+    /// returned deficit is against the smart account itself, not the sum of the
+    /// account and EntryPoint deposit.
+    static func evaluateAccountBalance(
+        requiredPrefund: Data,
+        callValue: Data,
+        accountBalance: Data,
+        entryPointDeposit: Data
+    ) throws -> AccountBalanceShortfall? {
+        let required = try normalizedUInt256(requiredPrefund)
+        let value = try normalizedUInt256(callValue)
+        let balance = try normalizedUInt256(accountBalance)
+        let deposit = try normalizedUInt256(entryPointDeposit)
+        let zero = Data(repeating: 0, count: 32)
+        let gasBalanceRequired: Data
+        if isGreater(required, than: deposit) {
+            gasBalanceRequired = Data(subtract(required, deposit).suffix(32))
+        } else {
+            gasBalanceRequired = zero
+        }
+
+        let wideMinimum = add(value, gasBalanceRequired)
+        guard wideMinimum.count <= 32
+                || wideMinimum.prefix(wideMinimum.count - 32).allSatisfy({ $0 == 0 }) else {
+            throw ArithmeticError.minimumAccountBalanceOverflow
+        }
+        let minimum = Data(wideMinimum.suffix(32))
+        guard isGreater(minimum, than: balance) else {
+            return nil
+        }
+        return AccountBalanceShortfall(
+            callValue: value,
+            gasBalanceRequired: gasBalanceRequired,
+            minimumAccountBalance: minimum,
+            accountBalance: balance,
+            deficit: Data(subtract(minimum, balance).suffix(32))
+        )
+    }
+
+    private static func normalizedUInt256(_ value: Data) throws -> Data {
+        if value.count > 32 {
+            guard value.prefix(value.count - 32).allSatisfy({ $0 == 0 }) else {
+                throw ArithmeticError.valueExceedsUInt256
+            }
+            return Data(value.suffix(32))
+        }
+        return value.leftPadded(to: 32)
+    }
+
     /// Sum of two big-endian values, one byte wider than the widest input so a
     /// carry out of the top byte is never dropped.
     private static func add(_ a: Data, _ b: Data) -> Data {
@@ -168,5 +293,51 @@ enum PrefundPrecheck {
             return x > y
         }
         return false
+    }
+}
+
+/// Extracts the native value already reviewed by the user from the trusted
+/// intent that produced the UserOperation. ERC-20 calls carry zero native
+/// value. Keeping this mapping next to the affordability gate makes it directly
+/// testable and prevents calldata parsing from becoming a second source of
+/// truth.
+enum UserOperationCallValue {
+    static let zero = Data(repeating: 0, count: 32)
+
+    static func wei(for intent: TransactionIntent) throws -> Data {
+        switch intent {
+        case let .nativeTransfer(_, amountETH):
+            return try EtherAmountParser.wei(fromETHString: amountETH)
+        case let .exactInputSwap(request) where request.tokenInIsNative:
+            guard request.quote.amountIn.count <= 32 else {
+                throw AppError.invalidAmount
+            }
+            return request.quote.amountIn.leftPadded(to: 32)
+        case .erc20Transfer, .exactInputSwap:
+            return zero
+        }
+    }
+
+    /// Kernel's batch executor can send native value from more than one call.
+    /// wallet-node checks their total, so the app must authorize that same total
+    /// before signing. Overflow is rejected rather than wrapped.
+    static func wei(for executions: [KernelExecutionRequest]) throws -> Data {
+        var total = [UInt8](repeating: 0, count: 32)
+        for execution in executions {
+            guard execution.value.count <= 32 else {
+                throw AppError.invalidAmount
+            }
+            let value = [UInt8](execution.value.leftPadded(to: 32))
+            var carry = 0
+            for index in stride(from: 31, through: 0, by: -1) {
+                let sum = Int(total[index]) + Int(value[index]) + carry
+                total[index] = UInt8(sum & 0xff)
+                carry = sum >> 8
+            }
+            guard carry == 0 else {
+                throw AppError.invalidAmount
+            }
+        }
+        return Data(total)
     }
 }

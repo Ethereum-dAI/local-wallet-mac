@@ -18,6 +18,9 @@ import WalletToolLayer
 /// paymaster and submitted by a public bundler, so it needs none of the user's gas and this
 /// type does not gate it — see `BundlerGasPolicy.requiresBundlerGas`.
 struct BundlerGasStatus: Equatable {
+    /// App-owned identity derived from the protected Keychain secret and matched against the
+    /// daemon status. All funding and top-up destinations come from this value.
+    let verifiedIdentity: VerifiedRelayerIdentity?
     /// The active bundler EOA, when the daemon has one installed.
     let address: String?
     /// Human balance for the bundler EOA, e.g. `0.0001 ETH`. `nil` when the read failed.
@@ -42,22 +45,71 @@ struct BundlerGasStatus: Equatable {
 
     static func from(
         relayer: WalletNodeClient.RelayerStatus?,
-        fallbackAddress: String?,
+        verifiedIdentity: VerifiedRelayerIdentity?,
         chain: ChainConfiguration
     ) -> BundlerGasStatus {
-        let address = relayer?.availableEOA ?? fallbackAddress
+        guard let relayer else {
+            return BundlerGasStatus(
+                verifiedIdentity: nil,
+                address: nil,
+                balance: nil,
+                thresholdDisplay: nil,
+                networkLabel: chain.shortName.capitalized,
+                fundingState: .checking
+            )
+        }
+        guard let verifiedIdentity,
+              verifiedIdentity.chainID == chain.id,
+              (try? RelayerIdentityBindingPolicy.verify(
+                  status: relayer,
+                  against: verifiedIdentity
+              )) != nil else {
+            return BundlerGasStatus(
+                verifiedIdentity: nil,
+                address: nil,
+                balance: nil,
+                thresholdDisplay: nil,
+                networkLabel: chain.shortName.capitalized,
+                fundingState: .unavailable
+            )
+        }
         return BundlerGasStatus(
-            address: (address?.hasPrefix("0x") == true) ? address : nil,
-            balance: displayETH(relayer?.balance),
-            thresholdDisplay: displayETH(relayer?.thresholdLow),
+            verifiedIdentity: verifiedIdentity,
+            address: verifiedIdentity.address,
+            balance: displayETH(relayer.balance),
+            thresholdDisplay: displayETH(relayer.thresholdLow),
             networkLabel: chain.shortName.capitalized,
-            fundingState: BundlerFundingPolicy.fromDaemonStatus(relayer)
+            fundingState: BundlerFundingPolicy.fromObservedBalance(relayer.balance)
         )
     }
 
     /// Badge text for the bundler card. Named for the consequence the user cares about
     /// ("can't send") rather than the daemon's internal state ("needs top-up").
-    var badgeText: String { "Out of gas — can't send" }
+    var badgeText: String { "Out of gas. Can't send" }
+
+    var topUpBlockTitle: String {
+        switch fundingState {
+        case .checking:
+            return "Checking bundler balance"
+        case .unavailable:
+            return "Bundler balance unavailable"
+        case .externalRequired:
+            return "Fund the bundler externally first"
+        case .kernelTopUpCandidate, .healthy:
+            return "Bundler ready"
+        }
+    }
+
+    var topUpBlockDetail: String {
+        switch fundingState {
+        case .checking, .unavailable:
+            return "Retry the status check. Funding stays unavailable until the app verifies the bundler identity."
+        case .externalRequired:
+            return "Copy the bundler address or open the Sepolia faucet, then try again."
+        case .kernelTopUpCandidate, .healthy:
+            return "The bundler can relay this top-up."
+        }
+    }
 
     /// Card body: why the in-app top-up is not offered and what to do instead.
     var cardDetail: String {
@@ -116,11 +168,96 @@ struct BundlerGasStatus: Equatable {
 }
 
 /// Which intents the bundler-gas block applies to, and when.
+/// Pure fail-closed binding between wallet-node's public relayer status and an
+/// identity previously derived from the app's protected Keychain secret.
+enum RelayerIdentityBindingPolicy {
+    enum Failure: Error, Equatable {
+        case wrongChain(expected: UInt64, actual: Int)
+        case missingKeyRef
+        case wrongKeyRef(expected: String, actual: String)
+        case invalidEOA(String)
+        case wrongEOA(expected: String, actual: String)
+        case inactiveLifecycle(String)
+        case compromiseSuspected
+        case incoherentStatus
+    }
+
+    @discardableResult
+    static func verify(
+        status: WalletNodeClient.RelayerStatus,
+        against identity: VerifiedRelayerIdentity
+    ) throws -> VerifiedRelayerIdentity {
+        guard UInt64(exactly: status.chainId) == identity.chainID else {
+            throw Failure.wrongChain(expected: identity.chainID, actual: status.chainId)
+        }
+        guard let statusKeyRef = status.keyRef else {
+            throw Failure.missingKeyRef
+        }
+        guard statusKeyRef == identity.keyRef else {
+            throw Failure.wrongKeyRef(expected: identity.keyRef, actual: statusKeyRef)
+        }
+
+        let statusEOA: String
+        do {
+            statusEOA = try VerifiedRelayerIdentity.normalizedAddress(status.eoa)
+        } catch {
+            throw Failure.invalidEOA(status.eoa)
+        }
+        guard statusEOA == identity.address else {
+            throw Failure.wrongEOA(expected: identity.address, actual: statusEOA)
+        }
+        guard status.lifecycle == "active" else {
+            throw Failure.inactiveLifecycle(status.lifecycle)
+        }
+        guard status.compromiseSubmissionBlocked == false else {
+            throw Failure.compromiseSuspected
+        }
+        guard isCoherent(status) else {
+            throw Failure.incoherentStatus
+        }
+        return identity
+    }
+
+    private static func isCoherent(_ status: WalletNodeClient.RelayerStatus) -> Bool {
+        guard let threshold = BundlerFundingPolicy.quantity(status.thresholdLow) else {
+            return false
+        }
+        if status.balance != "unavailable" {
+            guard let balance = BundlerFundingPolicy.quantity(status.balance),
+                  status.needsTopup == GasPricing.isWeiLessThan(balance, threshold) else {
+                return false
+            }
+        }
+
+        if status.ready {
+            return status.keyLoaded
+                && status.reason == nil
+                && status.needsTopup == false
+                && status.balance != "unavailable"
+        }
+
+        if status.keyLoaded == false {
+            // wallet_bundlerStatus prioritizes locked over balance state, so a
+            // locked identity may legitimately also need a top-up.
+            return status.reason == "bundler_eoa_locked"
+        }
+
+        switch status.reason {
+        case "bundler_eoa_needs_topup":
+            return status.needsTopup && status.balance != "unavailable"
+        case "bundler_balance_unavailable":
+            return status.needsTopup == false && status.balance == "unavailable"
+        default:
+            return false
+        }
+    }
+}
+
 enum BundlerGasPolicy {
     /// Whether the tool's execution path is relayed by the local bundler EOA.
     static func requiresBundlerGas(_ tool: ToolIntent.Tool) -> Bool {
         switch tool {
-        case .transfer, .swap, .shield:
+        case .transfer, .swap, .shield, .topUpBundler:
             // All submitted as UserOperations the bundler relays and pays the gas for.
             return true
         case .unshield:
@@ -139,10 +276,13 @@ enum BundlerGasPolicy {
         disposition: ToolIntent.Disposition,
         status: BundlerGasStatus
     ) -> BundlerGasStatus? {
-        guard disposition == .pending, requiresBundlerGas(tool), status.needsGas else {
+        guard disposition == .pending, requiresBundlerGas(tool) else {
             return nil
         }
-        return status
+        if tool == .topUpBundler {
+            return status.fundingState.isOperational ? nil : status
+        }
+        return status.needsGas ? status : nil
     }
 }
 

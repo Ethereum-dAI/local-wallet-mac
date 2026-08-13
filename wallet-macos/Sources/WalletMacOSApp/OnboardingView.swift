@@ -1379,7 +1379,7 @@ private struct BundlerActivationStep: View {
                     .font(.system(size: 21, weight: .bold))
                     .foregroundStyle(OnboardingPalette.primaryText)
                 Text(
-                    "Send at least \(BundlerFundingPolicy.minimumBalanceDisplay) on Sepolia — "
+                    "Send at least \(BundlerFundingPolicy.minimumBalanceDisplay) on Sepolia. "
                         + "\(BundlerFundingPolicy.recommendedBalanceDisplay) recommended."
                 )
                     .font(.system(size: 14, weight: .medium))
@@ -1418,19 +1418,17 @@ private struct BundlerActivationStep: View {
         switch state.bundlerActivationState {
         case .idle, .checking:
             activationStatusLine(
-                text: "Checking balance — updates automatically",
+                text: "Checking balance (updates automatically)",
                 showsProgress: true
             )
-        case .waiting(let balance):
+        case .waiting:
             activationStatusLine(
-                text: "Waiting for deposit — "
-                    + "\(balance.map(WeiFormatter.ethDisplayString(fromHexWei:)) ?? "0 ETH") detected — "
-                    + "\(BundlerFundingPolicy.minimumBalanceDisplay) required",
+                text: "Waiting for deposit (\(BundlerFundingPolicy.minimumBalanceDisplay) required)",
                 showsProgress: true
             )
         case .ready(let balance):
             activationStatusLine(
-                text: "Deposit detected — \(WeiFormatter.ethDisplayString(fromHexWei: balance))",
+                text: "Deposit detected: \(WeiFormatter.ethDisplayString(fromHexWei: balance))",
                 icon: "checkmark.circle.fill",
                 color: OnboardingPalette.success
             )
@@ -1439,7 +1437,7 @@ private struct BundlerActivationStep: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(OnboardingPalette.warning)
                     .accessibilityHidden(true)
-                Text("Couldn’t verify balance — \(message)")
+                Text("Couldn’t verify balance: \(message)")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(OnboardingPalette.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)

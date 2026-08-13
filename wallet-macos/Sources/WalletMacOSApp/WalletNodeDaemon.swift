@@ -714,7 +714,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
                 continue
             }
             let detail = fields["error"] as? String
-            let diagnostic = detail.flatMap { $0.isEmpty ? nil : "\(message) — \($0)" } ?? message
+            let diagnostic = detail.flatMap { $0.isEmpty ? nil : "\(message): \($0)" } ?? message
             if (object["level"] as? String)?.uppercased() == "ERROR" {
                 return diagnostic
             }

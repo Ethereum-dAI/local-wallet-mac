@@ -361,6 +361,26 @@
         "amount_side": { "kind": "exact", "value": "input" }
       },
       "notes": null
+    },
+    {
+      "id": "bundler-top-up-en-001",
+      "user_message": "Top up the bundler with 0.01 ETH",
+      "category": "bundlerTopUp",
+      "language": "english",
+      "expected_tool": "top_up_bundler",
+      "expected_args": {
+        "amount": { "kind": "exact", "value": "0.01" }
+      },
+      "notes": null
+    },
+    {
+      "id": "bundler-top-up-missing-amount-001",
+      "user_message": "Top up the bundler",
+      "category": "bundlerTopUpMissingAmount",
+      "language": "english",
+      "expected_tool": null,
+      "expected_args": null,
+      "notes": null
     }
   ]
 }

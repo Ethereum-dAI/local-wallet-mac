@@ -469,7 +469,7 @@ final class RailgunExitStatusTests: XCTestCase {
         )
         // An unparseable rendering is left alone rather than guessed at.
         XCTAssertFalse(
-            RailgunExitCopy.hasNothingToUnshield(maxValueWei: "0x2710", renderedAmount: "—")
+            RailgunExitCopy.hasNothingToUnshield(maxValueWei: "0x2710", renderedAmount: "Unavailable")
         )
         // The copy has to say BOTH that nothing is unshieldable and why; a bare "0" reads as a bug.
         let copy = RailgunExitCopy.nothingUnshieldableMessage

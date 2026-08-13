@@ -31,8 +31,9 @@ pub use error::{BundlerError, Result};
 pub use execution::{
     decode_entry_point_withdraw_to, decode_erc7579_executions, decode_erc7579_single_execution,
     encode_entry_point_withdraw_to, encode_erc7579_single_execution,
-    suggested_unestimated_call_gas_limit, validate_entry_point_reclaim_break_glass,
-    EntryPointReclaimBreakGlass, EntryPointReclaimBreakGlassError, EntryPointWithdrawTo,
+    suggested_unestimated_call_gas_limit, total_erc7579_call_value,
+    validate_entry_point_reclaim_break_glass, EntryPointReclaimBreakGlass,
+    EntryPointReclaimBreakGlassError, EntryPointWithdrawTo, Erc7579CallValueError,
     Erc7579SingleExecution, UNESTIMATED_BASE_CALL_GAS_HEADROOM,
     UNESTIMATED_PER_EXECUTION_CALL_GAS_HEADROOM,
 };

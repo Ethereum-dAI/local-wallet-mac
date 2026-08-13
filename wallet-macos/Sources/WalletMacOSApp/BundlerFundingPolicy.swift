@@ -52,18 +52,6 @@ enum BundlerFundingPolicy {
         return .healthy(balanceWeiHex: balanceWeiHex)
     }
 
-    static func fromDaemonStatus(
-        _ status: WalletNodeClient.RelayerStatus?
-    ) -> BundlerFundingState {
-        guard let status else { return .checking }
-        if status.needsTopup {
-            return .externalRequired(
-                balanceWeiHex: quantity(status.balance) == nil ? nil : status.balance
-            )
-        }
-        return fromObservedBalance(status.balance)
-    }
-
     static func quantity(_ value: String) -> Data? {
         guard value.hasPrefix("0x") else { return nil }
         let body = value.dropFirst(2)
@@ -76,5 +64,80 @@ enum BundlerFundingPolicy {
             return nil
         }
         return parsed.leftPadded(to: 32)
+    }
+}
+
+enum BundlerTopUpUIRoute: Equatable {
+    case prefillComposer
+    case externalFunding
+    case retryOnly
+}
+
+enum BundlerTopUpUI {
+    static let defaultPrompt = "Top up the bundler with 0.01 ETH"
+
+    static func route(
+        fundingState: BundlerFundingState,
+        forceExternalFunding: Bool
+    ) -> BundlerTopUpUIRoute {
+        if forceExternalFunding {
+            return .externalFunding
+        }
+        switch fundingState {
+        case .kernelTopUpCandidate, .healthy:
+            return .prefillComposer
+        case .externalRequired:
+            return .externalFunding
+        case .checking, .unavailable:
+            return .retryOnly
+        }
+    }
+
+    static func draft(existing: String) -> String {
+        defaultPrompt
+    }
+}
+
+/// A live exact-cost preflight can require more than the coarse 0.005 ETH
+/// readiness floor. Keep that requirement until a later verified balance read
+/// proves the same relayer can afford it; a generic refresh must not send the
+/// user back into an impossible Kernel-funded retry loop.
+struct BundlerExternalFundingRequirement: Equatable {
+    let identity: VerifiedRelayerIdentity
+    let requiredBalanceWeiHex: String
+    let balanceAtFailureWeiHex: String?
+}
+
+enum BundlerExternalFundingRequirementPolicy {
+    static func shouldClear(
+        _ requirement: BundlerExternalFundingRequirement,
+        verifiedIdentity: VerifiedRelayerIdentity?,
+        observedBalanceWeiHex: String?
+    ) -> Bool {
+        guard let verifiedIdentity else { return false }
+        // A requirement for a retired relayer must never constrain its verified
+        // replacement. An unverified mismatch reaches this method as nil and is
+        // deliberately retained until verification succeeds.
+        guard verifiedIdentity == requirement.identity else { return true }
+        guard let observedBalanceWeiHex,
+              let observed = BundlerFundingPolicy.quantity(observedBalanceWeiHex),
+              let required = BundlerFundingPolicy.quantity(
+                  requirement.requiredBalanceWeiHex
+              ) else {
+            return false
+        }
+        if !GasPricing.isWeiLessThan(observed, required) {
+            return true
+        }
+        guard let balanceAtFailureWeiHex = requirement.balanceAtFailureWeiHex,
+              let balanceAtFailure = BundlerFundingPolicy.quantity(
+                  balanceAtFailureWeiHex
+              ) else {
+            return false
+        }
+        // Any confirmed increase means the user's external funding action moved
+        // the balance. Re-run the exact live-cost check instead of pinning them
+        // forever to a gas quote that may already have fallen.
+        return GasPricing.isWeiLessThan(balanceAtFailure, observed)
     }
 }

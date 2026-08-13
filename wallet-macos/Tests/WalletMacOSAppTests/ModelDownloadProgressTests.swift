@@ -42,7 +42,7 @@ struct ModelDownloadProgressTests {
         #expect(first.bytesPerSecond == 10_000_000)
         #expect(smoothed.bytesPerSecond == 12_500_000)
         #expect(smoothed.estimatedSecondsRemaining == 403.2)
-        #expect(smoothed.statusText == "300 MB of 5.34 GB — 12.5 MB/s — about 7 min left")
+        #expect(smoothed.statusText == "300 MB of 5.34 GB - 12.5 MB/s - about 7 min left")
     }
 
     @Test func fractionIsBoundedAndCompletionHasNoETA() {
@@ -54,7 +54,7 @@ struct ModelDownloadProgressTests {
 
         #expect(progress.fractionCompleted == 1)
         #expect(progress.estimatedSecondsRemaining == 0)
-        #expect(progress.statusText == "4 of 4 KB — 2.0 KB/s")
+        #expect(progress.statusText == "4 of 4 KB - 2.0 KB/s")
     }
 
     @Test func visibleChangesFollowRenderedTelemetry() {

@@ -888,7 +888,7 @@ struct LocalWalletSettingsView: View {
                 }
                 .pickerStyle(.menu)
                 .frame(width: 200)
-                Text("Active: \(snapshot.contextWindow). Larger windows use more memory — the verdicts above are computed at this size. Sizes this Mac cannot hold are not listed.")
+                Text("Active: \(snapshot.contextWindow). Larger windows use more memory. The verdicts above are computed at this size. Sizes this Mac cannot hold are not listed.")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(SettingsPalette.secondaryText)
                 Divider().overlay(SettingsPalette.border).padding(.vertical, 4)
@@ -2490,7 +2490,7 @@ private enum SettingsConfirmation: Identifiable, Equatable {
         case .revokeSessionKeys:
             return "This starts a passkey-authorized onchain revoke transaction. Stay on the Session Keys settings screen until the transaction finishes and the local session key state is cleared."
         case .resetWallet:
-            return "This deletes the Secure Enclave wallet key reference, local relayer keys, local session keys, and wallet metadata. If session keys are enabled, disable them first — an onchain session permission stays valid until it expires. A new account will be created."
+            return "This deletes the Secure Enclave wallet key reference, local relayer keys, local session keys, and wallet metadata. If session keys are enabled, disable them first. An onchain session permission stays valid until it expires. A new account will be created."
         }
     }
 
@@ -3431,7 +3431,7 @@ private struct AddHuggingFaceModelForm: View {
             if let install {
                 installLine(install)
             } else if let blockedByInstallOf {
-                Text("Waiting on \(blockedByInstallOf) — one download at a time.")
+                Text("Waiting on \(blockedByInstallOf): one download at a time.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -3440,7 +3440,7 @@ private struct AddHuggingFaceModelForm: View {
                 SettingsMessageBanner(message: message)
             }
 
-            Text("Public GGUF repositories only. Unverified models can get tool calls wrong — review every transaction.")
+            Text("Public GGUF repositories only. Unverified models can get tool calls wrong. Review every transaction.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
@@ -3470,11 +3470,11 @@ private struct AddHuggingFaceModelForm: View {
             switch install.phase {
             case .downloading(let progress):
                 ProgressView(value: progress.fractionCompleted).frame(width: 180)
-                Text("\(install.displayName) — \(progress.statusText)")
+                Text("\(install.displayName): \(progress.statusText)")
                     .font(.system(size: 11, design: .monospaced))
             case .testing:
                 ProgressView().controlSize(.small)
-                Text("Loading \(install.displayName) for real and checking it can make a tool call — this can take a minute.")
+                Text("Loading \(install.displayName) for real and checking it can make a tool call. This can take a minute.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }

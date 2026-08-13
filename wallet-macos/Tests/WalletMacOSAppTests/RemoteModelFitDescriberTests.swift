@@ -121,7 +121,7 @@ struct ModelSelfTestReportTests {
         let message = ModelSelfTestReport.message(for: .steppedDown(from: 32_768, to: 8192))
         #expect(message.contains(RemoteModelFitDescriber.tokenText(32_768)))
         #expect(message.contains(RemoteModelFitDescriber.tokenText(8192)))
-        #expect(message.contains("lower the context window"))
+        #expect(message.contains("Lower the context window"))
     }
 
     /// A model that loads but cannot emit a tool call is useless for transfers —

@@ -8,8 +8,8 @@ pub fn minimum_account_balance(
     call_value: U256,
     required_prefund: U256,
     entry_point_deposit: U256,
-) -> U256 {
-    call_value + gas_shortfall(required_prefund, entry_point_deposit)
+) -> Option<U256> {
+    call_value.checked_add(gas_shortfall(required_prefund, entry_point_deposit))
 }
 
 pub fn displayed_topup_minimum(minimum: U256) -> U256 {
@@ -39,15 +39,23 @@ mod tests {
     fn minimum_account_balance_adds_call_value_and_gas_shortfall() {
         assert_eq!(
             minimum_account_balance(U256::from(7), U256::from(10), U256::from(3)),
-            U256::from(14)
+            Some(U256::from(14))
         );
         assert_eq!(
             minimum_account_balance(U256::from(7), U256::from(10), U256::from(10)),
-            U256::from(7)
+            Some(U256::from(7))
         );
         assert_eq!(
             minimum_account_balance(U256::from(7), U256::from(10), U256::from(12)),
-            U256::from(7)
+            Some(U256::from(7))
+        );
+    }
+
+    #[test]
+    fn minimum_account_balance_rejects_uint256_overflow() {
+        assert_eq!(
+            minimum_account_balance(U256::MAX, U256::from(1), U256::ZERO),
+            None
         );
     }
 

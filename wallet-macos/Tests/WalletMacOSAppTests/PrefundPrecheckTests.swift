@@ -22,6 +22,7 @@ import Testing
         var readCount = 0
         let outcome = await PrefundPrecheck.decision(
             requiredPrefund: wei(1_000),
+            callValue: UserOperationCallValue.zero,
             callGasLimit: wei(600_000),
             maxFeePerGas: wei(30_000_000_000),
             feeQuoteAtPolicyCeiling: false,
@@ -41,6 +42,7 @@ import Testing
     @Test func decisionProceedsWhenAffordable() async throws {
         let outcome = await PrefundPrecheck.decision(
             requiredPrefund: wei(1_000),
+            callValue: UserOperationCallValue.zero,
             callGasLimit: wei(600_000),
             maxFeePerGas: wei(30_000_000_000),
             feeQuoteAtPolicyCeiling: false,
@@ -53,9 +55,85 @@ import Testing
         }
     }
 
+    @Test func nativeValueIsNotMistakenForGasCoveredByTheEntryPointDeposit() async throws {
+        // wallet-node requires the account itself to hold the call value. The
+        // EntryPoint deposit can cover gas, but it cannot be sent to the
+        // recipient. The old balance + deposit check incorrectly allowed this.
+        let outcome = await PrefundPrecheck.decision(
+            requiredPrefund: wei(1_000),
+            callValue: wei(1_001),
+            callGasLimit: wei(600_000),
+            maxFeePerGas: wei(30_000_000_000),
+            feeQuoteAtPolicyCeiling: false,
+            readWalletStatus: { try self.status(balance: 1_000, deposit: 1_000) }
+        )
+
+        guard case let .accountBalanceDecline(report) = outcome else {
+            Issue.record("expected .accountBalanceDecline, got \(outcome)")
+            return
+        }
+        #expect(report.callValueWeiHex == "0x" + wei(1_001).hexEncodedString)
+        #expect(report.gasBalanceRequiredWeiHex == "0x" + wei(0).hexEncodedString)
+        #expect(report.minimumAccountBalanceWeiHex == "0x" + wei(1_001).hexEncodedString)
+        #expect(report.accountBalanceWeiHex == "0x" + wei(1_000).hexEncodedString)
+        #expect(report.deficitWeiHex == "0x" + wei(1).hexEncodedString)
+    }
+
+    @Test func nativeValueAndUncoveredGasAreBothRequiredFromTheAccount() async throws {
+        let outcome = await PrefundPrecheck.decision(
+            requiredPrefund: wei(1_000),
+            callValue: wei(500),
+            callGasLimit: wei(600_000),
+            maxFeePerGas: wei(30_000_000_000),
+            feeQuoteAtPolicyCeiling: false,
+            readWalletStatus: { try self.status(balance: 600, deposit: 400) }
+        )
+
+        guard case let .accountBalanceDecline(report) = outcome else {
+            Issue.record("expected .accountBalanceDecline, got \(outcome)")
+            return
+        }
+        #expect(report.gasBalanceRequiredWeiHex == "0x" + wei(600).hexEncodedString)
+        #expect(report.minimumAccountBalanceWeiHex == "0x" + wei(1_100).hexEncodedString)
+        #expect(report.deficitWeiHex == "0x" + wei(500).hexEncodedString)
+    }
+
+    @Test func depositAbovePrefundLeavesOnlyNativeValueToCover() async throws {
+        let outcome = await PrefundPrecheck.decision(
+            requiredPrefund: wei(1_000),
+            callValue: wei(500),
+            callGasLimit: wei(600_000),
+            maxFeePerGas: wei(30_000_000_000),
+            feeQuoteAtPolicyCeiling: false,
+            readWalletStatus: { try self.status(balance: 500, deposit: 2_000) }
+        )
+
+        guard case .proceed = outcome else {
+            Issue.record("expected .proceed, got \(outcome)")
+            return
+        }
+    }
+
+    @Test func nativeValuePlusGasOverflowFailsClosed() async throws {
+        let outcome = await PrefundPrecheck.decision(
+            requiredPrefund: wei(2),
+            callValue: Data(repeating: 0xff, count: 32),
+            callGasLimit: wei(600_000),
+            maxFeePerGas: wei(30_000_000_000),
+            feeQuoteAtPolicyCeiling: false,
+            readWalletStatus: { try self.status(balance: UInt64.max, deposit: 1) }
+        )
+
+        guard case .statusUnavailable = outcome else {
+            Issue.record("expected .statusUnavailable, got \(outcome)")
+            return
+        }
+    }
+
     @Test func decisionDeclinesWithTheFullPayload() async throws {
         let outcome = await PrefundPrecheck.decision(
             requiredPrefund: wei(48_000_000_000_000_000),
+            callValue: UserOperationCallValue.zero,
             callGasLimit: wei(720_000),
             maxFeePerGas: wei(30_000_000_000),
             feeQuoteAtPolicyCeiling: false,
@@ -81,6 +159,7 @@ import Testing
         struct Boom: Error {}
         let outcome = await PrefundPrecheck.decision(
             requiredPrefund: wei(48_000_000_000_000_000),
+            callValue: UserOperationCallValue.zero,
             callGasLimit: wei(600_000),
             maxFeePerGas: wei(30_000_000_000),
             feeQuoteAtPolicyCeiling: false,
@@ -100,6 +179,7 @@ import Testing
         let wide = Data(repeating: 0xff, count: 32)
         let outcome = await PrefundPrecheck.decision(
             requiredPrefund: wei(48_000_000_000_000_000),
+            callValue: UserOperationCallValue.zero,
             callGasLimit: wide,
             maxFeePerGas: wei(30_000_000_000),
             feeQuoteAtPolicyCeiling: false,
@@ -118,6 +198,7 @@ import Testing
         // card needs to know not to ask for a top-up.
         let outcome = await PrefundPrecheck.decision(
             requiredPrefund: wei(2_400_000_000_000_000_000),
+            callValue: UserOperationCallValue.zero,
             callGasLimit: wei(600_000),
             maxFeePerGas: wei(1_500_000_000_000),
             feeQuoteAtPolicyCeiling: true,
@@ -204,5 +285,94 @@ import Testing
             entryPointDeposit: Data()
         ))
         #expect(shortfall.deficit == wei(13))
+    }
+
+    @Test func nativeTransferCallValueUsesTheReviewedETHAmount() throws {
+        let value = try UserOperationCallValue.wei(
+            for: .nativeTransfer(
+                recipient: "0x0000000000000000000000000000000000000001",
+                amountETH: "0.125"
+            )
+        )
+        let expected = try EtherAmountParser.wei(fromETHString: "0.125")
+        #expect(value == expected)
+    }
+
+    @Test func nativeInputSwapCallValueUsesTheQuotedAmountIn() throws {
+        let amountIn = wei(123)
+        let quote = SwapQuote(
+            chainID: 11_155_111,
+            factory: "0x0000000000000000000000000000000000000001",
+            router: "0x0000000000000000000000000000000000000002",
+            quoter: "0x0000000000000000000000000000000000000003",
+            tokenIn: "ETH",
+            tokenOut: "USDC",
+            amountIn: amountIn,
+            quoteAmountOut: wei(100),
+            amountOutMinimum: wei(99),
+            slippageBps: 50,
+            path: Data(),
+            hops: [],
+            gasEstimate: "100000",
+            allowance: nil,
+            requiresApproval: false
+        )
+
+        let native = try UserOperationCallValue.wei(
+            for: .exactInputSwap(
+                SwapExecutionRequest(
+                    quote: quote,
+                    recipient: "0x0000000000000000000000000000000000000004",
+                    tokenInIsNative: true,
+                    tokenOutIsNative: false
+                )
+            )
+        )
+        let token = try UserOperationCallValue.wei(
+            for: .exactInputSwap(
+                SwapExecutionRequest(
+                    quote: quote,
+                    recipient: "0x0000000000000000000000000000000000000004",
+                    tokenInIsNative: false,
+                    tokenOutIsNative: true
+                )
+            )
+        )
+
+        #expect(native == amountIn)
+        #expect(token == wei(0))
+    }
+
+    @Test func batchCallValueSumsEveryKernelExecution() throws {
+        let total = try UserOperationCallValue.wei(for: [
+            KernelExecutionRequest(
+                target: "0x0000000000000000000000000000000000000001",
+                value: wei(40),
+                callData: Data()
+            ),
+            KernelExecutionRequest(
+                target: "0x0000000000000000000000000000000000000002",
+                value: Data([60]),
+                callData: Data()
+            ),
+        ])
+        #expect(total == wei(100))
+    }
+
+    @Test func batchCallValueOverflowIsRejected() {
+        #expect(throws: AppError.self) {
+            _ = try UserOperationCallValue.wei(for: [
+                KernelExecutionRequest(
+                    target: "0x0000000000000000000000000000000000000001",
+                    value: Data(repeating: 0xff, count: 32),
+                    callData: Data()
+                ),
+                KernelExecutionRequest(
+                    target: "0x0000000000000000000000000000000000000002",
+                    value: Data([1]),
+                    callData: Data()
+                ),
+            ])
+        }
     }
 }

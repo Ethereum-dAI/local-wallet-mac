@@ -72,6 +72,41 @@ struct BundlerKeyStore {
         return items.compactMap { $0[kSecAttrAccount as String] as? String }
     }
 
+    /// Reads only public attributes from the protected secret item. Attribute
+    /// queries never request `kSecValueData`, so this path stays prompt-free and
+    /// is safe for dashboard rendering and pre-auth transaction checks.
+    func verifiedIdentity(forKeyRef keyRef: String) throws -> VerifiedRelayerIdentity? {
+        let authenticationContext = LAContext()
+        authenticationContext.interactionNotAllowed = true
+        var query = baseQuery(keyRef: keyRef)
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecReturnAttributes as String] = true
+        query[kSecUseAuthenticationContext as String] = authenticationContext
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound {
+            return nil
+        }
+        guard status == errSecSuccess,
+              let attributes = result as? [String: Any] else {
+            throw mapSecurityStatus(status)
+        }
+        guard let metadata = attributes[kSecAttrGeneric as String] as? Data else {
+            // Legacy protected item. The next authenticated read derives and
+            // migrates this metadata rather than trusting an external cache.
+            return nil
+        }
+        let identity = try VerifiedRelayerIdentity.decodeMetadata(metadata)
+        guard identity.keyRef == keyRef else {
+            throw VerifiedRelayerIdentity.ValidationError.metadataKeyRefMismatch(
+                expected: keyRef,
+                actual: identity.keyRef
+            )
+        }
+        return identity
+    }
+
     private func load(
         keyRef: String,
         createIfMissing: Bool,
@@ -103,6 +138,11 @@ struct BundlerKeyStore {
             throw AppError.invalidHexString
         }
 
+        let identity = try VerifiedRelayerIdentity.derive(
+            keyRef: keyRef,
+            secret: secret
+        )
+
         try delete(keyRef: keyRef)
 
         var accessError: Unmanaged<CFError>?
@@ -118,6 +158,7 @@ struct BundlerKeyStore {
         var query = baseQuery(keyRef: keyRef)
         query[kSecValueData as String] = secret
         query[kSecAttrAccessControl as String] = accessControl
+        query[kSecAttrGeneric as String] = try identity.encodedMetadata()
 
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess else {
@@ -174,7 +215,39 @@ struct BundlerKeyStore {
         guard secret.count == 32 else {
             throw AppError.invalidHexString
         }
+
+        let derivedIdentity = try VerifiedRelayerIdentity.derive(
+            keyRef: keyRef,
+            secret: secret
+        )
+        switch try VerifiedRelayerIdentityMetadataPolicy.decision(
+            stored: try verifiedIdentity(forKeyRef: keyRef),
+            derived: derivedIdentity
+        ) {
+        case .current:
+            break
+        case .migrate(let identity):
+            try updateVerifiedIdentity(
+                identity,
+                authenticationContext: authenticationContext
+            )
+        }
         return BundlerSecretRecord(keyRef: keyRef, secret: secret)
+    }
+
+    private func updateVerifiedIdentity(
+        _ identity: VerifiedRelayerIdentity,
+        authenticationContext: LAContext
+    ) throws {
+        var query = baseQuery(keyRef: identity.keyRef)
+        query[kSecUseAuthenticationContext as String] = authenticationContext
+        let status = SecItemUpdate(
+            query as CFDictionary,
+            [kSecAttrGeneric as String: try identity.encodedMetadata()] as CFDictionary
+        )
+        guard status == errSecSuccess else {
+            throw mapSecurityStatus(status)
+        }
     }
 
     private func withAuthenticationContext<Result>(
@@ -222,6 +295,163 @@ struct BundlerKeyStore {
         default:
             return NSError(domain: NSOSStatusErrorDomain, code: Int(status))
         }
+    }
+}
+
+/// App-owned public identity for a protected local relayer secret.
+///
+/// The private key remains behind Keychain user-presence access control. This
+/// versioned metadata is stored on the same item so prompt-free UI and preflight
+/// code can bind wallet-node's public status to an identity the app previously
+/// derived from that secret.
+struct VerifiedRelayerIdentity: Codable, Equatable, Sendable {
+    static let currentVersion = 1
+
+    enum ValidationError: Error, Equatable, LocalizedError {
+        case unsupportedVersion(Int)
+        case invalidChainID(UInt64)
+        case invalidKeyRef(String)
+        case keyRefChainMismatch(expected: UInt64, actual: UInt64)
+        case invalidAddress(String)
+        case metadataKeyRefMismatch(expected: String, actual: String)
+        case malformedMetadata
+        case storedIdentityMismatch
+
+        var errorDescription: String? {
+            switch self {
+            case .unsupportedVersion(let version):
+                return "Unsupported relayer identity metadata version \(version)."
+            case .invalidChainID(let chainID):
+                return "Invalid relayer identity chain ID \(chainID)."
+            case .invalidKeyRef:
+                return "Invalid relayer identity key reference."
+            case let .keyRefChainMismatch(expected, actual):
+                return "Relayer identity key reference belongs to chain \(actual), expected \(expected)."
+            case .invalidAddress:
+                return "Invalid relayer identity address."
+            case .metadataKeyRefMismatch:
+                return "Relayer identity metadata does not belong to the requested key reference."
+            case .malformedMetadata:
+                return "Relayer identity metadata is malformed."
+            case .storedIdentityMismatch:
+                return "Stored relayer identity does not match the authenticated relayer secret."
+            }
+        }
+    }
+
+    let version: Int
+    let chainID: UInt64
+    let keyRef: String
+    /// Canonical lowercase `0x`-prefixed 20-byte Ethereum address.
+    let address: String
+
+    init(
+        version: Int = VerifiedRelayerIdentity.currentVersion,
+        chainID: UInt64,
+        keyRef: String,
+        address: String
+    ) throws {
+        guard version == Self.currentVersion else {
+            throw ValidationError.unsupportedVersion(version)
+        }
+        guard chainID > 0 else {
+            throw ValidationError.invalidChainID(chainID)
+        }
+        guard let keyRefChainID = BundlerLaunchKeyPolicy.chainId(ofKeyRef: keyRef) else {
+            throw ValidationError.invalidKeyRef(keyRef)
+        }
+        guard keyRefChainID == chainID else {
+            throw ValidationError.keyRefChainMismatch(expected: chainID, actual: keyRefChainID)
+        }
+
+        self.version = version
+        self.chainID = chainID
+        self.keyRef = keyRef
+        self.address = try Self.normalizedAddress(address)
+    }
+
+    static func derive(keyRef: String, secret: Data) throws -> VerifiedRelayerIdentity {
+        guard secret.count == 32 else {
+            throw AppError.invalidHexString
+        }
+        guard let chainID = BundlerLaunchKeyPolicy.chainId(ofKeyRef: keyRef) else {
+            throw ValidationError.invalidKeyRef(keyRef)
+        }
+        let addressData = try WalletSignature.bundlerAddress(fromSecret: secret)
+        return try VerifiedRelayerIdentity(
+            chainID: chainID,
+            keyRef: keyRef,
+            address: "0x" + addressData.hexEncodedString
+        )
+    }
+
+    static func normalizedAddress(_ raw: String) throws -> String {
+        let bytes = Array(raw.utf8)
+        guard bytes.count == 42,
+              bytes[0] == Character("0").asciiValue,
+              bytes[1] == Character("x").asciiValue,
+              bytes.dropFirst(2).allSatisfy({ byte in
+                  (byte >= 48 && byte <= 57)
+                      || (byte >= 65 && byte <= 70)
+                      || (byte >= 97 && byte <= 102)
+              }) else {
+            throw ValidationError.invalidAddress(raw)
+        }
+        return raw.lowercased()
+    }
+
+    func encodedMetadata() throws -> Data {
+        try JSONEncoder().encode(self)
+    }
+
+    static func decodeMetadata(_ data: Data) throws -> VerifiedRelayerIdentity {
+        do {
+            return try JSONDecoder().decode(VerifiedRelayerIdentity.self, from: data)
+        } catch let error as ValidationError {
+            throw error
+        } catch {
+            throw ValidationError.malformedMetadata
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            version: container.decode(Int.self, forKey: .version),
+            chainID: container.decode(UInt64.self, forKey: .chainID),
+            keyRef: container.decode(String.self, forKey: .keyRef),
+            address: container.decode(String.self, forKey: .address)
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case chainID
+        case keyRef
+        case address
+    }
+}
+
+/// Missing metadata is the only state migrated automatically. Once metadata
+/// exists, a mismatch with the authenticated secret is a security failure and
+/// must not be repaired by adopting either side.
+enum VerifiedRelayerIdentityMetadataPolicy {
+    enum Decision: Equatable {
+        case current
+        case migrate(VerifiedRelayerIdentity)
+    }
+
+    static func decision(
+        stored: VerifiedRelayerIdentity?,
+        derived: VerifiedRelayerIdentity
+    ) throws -> Decision {
+        guard let stored else {
+            return .migrate(derived)
+        }
+        guard stored == derived else {
+            throw VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch
+        }
+        return .current
     }
 }
 

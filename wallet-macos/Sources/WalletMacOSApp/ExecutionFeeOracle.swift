@@ -52,6 +52,7 @@ struct ExecutionFeeQuote: Equatable, Sendable {
 enum ExecutionFeeOracleError: Error, Equatable, LocalizedError {
     case invalidRPCURL
     case insecureRPCURL
+    case invalidAddress
     case transportFailure
     case httpStatus(Int)
     case malformedResponse(method: String)
@@ -73,6 +74,8 @@ enum ExecutionFeeOracleError: Error, Equatable, LocalizedError {
             return "The execution RPC URL is invalid."
         case .insecureRPCURL:
             return "The execution RPC must use HTTPS, except for loopback development endpoints."
+        case .invalidAddress:
+            return "The balance address is not a valid Ethereum address."
         case .transportFailure:
             return "The execution RPC could not be reached."
         case .httpStatus(let status):
@@ -195,6 +198,34 @@ struct ExecutionFeeOracle: @unchecked Sendable {
             throw ExecutionFeeOracleError.malformedResponse(method: "eth_blockNumber")
         }
         return try Self.parseUInt64Quantity(value, field: "blockNumber")
+    }
+
+    /// Reads a public account balance directly from the configured execution RPC.
+    /// The chain ID is checked first so onboarding cannot accept funding observed
+    /// on a different network, and the result must be a canonical JSON-RPC quantity.
+    func balanceWeiHex(
+        address: String,
+        rpcURL: URL,
+        expectedChainID: UInt64
+    ) async throws -> String {
+        try Self.validateRPCURL(rpcURL)
+        guard address.count == 42,
+              address.hasPrefix("0x"),
+              address.dropFirst(2).allSatisfy(\.isHexDigit) else {
+            throw ExecutionFeeOracleError.invalidAddress
+        }
+
+        _ = try await validatedChainID(rpcURL: rpcURL, expected: expectedChainID)
+        let result = try await rpcResult(
+            method: "eth_getBalance",
+            params: [address, "latest"],
+            rpcURL: rpcURL
+        )
+        guard let value = result as? String else {
+            throw ExecutionFeeOracleError.malformedResponse(method: "eth_getBalance")
+        }
+        _ = try Self.parseQuantity(value, field: "balance")
+        return value.lowercased()
     }
 
     func validateFreshness(

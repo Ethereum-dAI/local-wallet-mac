@@ -5,6 +5,7 @@ import Testing
 private final class FeeOracleURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var handler: ((URLRequest, [String: Any]) throws -> (Int, [String: Any]))?
     nonisolated(unsafe) static var responseURLOverride: URL?
+    nonisolated(unsafe) static var requestBodies: [[String: Any]] = []
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -12,6 +13,7 @@ private final class FeeOracleURLProtocol: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         do {
             let body = try Self.requestBody(request)
+            Self.requestBodies.append(body)
             let handler = try #require(Self.handler)
             let (status, payload) = try handler(request, body)
             let data = try JSONSerialization.data(withJSONObject: payload)
@@ -62,6 +64,7 @@ struct ExecutionFeeOracleTests {
     init() {
         FeeOracleURLProtocol.handler = nil
         FeeOracleURLProtocol.responseURLOverride = nil
+        FeeOracleURLProtocol.requestBodies = []
     }
 
     private func oracle() -> ExecutionFeeOracle {
@@ -99,6 +102,92 @@ struct ExecutionFeeOracleTests {
             default:
                 Issue.record("unexpected RPC method")
                 return (500, ["error": "unexpected method"])
+            }
+        }
+    }
+
+    @Test func balanceReadValidatesChainBeforeReadingBalance() async throws {
+        let address = "0x7A3f000000000000000000000000000000009C21"
+        FeeOracleURLProtocol.handler = { _, body in
+            let id = try #require(body["id"] as? Int)
+            switch body["method"] as? String {
+            case "eth_chainId":
+                return (200, ["jsonrpc": "2.0", "id": id, "result": "0xaa36a7"])
+            case "eth_getBalance":
+                #expect(body["params"] as? [String] == [address, "latest"])
+                return (200, [
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": "0x11c37937e08000",
+                ])
+            default:
+                return (500, [
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": ["code": -1],
+                ])
+            }
+        }
+
+        let balance = try await oracle().balanceWeiHex(
+            address: address,
+            rpcURL: rpcURL,
+            expectedChainID: chainID
+        )
+
+        #expect(balance == "0x11c37937e08000")
+        #expect(
+            FeeOracleURLProtocol.requestBodies.compactMap { $0["method"] as? String }
+                == ["eth_chainId", "eth_getBalance"]
+        )
+    }
+
+    @Test func wrongChainAndInvalidAddressNeverIssueABalanceRead() async {
+        FeeOracleURLProtocol.handler = { _, body in
+            let id = try #require(body["id"] as? Int)
+            return (200, ["jsonrpc": "2.0", "id": id, "result": "0x1"])
+        }
+
+        await #expect(throws: ExecutionFeeOracleError.self) {
+            try await oracle().balanceWeiHex(
+                address: "0x7A3f000000000000000000000000000000009C21",
+                rpcURL: rpcURL,
+                expectedChainID: chainID
+            )
+        }
+        #expect(
+            FeeOracleURLProtocol.requestBodies.compactMap { $0["method"] as? String }
+                == ["eth_chainId"]
+        )
+
+        FeeOracleURLProtocol.requestBodies = []
+        await #expect(throws: ExecutionFeeOracleError.self) {
+            try await oracle().balanceWeiHex(
+                address: "0xnot-an-address",
+                rpcURL: rpcURL,
+                expectedChainID: chainID
+            )
+        }
+        #expect(FeeOracleURLProtocol.requestBodies.isEmpty)
+    }
+
+    @Test func balanceReadRejectsNoncanonicalAndOversizedQuantities() async {
+        for balance in ["0x00", "0x" + String(repeating: "f", count: 65)] {
+            FeeOracleURLProtocol.requestBodies = []
+            FeeOracleURLProtocol.handler = { _, body in
+                let id = try #require(body["id"] as? Int)
+                let result = body["method"] as? String == "eth_chainId"
+                    ? "0xaa36a7"
+                    : balance
+                return (200, ["jsonrpc": "2.0", "id": id, "result": result])
+            }
+
+            await #expect(throws: ExecutionFeeOracleError.self) {
+                try await oracle().balanceWeiHex(
+                    address: "0x7A3f000000000000000000000000000000009C21",
+                    rpcURL: rpcURL,
+                    expectedChainID: chainID
+                )
             }
         }
     }

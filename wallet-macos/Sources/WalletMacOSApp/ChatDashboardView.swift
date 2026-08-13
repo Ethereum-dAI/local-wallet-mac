@@ -985,6 +985,9 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var fundingHelperAddress: String?
     @Published private(set) var helperFundError: String?
     @Published private(set) var helperFundErrorAddress: String?
+    /// Set only when the exact live relay-cost preflight proves that a Kernel-funded top-up
+    /// cannot be relayed. The card then exposes only the external recovery actions.
+    @Published private(set) var helperRequiresExternalFundingAddress: String?
     @Published private(set) var tokenBalanceMessage: String? = nil
     @Published private var transferPreflightStatuses: [UUID: ChatTransferPreflightStatus] = [:]
     @Published private var swapPreflightStatuses: [UUID: ChatSwapPreflightStatus] = [:]
@@ -1844,8 +1847,13 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     func refreshOnchainAccountStatus() {
+        helperRequiresExternalFundingAddress = nil
         walletModel.refreshOnchainAccountStatus()
         refreshTokenBalances(force: true)
+    }
+
+    func retryBundlerFundingStatus() {
+        refreshOnchainAccountStatus()
     }
 
     func createNewChat() {
@@ -3438,12 +3446,13 @@ private final class ChatDashboardModel: ObservableObject {
             guard let self else { return }
             defer { self.fundingHelperAddress = nil }
             do {
-                let result = try await self.walletModel.executeNativeTransfer(
+                let result = try await self.walletModel.executeBundlerTopUp(
                     recipient: address,
                     amountETH: amount,
                     logContext: "fund-helper",
                     signingReason: "Authorize \(amount) ETH to the \(label) for gas on \(self.walletModel.activeChain.name)"
                 )
+                self.helperRequiresExternalFundingAddress = nil
                 // Hold the funding lock until this op is actually mined. Two reasons:
                 // (1) balances only reflect it once it lands; (2) the shared lock stops a
                 // second helper-funding op building on a nonce this one hasn't consumed yet —
@@ -3458,6 +3467,13 @@ private final class ChatDashboardModel: ObservableObject {
                 // refreshAccountIdentity only re-maps the stale cache.
                 self.refreshOnchainAccountStatus()
             } catch {
+                switch error {
+                case AppError.bundlerRelayShortfall(_),
+                     AppError.bundlerRelayPreflightUnavailable(_):
+                    self.helperRequiresExternalFundingAddress = address
+                default:
+                    break
+                }
                 // An empty bundler cannot relay its own top-up, so name the real blocker
                 // instead of the RPC reason string.
                 self.setHelperFundError(
@@ -5107,7 +5123,10 @@ struct LocalWalletChatDashboardView: View {
                         isRefreshingTokenBalances: model.isRefreshingTokenBalances,
                         onRefreshTokenBalances: { model.refreshTokenBalances(force: true) },
                         explorerURL: explorerAddressURL(model.accountIdentity.bundlerAddress),
-                        gasWarning: model.accountIdentity.bundlerGas,
+                        fundingState: model.accountIdentity.bundlerGas.fundingState,
+                        forceExternalFunding: model.helperRequiresExternalFundingAddress?
+                            .caseInsensitiveCompare(model.accountIdentity.bundlerAddress) == .orderedSame,
+                        onRetry: { model.retryBundlerFundingStatus() },
                         onFund: { amount in
                             model.fundHelper(
                                 address: model.accountIdentity.bundlerAddress,
@@ -6251,15 +6270,9 @@ private struct AddressPill: View {
     }
 }
 
-/// Account card for a gas-paying helper EOA — in practice the bundler, the only one the wallet
-/// has. Unlike `AddressPill`, it leads with the gas balance and a **Fund** action — the raw
-/// address is demoted to a copy button (the external-funding fallback the bundler needs when
-/// empty). "Send" moves ETH from the Kernel account as a passkey UserOp; see `fundHelper`.
-///
-/// When `gasWarning` says the bundler is under the daemon's threshold, the Fund control is
-/// replaced by the only route that can work — its address, a Copy button and (on testnets) a
-/// faucet link — because the empty bundler would have to relay its own top-up. `gasWarning`
-/// stays optional so a future helper without that self-funding trap can reuse the card.
+/// Account card for the local gas-paying bundler EOA. Funding controls are action-only: healthy
+/// shows no funding body, unknown never falls through to Kernel funding, and a proven relay
+/// shortfall exposes only the no-backend external recovery actions.
 private struct FundableAccountCard: View {
     let icon: String
     let title: String
@@ -6272,23 +6285,53 @@ private struct FundableAccountCard: View {
     let isRefreshingTokenBalances: Bool
     let onRefreshTokenBalances: () -> Void
     let explorerURL: URL?
-    var gasWarning: BundlerGasStatus?
+    let fundingState: BundlerFundingState
+    let forceExternalFunding: Bool
+    let onRetry: () -> Void
     let onFund: (String) -> Void
 
-    @State private var fundAmount = "0.02"
+    @State private var fundAmount = "0.01"
     @State private var copied = false
     @State private var isTokenListPresented = false
 
     private var hasAddress: Bool { address.hasPrefix("0x") && address.count == 42 }
-    /// Out of gas by the daemon's own threshold — the in-app Fund control cannot work.
-    private var isOutOfGas: Bool { gasWarning?.needsGas == true }
+
+    private var effectiveFundingState: BundlerFundingState {
+        if forceExternalFunding {
+            // A nominally "healthy" admission-floor balance can still be
+            // below this operation's exact relay cost, and a compromised
+            // relayer can report a high numeric balance. Keep the exact
+            // preflight failure authoritative until an explicit refresh.
+            return .externalRequired(balanceWeiHex: nil)
+        }
+        return fundingState
+    }
+
+    private var needsExternalFunding: Bool {
+        if case .externalRequired = effectiveFundingState { return true }
+        return false
+    }
+
+    private var usesWarningStyle: Bool {
+        switch effectiveFundingState {
+        case .unavailable, .externalRequired:
+            return true
+        case .checking, .kernelTopUpCandidate, .healthy:
+            return false
+        }
+    }
+
+    private var shouldShowFundError: Bool {
+        if case .healthy = effectiveFundingState { return false }
+        return true
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 9) {
                 Image(systemName: icon)
                     .font(.system(size: 13, weight: .black))
-                    .foregroundStyle(isOutOfGas ? ChatPalette.warning : ChatPalette.accent)
+                    .foregroundStyle(usesWarningStyle ? ChatPalette.warning : ChatPalette.accent)
                     .frame(width: 30, height: 30)
                     .background(Circle().fill(ChatPalette.buttonCircle))
 
@@ -6300,7 +6343,7 @@ private struct FundableAccountCard: View {
                         .lineLimit(1)
                     Text(balance)
                         .font(.system(size: 18, weight: .heavy, design: .rounded))
-                        .foregroundStyle(isOutOfGas ? ChatPalette.warning : ChatPalette.primaryText)
+                        .foregroundStyle(usesWarningStyle ? ChatPalette.warning : ChatPalette.primaryText)
                         .lineLimit(1)
                         .minimumScaleFactor(0.5)
                 }
@@ -6310,21 +6353,12 @@ private struct FundableAccountCard: View {
                 trailingIcons
             }
 
-            if let gasWarning, isOutOfGas {
-                externalFundingControl(gasWarning)
-            } else {
-                fundControl
-            }
+            fundingBody
 
-            if let fundError {
+            if let fundError, shouldShowFundError {
                 Text(fundError)
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(ChatPalette.warning)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if isOutOfGas == false {
-                Text("Send from your Kernel account (passkey), or copy the address to fund externally.")
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(ChatPalette.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -6339,9 +6373,8 @@ private struct FundableAccountCard: View {
 
     private var trailingIcons: some View {
         HStack(spacing: 5) {
-            // Out of gas, the external-funding block below carries a full Copy button; a
-            // second copy icon up here would just be the same action twice.
-            if isOutOfGas == false {
+            // External recovery carries its own full Copy action; avoid duplicating it here.
+            if needsExternalFunding == false {
                 iconButton(systemName: copied ? "checkmark" : "doc.on.doc",
                            tint: copied ? ChatPalette.success : ChatPalette.secondaryText,
                            help: copied ? "Copied" : "Copy address to fund externally",
@@ -6362,76 +6395,72 @@ private struct FundableAccountCard: View {
         }
     }
 
-    /// Shown instead of `fundControl` while the bundler is under the daemon's threshold: the
-    /// reason it can't be funded from inside the app, then the address and a faucet link.
-    private func externalFundingControl(_ gas: BundlerGasStatus) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 11, weight: .black))
-                    .foregroundStyle(ChatPalette.warning)
-                Text(gas.cardDetail)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(ChatPalette.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(ChatPalette.warning.opacity(0.10))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(ChatPalette.warning.opacity(0.30), lineWidth: 1)
-                    )
-            )
-
-            HStack(spacing: 8) {
-                Text(hasAddress ? address : "Address not available yet")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(ChatPalette.secondaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-                Spacer(minLength: 4)
-                Button {
-                    copy(address)
-                } label: {
-                    Text(copied ? "Copied" : "Copy")
-                        .font(.system(size: 11, weight: .heavy))
-                        .foregroundStyle(hasAddress ? Color.black.opacity(0.85) : ChatPalette.mutedText)
-                        .padding(.horizontal, 9)
-                        .frame(height: 24)
-                        .background(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(hasAddress ? ChatPalette.warning : ChatPalette.buttonCircle)
-                        )
-                }
-                .buttonStyle(.plain)
-                .disabled(!hasAddress)
-                .help("Copy the bundler address to fund it from another wallet")
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 34)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(ChatPalette.input)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .stroke(ChatPalette.border, style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
-                    )
-            )
-
-            if let faucetURL = gas.faucetURL {
-                Link(destination: faucetURL) {
-                    Text("Open \(gas.networkLabel) faucet")
-                        .font(.system(size: 10.5, weight: .heavy))
-                        .foregroundStyle(ChatPalette.accent)
-                }
-                .buttonStyle(.plain)
-            }
+    @ViewBuilder
+    private var fundingBody: some View {
+        switch effectiveFundingState {
+        case .checking:
+            compactStatus(icon: "arrow.clockwise", text: "Checking relayer balance")
+        case .unavailable:
+            compactRetry(text: "Balance unavailable", action: onRetry)
+        case .externalRequired:
+            externalFundingControl
+        case .kernelTopUpCandidate:
+            fundControl
+        case .healthy:
+            EmptyView()
         }
+    }
+
+    @ViewBuilder
+    private var externalFundingControl: some View {
+        if hasAddress {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Fund from another wallet or a faucet before sending transactions.")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(ChatPalette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                BundlerExternalFundingActions(
+                    address: address,
+                    faucetURL: BundlerFundingPolicy.sepoliaFaucetURL,
+                    accent: ChatPalette.accent,
+                    secondaryText: ChatPalette.secondaryText,
+                    inputBackground: ChatPalette.input,
+                    border: ChatPalette.border,
+                    compact: true
+                )
+            }
+        } else {
+            compactRetry(text: "Bundler address unavailable", action: onRetry)
+        }
+    }
+
+    private func compactStatus(icon: String, text: String) -> some View {
+        HStack(spacing: 8) {
+            if icon == "arrow.clockwise" {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: icon)
+                    .foregroundStyle(ChatPalette.secondaryText)
+            }
+            Text(text)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(ChatPalette.secondaryText)
+        }
+        .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+    }
+
+    private func compactRetry(text: String, action: @escaping () -> Void) -> some View {
+        HStack(spacing: 8) {
+            Text(text)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(ChatPalette.warning)
+            Spacer()
+            Button("Retry", action: action)
+                .buttonStyle(.plain)
+                .foregroundStyle(ChatPalette.accent)
+        }
+        .frame(minHeight: 32)
     }
 
     private var fundControl: some View {
@@ -6440,7 +6469,7 @@ private struct FundableAccountCard: View {
                 Text("Fund")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(ChatPalette.mutedText)
-                TextField("0.02", text: $fundAmount)
+                TextField("0.01", text: $fundAmount)
                     .textFieldStyle(.plain)
                     .multilineTextAlignment(.trailing)
                     .font(.system(size: 13, weight: .heavy, design: .monospaced))
@@ -6466,7 +6495,7 @@ private struct FundableAccountCard: View {
                     if isFunding {
                         ProgressView().controlSize(.small)
                     }
-                    Text(isFunding ? "Sending" : "Send")
+                    Text(isFunding ? "Checking relay..." : "Top up from Kernel")
                         .font(.system(size: 12, weight: .heavy))
                     if !isFunding {
                         Image(systemName: "arrow.right")
@@ -6484,7 +6513,7 @@ private struct FundableAccountCard: View {
             .buttonStyle(.plain)
             .fixedSize()
             .disabled(!hasAddress || isFunding)
-            .help(hasAddress ? "Send ETH from your Kernel account for gas" : "Address not available yet")
+            .help(hasAddress ? "Top up from your Kernel account after a live relay check" : "Address not available yet")
         }
     }
 

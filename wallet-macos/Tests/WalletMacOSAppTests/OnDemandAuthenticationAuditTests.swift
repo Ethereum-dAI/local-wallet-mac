@@ -23,6 +23,19 @@ import Testing
         #expect(!launch.contains("BundlerKeyStore"))
     }
 
+    @Test func returningToTheAppPassivelyRefreshesRelayerStatus() throws {
+        let source = try appSource("AppModel.swift")
+        let resume = try slice(
+            source,
+            from: "func handleAppBecameActive",
+            until: "func recordSessionUserActivity"
+        )
+        #expect(resume.contains("refreshLocalRelayerStatus()"))
+        #expect(resume.contains("BundlerKeyStore") == false)
+        #expect(resume.contains("ensureRelayerUnlocked") == false)
+        #expect(resume.contains("authorize") == false)
+    }
+
     @Test func privacyBalanceHasAnExplicitUnlockAndNoViewLifecycleLoad() throws {
         let source = try appSource("ChatDashboardView.swift")
         let row = try slice(

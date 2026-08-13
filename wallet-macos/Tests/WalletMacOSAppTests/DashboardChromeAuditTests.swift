@@ -20,7 +20,7 @@ import Testing
         #expect(composer.contains("type / for tools"))
     }
 
-    @Test func bundlerCardOmitsPassiveStateButKeepsActionableFailures() throws {
+    @Test func bundlerCardNeverFallsThroughFromUnknownToKernelFund() throws {
         let source = try dashboardSource()
         let card = try slice(
             source,
@@ -28,13 +28,30 @@ import Testing
             until: "private struct TokenBalancePopover"
         )
 
-        #expect(!card.contains("let state: String"))
-        #expect(!card.contains("stateBadge"))
-        #expect(!card.contains("needsFunding"))
-        #expect(card.contains("if let gasWarning, isOutOfGas"))
-        #expect(card.contains("externalFundingControl(gasWarning)"))
-        #expect(card.contains("if let fundError"))
-        #expect(card.contains("Text(fundError)"))
+        #expect(card.contains("switch effectiveFundingState"))
+        #expect(card.contains("case .checking"))
+        #expect(card.contains("case .unavailable"))
+        #expect(card.contains("case .externalRequired"))
+        #expect(card.contains("case .kernelTopUpCandidate"))
+        #expect(card.contains("case .healthy"))
+        #expect(card.contains("BundlerExternalFundingActions("))
+        #expect(card.contains("if case .healthy = fundingState") == false)
+        #expect(card.contains("stateBadge") == false)
+        #expect(card.contains("healthy-status") == false)
+    }
+
+    @Test func exactTopUpPreflightFailureForcesExternalRecoveryActions() throws {
+        let source = try dashboardSource()
+        let funding = try slice(
+            source,
+            from: "func fundHelper",
+            until: "private func fundingFailureMessage"
+        )
+
+        #expect(funding.contains("executeBundlerTopUp"))
+        #expect(funding.contains("AppError.bundlerRelayShortfall"))
+        #expect(funding.contains("AppError.bundlerRelayPreflightUnavailable"))
+        #expect(funding.contains("helperRequiresExternalFundingAddress = address"))
     }
 
     private func dashboardSource() throws -> String {

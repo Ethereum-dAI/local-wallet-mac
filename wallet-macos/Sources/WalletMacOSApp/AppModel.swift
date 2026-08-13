@@ -738,6 +738,9 @@ final class AppModel: ObservableObject {
         // left, funded the account from a faucet or another wallet, and came back to check. With
         // no poll, this is the only trigger that catches money the app didn't move itself.
         Task { await refreshAccountBalanceQuietly(logContext: "balance-resume") }
+        // Relayer status is public state. Refresh it without unlocking the relayer so returning
+        // from a faucet updates the funding UI without asking for Touch ID.
+        refreshLocalRelayerStatus()
         // Same reasoning as the balance: coming back is when a stale gas number is
         // most likely to be looked at, and about to be acted on.
         Task { await refreshLiveGasPricesIfStale(now: now) }

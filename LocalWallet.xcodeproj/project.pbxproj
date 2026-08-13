@@ -12,10 +12,12 @@
 		060E9DD044870D066896CDB1 /* WalletKeyValidation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8CCAE40478CEED51B8D7678 /* WalletKeyValidation.swift */; };
 		07576A6060429E762BE2232E /* RailgunHelperClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D3E2EAC0AE7783C320B5E70 /* RailgunHelperClient.swift */; };
 		0862B4288F14FE4DC5687DC1 /* PrefundPrecheck.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BC4122D7CD6FE507FD2A461 /* PrefundPrecheck.swift */; };
+		09C8A1D177F368ECAD799C29 /* BundlerFundingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B7AECA755B3384D0D9E9F48 /* BundlerFundingPolicy.swift */; };
 		0AEF64FBB3ECFADFD9712B00 /* DemoSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FF9147DC25C40D4A7D8DA39 /* DemoSettingsStore.swift */; };
 		108F1C07C994151FA300ACAF /* ContextWindowPresets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CBD70736AA26349D04C84E5 /* ContextWindowPresets.swift */; };
 		1A1FA5DD76AA6754B41EE613 /* WalletResetCleanup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 797D42F9F537EC9B6F816DDC /* WalletResetCleanup.swift */; };
 		24FA830DF34A44E32A999886 /* KernelImplementation.json in Resources */ = {isa = PBXBuildFile; fileRef = BF4BC97318D96D64FC625767 /* KernelImplementation.json */; };
+		26707AAE2B7A7ED777620E94 /* BundlerRelayPrecheck.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6D491FA967C0F2658BC7FE6 /* BundlerRelayPrecheck.swift */; };
 		274EC1F7AF7D01549E14B740 /* WalletRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71035AA789A3F89268A157B9 /* WalletRecord.swift */; };
 		2CBC92C0946C78E64037CE39 /* ModelMemoryProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FCB7CD6E444ABF8C59A90AF /* ModelMemoryProfile.swift */; };
 		2E17357921E0DF8E3F920EC5 /* WeiFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71DDE5CB6A4F86F27DE37255 /* WeiFormatter.swift */; };
@@ -50,6 +52,7 @@
 		7839C20F4B207A211CCD6B6A /* OnDemandAuthenticationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7082EFE1C487A433BF263F3 /* OnDemandAuthenticationState.swift */; };
 		82C23E6456D6B25C14A4338E /* EtherAmountParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0565FE58E3D3C819258A03C1 /* EtherAmountParser.swift */; };
 		8391930683033D3B966F922D /* ModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2A8AB16A906FBB145A2C993 /* ModelCatalog.swift */; };
+		84A6F9D49CCD63629D02ACD0 /* BundlerExternalFundingActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF00A8DD80314E550CA56DAD /* BundlerExternalFundingActions.swift */; };
 		860420B54336BAB0D5BB1C09 /* RailgunHelperDaemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91446B8FA20B4F9AA100690 /* RailgunHelperDaemon.swift */; };
 		8A4F334C71F0A61F144B033B /* BundlerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10EF37094DF3BB75ADE15500 /* BundlerClient.swift */; };
 		8B9B5BF09A602787168F67FB /* ModelSelfTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4150C3CF3A8819F2B4A82289 /* ModelSelfTest.swift */; };
@@ -76,6 +79,7 @@
 		DF8B4BA895AD063762850096 /* OnboardingChainReadiness.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEECD58404A5DC1C3FDA0D73 /* OnboardingChainReadiness.swift */; };
 		E1C3DCD8C60EB9C2062460DB /* LocalHardwareInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A65A9349550912C759EED6DC /* LocalHardwareInspector.swift */; };
 		E2AD8A1C5BA50EA87A1DE131 /* HardwareBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A4E5F34D9EA99058E3070DD /* HardwareBudget.swift */; };
+		E3543821EA92B8E30FA68DDD /* OnboardingBundlerActivation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23D6F68B9EB28C06726DAC08 /* OnboardingBundlerActivation.swift */; };
 		E77D1B06C709482E5FEBE4D0 /* SessionKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C515CE6F978A9E670671762 /* SessionKeyStore.swift */; };
 		E833E851A60F87809E469568 /* SwapSlippage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2D160DB623839455408460D /* SwapSlippage.swift */; };
 		E8814C9D26FDE81508FD6116 /* ModelInstallFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DF5A355F8C1F4918F1B2F0D /* ModelInstallFlow.swift */; };
@@ -97,6 +101,7 @@
 		10EF37094DF3BB75ADE15500 /* BundlerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundlerClient.swift; sourceTree = "<group>"; };
 		11E180BF3D8F8D5B19BA9394 /* ModelSwapPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSwapPlanner.swift; sourceTree = "<group>"; };
 		1B2090660CAE81D103494C90 /* KernelFactory.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = KernelFactory.json; sourceTree = "<group>"; };
+		23D6F68B9EB28C06726DAC08 /* OnboardingBundlerActivation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingBundlerActivation.swift; sourceTree = "<group>"; };
 		2FDD97F68DC79C7A31430C30 /* ChatDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDashboardView.swift; sourceTree = "<group>"; };
 		338C3CE5B2A1B13400716881 /* BundlerKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundlerKeyStore.swift; sourceTree = "<group>"; };
 		4150C3CF3A8819F2B4A82289 /* ModelSelfTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSelfTest.swift; sourceTree = "<group>"; };
@@ -108,6 +113,7 @@
 		56FE4DE0623771A014AC3521 /* HuggingFaceRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuggingFaceRepository.swift; sourceTree = "<group>"; };
 		587698F46EE6170D2C36A1A3 /* UserOperationSigning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserOperationSigning.swift; sourceTree = "<group>"; };
 		59F31B5232BAD096F9535BAF /* GasPricing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GasPricing.swift; sourceTree = "<group>"; };
+		5B7AECA755B3384D0D9E9F48 /* BundlerFundingPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundlerFundingPolicy.swift; sourceTree = "<group>"; };
 		5FF9147DC25C40D4A7D8DA39 /* DemoSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoSettingsStore.swift; sourceTree = "<group>"; };
 		611B7A76D937ADC7B38FEDA8 /* WalletMacOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletMacOSApp.swift; sourceTree = "<group>"; };
 		67B502247B100304EFA6AE81 /* ExecutionFeeOracle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutionFeeOracle.swift; sourceTree = "<group>"; };
@@ -153,6 +159,7 @@
 		C181BA1816CAA2A5AB3F71D2 /* DeviceOwnerAuthenticationSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceOwnerAuthenticationSession.swift; sourceTree = "<group>"; };
 		CA70447386F5101E9E65125F /* SessionSwapRouterRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionSwapRouterRegistry.swift; sourceTree = "<group>"; };
 		CE4F3CE27EE12DD30DC489C5 /* OnboardingSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingSettingsStore.swift; sourceTree = "<group>"; };
+		CF00A8DD80314E550CA56DAD /* BundlerExternalFundingActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundlerExternalFundingActions.swift; sourceTree = "<group>"; };
 		D0BC22C212DB57DCEC672193 /* KeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyStore.swift; sourceTree = "<group>"; };
 		D77908DB25C2FD6278F88B91 /* SessionPolicyMirror.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionPolicyMirror.swift; sourceTree = "<group>"; };
 		D8CCAE40478CEED51B8D7678 /* WalletKeyValidation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletKeyValidation.swift; sourceTree = "<group>"; };
@@ -166,6 +173,7 @@
 		F0414C26F11FE88CF6E50E1F /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		F5B4D58528463A7C7E86C420 /* WalletRecoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletRecoveryView.swift; sourceTree = "<group>"; };
 		F6220284599C5BA1AD595394 /* KernelAccountAddressPredictor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KernelAccountAddressPredictor.swift; sourceTree = "<group>"; };
+		F6D491FA967C0F2658BC7FE6 /* BundlerRelayPrecheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundlerRelayPrecheck.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -246,8 +254,11 @@
 				941728D99B90C6F20EB2655D /* BalanceReadRetry.swift */,
 				8CA76EA9DF109AB635672083 /* BiometricAuthentication.swift */,
 				10EF37094DF3BB75ADE15500 /* BundlerClient.swift */,
+				CF00A8DD80314E550CA56DAD /* BundlerExternalFundingActions.swift */,
+				5B7AECA755B3384D0D9E9F48 /* BundlerFundingPolicy.swift */,
 				767BAD4EEB16996F5AB7FE9C /* BundlerGasStatus.swift */,
 				338C3CE5B2A1B13400716881 /* BundlerKeyStore.swift */,
+				F6D491FA967C0F2658BC7FE6 /* BundlerRelayPrecheck.swift */,
 				DB254515D29EBD3388AD3FFA /* ChainReadCallData.swift */,
 				2FDD97F68DC79C7A31430C30 /* ChatDashboardView.swift */,
 				DF0CD621D86FF51807777FFF /* ChatSQLiteStore.swift */,
@@ -277,6 +288,7 @@
 				0FCB7CD6E444ABF8C59A90AF /* ModelMemoryProfile.swift */,
 				4150C3CF3A8819F2B4A82289 /* ModelSelfTest.swift */,
 				11E180BF3D8F8D5B19BA9394 /* ModelSwapPlanner.swift */,
+				23D6F68B9EB28C06726DAC08 /* OnboardingBundlerActivation.swift */,
 				DEECD58404A5DC1C3FDA0D73 /* OnboardingChainReadiness.swift */,
 				80EEACA183C6F7A248A93A62 /* OnboardingProvisioningService.swift */,
 				CE4F3CE27EE12DD30DC489C5 /* OnboardingSettingsStore.swift */,
@@ -430,8 +442,11 @@
 				5E87747E2C7780AF4176CE84 /* BalanceReadRetry.swift in Sources */,
 				A6EF150FAB2DB85394239D65 /* BiometricAuthentication.swift in Sources */,
 				8A4F334C71F0A61F144B033B /* BundlerClient.swift in Sources */,
+				84A6F9D49CCD63629D02ACD0 /* BundlerExternalFundingActions.swift in Sources */,
+				09C8A1D177F368ECAD799C29 /* BundlerFundingPolicy.swift in Sources */,
 				5BFC221CB1530B54F59CDD68 /* BundlerGasStatus.swift in Sources */,
 				D720097E3C1CA355A0CB0B69 /* BundlerKeyStore.swift in Sources */,
+				26707AAE2B7A7ED777620E94 /* BundlerRelayPrecheck.swift in Sources */,
 				B1E42A5222A007C1B9A53A68 /* ChainReadCallData.swift in Sources */,
 				B2656DCF13F49D71F359FC59 /* ChatDashboardView.swift in Sources */,
 				A31DC37F436D23B0A1BB950A /* ChatSQLiteStore.swift in Sources */,
@@ -462,6 +477,7 @@
 				8B9B5BF09A602787168F67FB /* ModelSelfTest.swift in Sources */,
 				36F1776E10A529FC4F505610 /* ModelSwapPlanner.swift in Sources */,
 				7839C20F4B207A211CCD6B6A /* OnDemandAuthenticationState.swift in Sources */,
+				E3543821EA92B8E30FA68DDD /* OnboardingBundlerActivation.swift in Sources */,
 				DF8B4BA895AD063762850096 /* OnboardingChainReadiness.swift in Sources */,
 				615AE4DBE68ECDD43606DDD8 /* OnboardingProvisioningService.swift in Sources */,
 				F916BD7F05D51CA7EB4824E0 /* OnboardingSettingsStore.swift in Sources */,

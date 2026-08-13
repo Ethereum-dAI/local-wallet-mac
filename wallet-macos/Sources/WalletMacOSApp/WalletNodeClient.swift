@@ -121,6 +121,9 @@ struct WalletNodeClient {
         let thresholdLow: String
         let needsTopup: Bool
         let lifecycle: String
+        /// Public daemon health metadata. This remains available while the key
+        /// is locked and lets pre-auth checks reject a compromised relayer.
+        let compromiseSubmissionBlocked: Bool
         let pendingFundingAddress: String?
         let pendingFundingCount: Int
         let retiringCount: Int
@@ -1120,6 +1123,9 @@ extension WalletNodeClient.RelayerStatus {
         let replacement = (json["replacement"] as? [String: Any]).flatMap {
             WalletNodeClient.RelayerStatus.ReplacementStatus(json: $0)
         }
+        let compromise = json["compromise"] as? [String: Any]
+        let compromiseSubmissionBlocked = compromise?["submissionBlocked"] as? Bool
+            ?? ((json["reason"] as? String) == "bundler_eoa_compromise_suspected")
 
         self.init(
             ready: ready,
@@ -1136,6 +1142,7 @@ extension WalletNodeClient.RelayerStatus {
             thresholdLow: thresholdLow,
             needsTopup: needsTopup,
             lifecycle: lifecycle,
+            compromiseSubmissionBlocked: compromiseSubmissionBlocked,
             pendingFundingAddress: pendingFunding.first?["eoa"] as? String,
             pendingFundingCount: pendingFunding.count,
             retiringCount: retiring.count,

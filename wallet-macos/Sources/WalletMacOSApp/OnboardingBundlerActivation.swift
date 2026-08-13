@@ -69,4 +69,13 @@ struct OnboardingBundlerActivationService: @unchecked Sendable {
             }
         }
     }
+
+    /// Uses the same injected clock as the below-floor polling loop so the
+    /// coordinator can keep validating an already-ready balance while the
+    /// activation screen remains visible.
+    func waitBeforeNextObservation(
+        timing: OnboardingBundlerActivationTiming = .default
+    ) async throws {
+        try await sleep(timing.pollInterval)
+    }
 }

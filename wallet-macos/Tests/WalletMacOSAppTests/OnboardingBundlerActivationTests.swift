@@ -195,6 +195,35 @@ import Testing
             )
         )
     }
+
+    @MainActor
+    @Test func aReadyBalanceCanBeDemotedWhileTheActivationScreenRemainsVisible() async {
+        let reads = ControllableActivationRuns()
+        let state = makeState(consensusURL: "", activationService: reads.service())
+        state.step = .activation
+        state.keyState = .ready(
+            kernelAddress: "0x1111111111111111111111111111111111111111",
+            bundlerAddress: "0x7A3f000000000000000000000000000000009C21"
+        )
+
+        state.startBundlerActivationIfNeeded()
+        for _ in 0..<50 where await reads.runCount < 1 { await Task.yield() }
+        await reads.finish(run: 0, balance: BundlerFundingPolicy.minimumBalanceWeiHex)
+        for _ in 0..<50 where await reads.runCount < 2 { await Task.yield() }
+        #expect(
+            state.bundlerActivationState == .ready(
+                balanceWeiHex: BundlerFundingPolicy.minimumBalanceWeiHex
+            )
+        )
+
+        await reads.finish(run: 1, balance: "0x0")
+        for _ in 0..<50 where state.bundlerActivationState != .waiting(balanceWeiHex: "0x0") {
+            await Task.yield()
+        }
+        #expect(state.bundlerActivationState == .waiting(balanceWeiHex: "0x0"))
+        #expect(state.canContinueFromActivation == false)
+        state.cancelBundlerActivation(reset: false)
+    }
 }
 
 private actor SequencedBalanceReader {

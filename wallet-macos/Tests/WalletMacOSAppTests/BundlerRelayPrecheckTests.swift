@@ -86,6 +86,44 @@ import Testing
         )
         #expect(try decision(gas: gas, requiredPrefund: 300, status: largeBalance) == .proceed)
     }
+
+    @Test func onlyAnActiveReadyOrOrdinarilyLockedRelayerCanReachAuthentication() throws {
+        let gas = gasPlan(call: 100, verification: 100, preVerification: 100, fee: 1)
+
+        #expect(
+            try decision(
+                gas: gas,
+                requiredPrefund: 300,
+                status: relayer(
+                    ready: false,
+                    keyLoaded: false,
+                    reason: "bundler_eoa_locked"
+                )
+            ) == .proceed
+        )
+
+        for status in [
+            relayer(
+                ready: false,
+                keyLoaded: true,
+                reason: "bundler_eoa_compromise_suspected"
+            ),
+            relayer(
+                ready: false,
+                keyLoaded: false,
+                reason: "bundler_eoa_locked",
+                compromiseSubmissionBlocked: true
+            ),
+            relayer(ready: false, keyLoaded: true, reason: "verified_reads_not_ready"),
+            relayer(ready: true, keyLoaded: true, reason: nil, lifecycle: "retiring"),
+            relayer(ready: false, keyLoaded: false, reason: nil),
+            relayer(ready: true, keyLoaded: false, reason: "bundler_eoa_locked"),
+        ] {
+            #expect(throws: BundlerRelayPrecheck.Error.statusUnavailable) {
+                try decision(gas: gas, requiredPrefund: 300, status: status)
+            }
+        }
+    }
 }
 
 private let testBundlerEOA = "0x7A3f000000000000000000000000000000009C21"
@@ -112,12 +150,17 @@ private func relayer(
     threshold: String = "0x0",
     chainID: Int = 11_155_111,
     eoa: String = testBundlerEOA,
-    needsTopup: Bool = false
+    needsTopup: Bool = false,
+    ready: Bool = true,
+    keyLoaded: Bool = true,
+    reason: String? = nil,
+    lifecycle: String = "active",
+    compromiseSubmissionBlocked: Bool = false
 ) -> WalletNodeClient.RelayerStatus {
     do {
-        return try WalletNodeClient.RelayerStatus(json: [
-            "ready": true,
-            "keyLoaded": false,
+        var json: [String: Any] = [
+            "ready": ready,
+            "keyLoaded": keyLoaded,
             "ownerScope": "default",
             "chainId": chainID,
             "networkProfile": "sepolia",
@@ -125,8 +168,16 @@ private func relayer(
             "balance": balance,
             "thresholdLow": threshold,
             "needsTopup": needsTopup,
-            "lifecycle": "active",
-        ])
+            "lifecycle": lifecycle,
+            "compromise": [
+                "suspected": compromiseSubmissionBlocked,
+                "submissionBlocked": compromiseSubmissionBlocked,
+            ],
+        ]
+        if let reason {
+            json["reason"] = reason
+        }
+        return try WalletNodeClient.RelayerStatus(json: json)
     } catch {
         fatalError("Invalid relayer fixture: \(error)")
     }

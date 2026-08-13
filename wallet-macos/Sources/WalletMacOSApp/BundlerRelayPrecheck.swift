@@ -45,6 +45,25 @@ enum BundlerRelayPrecheck {
         guard status.eoa.caseInsensitiveCompare(expectedEOA) == .orderedSame else {
             throw Error.wrongEOA(expected: expectedEOA, actual: status.eoa)
         }
+        // A passive status read may legitimately report the active key as
+        // locked: this operation is precisely what will authorize loading it.
+        // Every other non-ready reason is an authoritative submission blocker
+        // and must stop before Touch ID. Also reject contradictory status
+        // shapes instead of guessing which field is stale.
+        guard status.lifecycle == "active",
+              status.compromiseSubmissionBlocked == false else {
+            throw Error.statusUnavailable
+        }
+        if status.ready {
+            guard status.keyLoaded, status.reason == nil else {
+                throw Error.statusUnavailable
+            }
+        } else {
+            guard status.keyLoaded == false,
+                  status.reason == "bundler_eoa_locked" else {
+                throw Error.statusUnavailable
+            }
+        }
         guard let balance = BundlerFundingPolicy.quantity(status.balance),
               let threshold = BundlerFundingPolicy.quantity(status.thresholdLow) else {
             throw Error.statusUnavailable

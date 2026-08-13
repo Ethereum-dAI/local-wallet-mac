@@ -471,7 +471,6 @@ final class OnboardingState: ObservableObject {
     func startBundlerActivationIfNeeded(force: Bool = false) {
         guard step == .activation else { return }
         if bundlerActivationTask != nil && force == false { return }
-        if canContinueFromActivation && force == false { return }
         guard case let .ready(_, bundlerAddress) = keyState else {
             bundlerActivationState = .failed(
                 "Create the wallet keys before activating transactions."
@@ -499,26 +498,40 @@ final class OnboardingState: ObservableObject {
         bundlerActivationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let readyBalance = try await service.waitUntilReady(
-                    address: bundlerAddress,
-                    rpcURL: chain.rpcURL,
-                    expectedChainID: chain.id,
-                    timing: timing,
-                    onBalance: { [weak self] balance in
-                        guard let self,
-                              self.bundlerActivationRunID == runID,
-                              Task.isCancelled == false else {
-                            return
+                while true {
+                    let readyBalance = try await service.waitUntilReady(
+                        address: bundlerAddress,
+                        rpcURL: chain.rpcURL,
+                        expectedChainID: chain.id,
+                        timing: timing,
+                        onBalance: { [weak self] balance in
+                            guard let self,
+                                  self.bundlerActivationRunID == runID,
+                                  Task.isCancelled == false else {
+                                return
+                            }
+                            switch BundlerFundingPolicy.fromObservedBalance(balance) {
+                            case .kernelTopUpCandidate, .healthy:
+                                self.bundlerActivationState = .ready(balanceWeiHex: balance)
+                            case .externalRequired:
+                                self.bundlerActivationState = .waiting(balanceWeiHex: balance)
+                            case .checking, .unavailable:
+                                self.bundlerActivationState = .failed(
+                                    "The execution RPC returned an invalid relayer balance."
+                                )
+                            }
                         }
-                        self.bundlerActivationState = .waiting(balanceWeiHex: balance)
+                    )
+                    guard self.bundlerActivationRunID == runID,
+                          Task.isCancelled == false else {
+                        return
                     }
-                )
-                guard self.bundlerActivationRunID == runID,
-                      Task.isCancelled == false else {
-                    return
+                    self.bundlerActivationState = .ready(balanceWeiHex: readyBalance)
+                    // Funding can be reorged or moved after the first positive
+                    // observation. Keep the latest public balance authoritative
+                    // until the user explicitly leaves this step.
+                    try await service.waitBeforeNextObservation(timing: timing)
                 }
-                self.bundlerActivationState = .ready(balanceWeiHex: readyBalance)
-                self.bundlerActivationTask = nil
             } catch is CancellationError {
             } catch {
                 guard self.bundlerActivationRunID == runID else { return }
@@ -1405,6 +1418,7 @@ private struct BundlerActivationStep: View {
                 case .idle, .checking:
                     ProgressView()
                         .controlSize(.small)
+                        .accessibilityHidden(true)
                     statusText(
                         title: "Checking balance",
                         detail: "Reading the public relayer balance from your execution RPC."
@@ -1412,6 +1426,7 @@ private struct BundlerActivationStep: View {
                 case .waiting(let balance):
                     ProgressView()
                         .controlSize(.small)
+                        .accessibilityHidden(true)
                     statusText(
                         title: "Waiting for funds",
                         detail: balance.map {
@@ -1421,6 +1436,7 @@ private struct BundlerActivationStep: View {
                 case .ready(let balance):
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(OnboardingPalette.success)
+                        .accessibilityHidden(true)
                     statusText(
                         title: "Transactions activated",
                         detail: "Detected \(WeiFormatter.ethDisplayString(fromHexWei: balance))."
@@ -1428,6 +1444,7 @@ private struct BundlerActivationStep: View {
                 case .failed(let message):
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(OnboardingPalette.warning)
+                        .accessibilityHidden(true)
                     statusText(title: "Balance check failed", detail: message)
                     Spacer()
                     Button("Retry check") {
@@ -1450,6 +1467,7 @@ private struct BundlerActivationStep: View {
                 .foregroundStyle(OnboardingPalette.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .accessibilityElement(children: .combine)
     }
 }
 

@@ -24,6 +24,7 @@ import WalletToolLayer
             thresholdLow: "0x11c37937e08000", // 0.005 ETH — daemon's THRESHOLD_LOW
             needsTopup: needsTopup,
             lifecycle: "active",
+            compromiseSubmissionBlocked: false,
             pendingFundingAddress: nil,
             pendingFundingCount: 0,
             retiringCount: 0,

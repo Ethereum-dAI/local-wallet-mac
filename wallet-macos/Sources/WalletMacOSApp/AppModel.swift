@@ -31,6 +31,16 @@ enum WalletResetDestination: Equatable {
     var marksOnboardingIncomplete: Bool { self == .onboarding }
 }
 
+private enum UserOperationExecutionPurpose {
+    case standard
+    case bundlerTopUp(expectedEOA: String)
+
+    var allowsSessionSigning: Bool {
+        if case .standard = self { return true }
+        return false
+    }
+}
+
 // AppModel drives the signed macOS demo shell. It is intentionally opinionated
 // around the current demo scope (Sepolia, ETH transfer first, local wallet-node)
 // and should not be treated as the final wallet product architecture.
@@ -2447,6 +2457,23 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// A Kernel-funded relayer top-up is always owner-authorized. Before any
+    /// authentication, its finalized UserOperation is checked against a fresh
+    /// daemon balance using the same outer-transaction gas formula as wallet-node.
+    func executeBundlerTopUp(
+        recipient: String,
+        amountETH: String,
+        logContext: String,
+        signingReason: String
+    ) async throws -> UserOperationSendResult {
+        try await executeTransfer(
+            intent: .nativeTransfer(recipient: recipient, amountETH: amountETH),
+            logContext: logContext,
+            signingReason: signingReason,
+            purpose: .bundlerTopUp(expectedEOA: recipient)
+        )
+    }
+
     func executeERC20Transfer(
         token: WalletToken,
         recipient: String,
@@ -2610,17 +2637,21 @@ final class AppModel: ObservableObject {
         intent: TransactionIntent,
         logContext: String,
         signingReason: String,
-        acknowledgedCallGasLimit: UInt64? = nil
+        acknowledgedCallGasLimit: UInt64? = nil,
+        purpose: UserOperationExecutionPurpose = .standard
     ) async throws -> UserOperationSendResult {
         // Lazily install the session permission on its first use (a separate
         // passkey-validated op) so the one-time install runs in execution and is
         // not charged to the session GasPolicy. Afterwards this send is installed-mode.
-        try await installSessionPermissionIfNeeded(for: intent, logContext: logContext)
+        if purpose.allowsSessionSigning {
+            try await installSessionPermissionIfNeeded(for: intent, logContext: logContext)
+        }
         return try await executeUserOperation(
             logContext: logContext,
             signingReason: signingReason,
             intent: intent,
             historyDraft: historyDraft(for: intent),
+            purpose: purpose,
             acknowledgedCallGasLimit: acknowledgedCallGasLimit
         ) { [self] buildContext in
             try await buildUserOperationDraft(
@@ -2636,6 +2667,7 @@ final class AppModel: ObservableObject {
         signingReason: String,
         intent: TransactionIntent?,
         historyDraft: WalletTransactionDraft?,
+        purpose: UserOperationExecutionPurpose = .standard,
         afterSubmit: ((String) -> Void)? = nil,
         acknowledgedCallGasLimit: UInt64? = nil,
         buildDraft: @escaping (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
@@ -2663,6 +2695,7 @@ final class AppModel: ObservableObject {
                 signingReason: signingReason,
                 intent: intent,
                 historyDraft: historyDraft,
+                purpose: purpose,
                 afterSubmit: afterSubmit,
                 acknowledgedCallGasLimit: acknowledgedCallGasLimit,
                 buildDraft: buildDraft
@@ -2681,6 +2714,7 @@ final class AppModel: ObservableObject {
         signingReason: String,
         intent: TransactionIntent?,
         historyDraft: WalletTransactionDraft?,
+        purpose: UserOperationExecutionPurpose,
         afterSubmit: ((String) -> Void)? = nil,
         acknowledgedCallGasLimit: UInt64? = nil,
         buildDraft: (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
@@ -2690,9 +2724,11 @@ final class AppModel: ObservableObject {
         let liveInspection = try await refreshAccountInspectionWithRetry(logContext: "\(logContext)-preflight")
         appendLog("\(logContext): using \(liveInspection.isDeployed ? "deployed" : "precomputed") account path")
 
-        var sessionPlan = intent.flatMap {
-            liveInspection.isDeployed ? activeSessionPlan(for: $0, now: Date()) : nil
-        }
+        var sessionPlan = purpose.allowsSessionSigning
+            ? intent.flatMap {
+                liveInspection.isDeployed ? activeSessionPlan(for: $0, now: Date()) : nil
+            }
+            : nil
         if let sessionPlan {
             let modeLabel = sessionPlan.signatureMode == .installed ? "installed" : "enable"
             appendLog("\(logContext): using silent session-key path (\(modeLabel) mode)")
@@ -2855,6 +2891,75 @@ final class AppModel: ObservableObject {
             )
             clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
             throw AppError.prefundShortfall(report)
+        }
+
+        if case let .bundlerTopUp(expectedEOA) = purpose {
+            let relayerObservation: (
+                status: WalletNodeClient.RelayerStatus,
+                generation: UInt64
+            )
+            do {
+                relayerObservation = try await fetchLocalRelayerStatusWithBalanceRetry()
+            } catch {
+                appendLog(
+                    "\(logContext): relayer preflight status unavailable — \(error.localizedDescription)"
+                )
+                clearPendingSessionInstallAfterPreSubmitFailure(
+                    sessionPlan,
+                    logContext: logContext
+                )
+                throw AppError.bundlerRelayPreflightUnavailable(
+                    "Could not verify the local relayer balance."
+                )
+            }
+            guard publishLocalRelayerStatus(
+                relayerObservation.status,
+                expectedGeneration: relayerObservation.generation
+            ) else {
+                clearPendingSessionInstallAfterPreSubmitFailure(
+                    sessionPlan,
+                    logContext: logContext
+                )
+                throw AppError.bundlerRelayPreflightUnavailable(
+                    "The local relayer status changed while checking the top-up."
+                )
+            }
+
+            let relayDecision: BundlerRelayPrecheck.Decision
+            do {
+                relayDecision = try BundlerRelayPrecheck.evaluate(
+                    gasPlan: enrichedDraft.gasPlan,
+                    requiredPrefund: enriched.requiredPrefund,
+                    status: relayerObservation.status,
+                    expectedChainID: activeChain.id,
+                    expectedEOA: expectedEOA
+                )
+            } catch {
+                appendLog(
+                    "\(logContext): relayer preflight data rejected — \(String(describing: error))"
+                )
+                clearPendingSessionInstallAfterPreSubmitFailure(
+                    sessionPlan,
+                    logContext: logContext
+                )
+                throw AppError.bundlerRelayPreflightUnavailable(
+                    "The local relayer returned inconsistent balance or gas data."
+                )
+            }
+
+            switch relayDecision {
+            case .proceed:
+                appendLog("\(logContext): exact relayer-cost preflight passed")
+            case .externalFundingRequired(let report):
+                appendLog(
+                    "\(logContext): relayer preflight declined — balance=\(report.balanceWeiHex) required=\(report.requiredBalanceWeiHex) deficit=\(report.deficitWeiHex)"
+                )
+                clearPendingSessionInstallAfterPreSubmitFailure(
+                    sessionPlan,
+                    logContext: logContext
+                )
+                throw AppError.bundlerRelayShortfall(report)
+            }
         }
 
         // Everything above is non-secret preflight. Only now, once the operation is known to be

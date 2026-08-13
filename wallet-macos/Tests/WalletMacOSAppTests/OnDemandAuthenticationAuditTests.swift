@@ -165,6 +165,28 @@ import Testing
         #expect(authorization.lowerBound < cleanup.lowerBound)
     }
 
+    @Test func bundlerTopUpChecksExactRelayCostBeforeAuthentication() throws {
+        let source = try appSource("AppModel.swift")
+        let send = try slice(
+            source,
+            from: "private func sendUserOperation",
+            until: "private func activeSessionPlan"
+        )
+        let precheck = try #require(send.range(of: "BundlerRelayPrecheck.evaluate"))
+        let authentication = try #require(
+            send.range(of: "DeviceOwnerAuthenticationSession.ownerUserOperation")
+        )
+        let unlock = try #require(send.range(of: "ensureRelayerUnlocked"))
+        #expect(precheck.lowerBound < authentication.lowerBound)
+        #expect(precheck.lowerBound < unlock.lowerBound)
+    }
+
+    @Test func bundlerTopUpCannotInstallOrUseASessionKey() throws {
+        let source = try appSource("AppModel.swift")
+        #expect(source.contains("purpose.allowsSessionSigning"))
+        #expect(source.contains("case bundlerTopUp(expectedEOA: String)"))
+    }
+
     private func appSource(_ fileName: String) throws -> String {
         try String(
             contentsOf: packageRoot

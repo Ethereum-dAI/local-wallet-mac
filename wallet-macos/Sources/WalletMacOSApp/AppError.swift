@@ -28,6 +28,12 @@ enum AppError: LocalizedError {
     case userOperationReceiptReverted(String)
     case userAuthorizationCancelled
     case privacyAccountLocked
+    /// The app could not prove that the local relayer can afford this exact
+    /// top-up operation. Thrown before authentication or signing.
+    case bundlerRelayPreflightUnavailable(String)
+    /// The live relayer balance is below the maximum outer-transaction cost
+    /// for this finalized top-up. Thrown before authentication or signing.
+    case bundlerRelayShortfall(BundlerRelayPrecheck.Report)
     /// The account cannot cover the locally authorized maximum UserOperation
     /// liability. Thrown before any owner or session signing key is accessed;
     /// `ChatIntentExecutionStatus.prefundShortfall(from:)` turns it into a
@@ -95,6 +101,12 @@ enum AppError: LocalizedError {
             return "Local authorization was cancelled or failed, so the action was not performed."
         case .privacyAccountLocked:
             return "Shielded balances are locked. Choose Unlock to view and approve local authentication."
+        case .bundlerRelayPreflightUnavailable(let detail):
+            return "\(detail) No transaction was signed. Fund the local relayer from another wallet or the Sepolia faucet, then retry."
+        case .bundlerRelayShortfall(let report):
+            return """
+            The local relayer holds \(WeiFormatter.ethDisplayString(fromHexWei: report.balanceWeiHex)), but this top-up can require up to \(WeiFormatter.ethDisplayString(fromHexWei: report.requiredBalanceWeiHex)) to relay. No transaction was signed. Add at least \(WeiFormatter.ethDisplayString(fromHexWei: report.deficitWeiHex)) from another wallet or the Sepolia faucet, then retry.
+            """
         case let .prefundShortfall(report):
             // States the exact deficit rather than the daemon's
             // displayed_topup_minimum x1.2 figure (funding.rs:15): only one of the

@@ -26,12 +26,14 @@ struct BundlerGasStatus: Equatable {
     let thresholdDisplay: String?
     /// Short, user-facing network name used in funding instructions.
     let networkLabel: String
-    /// `true` when the daemon would refuse a send with `bundler_eoa_needs_topup`.
-    ///
-    /// Mirrors `wallet_bundlerStatus.needsTopup`, which is `false` when the balance could not
-    /// be read — an unavailable balance must not block the user locally; the daemon stays the
-    /// authority and the send is attempted.
-    let needsGas: Bool
+    /// Explicit funding state. Unknown and unreadable balances remain distinct from a funded
+    /// relayer so the dashboard cannot accidentally expose an impossible Kernel-funded action.
+    let fundingState: BundlerFundingState
+
+    /// Existing intent blocking remains tied only to a known daemon top-up requirement. An
+    /// unknown status may still reach the authoritative daemon, but cannot expose a dedicated
+    /// Kernel-to-bundler funding control.
+    var needsGas: Bool { fundingState.needsExternalFunding }
 
     /// The daemon's `-32002` reason for a bundler that is under the threshold.
     static let needsTopupReason = "bundler_eoa_needs_topup"
@@ -49,7 +51,7 @@ struct BundlerGasStatus: Equatable {
             balance: displayETH(relayer?.balance),
             thresholdDisplay: displayETH(relayer?.thresholdLow),
             networkLabel: chain.shortName.capitalized,
-            needsGas: relayer?.needsTopup ?? false
+            fundingState: BundlerFundingPolicy.fromDaemonStatus(relayer)
         )
     }
 
@@ -94,7 +96,7 @@ struct BundlerGasStatus: Equatable {
 
     /// Faucet for Sepolia, the only supported app network.
     var faucetURL: URL? {
-        return URL(string: "https://cloud.google.com/application/web3/faucet/ethereum/sepolia")
+        BundlerFundingPolicy.sepoliaFaucetURL
     }
 
     private var sendInstruction: String {

@@ -33,6 +33,63 @@ import WalletToolLayer
         )
     }
 
+    @Test func fundingPolicyClassifiesExactBoundaries() {
+        #expect(BundlerFundingPolicy.fromObservedBalance(nil) == .unavailable)
+        #expect(BundlerFundingPolicy.fromObservedBalance("unavailable") == .unavailable)
+        #expect(
+            BundlerFundingPolicy.fromObservedBalance("0x0")
+                == .externalRequired(balanceWeiHex: "0x0")
+        )
+        #expect(
+            BundlerFundingPolicy.fromObservedBalance("0x11c37937e07fff")
+                == .externalRequired(balanceWeiHex: "0x11c37937e07fff")
+        )
+        #expect(
+            BundlerFundingPolicy.fromObservedBalance("0x11c37937e08000")
+                == .kernelTopUpCandidate(balanceWeiHex: "0x11c37937e08000")
+        )
+        #expect(
+            BundlerFundingPolicy.fromObservedBalance("0x2386f26fc0ffff")
+                == .kernelTopUpCandidate(balanceWeiHex: "0x2386f26fc0ffff")
+        )
+        #expect(
+            BundlerFundingPolicy.fromObservedBalance("0x2386f26fc10000")
+                == .healthy(balanceWeiHex: "0x2386f26fc10000")
+        )
+    }
+
+    @Test func missingAndUnreadableDaemonStatusNeverExposeKernelFunding() {
+        let checking = BundlerGasStatus.from(
+            relayer: nil,
+            fallbackAddress: "0x7A3f000000000000000000000000000000009C21",
+            chain: .ethereumSepolia
+        )
+        #expect(checking.fundingState == .checking)
+        #expect(checking.fundingState.shouldOfferKernelTopUp == false)
+
+        let unreadable = BundlerGasStatus.from(
+            relayer: Self.relayer(balance: "unavailable", needsTopup: false),
+            fallbackAddress: nil,
+            chain: .ethereumSepolia
+        )
+        #expect(unreadable.fundingState == .unavailable)
+        #expect(unreadable.fundingState.shouldOfferKernelTopUp == false)
+    }
+
+    @Test func daemonNeedsTopupOverridesAContradictoryNumericBalance() {
+        let status = BundlerFundingPolicy.fromDaemonStatus(
+            Self.relayer(
+                balance: BundlerFundingPolicy.recommendedBalanceWeiHex,
+                needsTopup: true
+            )
+        )
+        #expect(
+            status == .externalRequired(
+                balanceWeiHex: BundlerFundingPolicy.recommendedBalanceWeiHex
+            )
+        )
+    }
+
     @Test func mapsDaemonThresholdIntoHumanCopy() throws {
         let status = BundlerGasStatus.from(
             relayer: Self.relayer(balance: "0x0", needsTopup: true),

@@ -1375,10 +1375,13 @@ private struct BundlerActivationStep: View {
             bodyText: "Fund the local relayer once so it can submit your wallet's transactions. No account or app backend is involved."
         ) {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Send \(BundlerFundingPolicy.recommendedBalanceDisplay)")
+                Text("Fund your relayer")
                     .font(.system(size: 21, weight: .bold))
                     .foregroundStyle(OnboardingPalette.primaryText)
-                Text("Use another wallet or the Sepolia faucet. The wallet becomes ready as soon as at least 0.005 ETH is detected.")
+                Text(
+                    "Send at least \(BundlerFundingPolicy.minimumBalanceDisplay) on Sepolia — "
+                        + "\(BundlerFundingPolicy.recommendedBalanceDisplay) recommended."
+                )
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(OnboardingPalette.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1412,61 +1415,66 @@ private struct BundlerActivationStep: View {
 
     @ViewBuilder
     private var activationStatus: some View {
-        OnboardingGlassCard {
-            HStack(alignment: .top, spacing: 12) {
-                switch state.bundlerActivationState {
-                case .idle, .checking:
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityHidden(true)
-                    statusText(
-                        title: "Checking balance",
-                        detail: "Reading the public relayer balance from your execution RPC."
-                    )
-                case .waiting(let balance):
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityHidden(true)
-                    statusText(
-                        title: "Waiting for funds",
-                        detail: balance.map {
-                            "Detected \(WeiFormatter.ethDisplayString(fromHexWei: $0)); at least 0.005 ETH is required."
-                        } ?? "No funded balance has been detected yet."
-                    )
-                case .ready(let balance):
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(OnboardingPalette.success)
-                        .accessibilityHidden(true)
-                    statusText(
-                        title: "Transactions activated",
-                        detail: "Detected \(WeiFormatter.ethDisplayString(fromHexWei: balance))."
-                    )
-                case .failed(let message):
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(OnboardingPalette.warning)
-                        .accessibilityHidden(true)
-                    statusText(title: "Balance check failed", detail: message)
-                    Spacer()
-                    Button("Retry check") {
-                        state.refreshBundlerActivationNow()
-                    }
-                    .buttonStyle(OnboardingTextButtonStyle())
+        switch state.bundlerActivationState {
+        case .idle, .checking:
+            activationStatusLine(
+                text: "Checking balance — updates automatically",
+                showsProgress: true
+            )
+        case .waiting(let balance):
+            activationStatusLine(
+                text: "Waiting for deposit — "
+                    + "\(balance.map(WeiFormatter.ethDisplayString(fromHexWei:)) ?? "0 ETH") detected — "
+                    + "\(BundlerFundingPolicy.minimumBalanceDisplay) required",
+                showsProgress: true
+            )
+        case .ready(let balance):
+            activationStatusLine(
+                text: "Deposit detected — \(WeiFormatter.ethDisplayString(fromHexWei: balance))",
+                icon: "checkmark.circle.fill",
+                color: OnboardingPalette.success
+            )
+        case .failed(let message):
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(OnboardingPalette.warning)
+                    .accessibilityHidden(true)
+                Text("Couldn’t verify balance — \(message)")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(OnboardingPalette.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button("Retry check") {
+                    state.refreshBundlerActivationNow()
                 }
+                .buttonStyle(OnboardingTextButtonStyle())
             }
-            .padding(16)
+            .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
         }
     }
 
-    private func statusText(title: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(OnboardingPalette.primaryText)
-            Text(detail)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(OnboardingPalette.secondaryText)
+    private func activationStatusLine(
+        text: String,
+        icon: String? = nil,
+        color: Color = OnboardingPalette.secondaryText,
+        showsProgress: Bool = false
+    ) -> some View {
+        HStack(spacing: 10) {
+            if showsProgress {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityHidden(true)
+            } else if let icon {
+                Image(systemName: icon)
+                    .foregroundStyle(color)
+                    .accessibilityHidden(true)
+            }
+            Text(text)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(color)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
 }

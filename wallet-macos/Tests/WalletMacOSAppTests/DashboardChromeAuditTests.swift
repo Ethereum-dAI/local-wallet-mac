@@ -35,6 +35,7 @@ import Testing
         #expect(card.contains("case .kernelTopUpCandidate"))
         #expect(card.contains("case .healthy"))
         #expect(card.contains("BundlerExternalFundingActions("))
+        #expect(card.contains("compact: true"))
         #expect(card.contains("if case .healthy = fundingState") == false)
         #expect(card.contains("stateBadge") == false)
         #expect(card.contains("healthy-status") == false)

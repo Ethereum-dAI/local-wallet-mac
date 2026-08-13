@@ -18,7 +18,7 @@ Both buttons remain visible during checking, waiting, and balance-read failures.
 Remove the glass status card. Show one compact status line below the buttons:
 
 - checking: spinner plus `Checking balance`
-- waiting: spinner plus `Waiting for deposit — <detected> / 0.005 ETH`
+- waiting: spinner plus `Waiting for deposit — <detected> detected — 0.005 ETH required`
 - ready: green check plus `Deposit detected — <detected> ETH`
 - failed: warning icon plus `Couldn’t verify balance — Retry`
 

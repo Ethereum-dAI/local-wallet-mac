@@ -30,7 +30,8 @@ enum BundlerFundingState: Equatable {
 enum BundlerFundingPolicy {
     static let minimumBalanceWeiHex = "0x11c37937e08000"       // 0.005 ETH
     static let recommendedBalanceWeiHex = "0x2386f26fc10000"   // 0.01 ETH
-    static let recommendedBalanceDisplay = "0.01 Sepolia ETH"
+    static let minimumBalanceDisplay = "0.005 ETH"
+    static let recommendedBalanceDisplay = "0.01 ETH"
     static let sepoliaFaucetURL = URL(
         string: "https://cloud.google.com/application/web3/faucet/ethereum/sepolia"
     )!

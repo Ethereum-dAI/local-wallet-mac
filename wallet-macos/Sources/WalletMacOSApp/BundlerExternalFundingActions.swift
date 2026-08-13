@@ -54,18 +54,24 @@ struct BundlerExternalFundingActions: View {
                         copied ? "Copied" : "Copy address",
                         systemImage: copied ? "checkmark" : "doc.on.doc"
                     )
+                    .frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.borderedProminent)
+                .tint(accent)
+                .controlSize(compact ? .small : .large)
                 .accessibilityHint(
                     "Copies the bundler address for funding from another wallet"
                 )
 
                 Link(destination: faucetURL) {
                     Label("Open Sepolia faucet", systemImage: "safari")
+                        .frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.bordered)
+                .tint(accent)
+                .controlSize(compact ? .small : .large)
                 .accessibilityHint("Opens the faucet without changing the clipboard")
             }
-            .buttonStyle(.borderless)
-            .foregroundStyle(accent)
         }
     }
 }

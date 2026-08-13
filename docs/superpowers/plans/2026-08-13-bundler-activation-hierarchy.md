@@ -72,6 +72,8 @@
     #expect(activation.contains("OnboardingGlassCard") == false)
     #expect(activation.contains("statusText(") == false)
     #expect(activation.contains("Waiting for deposit —"))
+    #expect(activation.contains(" detected — "))
+    #expect(activation.contains(" required"))
     #expect(activation.contains("Deposit detected —"))
     #expect(activation.contains("Retry check"))
     #expect(activation.contains("·") == false)
@@ -178,8 +180,8 @@ private var activationStatus: some View {
     case .waiting(let balance):
         activationStatusLine(
             text: "Waiting for deposit — "
-                + "\(balance.map(WeiFormatter.ethDisplayString(fromHexWei:)) ?? \"0 ETH\") / "
-                + BundlerFundingPolicy.minimumBalanceDisplay,
+                + "\(balance.map(WeiFormatter.ethDisplayString(fromHexWei:)) ?? \"0 ETH\") detected — "
+                + "\(BundlerFundingPolicy.minimumBalanceDisplay) required",
             showsProgress: true
         )
     case .ready(let balance):

@@ -75,16 +75,51 @@ import Testing
         #expect(source.contains("DeviceOwnerAuthentication") == false)
     }
 
-    @Test func externalFundingActionsKeepCopyAndFaucetSeparate() throws {
+    @Test func externalFundingActionsKeepCopyPrimaryAndFaucetSeparate() throws {
         let source = try appSource(named: "BundlerExternalFundingActions.swift")
-        #expect(source.contains("NSPasteboard.general.setString"))
-        #expect(source.contains("Link(destination: faucetURL)"))
-        let link = try sourceSlice(
+        let copy = try sourceSlice(
+            source,
+            from: "Button {",
+            until: "Link(destination: faucetURL)"
+        )
+        let faucet = try sourceSlice(
             source,
             from: "Link(destination: faucetURL)",
-            until: ".buttonStyle"
+            until: ".accessibilityHint(\"Opens the faucet without changing the clipboard\")"
         )
-        #expect(link.contains("NSPasteboard") == false)
+
+        #expect(copy.contains("NSPasteboard.general.setString"))
+        #expect(copy.contains(".buttonStyle(.borderedProminent)"))
+        #expect(copy.contains(".controlSize(compact ? .small : .large)"))
+        #expect(faucet.contains(".buttonStyle(.bordered)"))
+        #expect(faucet.contains(".controlSize(compact ? .small : .large)"))
+        #expect(faucet.contains("NSPasteboard") == false)
+        #expect(source.firstRange(of: "Copy address")!.lowerBound
+            < source.firstRange(of: "Open Sepolia faucet")!.lowerBound)
+    }
+
+    @Test func activationScreenUsesCompactDashSeparatedStatus() throws {
+        let source = try appSource(named: "OnboardingView.swift")
+        let activation = try sourceSlice(
+            source,
+            from: "private struct BundlerActivationStep",
+            until: "private struct SyncStep"
+        )
+        let waiting = try sourceSlice(
+            activation,
+            from: "case .waiting(let balance):",
+            until: "case .ready(let balance):"
+        )
+
+        #expect(activation.contains("OnboardingGlassCard") == false)
+        #expect(activation.contains("statusText(") == false)
+        #expect(waiting.contains("Waiting for deposit —"))
+        #expect(waiting.contains(" detected — "))
+        #expect(waiting.contains(" required"))
+        #expect(waiting.contains(" / ") == false)
+        #expect(activation.contains("Deposit detected —"))
+        #expect(activation.contains("Retry check"))
+        #expect(activation.contains("·") == false)
     }
 
     @Test func activationScreenStartsAndCancelsItsPublicMonitor() throws {

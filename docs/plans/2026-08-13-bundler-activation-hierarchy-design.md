@@ -8,7 +8,7 @@ The onboarding activation screen gives its passive `Waiting for funds` status a 
 
 ## Approved hierarchy
 
-Keep the existing heading, explanation, and full relayer address. Directly below the address, render the funding paths as real buttons:
+Keep the full relayer address. Replace the conflicting amount-led heading with `Fund your relayer`, followed by `Send at least 0.005 ETH on Sepolia — 0.01 ETH recommended.` Directly below the address, render the funding paths as real buttons:
 
 - `Copy address` is the filled primary button because every external-funding path needs the destination address.
 - `Open Sepolia faucet` is an outlined secondary button and continues to open the faucet without changing the clipboard.

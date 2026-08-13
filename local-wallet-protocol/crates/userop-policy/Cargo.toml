@@ -1,0 +1,15 @@
+[package]
+name = "wallet-userop-policy"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Shared checked ERC-4337 UserOperation gas authorization policy."
+
+[dependencies]
+alloy-primitives = { workspace = true }
+alloy-sol-types = { workspace = true }
+thiserror = { workspace = true }
+wallet-signature = { path = "../signature" }
+
+[dev-dependencies]
+hex-literal = { workspace = true }

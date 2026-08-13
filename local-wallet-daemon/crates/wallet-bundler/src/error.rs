@@ -1,5 +1,6 @@
 use alloy_primitives::{Address, B256};
 use thiserror::Error;
+use wallet_userop_policy::GasPolicyError;
 
 pub type Result<T> = std::result::Result<T, BundlerError>;
 
@@ -51,4 +52,23 @@ pub enum BundlerError {
 
     #[error("store error: {0}")]
     Store(#[from] wallet_node_store::StoreError),
+}
+
+impl From<GasPolicyError> for BundlerError {
+    fn from(error: GasPolicyError) -> Self {
+        match error {
+            GasPolicyError::EntryPointFieldWidth { field }
+            | GasPolicyError::CapExceeded { field } => Self::PolicyCapExceeded { field },
+            GasPolicyError::PriorityFeeAboveMaxFee => {
+                Self::InvalidUserOperation("maxPriorityFeePerGas exceeds maxFeePerGas".to_string())
+            }
+            GasPolicyError::PaymasterNotSupported => Self::PaymasterNotSupported,
+            GasPolicyError::ArithmeticOverflow { operation } => Self::InvalidUserOperation(
+                format!("arithmetic overflow while computing {operation}"),
+            ),
+            GasPolicyError::SignatureLengthTooLarge => Self::InvalidUserOperation(
+                "signature length cannot be represented safely".to_string(),
+            ),
+        }
+    }
 }

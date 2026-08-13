@@ -83,6 +83,39 @@ import Testing
         }
     }
 
+    @Test func externalWalletNodeTransportRequiresTLSOrLiteralLoopback() throws {
+        let accepted = [
+            "https://wallet-node.example/rpc",
+            "http://127.0.0.1:8080",
+            "http://127.42.0.9:8080",
+            "http://[::1]:8080",
+        ]
+        for endpoint in accepted {
+            let configuration = WalletNodeClient.Configuration.fromEnvironment(environment: [
+                "LOCAL_WALLET_NODE_HTTP_URL": endpoint,
+                "LOCAL_WALLET_NODE_TOKEN": "secret",
+            ])
+            #expect(configuration != nil, "expected \(endpoint) to be accepted")
+        }
+
+        let rejected = [
+            "http://wallet-node.example/rpc",
+            "http://localhost:8080",
+            "http://localhost.:8080",
+            "http://0.0.0.0:8080",
+            "http://192.168.1.10:8080",
+            "ftp://127.0.0.1:8080",
+            "https://user:password@wallet-node.example/rpc",
+        ]
+        for endpoint in rejected {
+            let configuration = WalletNodeClient.Configuration.fromEnvironment(environment: [
+                "LOCAL_WALLET_NODE_HTTP_URL": endpoint,
+                "LOCAL_WALLET_NODE_TOKEN": "secret",
+            ])
+            #expect(configuration == nil, "expected \(endpoint) to be rejected")
+        }
+    }
+
     @Test func resetPreflightRejectsAnyExternalPrivacyHelperConfiguration() {
         #expect(throws: AppError.self) {
             try WalletResetPreflight.ensureNoExternalSecretRuntimes(environment: [

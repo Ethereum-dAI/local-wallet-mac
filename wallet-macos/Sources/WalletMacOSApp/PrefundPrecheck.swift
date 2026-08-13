@@ -1,29 +1,12 @@
 import Foundation
 
 /// Decides, before the Secure Enclave is asked to sign, whether the account can
-/// cover EntryPoint v0.7's prefund floor for a `callGasLimit` the user consented
-/// to via the gas-headroom affordance.
+/// cover the locally authorized EntryPoint v0.7 maximum liability.
 ///
-/// Two deliberate narrowings, both so this can never wrongly decline a send the
-/// daemon would have accepted:
-///
-/// - It compares `requiredPrefund` against `accountBalance + entryPointDeposit`,
-///   which is strictly weaker than the daemon's `minimum_account_balance`
-///   (`wallet-bundler/src/funding.rs:7` adds the call value). A balance that
-///   covers the prefund but not prefund + transfer amount still surfaces at send
-///   time as `transferable_below_call_value`, a different failure from #71's.
-/// - A zero `requiredPrefund` — an older daemon omitting the field — never
-///   declines.
-///
-/// One caveat the "strictly weaker" claim rests on: the estimate returns
-/// `estimated.required_prefund().max(simulation.validation.prefund)`
-/// (`estimate_user_operation_gas.rs:129-134`), while the send path checks only
-/// `op.required_prefund()`. Were `validation.prefund` ever to win that `max`,
-/// this would compare a *larger* floor than the daemon enforces and could
-/// decline an affordable send. It cannot today — `simulation_attempts` floors
-/// verification gas to the same `DAIMO_VERIFICATION_GAS_FLOOR` the estimate uses
-/// and the estimate adds call + preVerification gas on top — but the invariant
-/// is the daemon's to keep, not this file's.
+/// This is a signing authorization gate, not a best-effort UX hint. It runs for
+/// every operation and its caller must fail closed when the balance/deposit read
+/// is unavailable. The liability comes from the shared Rust policy; daemon
+/// `requiredPrefund` is never consumed here.
 ///
 /// Arithmetic is byte-wise on big-endian `Data` rather than on `UInt64`: a real
 /// account balance can exceed `UInt64.max` wei (≈18.4 ETH).
@@ -46,9 +29,9 @@ enum PrefundPrecheck {
         /// The fee the floor was computed at. The deficit is fee-dominated, so
         /// naming it is what makes an outsized floor legible.
         let maxFeePerGasWeiHex: String
-        /// The fee above is the configured policy ceiling rather than a live
-        /// spread, so this floor is cap-driven: raising the cap or waiting for gas
-        /// to fall moves it, funding does not.
+        /// Compatibility field for persisted chat cards created before the
+        /// independent fee oracle. Newly authorized operations always use a
+        /// fresh live quote and set this to false.
         let feeQuoteAtPolicyCeiling: Bool
         let effectiveCallGasLimit: UInt64
     }
@@ -58,23 +41,18 @@ enum PrefundPrecheck {
         case proceed
         /// Decline before signing, with the numbers to explain why.
         case decline(Report)
-        /// The balance read failed. Callers fail open (and log) — the send path's
-        /// own funding check is still the real gate, and failing closed would
-        /// turn a transient read failure into a refused send the user could
-        /// afford.
+        /// The balance read failed. Callers must fail closed before key access.
         case statusUnavailable(Error)
     }
 
-    /// The whole gate: skip unless a limit was acknowledged, read balance +
-    /// EntryPoint deposit, and decide. Takes the read as a closure so the
-    /// decision — including the fail-open branch — is testable without a
-    /// wallet-node.
+    /// The whole gate: read balance + EntryPoint deposit for every operation and
+    /// decide. Takes the read as a closure so transport failure is testable
+    /// without a wallet-node.
     /// `isolation` lets the read closure stay non-`Sendable` and run on the
     /// caller's actor — `AppModel` is `@MainActor` and its client accessor is
     /// too, so sending the closure across an isolation boundary would not
     /// compile under Swift 6.
     static func decision(
-        acknowledgedCallGasLimit: UInt64?,
         requiredPrefund: Data,
         callGasLimit: Data,
         maxFeePerGas: Data,
@@ -82,12 +60,6 @@ enum PrefundPrecheck {
         isolation: isolated (any Actor)? = #isolation,
         readWalletStatus: () async throws -> WalletNodeClient.WalletStatus
     ) async -> Outcome {
-        // Scoped to the gas-headroom retry: an ordinary send must not pay for an
-        // extra round trip. Checked here rather than by the caller so the scope
-        // is part of the tested unit.
-        guard let acknowledgedCallGasLimit else {
-            return .proceed
-        }
         let status: WalletNodeClient.WalletStatus
         do {
             status = try await readWalletStatus()
@@ -108,17 +80,17 @@ enum PrefundPrecheck {
                 deficitWeiHex: "0x" + shortfall.deficit.hexEncodedString,
                 maxFeePerGasWeiHex: "0x" + maxFeePerGas.leftPadded(to: 32).hexEncodedString,
                 feeQuoteAtPolicyCeiling: feeQuoteAtPolicyCeiling,
-                effectiveCallGasLimit: narrowed(callGasLimit)
-                    ?? acknowledgedCallGasLimit
+                // The local Rust authorization cap is 10,000,000, so a value
+                // wider than UInt64 cannot reach this report. Preserve a loud,
+                // non-truncated sentinel if that invariant is ever violated.
+                effectiveCallGasLimit: narrowed(callGasLimit) ?? UInt64.max
             )
         )
     }
 
     /// Low 64 bits of a big-endian value, or `nil` if anything above them is set.
-    /// The daemon clamps every limit that reaches here to
-    /// `policy.max_call_gas_limit`, far below 2^64, so `nil` is unreachable in
-    /// practice — but a wider value must fall back to a caller-supplied number
-    /// rather than silently truncate.
+    /// The shared local policy clamps every limit that reaches here far below
+    /// 2^64. Returning nil rather than truncating keeps that invariant explicit.
     private static func narrowed(_ value: Data) -> UInt64? {
         let padded = value.leftPadded(to: 32)
         guard padded.prefix(24).allSatisfy({ $0 == 0 }) else {

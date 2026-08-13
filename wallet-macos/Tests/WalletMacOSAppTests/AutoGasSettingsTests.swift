@@ -111,7 +111,7 @@ private func freshStore() -> DemoSettingsStore {
     #expect(settings.resolvedDaemonGasPolicy.maxFeePerGas == settings.activeGasPolicy.maxFeePerGas)
 }
 
-@Test func resolvedDaemonGasPolicyUsesGenerousCeilingWhenAutoOn() {
+@Test func resolvedDaemonGasPolicyUsesImmutableCeilingWhenAutoOn() {
     var settings = DemoNetworkSettings.defaults
     settings.autoGasModeEnabled = true
     #expect(settings.resolvedDaemonGasPolicy.maxFeePerGas == WalletNodeDaemon.GasPolicy.autoCeiling.maxFeePerGas)
@@ -127,9 +127,20 @@ private func freshStore() -> DemoSettingsStore {
     #expect(NetworkSettingsChangePolicy.requiresWalletNodeRestart(from: old, to: new) == false)
 }
 
-@Test func gasPolicyModeChangeRequiresWalletNodeRestart() {
+@Test func gasPolicyModeChangeDoesNotRestartWhenDaemonCapsAreIdentical() {
     var old = DemoNetworkSettings.defaults
     old.autoGasModeEnabled = false
+    var new = old
+    new.autoGasModeEnabled = true
+
+    #expect(NetworkSettingsChangePolicy.requiresWalletNodeRestart(from: old, to: new) == false)
+}
+
+@Test func gasPolicyModeChangeRestartsWhenDaemonCapsActuallyChange() {
+    var old = DemoNetworkSettings.defaults
+    old.autoGasModeEnabled = false
+    old.sepoliaMaxFeePerGasGwei = "40"
+    old.sepoliaMaxPriorityFeePerGasGwei = "4"
     var new = old
     new.autoGasModeEnabled = true
 
@@ -181,14 +192,15 @@ private func freshStore() -> DemoSettingsStore {
     #expect(NetworkSettingsChangePolicy.requiresHeliosCheckpointResync(from: old, to: new) == false)
 }
 
-@Test func autoCeilingIsValidAndGenerous() {
+@Test func autoCeilingMatchesImmutableAppCap() {
     let ceiling = WalletNodeDaemon.GasPolicy.autoCeiling
-    // Priority must not exceed max; the ceiling stays deliberately generous for live pricing.
+    // Priority must not exceed max, and daemon defense in depth matches the app boundary.
     #expect(GasPricing.minWei(
         (try? Data.quantityString(ceiling.maxPriorityFeePerGas)) ?? Data(),
         (try? Data.quantityString(ceiling.maxFeePerGas)) ?? Data()
     ) == ((try? Data.quantityString(ceiling.maxPriorityFeePerGas).leftPadded(to: 32)) ?? Data()))
-    #expect(Int(ceiling.maxFeePerGasGwei) ?? 0 >= 1000)
+    #expect(ceiling.maxFeePerGasGwei == "50")
+    #expect(ceiling.maxPriorityFeePerGasGwei == "5")
 }
 
 @Test func appNetworkIsAlwaysSepolia() {

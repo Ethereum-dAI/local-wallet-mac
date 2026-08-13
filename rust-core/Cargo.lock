@@ -1858,6 +1858,7 @@ dependencies = [
  "wallet-kernel",
  "wallet-node-api",
  "wallet-signature",
+ "wallet-userop-policy",
  "zeroize",
 ]
 
@@ -1892,6 +1893,16 @@ dependencies = [
  "p256",
  "sha2",
  "wallet-addresses",
+]
+
+[[package]]
+name = "wallet-userop-policy"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "thiserror",
+ "wallet-signature",
 ]
 
 [[package]]

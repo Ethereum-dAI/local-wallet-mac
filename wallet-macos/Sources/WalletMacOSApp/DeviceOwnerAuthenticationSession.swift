@@ -18,6 +18,28 @@ final class DeviceOwnerAuthenticationSession {
     private let invalidator: Invalidator
     private(set) var isInvalidated = false
 
+    /// The authorization reason must be created only after the complete owner
+    /// UserOperation and its maximum liability are known. Keeping this rule in
+    /// one testable boundary prevents an already-authorized upstream context
+    /// from bypassing the fee disclosure.
+    static func ownerUserOperation(
+        action: String,
+        maximumLiability: Data,
+        context: LAContext = LAContext(),
+        evaluator: Evaluator? = nil,
+        invalidator: Invalidator? = nil
+    ) -> DeviceOwnerAuthenticationSession {
+        DeviceOwnerAuthenticationSession(
+            reason: GasAuthorizationPresentation.ownerSigningReason(
+                action: action,
+                maximumLiability: maximumLiability
+            ),
+            context: context,
+            evaluator: evaluator,
+            invalidator: invalidator
+        )
+    }
+
     init(
         reason: String,
         context: LAContext = LAContext(),

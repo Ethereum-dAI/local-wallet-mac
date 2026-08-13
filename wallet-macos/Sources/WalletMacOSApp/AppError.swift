@@ -28,9 +28,9 @@ enum AppError: LocalizedError {
     case userOperationReceiptReverted(String)
     case userAuthorizationCancelled
     case privacyAccountLocked
-    /// The account cannot cover EntryPoint's prefund floor for a consented
-    /// gas-headroom `callGasLimit`. Thrown before the Secure Enclave is asked to
-    /// sign; `ChatIntentExecutionStatus.prefundShortfall(from:)` turns it into a
+    /// The account cannot cover the locally authorized maximum UserOperation
+    /// liability. Thrown before any owner or session signing key is accessed;
+    /// `ChatIntentExecutionStatus.prefundShortfall(from:)` turns it into a
     /// recoverable card rather than a terminal failure.
     case prefundShortfall(PrefundPrecheck.Report)
 

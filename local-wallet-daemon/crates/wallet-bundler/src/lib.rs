@@ -53,8 +53,9 @@ pub use manifest::{
     ManifestTrustRoot, MAX_MANIFEST_LIFETIME_SECS,
 };
 pub use policy::{
-    bumped_replacement_fees, bumped_replacement_fees_with_budget, bumped_transaction_fees,
-    validate_bundler_tx_fee_invariant, validate_relayer_replacement_fee_budget,
+    authorize_user_operation_gas, bumped_replacement_fees, bumped_replacement_fees_with_budget,
+    bumped_transaction_fees, validate_bundler_tx_fee_invariant,
+    validate_finalized_user_operation_gas, validate_relayer_replacement_fee_budget,
     validate_user_operation, BundlerPolicy, BundlerPolicyInvariants, BundlerTxFees, PolicyError,
     PolicyMode,
 };

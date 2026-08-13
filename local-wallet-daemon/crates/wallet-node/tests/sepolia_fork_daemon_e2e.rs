@@ -44,6 +44,7 @@ const ENTRY_POINT: &str = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
 // Comfortably under the daemon's default policy gas-price caps (10 gwei / 1 gwei).
 const MAX_FEE_PER_GAS: u64 = 8_000_000_000;
 const MAX_PRIORITY_FEE_PER_GAS: u64 = 500_000_000;
+const FORGED_PRE_VERIFICATION_GAS_INCREASE: u64 = 100_000;
 // A verificationGasLimit the RIP-7212 precompile path fits within (~175k observed
 // pre-op gas) but the Daimo verifier path (~330k+ just for the P-256 verify) cannot.
 // Submitting and executing a UserOp under this budget is itself proof the precompile
@@ -156,7 +157,7 @@ async fn sepolia_fork_daemon_sends_userop_via_p256_precompile() {
         &token,
         "eth_estimateUserOperationGas",
         json!([
-            unsigned_transfer_op(sender, recipient, transfer_amount),
+            unsigned_transfer_op(sender, U256::ZERO, recipient, transfer_amount),
             ENTRY_POINT
         ]),
     )
@@ -166,19 +167,101 @@ async fn sepolia_fork_daemon_sends_userop_via_p256_precompile() {
         "estimate should return a verificationGasLimit: {estimate}"
     );
 
-    // 7. Build + sign the transfer with usePrecompiled=true and submit it through the
-    //    daemon's self-relaying send pipeline. The op carries a verificationGasLimit
-    //    (TIGHT_VERIFICATION_GAS_LIMIT) that the precompile path fits within but the
-    //    Daimo verifier path (~330k+) cannot — so an on-chain success is itself proof
-    //    the RIP-7212 precompile path is active and load-bearing.
-    let op_json = unsigned_transfer_op(sender, recipient, transfer_amount);
-    let op = wallet_bundler::UserOperation::parse(op_json.clone()).unwrap();
-    let user_op_hash = entry_point_user_op_hash(&client, &fork_url, &op).await;
-    let signed = sign_user_op_for_test(op, user_op_hash, &signing_key, true);
-    let mut signed_json = op_json;
-    signed_json["signature"] = json!(bytes_hex(&signed.op.signature));
+    // 7. Prove the inflated-preVerificationGas premise against the real EntryPoint,
+    //    and prove the daemon rejects the exact same otherwise-valid signed operation
+    //    before submitting any transaction. All state changes remain on local Anvil.
+    let (mut forged_json, expected_forged_pre_verification_gas) =
+        locally_authorized_unsigned_transfer(sender, U256::ZERO, recipient, U256::ZERO);
+    let forged_pre_verification_gas =
+        expected_forged_pre_verification_gas + U256::from(FORGED_PRE_VERIFICATION_GAS_INCREASE);
+    forged_json["preVerificationGas"] = json!(u256_hex(forged_pre_verification_gas));
+    let (forged_json, forged_op) =
+        sign_operation_json(&client, &fork_url, forged_json, &signing_key).await;
+    let recomputed_forged_plan =
+        wallet_bundler::authorize_user_operation_gas(&local_bundler_policy(), &forged_op)
+            .expect("inflated operation remains within the shared caps");
+    assert_eq!(
+        recomputed_forged_plan.pre_verification_gas, expected_forged_pre_verification_gas,
+        "real and dummy WebAuthn signatures must require the same locally derived pVG"
+    );
+    assert_eq!(
+        forged_op.pre_verification_gas,
+        recomputed_forged_plan.pre_verification_gas
+            + U256::from(FORGED_PRE_VERIFICATION_GAS_INCREASE),
+        "control must inflate pVG without exceeding another policy cap"
+    );
+
+    let rejected_nonce_before = eth_get_transaction_count(&client, &fork_url, bundler_eoa).await;
+    let rejected_bundler_balance_before = eth_get_balance(&client, &fork_url, bundler_eoa).await;
+    let rejected_deposit_before = entry_point_balance_of(&client, &fork_url, sender).await;
+    let rejection = daemon_rpc_raw(
+        &socket,
+        &token,
+        "eth_sendUserOperation",
+        json!([forged_json, ENTRY_POINT]),
+    )
+    .await;
+    assert_eq!(
+        rejection["error"]["data"]["reason"], "finalized_gas_mismatch",
+        "daemon must reject caller-inflated preVerificationGas before submission: {rejection}"
+    );
+    assert_eq!(
+        eth_get_transaction_count(&client, &fork_url, bundler_eoa).await,
+        rejected_nonce_before,
+        "rejected UserOperation must not consume a bundler transaction nonce"
+    );
+    assert_eq!(
+        eth_get_balance(&client, &fork_url, bundler_eoa).await,
+        rejected_bundler_balance_before,
+        "rejected UserOperation must not change the bundler beneficiary balance"
+    );
+    assert_eq!(
+        entry_point_balance_of(&client, &fork_url, sender).await,
+        rejected_deposit_before,
+        "rejected UserOperation must not debit the account's EntryPoint deposit"
+    );
+
+    let direct_beneficiary: Address = ANVIL_DEFAULT_SENDER.parse().unwrap();
+    let forged_direct_tx = eth_send_transaction_with_fees(
+        &client,
+        &fork_url,
+        ANVIL_DEFAULT_SENDER,
+        wallet_bundler::ENTRY_POINT_V07,
+        wallet_bundler::encode_handle_ops(&forged_op, direct_beneficiary).unwrap(),
+        U256::from(MAX_FEE_PER_GAS),
+        U256::from(MAX_PRIORITY_FEE_PER_GAS),
+    )
+    .await;
+    let forged_direct_receipt =
+        wait_for_successful_receipt(&client, &fork_url, &forged_direct_tx).await;
+    assert!(
+        user_operation_actual_gas_cost(&forged_direct_receipt) > U256::ZERO,
+        "direct EntryPoint control must execute the signed inflated-pVG UserOperation"
+    );
+
+    // 8. Build + sign nonce 1 with gas derived locally by the shared policy, then
+    //    submit it through the daemon's self-relaying send pipeline. The operation
+    //    carries a verificationGasLimit that the P-256 precompile path fits within,
+    //    but the Daimo verifier path (~330k+) cannot.
+    let (signed_json, signed_op, local_max_liability) = locally_authorized_signed_transfer(
+        &client,
+        &fork_url,
+        sender,
+        U256::from(1),
+        recipient,
+        transfer_amount,
+        &signing_key,
+    )
+    .await;
+    assert_eq!(
+        signed_op.pre_verification_gas,
+        locally_authorized_unsigned_transfer(sender, U256::from(1), recipient, transfer_amount,).1,
+        "the signed operation must contain the locally authorized pVG"
+    );
 
     let recipient_before = eth_get_balance(&client, &fork_url, recipient).await;
+    let deposit_before = entry_point_balance_of(&client, &fork_url, sender).await;
+    let beneficiary_before = eth_get_balance(&client, &fork_url, bundler_eoa).await;
     let sent_hash = daemon_rpc(
         &socket,
         &token,
@@ -190,11 +273,42 @@ async fn sepolia_fork_daemon_sends_userop_via_p256_precompile() {
         .as_str()
         .expect("sendUserOperation returns a hash");
 
-    // 8. Poll the receipt through the daemon and assert on-chain success.
+    // 9. Poll the receipt through the daemon and independently account for the
+    //    exact economic effect from the outer transaction receipt and chain state.
     let receipt = wait_for_user_op_receipt(&socket, &token, sent_hash).await;
     assert_eq!(
         receipt["success"], true,
         "UserOperation must succeed on-chain via the precompile: {receipt}"
+    );
+    let outer_tx_hash = receipt["txHash"]
+        .as_str()
+        .expect("daemon receipt includes the outer transaction hash");
+    let outer_receipt = wait_for_successful_receipt(&client, &fork_url, outer_tx_hash).await;
+    let actual_gas_cost = user_operation_actual_gas_cost(&outer_receipt);
+    let outer_tx_fee = receipt_fee_paid(&outer_receipt);
+    let deposit_after = entry_point_balance_of(&client, &fork_url, sender).await;
+    let beneficiary_after = eth_get_balance(&client, &fork_url, bundler_eoa).await;
+
+    assert!(
+        actual_gas_cost <= local_max_liability,
+        "actual UserOperation gas cost {} exceeds locally authorized maximum {}",
+        u256_hex(actual_gas_cost),
+        u256_hex(local_max_liability)
+    );
+    assert_eq!(
+        deposit_before
+            .checked_sub(deposit_after)
+            .expect("EntryPoint deposit must not increase during a no-paymaster send"),
+        actual_gas_cost,
+        "the account's EntryPoint deposit debit must equal UserOperationEvent.actualGasCost"
+    );
+    let normalized_beneficiary_credit = beneficiary_after
+        .checked_add(outer_tx_fee)
+        .and_then(|value| value.checked_sub(beneficiary_before))
+        .expect("beneficiary balance plus its outer transaction fee must cover its prior balance");
+    assert_eq!(
+        normalized_beneficiary_credit, actual_gas_cost,
+        "beneficiary credit normalized for the outer transaction fee must equal actualGasCost"
     );
     assert_eq!(
         eth_get_balance(&client, &fork_url, recipient).await,
@@ -203,10 +317,10 @@ async fn sepolia_fork_daemon_sends_userop_via_p256_precompile() {
     );
 }
 
-fn unsigned_transfer_op(sender: Address, recipient: Address, amount: U256) -> Value {
+fn unsigned_transfer_op(sender: Address, nonce: U256, recipient: Address, amount: U256) -> Value {
     json!({
         "sender": address_hex(sender),
-        "nonce": "0x0",
+        "nonce": u256_hex(nonce),
         "callData": bytes_hex(&wallet_bundler::encode_erc7579_single_execution(
             recipient,
             amount,
@@ -219,6 +333,95 @@ fn unsigned_transfer_op(sender: Address, recipient: Address, amount: U256) -> Va
         "maxPriorityFeePerGas": u256_hex(U256::from(MAX_PRIORITY_FEE_PER_GAS)),
         "signature": "0x"
     })
+}
+
+fn local_bundler_policy() -> wallet_bundler::BundlerPolicy {
+    // The bundler wrapper intersects configured caps with the shared v1 caps.
+    // U256::MAX therefore selects the shared caps without duplicating them here.
+    wallet_bundler::BundlerPolicy {
+        chain_id: SEPOLIA_CHAIN_ID,
+        entry_points: vec![wallet_bundler::ENTRY_POINT_V07],
+        max_call_gas_limit: U256::MAX,
+        max_verification_gas_limit: U256::MAX,
+        max_pre_verification_gas: U256::MAX,
+        max_fee_per_gas: U256::MAX,
+        max_priority_fee_per_gas: U256::MAX,
+        invariants: wallet_bundler::BundlerPolicyInvariants::LOCAL_WALLET_V1,
+    }
+}
+
+fn locally_authorized_unsigned_transfer(
+    sender: Address,
+    nonce: U256,
+    recipient: Address,
+    amount: U256,
+) -> (Value, U256) {
+    let mut op_json = unsigned_transfer_op(sender, nonce, recipient, amount);
+    op_json["signature"] = json!(bytes_hex(&wallet_bundler::dummy_webauthn_signature(true)));
+    let sizing_op = wallet_bundler::UserOperation::parse(op_json.clone()).unwrap();
+    let plan = wallet_bundler::authorize_user_operation_gas(&local_bundler_policy(), &sizing_op)
+        .expect("shared local policy authorizes the transfer envelope");
+    op_json["preVerificationGas"] = json!(u256_hex(plan.pre_verification_gas));
+    op_json["signature"] = json!("0x");
+    (op_json, plan.pre_verification_gas)
+}
+
+async fn locally_authorized_signed_transfer(
+    client: &reqwest::Client,
+    fork_url: &str,
+    sender: Address,
+    nonce: U256,
+    recipient: Address,
+    amount: U256,
+    signing_key: &SigningKey,
+) -> (Value, wallet_bundler::UserOperation, U256) {
+    let (op_json, sizing_pre_verification_gas) =
+        locally_authorized_unsigned_transfer(sender, nonce, recipient, amount);
+    let (signed_json, signed_op) =
+        sign_operation_json(client, fork_url, op_json, signing_key).await;
+    let final_plan =
+        wallet_bundler::validate_finalized_user_operation_gas(&local_bundler_policy(), &signed_op)
+            .expect("exact signed operation must match the shared local authorization");
+    assert_eq!(
+        final_plan.pre_verification_gas, sizing_pre_verification_gas,
+        "dummy and real WebAuthn signatures must produce the same authorized pVG"
+    );
+    (signed_json, signed_op, final_plan.max_liability)
+}
+
+async fn sign_operation_json(
+    client: &reqwest::Client,
+    fork_url: &str,
+    mut op_json: Value,
+    signing_key: &SigningKey,
+) -> (Value, wallet_bundler::UserOperation) {
+    op_json["signature"] = json!("0x");
+    let unsigned = wallet_bundler::UserOperation::parse(op_json.clone()).unwrap();
+    let user_op_hash = entry_point_user_op_hash(client, fork_url, &unsigned).await;
+    let signed = sign_user_op_for_test(unsigned, user_op_hash, signing_key, true).op;
+    op_json["signature"] = json!(bytes_hex(&signed.signature));
+    let reparsed = wallet_bundler::UserOperation::parse(op_json.clone()).unwrap();
+    assert_eq!(
+        wallet_bundler::encode_handle_ops(&reparsed, Address::ZERO).unwrap(),
+        wallet_bundler::encode_handle_ops(&signed, Address::ZERO).unwrap(),
+        "submitted JSON must match the exact signed operation"
+    );
+    (op_json, reparsed)
+}
+
+async fn eth_get_transaction_count(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    address: Address,
+) -> U256 {
+    let value: String = rpc(
+        client,
+        rpc_url,
+        "eth_getTransactionCount",
+        json!([address_hex(address), "latest"]),
+    )
+    .await;
+    u256_from_hex(&value)
 }
 
 fn daemon_config_toml(fork_url: &str) -> String {

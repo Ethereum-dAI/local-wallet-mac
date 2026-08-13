@@ -3550,8 +3550,7 @@ private final class ChatDashboardModel: ObservableObject {
             executions: executions,
             logContext: "chat-shield",
             signingReason: authentication.reason,
-            acknowledgedCallGasLimit: acknowledgedCallGasLimit,
-            authenticationSession: authentication
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit
         )
         appendShieldExecutionResult(result, amount: amount, for: intent)
         refreshShieldedBalanceUntilSettled()

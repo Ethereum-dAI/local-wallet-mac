@@ -18,12 +18,9 @@ import Testing
         ])
     }
 
-    @Test func decisionProceedsWithoutReadingStatusWhenNoLimitAcknowledged() async {
-        // The gate is scoped to the headroom retry, and must not spend a round
-        // trip on an ordinary send.
+    @Test func decisionChecksEveryOperationEvenWithoutHeadroomRetry() async {
         var readCount = 0
         let outcome = await PrefundPrecheck.decision(
-            acknowledgedCallGasLimit: nil,
             requiredPrefund: wei(1_000),
             callGasLimit: wei(600_000),
             maxFeePerGas: wei(30_000_000_000),
@@ -34,16 +31,15 @@ import Testing
             }
         )
 
-        #expect(readCount == 0)
-        guard case .proceed = outcome else {
-            Issue.record("expected .proceed, got \(outcome)")
+        #expect(readCount == 1)
+        guard case .decline = outcome else {
+            Issue.record("expected .decline, got \(outcome)")
             return
         }
     }
 
     @Test func decisionProceedsWhenAffordable() async throws {
         let outcome = await PrefundPrecheck.decision(
-            acknowledgedCallGasLimit: 600_000,
             requiredPrefund: wei(1_000),
             callGasLimit: wei(600_000),
             maxFeePerGas: wei(30_000_000_000),
@@ -59,7 +55,6 @@ import Testing
 
     @Test func decisionDeclinesWithTheFullPayload() async throws {
         let outcome = await PrefundPrecheck.decision(
-            acknowledgedCallGasLimit: 600_000,
             requiredPrefund: wei(48_000_000_000_000_000),
             callGasLimit: wei(720_000),
             maxFeePerGas: wei(30_000_000_000),
@@ -82,10 +77,9 @@ import Testing
         #expect(report.effectiveCallGasLimit == 720_000)
     }
 
-    @Test func decisionFailsOpenWhenTheStatusReadThrows() async {
+    @Test func decisionReturnsUnavailableForCallerToFailClosed() async {
         struct Boom: Error {}
         let outcome = await PrefundPrecheck.decision(
-            acknowledgedCallGasLimit: 600_000,
             requiredPrefund: wei(48_000_000_000_000_000),
             callGasLimit: wei(600_000),
             maxFeePerGas: wei(30_000_000_000),
@@ -93,20 +87,18 @@ import Testing
             readWalletStatus: { throw Boom() }
         )
 
-        // Fail open: the send path's own funding check is still the real gate, so
-        // a transient read failure must not refuse a send the user can afford.
+        // AppModel treats this outcome as terminal before owner/session key use.
         guard case .statusUnavailable = outcome else {
             Issue.record("expected .statusUnavailable, got \(outcome)")
             return
         }
     }
 
-    @Test func decisionFallsBackToTheAcknowledgedLimitWhenTheDraftLimitIsTooWide() async throws {
-        // Cannot happen while the daemon clamps to policy.max_call_gas_limit, but
-        // the narrowing must not silently truncate if it ever does.
+    @Test func decisionDoesNotTruncateAnImpossibleWideDraftLimit() async throws {
+        // Cannot happen after local policy authorization, but the report must
+        // remain loud rather than silently taking the low 64 bits.
         let wide = Data(repeating: 0xff, count: 32)
         let outcome = await PrefundPrecheck.decision(
-            acknowledgedCallGasLimit: 600_000,
             requiredPrefund: wei(48_000_000_000_000_000),
             callGasLimit: wide,
             maxFeePerGas: wei(30_000_000_000),
@@ -118,14 +110,13 @@ import Testing
             Issue.record("expected .decline, got \(outcome)")
             return
         }
-        #expect(report.effectiveCallGasLimit == 600_000)
+        #expect(report.effectiveCallGasLimit == UInt64.max)
     }
 
     @Test func decisionCarriesTheGasPricingUnavailableFlag() async throws {
         // The floor is arithmetically right but economically meaningless, so the
         // card needs to know not to ask for a top-up.
         let outcome = await PrefundPrecheck.decision(
-            acknowledgedCallGasLimit: 600_000,
             requiredPrefund: wei(2_400_000_000_000_000_000),
             callGasLimit: wei(600_000),
             maxFeePerGas: wei(1_500_000_000_000),
@@ -172,7 +163,8 @@ import Testing
     }
 
     @Test func zeroRequiredPrefundNeverDeclines() {
-        // Fail open: a daemon that omitted requiredPrefund decodes as zero.
+        // Arithmetic boundary only. Production passes the nonzero liability
+        // recomputed by the local Rust authorization policy, never daemon data.
         #expect(PrefundPrecheck.evaluate(
             requiredPrefund: Data(repeating: 0, count: 32),
             accountBalance: Data(repeating: 0, count: 32),

@@ -59,7 +59,7 @@ pub fn u256_hex(value: U256) -> String {
 }
 
 pub fn u256_from_hex(value: &str) -> U256 {
-    U256::from_str_radix(value, 16).unwrap()
+    U256::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).unwrap()
 }
 
 pub fn hex_bytes(value: &str) -> Bytes {

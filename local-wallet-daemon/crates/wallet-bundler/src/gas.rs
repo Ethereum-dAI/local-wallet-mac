@@ -1,7 +1,7 @@
 use alloy_primitives::U256;
 use serde::Serialize;
 
-use crate::{DecodedValidationResult, UserOperation};
+use crate::{DecodedValidationResult, Result, UserOperation};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,8 +22,11 @@ pub fn pimlico_gas_price(
     })
 }
 
-pub fn estimate_user_operation_gas(op: &UserOperation) -> serde_json::Value {
-    estimate_user_operation_gas_with_prefund(op, op.required_prefund())
+pub fn estimate_user_operation_gas(op: &UserOperation) -> Result<serde_json::Value> {
+    Ok(estimate_user_operation_gas_with_prefund(
+        op,
+        op.required_prefund()?,
+    ))
 }
 
 pub fn estimate_user_operation_gas_from_validation(

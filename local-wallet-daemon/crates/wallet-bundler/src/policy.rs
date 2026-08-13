@@ -1,4 +1,7 @@
 use alloy_primitives::{Address, U256};
+use wallet_userop_policy::{
+    AuthorizedGasPlan, GasAuthorizationCaps, GasAuthorizationInput, GasPolicyError, GasSchedule,
+};
 
 use crate::{BundlerError, Result, UserOperation};
 
@@ -59,6 +62,10 @@ pub enum PolicyError {
     PaymasterNotSupported,
     SignatureMissing,
     CapExceeded(&'static str),
+    PriorityFeeAboveMaxFee,
+    ArithmeticOverflow(&'static str),
+    FinalizedGasMismatch(&'static str),
+    SignatureLengthTooLarge,
     ReplacementNotPossible(&'static str),
 }
 
@@ -86,22 +93,121 @@ pub fn validate_user_operation(
     if mode == PolicyMode::Submit && op.signature.is_empty() {
         return Err(PolicyError::SignatureMissing);
     }
-    if op.call_gas_limit > policy.max_call_gas_limit {
-        return Err(PolicyError::CapExceeded("callGasLimit"));
-    }
-    if op.verification_gas_limit > policy.max_verification_gas_limit {
-        return Err(PolicyError::CapExceeded("verificationGasLimit"));
-    }
+    authorize_user_operation_gas(policy, op)?;
+    wallet_userop_policy::validate_entrypoint_v07_width(
+        op.call_gas_limit,
+        op.verification_gas_limit,
+        op.pre_verification_gas,
+        op.max_fee_per_gas,
+        op.max_priority_fee_per_gas,
+    )
+    .map_err(map_gas_policy_error)?;
     if op.pre_verification_gas > policy.max_pre_verification_gas {
         return Err(PolicyError::CapExceeded("preVerificationGas"));
     }
-    if op.max_fee_per_gas > policy.max_fee_per_gas {
-        return Err(PolicyError::CapExceeded("maxFeePerGas"));
-    }
-    if op.max_priority_fee_per_gas > policy.max_priority_fee_per_gas {
-        return Err(PolicyError::CapExceeded("maxPriorityFeePerGas"));
-    }
     Ok(())
+}
+
+/// Derive the only gas plan the daemon is willing to estimate, sign, or submit.
+/// Configured daemon caps may tighten the shared v1 policy, but cannot widen it.
+pub fn authorize_user_operation_gas(
+    policy: &BundlerPolicy,
+    op: &UserOperation,
+) -> std::result::Result<AuthorizedGasPlan, PolicyError> {
+    let shared_caps = wallet_userop_policy::v1_owner_caps();
+    let caps = GasAuthorizationCaps {
+        max_call_gas_limit: policy
+            .max_call_gas_limit
+            .min(shared_caps.max_call_gas_limit),
+        max_verification_gas_limit: policy
+            .max_verification_gas_limit
+            .min(shared_caps.max_verification_gas_limit),
+        max_pre_verification_gas: policy
+            .max_pre_verification_gas
+            .min(shared_caps.max_pre_verification_gas),
+        max_fee_per_gas: policy.max_fee_per_gas.min(shared_caps.max_fee_per_gas),
+        max_priority_fee_per_gas: policy
+            .max_priority_fee_per_gas
+            .min(shared_caps.max_priority_fee_per_gas),
+        max_liability: shared_caps.max_liability,
+    };
+    wallet_userop_policy::authorize_no_paymaster(
+        &gas_authorization_input(op),
+        &caps,
+        GasSchedule::EthereumPectraSingleOpV07V1,
+    )
+    .map_err(map_gas_policy_error)
+}
+
+/// Recompute the shared plan after estimation and again before submission.
+/// A caller-supplied preVerificationGas is never an authorization decision.
+pub fn validate_finalized_user_operation_gas(
+    policy: &BundlerPolicy,
+    op: &UserOperation,
+) -> std::result::Result<AuthorizedGasPlan, PolicyError> {
+    let plan = authorize_user_operation_gas(policy, op)?;
+    if op.pre_verification_gas != plan.pre_verification_gas {
+        return Err(PolicyError::FinalizedGasMismatch("preVerificationGas"));
+    }
+    let fields = op.pack_fields().map_err(|error| match error {
+        BundlerError::PolicyCapExceeded { field } => PolicyError::CapExceeded(field),
+        _ => PolicyError::FinalizedGasMismatch("packedGasFields"),
+    })?;
+    if fields.account_gas_limits != plan.account_gas_limits {
+        return Err(PolicyError::FinalizedGasMismatch("accountGasLimits"));
+    }
+    if fields.gas_fees != plan.gas_fees {
+        return Err(PolicyError::FinalizedGasMismatch("gasFees"));
+    }
+    Ok(plan)
+}
+
+fn gas_authorization_input(op: &UserOperation) -> GasAuthorizationInput {
+    let mut init_code = Vec::new();
+    if let Some(factory) = op.factory {
+        init_code.extend_from_slice(factory.as_slice());
+        init_code.extend_from_slice(&op.factory_data);
+    }
+
+    let mut paymaster_and_data = Vec::new();
+    if let Some(paymaster) = op.paymaster {
+        paymaster_and_data.extend_from_slice(paymaster.as_slice());
+    }
+    if op.paymaster_verification_gas_limit.is_some()
+        || op.paymaster_post_op_gas_limit.is_some()
+        || !op.paymaster_data.is_empty()
+    {
+        // The shared policy only needs to know this input is non-empty because
+        // v1 rejects every paymaster shape before packing it.
+        paymaster_and_data.push(1);
+    }
+
+    GasAuthorizationInput {
+        sender: op.sender,
+        nonce: op.nonce,
+        init_code: init_code.into(),
+        call_data: op.call_data.clone(),
+        call_gas_limit: op.call_gas_limit,
+        verification_gas_limit: op.verification_gas_limit,
+        max_fee_per_gas: op.max_fee_per_gas,
+        max_priority_fee_per_gas: op.max_priority_fee_per_gas,
+        paymaster_and_data: paymaster_and_data.into(),
+        signature_len: op.signature.len(),
+    }
+}
+
+fn map_gas_policy_error(error: GasPolicyError) -> PolicyError {
+    match error {
+        GasPolicyError::EntryPointFieldWidth { field } | GasPolicyError::CapExceeded { field } => {
+            PolicyError::CapExceeded(field)
+        }
+        GasPolicyError::PriorityFeeAboveMaxFee => PolicyError::PriorityFeeAboveMaxFee,
+        GasPolicyError::PaymasterNotSupported => PolicyError::PaymasterNotSupported,
+        GasPolicyError::ArithmeticOverflow { operation } => {
+            PolicyError::ArithmeticOverflow(operation)
+        }
+        GasPolicyError::SignatureLengthTooLarge => PolicyError::SignatureLengthTooLarge,
+    }
 }
 
 pub fn validate_bundler_tx_fee_invariant(
@@ -206,6 +312,18 @@ impl PolicyError {
             PolicyError::PaymasterNotSupported => BundlerError::PaymasterNotSupported,
             PolicyError::SignatureMissing => BundlerError::SignatureMissing,
             PolicyError::CapExceeded(field) => BundlerError::PolicyCapExceeded { field },
+            PolicyError::PriorityFeeAboveMaxFee => BundlerError::InvalidUserOperation(
+                "maxPriorityFeePerGas exceeds maxFeePerGas".to_string(),
+            ),
+            PolicyError::ArithmeticOverflow(operation) => BundlerError::InvalidUserOperation(
+                format!("arithmetic overflow while computing {operation}"),
+            ),
+            PolicyError::FinalizedGasMismatch(field) => BundlerError::InvalidUserOperation(
+                format!("{field} does not match the authorized gas plan"),
+            ),
+            PolicyError::SignatureLengthTooLarge => BundlerError::InvalidUserOperation(
+                "signature length cannot be represented safely".to_string(),
+            ),
             PolicyError::ReplacementNotPossible(reason) => {
                 BundlerError::ReplacementNotPossible { reason }
             }
@@ -231,7 +349,7 @@ mod tests {
             entry_points: vec![crate::ENTRY_POINT_V07],
             max_call_gas_limit: U256::from(100),
             max_verification_gas_limit: U256::from(100),
-            max_pre_verification_gas: U256::from(100),
+            max_pre_verification_gas: U256::from(1_000_000),
             max_fee_per_gas: U256::from(100),
             max_priority_fee_per_gas: U256::from(100),
             invariants: BundlerPolicyInvariants::LOCAL_WALLET_V1,
@@ -305,6 +423,83 @@ mod tests {
             )
             .unwrap_err(),
             PolicyError::PaymasterNotSupported
+        );
+    }
+
+    #[test]
+    fn rejects_priority_fee_above_max_fee_before_simulation() {
+        let mut op = op();
+        op.max_priority_fee_per_gas = op.max_fee_per_gas + U256::from(1);
+
+        assert_eq!(
+            validate_user_operation(
+                &policy(),
+                &op,
+                crate::ENTRY_POINT_V07,
+                1,
+                PolicyMode::Estimate
+            )
+            .unwrap_err(),
+            PolicyError::PriorityFeeAboveMaxFee
+        );
+    }
+
+    #[test]
+    fn finalized_gas_must_exactly_match_shared_authorization() {
+        let mut op = op();
+        let plan = authorize_user_operation_gas(&policy(), &op).unwrap();
+        op.pre_verification_gas = plan.pre_verification_gas;
+
+        assert_eq!(
+            validate_finalized_user_operation_gas(&policy(), &op)
+                .unwrap()
+                .max_liability,
+            op.required_prefund().unwrap()
+        );
+
+        op.pre_verification_gas += U256::from(1);
+        assert_eq!(
+            validate_finalized_user_operation_gas(&policy(), &op).unwrap_err(),
+            PolicyError::FinalizedGasMismatch("preVerificationGas")
+        );
+    }
+
+    #[test]
+    fn entrypoint_uint120_boundary_is_enforced_even_if_config_is_wider() {
+        let mut policy = policy();
+        policy.max_call_gas_limit = U256::MAX;
+        let mut op = op();
+        op.call_gas_limit = wallet_userop_policy::ENTRY_POINT_V07_FIELD_MAX + U256::from(1);
+
+        assert_eq!(
+            validate_user_operation(
+                &policy,
+                &op,
+                crate::ENTRY_POINT_V07,
+                1,
+                PolicyMode::Estimate
+            )
+            .unwrap_err(),
+            PolicyError::CapExceeded("callGasLimit")
+        );
+    }
+
+    #[test]
+    fn total_liability_cap_rejects_individually_bounded_fields() {
+        let mut policy = policy();
+        policy.max_call_gas_limit = U256::from(10_000_000_u64);
+        policy.max_verification_gas_limit = U256::from(5_000_000_u64);
+        policy.max_fee_per_gas = U256::from(50_000_000_000_u64);
+        policy.max_priority_fee_per_gas = U256::from(5_000_000_000_u64);
+        let mut op = op();
+        op.call_gas_limit = policy.max_call_gas_limit;
+        op.verification_gas_limit = policy.max_verification_gas_limit;
+        op.max_fee_per_gas = policy.max_fee_per_gas;
+        op.max_priority_fee_per_gas = policy.max_priority_fee_per_gas;
+
+        assert_eq!(
+            authorize_user_operation_gas(&policy, &op).unwrap_err(),
+            PolicyError::CapExceeded("maxLiability")
         );
     }
 

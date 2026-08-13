@@ -31,6 +31,8 @@ pub async fn handle(
         PolicyMode::Submit,
     )
     .map_err(super::map_policy_error)?;
+    wallet_bundler::validate_finalized_user_operation_gas(&policy, &op)
+        .map_err(super::map_policy_error)?;
 
     let hash = super::hex_hash(
         op.user_op_hash(entry_point, state.config.network.chain_id)
@@ -346,9 +348,21 @@ pub(crate) async fn record_submit_outcome(
 }
 
 fn handle_ops_gas_limit(op: &UserOperation) -> Result<u64, wallet_node_api::JsonRpcError> {
-    let limit = op.call_gas_limit + op.verification_gas_limit + op.pre_verification_gas;
+    let limit = op
+        .call_gas_limit
+        .checked_add(op.verification_gas_limit)
+        .and_then(|value| value.checked_add(op.pre_verification_gas))
+        .ok_or_else(|| {
+            super::map_bundler_error(wallet_bundler::BundlerError::InvalidUserOperation(
+                "arithmetic overflow while computing bundler transaction gas limit".to_string(),
+            ))
+        })?;
     let overhead = U256::from(150_000_u64);
-    let total = limit + overhead;
+    let total = limit.checked_add(overhead).ok_or_else(|| {
+        super::map_bundler_error(wallet_bundler::BundlerError::InvalidUserOperation(
+            "arithmetic overflow while computing bundler transaction gas limit".to_string(),
+        ))
+    })?;
     if total > U256::from(u64::MAX) {
         return Err(super::map_bundler_error(
             wallet_bundler::BundlerError::PolicyCapExceeded {
@@ -364,7 +378,13 @@ fn ensure_bundler_eoa_gas_funded(
     bundler_balance: U256,
 ) -> Result<(), wallet_node_api::JsonRpcError> {
     let gas_limit = handle_ops_gas_limit(op)?;
-    let required_max_cost = U256::from(gas_limit) * op.max_fee_per_gas;
+    let required_max_cost = U256::from(gas_limit)
+        .checked_mul(op.max_fee_per_gas)
+        .ok_or_else(|| {
+            super::map_bundler_error(wallet_bundler::BundlerError::InvalidUserOperation(
+                "arithmetic overflow while computing bundler transaction maximum cost".to_string(),
+            ))
+        })?;
     if bundler_balance >= required_max_cost {
         return Ok(());
     }
@@ -399,10 +419,11 @@ fn enforce_per_sender_quota(
         16,
     )
     .map_err(|_| internal("sender_quota_config_invalid"))?;
+    let required_prefund = op.required_prefund().map_err(super::map_bundler_error)?;
     let decision = state.per_sender_rate_limiter.check(
         state.config.network.chain_id,
         op.sender,
-        op.required_prefund(),
+        required_prefund,
         crate::rate_limit::SenderQuotaConfig {
             max_user_ops_per_minute: state.config.policy.max_user_ops_per_sender_per_minute,
             max_gas_wei_per_hour,

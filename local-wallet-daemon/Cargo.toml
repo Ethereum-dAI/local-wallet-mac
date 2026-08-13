@@ -18,6 +18,7 @@ license = "MIT OR Apache-2.0"
 wallet-signature = { path = "../local-wallet-protocol/crates/signature" }
 wallet-kernel    = { path = "../local-wallet-protocol/crates/kernel" }
 wallet-addresses = { path = "../local-wallet-protocol/crates/wallet-addresses" }
+wallet-userop-policy = { path = "../local-wallet-protocol/crates/userop-policy" }
 
 # Copied verbatim from local-wallet-protocol monorepo [workspace.dependencies]
 alloy-primitives = { version = "1.5", features = ["serde"] }

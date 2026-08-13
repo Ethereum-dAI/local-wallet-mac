@@ -2585,8 +2585,7 @@ final class AppModel: ObservableObject {
         executions: [KernelExecutionRequest],
         logContext: String = "batch",
         signingReason: String? = nil,
-        acknowledgedCallGasLimit: UInt64? = nil,
-        authenticationSession: DeviceOwnerAuthenticationSession? = nil
+        acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationSendResult {
         try await executeUserOperation(
             logContext: logContext,
@@ -2597,8 +2596,7 @@ final class AppModel: ObservableObject {
                 amount: String(executions.count),
                 token: executions.count == 1 ? "call" : "calls"
             ),
-            acknowledgedCallGasLimit: acknowledgedCallGasLimit,
-            authenticationSession: authenticationSession
+            acknowledgedCallGasLimit: acknowledgedCallGasLimit
         ) { [self] buildContext in
             try await buildUserOperationDraft(
                 executions: executions,
@@ -2640,7 +2638,6 @@ final class AppModel: ObservableObject {
         historyDraft: WalletTransactionDraft?,
         afterSubmit: ((String) -> Void)? = nil,
         acknowledgedCallGasLimit: UInt64? = nil,
-        authenticationSession: DeviceOwnerAuthenticationSession? = nil,
         buildDraft: @escaping (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         guard !isResettingWallet, !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
@@ -2668,7 +2665,6 @@ final class AppModel: ObservableObject {
                 historyDraft: historyDraft,
                 afterSubmit: afterSubmit,
                 acknowledgedCallGasLimit: acknowledgedCallGasLimit,
-                authenticationSession: authenticationSession,
                 buildDraft: buildDraft
             )
             isSendingUserOperation = false
@@ -2687,7 +2683,6 @@ final class AppModel: ObservableObject {
         historyDraft: WalletTransactionDraft?,
         afterSubmit: ((String) -> Void)? = nil,
         acknowledgedCallGasLimit: UInt64? = nil,
-        authenticationSession: DeviceOwnerAuthenticationSession? = nil,
         buildDraft: (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
         appendLog("\(logContext): preparing transaction on \(activeChain.name)")
@@ -2695,7 +2690,7 @@ final class AppModel: ObservableObject {
         let liveInspection = try await refreshAccountInspectionWithRetry(logContext: "\(logContext)-preflight")
         appendLog("\(logContext): using \(liveInspection.isDeployed ? "deployed" : "precomputed") account path")
 
-        let sessionPlan = intent.flatMap {
+        var sessionPlan = intent.flatMap {
             liveInspection.isDeployed ? activeSessionPlan(for: $0, now: Date()) : nil
         }
         if let sessionPlan {
@@ -2709,7 +2704,7 @@ final class AppModel: ObservableObject {
             isDeployed: liveInspection.isDeployed,
             sessionPlan: sessionPlan
         )
-        let draft: UserOperationDraft
+        var draft: UserOperationDraft
         do {
             draft = try await buildDraft(buildContext)
         } catch {
@@ -2720,7 +2715,27 @@ final class AppModel: ObservableObject {
 
         let usePrecompiled = await resolveUsePrecompiled(logContext: logContext)
 
-        let enriched: EnrichedUserOperation
+        func rebuildFreshOwnerOperation(
+            context: String
+        ) async throws -> (UserOperationDraft, EnrichedUserOperation) {
+            let ownerDraft = try await buildDraft(
+                UserOperationBuildContext(
+                    isDeployed: liveInspection.isDeployed,
+                    sessionPlan: nil
+                )
+            )
+            appendDraftLogSummary(ownerDraft, context: context)
+            let ownerOperation = try await enrichDraftWithLocalBundlerEstimation(
+                ownerDraft,
+                logContext: context,
+                usePrecompiled: usePrecompiled,
+                sessionPlan: nil,
+                acknowledgedCallGasLimit: acknowledgedCallGasLimit
+            )
+            return (ownerDraft, ownerOperation)
+        }
+
+        var enriched: EnrichedUserOperation
         do {
             enriched = try await enrichDraftWithLocalBundlerEstimation(
                 draft,
@@ -2730,22 +2745,94 @@ final class AppModel: ObservableObject {
                 acknowledgedCallGasLimit: acknowledgedCallGasLimit
             )
         } catch {
+            guard SessionGasAuthorizationFallback.requiresFreshOwnerDraft(
+                after: error,
+                hadSessionPlan: sessionPlan != nil
+            ) else {
+                clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+                throw error
+            }
+
+            // A session nonce/signature shape is not valid input to the owner
+            // signer. Throw it away and rebuild from the original intent using
+            // the root nonce path, then obtain a fresh fee quote and authorize
+            // that distinct operation independently.
+            appendLog(
+                "\(logContext): session gas liability exceeds its local budget; rebuilding a fresh owner operation"
+            )
+            clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+            sessionPlan = nil
+            (draft, enriched) = try await rebuildFreshOwnerOperation(
+                context: "\(logContext)-owner-fallback"
+            )
+        }
+
+        // Estimation can itself take long enough for the fee quote to age. Do
+        // one complete rebuild before prompting. This avoids asking for Touch ID
+        // and only then discovering that the operation was already stale.
+        do {
+            for refreshAttempt in 0..<2 {
+                let head = try await ExecutionFeeOracle().currentBlockNumber(
+                    rpcURL: activeChain.rpcURL,
+                    expectedChainID: activeChain.id
+                )
+                do {
+                    try enriched.operation.feeQuote.validateFreshness(
+                        now: Date(),
+                        currentBlockNumber: head
+                    )
+                    break
+                } catch {
+                    guard refreshAttempt == 0,
+                          FeeAuthorizationRefreshPolicy.shouldRefresh(after: error)
+                    else {
+                        throw error
+                    }
+                    appendLog(
+                        "\(logContext): fee quote aged during estimation; rebuilding authorization before key access"
+                    )
+                    do {
+                        enriched = try await enrichDraftWithLocalBundlerEstimation(
+                            draft,
+                            logContext: "\(logContext)-fee-refresh",
+                            usePrecompiled: usePrecompiled,
+                            sessionPlan: sessionPlan,
+                            acknowledgedCallGasLimit: acknowledgedCallGasLimit
+                        )
+                    } catch {
+                        guard SessionGasAuthorizationFallback.requiresFreshOwnerDraft(
+                            after: error,
+                            hadSessionPlan: sessionPlan != nil
+                        ) else {
+                            throw error
+                        }
+                        clearPendingSessionInstallAfterPreSubmitFailure(
+                            sessionPlan,
+                            logContext: logContext
+                        )
+                        sessionPlan = nil
+                        (draft, enriched) = try await rebuildFreshOwnerOperation(
+                            context: "\(logContext)-fee-refresh-owner-fallback"
+                        )
+                    }
+                }
+            }
+        } catch {
             clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
             throw error
         }
         let enrichedDraft = enriched.draft
         builtUserOperationDraft = enrichedDraft
 
-        // Pre-signature affordability check, scoped to the gas-headroom retry.
-        // This is the only point where it helps: callGasLimit is inside the
-        // UserOperation hash, so nothing downstream can change it without
+        // Every operation must be affordable at its locally authorized maximum
+        // liability before any signing key is touched. callGasLimit is inside
+        // the UserOperation hash, so nothing downstream can change it without
         // invalidating the signature we are about to request.
         switch await PrefundPrecheck.decision(
-            acknowledgedCallGasLimit: acknowledgedCallGasLimit,
             requiredPrefund: enriched.requiredPrefund,
             callGasLimit: enrichedDraft.gasPlan.callGasLimit,
             maxFeePerGas: enrichedDraft.gasPlan.maxFeePerGas,
-            feeQuoteAtPolicyCeiling: enriched.feeQuoteAtPolicyCeiling,
+            feeQuoteAtPolicyCeiling: false,
             readWalletStatus: {
                 try await withWalletNodeClient(operation: "\(logContext) wallet status") { client in
                     try await client.walletStatus(smartAccount: enrichedDraft.sender)
@@ -2756,7 +2843,11 @@ final class AppModel: ObservableObject {
             break
         case let .statusUnavailable(error):
             appendLog(
-                "\(logContext): wallet status unavailable (\(error.localizedDescription)); skipping prefund precheck"
+                "\(logContext): wallet status unavailable (\(error.localizedDescription)); declining before signature"
+            )
+            clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+            throw AppError.localDaemonLaunchFailed(
+                "Could not verify the account balance and EntryPoint deposit before signing. Retry when wallet-node is available."
             )
         case let .decline(report):
             appendLog(
@@ -2770,27 +2861,38 @@ final class AppModel: ObservableObject {
         // buildable and affordable, create the action context and make the relayer available.
         // A session-key send with an already-running relayer therefore remains prompt-free;
         // passkey sends reuse this same context for the Secure Enclave signature below.
-        let actionAuthentication = authenticationSession
-            ?? DeviceOwnerAuthenticationSession(reason: signingReason)
-        let ownsAuthenticationSession = authenticationSession == nil
-        defer {
-            if ownsAuthenticationSession {
-                actionAuthentication.invalidate()
-            }
-        }
+        // Never accept a previously authorized context here. Some upstream
+        // workflows must unlock a different secret before the gas envelope can
+        // be known. Reusing that context would let an owner signature happen
+        // without ever presenting the exact locally authorized liability.
+        let actionAuthentication = DeviceOwnerAuthenticationSession.ownerUserOperation(
+            action: signingReason,
+            maximumLiability: enriched.requiredPrefund
+        )
+        let gasAwareSigningReason = actionAuthentication.reason
+        defer { actionAuthentication.invalidate() }
         _ = try await ensureRelayerUnlocked(using: actionAuthentication)
 
-        let signatureResult: UserOperationSignatureResult
+        // Re-read the independent execution-RPC head after any relayer unlock or
+        // biometric delay. UserOperationSigning repeats the time/block check
+        // before touching either owner or session key.
+        let feeQuoteHead = try await ExecutionFeeOracle().currentBlockNumber(
+            rpcURL: activeChain.rpcURL,
+            expectedChainID: activeChain.id
+        )
+
+        let signatureResult: SignedUserOperation
         do {
             signatureResult = try UserOperationSigning.signForSend(
-                draft: enrichedDraft,
+                operation: enriched.operation,
+                currentBlockNumber: feeQuoteHead,
                 session: sessionPlan?.signingContext,
                 passkeySigner: { [self] preimage in
                     appendLog("\(logContext): computed signing preimage (\(preimage.count) bytes)")
                     appendLog("\(logContext): requesting Secure Enclave signature")
                     let signature = try keyStore.sign(
                         preimage: preimage,
-                        reason: signingReason,
+                        reason: gasAwareSigningReason,
                         authenticationContext: actionAuthentication.context
                     )
                     appendLog("\(logContext): signature components r=\(signature.r.shortHex) s=\(signature.s.shortHex)")
@@ -2849,9 +2951,13 @@ final class AppModel: ObservableObject {
                 operation: "\(logContext) submit",
                 authenticationSession: actionAuthentication
             ) { client in
-                try await client.sendUserOperation(
-                    draft: enrichedDraft,
-                    signature: signatureResult.signature
+                try await UserOperationSubmission.submit(
+                    operation: signatureResult,
+                    rpcURL: activeChain.rpcURL,
+                    expectedChainID: activeChain.id,
+                    transport: { operation in
+                        try await client.sendUserOperation(operation: operation)
+                    }
                 )
             }
         } catch {
@@ -3237,12 +3343,12 @@ final class AppModel: ObservableObject {
             "\(logContext): fee quote maxPriority=\(feeQuote.maxPriorityFeePerGas.shortHex) maxFee=\(feeQuote.maxFeePerGas.shortHex)"
         )
 
-        // Quoted *before* estimating so the submitted draft carries real fees and
-        // the daemon's requiredPrefund comes back as a real number rather than
-        // (limits x 0). Do not move this back below the estimate.
-        let gasFees = pack128(
-            high: feeQuote.maxPriorityFeePerGas,
-            low: feeQuote.maxFeePerGas
+        // Quote before estimating so simulation sees the same locally selected
+        // fees. The daemon's preVerificationGas and requiredPrefund remain
+        // diagnostic only and never cross the authorization boundary.
+        let gasFees = try UserOperationGasAuthorizer.checkedPackedGasFees(
+            maxPriorityFeePerGas: feeQuote.maxPriorityFeePerGas,
+            maxFeePerGas: feeQuote.maxFeePerGas
         )
         let pricedDraft = draft.updatingGasPlan(
             UserOperationGasPlan(
@@ -3266,23 +3372,31 @@ final class AppModel: ObservableObject {
             "\(logContext): gas estimate call=\(estimate.callGasLimit.shortHex) verification=\(estimate.verificationGasLimit.shortHex) preVerification=\(estimate.preVerificationGas.shortHex) requiredPrefund=\(estimate.requiredPrefund.shortHex)"
         )
 
+        let authorizationScope: WalletSignature.GasAuthorizationScope
+        if let gasBudgetWei = sessionPlan?.record.policyConfigSnapshot.gasBudgetWei {
+            authorizationScope = .session(
+                gasBudget: try Data.quantityString(gasBudgetWei).leftPadded(to: 32)
+            )
+        } else {
+            authorizationScope = .owner
+        }
+        let authorized = try UserOperationGasAuthorizer.authorize(
+            draft: draft,
+            callGasLimit: estimate.callGasLimit,
+            verificationGasLimit: estimate.verificationGasLimit,
+            maxPriorityFeePerGas: feeQuote.maxPriorityFeePerGas,
+            maxFeePerGas: feeQuote.maxFeePerGas,
+            expectedSignatureLength: dummySignature.count,
+            authorizationScope: authorizationScope,
+            feeQuote: feeQuote.quote
+        )
+        appendLog(
+            "\(logContext): locally authorized pvg=\(authorized.draft.gasPlan.preVerificationGas.shortHex) maxLiability=\(authorized.maxLiability.shortHex) policy=v\(authorized.gasPolicyVersion); daemon pvg/prefund ignored"
+        )
+
         activeBundlerStatus = "Local wallet-node ready on \(activeChain.name)"
 
-        return EnrichedUserOperation(
-            draft: pricedDraft.updatingGasPlan(
-                UserOperationGasPlan(
-                    accountGasLimits: pack128(
-                        high: estimate.verificationGasLimit,
-                        low: estimate.callGasLimit
-                    ),
-                    preVerificationGas: estimate.preVerificationGas,
-                    gasFees: gasFees,
-                    paymasterAndData: Data()
-                )
-            ),
-            requiredPrefund: estimate.requiredPrefund,
-            feeQuoteAtPolicyCeiling: feeQuote.atPolicyCeiling
-        )
+        return EnrichedUserOperation(operation: authorized)
     }
 
     private func pollForLocalReceipt(
@@ -3799,35 +3913,29 @@ final class AppModel: ObservableObject {
         return String(data: data, encoding: .utf8)
     }
 
-    private func pack128(high: Data, low: Data) -> Data {
-        high.suffix(16) + low.suffix(16)
-    }
-
     private func suggestedUserOperationFees(
         logContext: String
-    ) async throws -> (maxPriorityFeePerGas: Data, maxFeePerGas: Data, atPolicyCeiling: Bool) {
-        let gasPrice = try await withWalletNodeWarmupRetry(operation: "\(logContext) gas price") {
-            try await withWalletNodeClient(operation: "\(logContext) gas price") { client in
-                try await client.userOperationGasPrice()
-            }
-        }
+    ) async throws -> (
+        quote: ExecutionFeeQuote,
+        maxPriorityFeePerGas: Data,
+        maxFeePerGas: Data
+    ) {
+        let quote = try await ExecutionFeeOracle().quote(
+            rpcURL: activeChain.rpcURL,
+            expectedChainID: activeChain.id
+        )
         let settings = networkSettings
-        let resolved = GasPricing.resolveUserOperationFees(
-            gasPrice: gasPrice,
+        let resolved = try GasPricing.resolveUserOperationFees(
+            quote: quote,
             autoEnabled: settings.autoGasModeEnabled,
             autoTier: settings.autoGasTier,
             manualCap: settings.activeGasPolicy
         )
         appendLog("\(logContext): gas fee mode \(settings.autoGasModeEnabled ? "auto/\(settings.autoGasTier.rawValue)" : "manual(capped to \(settings.activeMaxFeePerGasGwei)/\(settings.activeMaxPriorityFeePerGasGwei) gwei)")")
-        // Every tier at the configured ceiling means the live price is at or above
-        // the cap (`gas_price.rs` clamps there). The fee is still the one we will
-        // sign with, but a prefund floor derived from it is cap-driven, so the card
-        // must not present funding as the only lever.
-        let atPolicyCeiling = GasPricing.isPolicyCeilingQuote(gasPrice)
-        if atPolicyCeiling {
-            appendLog("\(logContext): every gas tier came back at the policy ceiling; live price is at or above the cap")
-        }
-        return (resolved.maxPriorityFeePerGas, resolved.maxFeePerGas, atPolicyCeiling)
+        appendLog(
+            "\(logContext): independent fee quote block=\(quote.blockNumber) age=0s six-block ceiling"
+        )
+        return (quote, resolved.maxPriorityFeePerGas, resolved.maxFeePerGas)
     }
 
     /// Fetch the current live gas tiers + base fee for the chat indicator.

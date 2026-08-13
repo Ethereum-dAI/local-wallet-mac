@@ -3,6 +3,7 @@ members = [
     "crates/signature",
     "crates/kernel",
     "crates/wallet-addresses",
+    "crates/userop-policy",
 ]
 resolver = "2"
 

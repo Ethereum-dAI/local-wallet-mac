@@ -207,6 +207,16 @@ private enum InjectedDaemonTerminationError: Error {
     #expect(toml.contains(#"max_priority_fee_per_gas = "0x9502f900""#))
 }
 
+@Test func automaticDaemonCeilingMatchesImmutableAppCaps() {
+    let ceiling = WalletNodeDaemon.GasPolicy.autoCeiling
+
+    #expect(ceiling.maxFeePerGasGwei == "50")
+    #expect(ceiling.maxPriorityFeePerGasGwei == "5")
+    let toml = WalletNodeDaemon.daemonConfigTOML(chain: .ethereumSepolia, gasPolicy: ceiling)
+    #expect(toml.contains(#"max_fee_per_gas = "0xba43b7400""#))
+    #expect(toml.contains(#"max_priority_fee_per_gas = "0x12a05f200""#))
+}
+
 @Test func daemonConfigCanDisableHeliosVerification() throws {
     let toml = WalletNodeDaemon.daemonConfigTOML(
         chain: .ethereumSepolia,

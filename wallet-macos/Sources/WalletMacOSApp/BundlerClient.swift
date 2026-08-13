@@ -199,14 +199,16 @@ struct BundlerClient {
 
     func sendUserOperation(
         chain: ChainConfiguration,
-        draft: UserOperationDraft,
-        signature: Data
+        operation: SignedUserOperation
     ) async throws -> String {
         guard let bundlerURL = chain.bundlerURL else {
             throw AppError.bundlerNotConfigured
         }
 
-        let userOperation = rpcUserOperation(draft: draft, signature: signature)
+        let userOperation = rpcUserOperation(
+            draft: operation.draft,
+            signature: operation.signature
+        )
 
         var request = URLRequest(url: bundlerURL)
         request.httpMethod = "POST"
@@ -234,8 +236,7 @@ struct BundlerClient {
         guard let result = decoded.result else {
             throw BundlerError.invalidResponse
         }
-
-        return result
+        return try operation.validatingReturnedHash(result)
     }
 
     func getUserOperationReceipt(
@@ -408,8 +409,17 @@ struct BundlerClient {
 
     private func parseQuantity(_ value: String, field: String) throws -> Data {
         do {
-            return try Data.quantityString(value)
+            let decoded = try Data.quantityString(value)
+            guard decoded.count <= 32 else {
+                throw BundlerError.rpcError(
+                    "Bundler returned oversized \(field): \(decoded.count) bytes"
+                )
+            }
+            return decoded
         } catch {
+            if let error = error as? BundlerError {
+                throw error
+            }
             throw BundlerError.rpcError("Bundler returned invalid \(field): \(value)")
         }
     }

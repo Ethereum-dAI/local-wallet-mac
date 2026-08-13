@@ -148,6 +148,18 @@ fn replacement_policy_error(error: PolicyError) -> BundlerError {
         },
         PolicyError::PaymasterNotSupported => BundlerError::PaymasterNotSupported,
         PolicyError::SignatureMissing => BundlerError::SignatureMissing,
+        PolicyError::PriorityFeeAboveMaxFee => BundlerError::ReplacementNotPossible {
+            reason: "priority_fee_above_max_fee",
+        },
+        PolicyError::ArithmeticOverflow(_) => BundlerError::ReplacementNotPossible {
+            reason: "gas_arithmetic_overflow",
+        },
+        PolicyError::FinalizedGasMismatch(_) => BundlerError::ReplacementNotPossible {
+            reason: "finalized_gas_mismatch",
+        },
+        PolicyError::SignatureLengthTooLarge => BundlerError::ReplacementNotPossible {
+            reason: "signature_length_too_large",
+        },
     }
 }
 

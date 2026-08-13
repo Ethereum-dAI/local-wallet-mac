@@ -102,6 +102,26 @@ private enum AuthenticationPolicyTestError: Error {
     #expect(invalidationCount == 1)
 }
 
+@Test @MainActor func ownerUserOperationAuthenticationIsCreatedWithThePostEnvelopeLiability() async throws {
+    let liability = Data([0x0a, 0xa8, 0x7b, 0xee, 0x53, 0x80, 0x01])
+        .leftPadded(to: 32)
+    var presentedReason: String?
+    let session = DeviceOwnerAuthenticationSession.ownerUserOperation(
+        action: "Shield 1 ETH",
+        maximumLiability: liability,
+        evaluator: { _, _, reason in
+            presentedReason = reason
+            return true
+        }
+    )
+
+    try await session.authorize()
+
+    #expect(presentedReason == "Maximum network fee: 0.003001 ETH. Shield 1 ETH.")
+    #expect(session.reason == presentedReason)
+    session.invalidate()
+}
+
 @Test func protectedSecretStoresDoNotCachePlaintextOrAuthenticationWindows() throws {
     let bundlerSource = try authenticationSource(named: "BundlerKeyStore.swift")
     let railgunSource = try authenticationSource(named: "RailgunSecretsStore.swift")

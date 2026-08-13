@@ -2371,7 +2371,11 @@ mod tests {
         let chain = Arc::new(MockChainAdapter::with_synced(true));
         chain.set_current_head(head.clone());
         let op = wallet_bundler::UserOperation::parse(sample_user_op("0xab")).unwrap();
-        chain.set_balance(op.sender, BlockTag::Hash(head.hash), U256::from(0x1800));
+        chain.set_balance(
+            op.sender,
+            BlockTag::Hash(head.hash),
+            op.required_prefund().unwrap(),
+        );
         set_entry_point_deposit(
             &chain,
             entry_point,
@@ -3260,7 +3264,11 @@ mod tests {
             .with_verification_gas_limit(U256::from(1_000_000u64))
             .with_signature(wallet_bundler::dummy_webauthn_signature(false));
         chain.set_current_head(head.clone());
-        chain.set_balance(op.sender, BlockTag::Hash(head.hash), U256::from(0x1800));
+        chain.set_balance(
+            op.sender,
+            BlockTag::Hash(head.hash),
+            op.required_prefund().unwrap(),
+        );
         set_entry_point_deposit(
             &chain,
             entry_point,
@@ -3356,7 +3364,11 @@ mod tests {
         ));
 
         chain.set_current_head(head.clone());
-        chain.set_balance(op.sender, BlockTag::Hash(head.hash), U256::from(0x1800));
+        chain.set_balance(
+            op.sender,
+            BlockTag::Hash(head.hash),
+            op.required_prefund().unwrap(),
+        );
         set_entry_point_deposit(
             &chain,
             entry_point,
@@ -3444,7 +3456,11 @@ mod tests {
         }
         .abi_encode();
         chain.set_current_head(head.clone());
-        chain.set_balance(op.sender, BlockTag::Hash(head.hash), U256::from(0x1800));
+        chain.set_balance(
+            op.sender,
+            BlockTag::Hash(head.hash),
+            op.required_prefund().unwrap(),
+        );
         set_entry_point_deposit(
             &chain,
             entry_point,
@@ -3537,7 +3553,11 @@ mod tests {
             boosted_op.with_signature(wallet_bundler::dummy_webauthn_signature(false));
 
         chain.set_current_head(head.clone());
-        chain.set_balance(op.sender, BlockTag::Hash(head.hash), U256::from(0x1800));
+        chain.set_balance(
+            op.sender,
+            BlockTag::Hash(head.hash),
+            op.required_prefund().unwrap(),
+        );
         set_entry_point_deposit(
             &chain,
             entry_point,
@@ -3618,7 +3638,11 @@ mod tests {
         let chain = Arc::new(MockChainAdapter::with_synced(true));
         let op = wallet_bundler::UserOperation::parse(sample_user_op("0x")).unwrap();
         chain.set_current_head(head.clone());
-        chain.set_balance(op.sender, BlockTag::Hash(head.hash), U256::from(0x17ff));
+        chain.set_balance(
+            op.sender,
+            BlockTag::Hash(head.hash),
+            op.required_prefund().unwrap() - U256::from(1),
+        );
         set_entry_point_deposit(
             &chain,
             entry_point,
@@ -3683,7 +3707,7 @@ mod tests {
             entry_point,
             op.sender,
             BlockTag::Hash(head.hash),
-            op.required_prefund(),
+            op.required_prefund().unwrap(),
         );
         let (handler, auth_header, state) = test_handler(chain.clone());
         state.mark_state_override_smoke_passed();
@@ -3743,7 +3767,7 @@ mod tests {
             entry_point,
             op.sender,
             BlockTag::Hash(head.hash),
-            base_op.required_prefund() + U256::from(10),
+            base_op.required_prefund().unwrap() + U256::from(10),
         );
         let (handler, auth_header, state) = test_handler(chain.clone());
         state.mark_state_override_smoke_passed();
@@ -3934,7 +3958,11 @@ mod tests {
         let chain = Arc::new(MockChainAdapter::with_synced(true));
         chain.set_current_head(head.clone());
         let op = wallet_bundler::UserOperation::parse(sample_user_op("0xab")).unwrap();
-        chain.set_balance(op.sender, BlockTag::Hash(head.hash), U256::from(0x1800));
+        chain.set_balance(
+            op.sender,
+            BlockTag::Hash(head.hash),
+            op.required_prefund().unwrap(),
+        );
         set_entry_point_deposit(
             &chain,
             entry_point,
@@ -4004,7 +4032,11 @@ mod tests {
             "{:#x}",
             B256::from(op.user_op_hash(entry_point, 1).unwrap())
         );
-        chain.set_balance(op.sender, BlockTag::Hash(head.hash), U256::from(0x1800));
+        chain.set_balance(
+            op.sender,
+            BlockTag::Hash(head.hash),
+            op.required_prefund().unwrap(),
+        );
         set_entry_point_deposit(
             &chain,
             entry_point,
@@ -4291,7 +4323,11 @@ mod tests {
             BlockTag::Hash(head.hash),
             U256::from(5_000_000_000_000_000_u64),
         );
-        chain.set_balance(op.sender, BlockTag::Hash(head.hash), U256::from(0x17ff));
+        chain.set_balance(
+            op.sender,
+            BlockTag::Hash(head.hash),
+            op.required_prefund().unwrap() - U256::from(1),
+        );
         set_entry_point_deposit(
             &chain,
             entry_point,
@@ -4341,6 +4377,32 @@ mod tests {
 
         assert_eq!(value["error"]["code"], wallet_node_api::SIMULATION_FAILED);
         assert_eq!(value["error"]["data"]["reason"], "paymaster_not_supported");
+    }
+
+    #[tokio::test]
+    async fn send_user_operation_rejects_gas_drift_before_chain_access() {
+        let chain = Arc::new(MockChainAdapter::new());
+        let (handler, auth_header, _state) = test_handler(chain.clone());
+        let mut op = sample_user_op("0xab");
+        let canonical = wallet_bundler::UserOperation::parse(op.clone()).unwrap();
+        op["preVerificationGas"] = json!(wallet_bundler::gas::u256_hex(
+            canonical.pre_verification_gas + U256::from(1)
+        ));
+
+        let value = call_rpc(
+            &handler,
+            &auth_header,
+            "localwallet_sendUserOperation",
+            json!([op, entry_point_v07_hex()]),
+        )
+        .await;
+
+        assert_eq!(value["error"]["code"], wallet_node_api::SIMULATION_FAILED);
+        assert_eq!(value["error"]["data"]["reason"], "finalized_gas_mismatch");
+        assert_eq!(chain.is_synced_call_count(), 0);
+        assert_eq!(chain.code_call_count(), 0);
+        assert_eq!(chain.balance_call_count(), 0);
+        assert_eq!(chain.call_call_count(), 0);
     }
 
     #[tokio::test]
@@ -4838,7 +4900,7 @@ mod tests {
         }
         .abi_encode();
 
-        json!({
+        let mut op = json!({
             "sender": format!("{:#x}", sample_sender()),
             "nonce": "0x01",
             "factory": format!("{:#x}", wallet_bundler::PINNED_KERNEL_FACTORY_ADDRESS),
@@ -4850,7 +4912,11 @@ mod tests {
             "maxFeePerGas": "0x40",
             "maxPriorityFeePerGas": "0x05",
             "signature": signature
-        })
+        });
+        if signature != "0x" {
+            canonicalize_submit_gas(&mut op);
+        }
+        op
     }
 
     fn deployed_sample_user_op(signature: &str) -> serde_json::Value {
@@ -4858,7 +4924,27 @@ mod tests {
         let object = op.as_object_mut().expect("sample user op is an object");
         object.remove("factory");
         object.remove("factoryData");
+        if signature != "0x" {
+            canonicalize_submit_gas(&mut op);
+        }
         op
+    }
+
+    fn canonicalize_submit_gas(value: &mut serde_json::Value) {
+        let op = wallet_bundler::UserOperation::parse(value.clone()).unwrap();
+        let policy = wallet_bundler::BundlerPolicy {
+            chain_id: 1,
+            entry_points: vec![wallet_bundler::ENTRY_POINT_V07],
+            max_call_gas_limit: U256::from(10_000_000_u64),
+            max_verification_gas_limit: U256::from(5_000_000_u64),
+            max_pre_verification_gas: U256::from(1_000_000_u64),
+            max_fee_per_gas: U256::from(10_000_000_000_u64),
+            max_priority_fee_per_gas: U256::from(2_000_000_000_u64),
+            invariants: wallet_bundler::BundlerPolicyInvariants::LOCAL_WALLET_V1,
+        };
+        let plan = wallet_bundler::authorize_user_operation_gas(&policy, &op).unwrap();
+        value["preVerificationGas"] =
+            json!(wallet_bundler::gas::u256_hex(plan.pre_verification_gas));
     }
 
     fn sample_sender() -> Address {

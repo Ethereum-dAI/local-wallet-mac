@@ -20,8 +20,9 @@ import Testing
     }
 
     @Test func absentRequiredPrefundDecodesAsZero() throws {
-        // Fail open: an older daemon that omits the field must not synthesise a
-        // shortfall. The precheck predicate treats zero as "nothing to check".
+        // Kept for wire compatibility with older daemons. Authorization ignores
+        // this value and recomputes liability locally, so zero cannot weaken the
+        // signing gate.
         let estimate = try WalletNodeClient.decodeGasEstimate([
             "callGasLimit": "0x927c0",
             "verificationGasLimit": "0xf4240",
@@ -29,6 +30,28 @@ import Testing
         ])
 
         #expect(estimate.requiredPrefund == Data(repeating: 0, count: 32))
+    }
+
+    @Test func zeroOmittedAndFalseRequiredPrefundAreEquivalent() throws {
+        let common: [String: Any] = [
+            "callGasLimit": "0x927c0",
+            "verificationGasLimit": "0xf4240",
+            "preVerificationGas": "0xd903",
+        ]
+        var explicitZero = common
+        explicitZero["requiredPrefund"] = "0x0"
+        var falsePrefund = common
+        falsePrefund["requiredPrefund"] = false
+
+        let estimates = try [explicitZero, common, falsePrefund].map(
+            WalletNodeClient.decodeGasEstimate
+        )
+
+        #expect(estimates[0] == estimates[1])
+        #expect(estimates[1] == estimates[2])
+        #expect(estimates.allSatisfy {
+            $0.requiredPrefund == Data(repeating: 0, count: 32)
+        })
     }
 
     @Test func malformedRequiredPrefundThrows() {
@@ -39,6 +62,43 @@ import Testing
                 "preVerificationGas": "0xd903",
                 "requiredPrefund": "not-hex",
             ])
+        }
+    }
+
+    @Test func acceptsExactThirtyTwoByteDaemonQuantities() throws {
+        let maximumWidth = "0x" + String(repeating: "ff", count: 32)
+        let estimate = try WalletNodeClient.decodeGasEstimate([
+            "callGasLimit": maximumWidth,
+            "verificationGasLimit": maximumWidth,
+            "preVerificationGas": maximumWidth,
+            "requiredPrefund": maximumWidth,
+        ])
+
+        #expect(estimate.callGasLimit == Data(repeating: 0xff, count: 32))
+        #expect(estimate.verificationGasLimit == Data(repeating: 0xff, count: 32))
+        #expect(estimate.preVerificationGas == Data(repeating: 0xff, count: 32))
+        #expect(estimate.requiredPrefund == Data(repeating: 0xff, count: 32))
+    }
+
+    @Test func rejectsEveryThirtyThreeByteDaemonQuantityWithoutTruncation() {
+        let oversized = "0x" + String(repeating: "11", count: 33)
+        for field in [
+            "callGasLimit",
+            "verificationGasLimit",
+            "preVerificationGas",
+            "requiredPrefund",
+        ] {
+            var response = [
+                "callGasLimit": "0x1",
+                "verificationGasLimit": "0x1",
+                "preVerificationGas": "0x1",
+                "requiredPrefund": "0x1",
+            ]
+            response[field] = oversized
+
+            #expect(throws: (any Error).self) {
+                _ = try WalletNodeClient.decodeGasEstimate(response)
+            }
         }
     }
 

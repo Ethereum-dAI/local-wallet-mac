@@ -6,6 +6,62 @@ public enum WalletError: Error {
     case internalError
 }
 
+public enum WalletGasAuthorizationError: Error, Equatable, LocalizedError {
+    case invalidInput
+    case internalError
+    case entryPointWidth(field: String)
+    case capExceeded(field: String)
+    case priorityFeeAboveMaxFee
+    case paymasterNotSupported
+    case arithmeticOverflow
+    case signatureLengthTooLarge
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidInput:
+            return "The UserOperation gas authorization input is malformed."
+        case .internalError:
+            return "The UserOperation gas authorization policy failed internally."
+        case .entryPointWidth(let field):
+            return "\(field) exceeds EntryPoint v0.7's uint120 limit."
+        case .capExceeded(let field):
+            return "\(field) exceeds the local wallet gas safety cap."
+        case .priorityFeeAboveMaxFee:
+            return "The priority fee exceeds the maximum fee."
+        case .paymasterNotSupported:
+            return "Paymaster data is not allowed by this gas policy."
+        case .arithmeticOverflow:
+            return "The UserOperation maximum gas liability overflowed."
+        case .signatureLengthTooLarge:
+            return "The UserOperation signature shape is too large."
+        }
+    }
+}
+
+private func checkGasAuthorizationResult(_ code: Int32) throws {
+    switch code {
+    case 0: return
+    case -1: throw WalletGasAuthorizationError.invalidInput
+    case -2: throw WalletGasAuthorizationError.internalError
+    case -10: throw WalletGasAuthorizationError.entryPointWidth(field: "callGasLimit")
+    case -11: throw WalletGasAuthorizationError.entryPointWidth(field: "verificationGasLimit")
+    case -12: throw WalletGasAuthorizationError.entryPointWidth(field: "preVerificationGas")
+    case -13: throw WalletGasAuthorizationError.entryPointWidth(field: "maxFeePerGas")
+    case -14: throw WalletGasAuthorizationError.entryPointWidth(field: "maxPriorityFeePerGas")
+    case -20: throw WalletGasAuthorizationError.capExceeded(field: "callGasLimit")
+    case -21: throw WalletGasAuthorizationError.capExceeded(field: "verificationGasLimit")
+    case -22: throw WalletGasAuthorizationError.capExceeded(field: "preVerificationGas")
+    case -23: throw WalletGasAuthorizationError.capExceeded(field: "maxFeePerGas")
+    case -24: throw WalletGasAuthorizationError.capExceeded(field: "maxPriorityFeePerGas")
+    case -25: throw WalletGasAuthorizationError.capExceeded(field: "maximum gas liability")
+    case -30: throw WalletGasAuthorizationError.priorityFeeAboveMaxFee
+    case -31: throw WalletGasAuthorizationError.paymasterNotSupported
+    case -32: throw WalletGasAuthorizationError.arithmeticOverflow
+    case -33: throw WalletGasAuthorizationError.signatureLengthTooLarge
+    default: throw WalletGasAuthorizationError.internalError
+    }
+}
+
 private func checkResult(_ code: Int32) throws {
     switch code {
     case 0: return
@@ -41,6 +97,121 @@ public struct WalletSignature {
         public let selectorData: Data
         public let nonceKeyDefault: Data
         public let nonceKeyEnable: Data
+    }
+
+    public struct AuthorizedGasPlan: Equatable, Sendable {
+        public let accountGasLimits: Data
+        public let preVerificationGas: Data
+        public let gasFees: Data
+        public let maxLiability: Data
+        public let signatureLength: Int
+        public let policyVersion: UInt32
+    }
+
+    public enum GasAuthorizationScope: Equatable, Sendable {
+        case owner
+        case session(gasBudget: Data)
+    }
+
+    public static func authorizeUserOperationGasV1(
+        sender: Data,
+        nonce: Data,
+        initCode: Data,
+        callData: Data,
+        callGasLimit: Data,
+        verificationGasLimit: Data,
+        maxFeePerGas: Data,
+        maxPriorityFeePerGas: Data,
+        paymasterAndData: Data,
+        signatureLength: Int,
+        scope: GasAuthorizationScope
+    ) throws -> AuthorizedGasPlan {
+        let scopeMode: UInt8
+        let sessionGasBudget: Data?
+        switch scope {
+        case .owner:
+            scopeMode = 0
+            sessionGasBudget = nil
+        case .session(let gasBudget):
+            guard gasBudget.count == 32 else {
+                throw WalletGasAuthorizationError.invalidInput
+            }
+            scopeMode = 1
+            sessionGasBudget = gasBudget
+        }
+
+        guard sender.count == 20,
+              nonce.count == 32,
+              callGasLimit.count == 32,
+              verificationGasLimit.count == 32,
+              maxFeePerGas.count == 32,
+              maxPriorityFeePerGas.count == 32,
+              signatureLength >= 0,
+              signatureLength <= Int(UInt32.max),
+              initCode.count <= Int(UInt32.max),
+              callData.count <= Int(UInt32.max),
+              paymasterAndData.count <= Int(UInt32.max)
+        else {
+            throw WalletGasAuthorizationError.invalidInput
+        }
+
+        // NSData keeps each backing buffer alive for the complete C call and
+        // avoids a fourteen-level withUnsafeBytes expression that the Swift
+        // type checker cannot solve reliably.
+        let senderBuffer = sender as NSData
+        let nonceBuffer = nonce as NSData
+        let initCodeBuffer = initCode as NSData
+        let callDataBuffer = callData as NSData
+        let callGasBuffer = callGasLimit as NSData
+        let verificationGasBuffer = verificationGasLimit as NSData
+        let maxFeeBuffer = maxFeePerGas as NSData
+        let priorityBuffer = maxPriorityFeePerGas as NSData
+        let paymasterBuffer = paymasterAndData as NSData
+        let sessionGasBudgetBuffer = sessionGasBudget as NSData?
+        let accountGasLimitsBuffer = NSMutableData(length: 32)!
+        let preVerificationGasBuffer = NSMutableData(length: 32)!
+        let gasFeesBuffer = NSMutableData(length: 32)!
+        let authorizedLiabilityBuffer = NSMutableData(length: 32)!
+        var policyVersion: UInt32 = 0
+
+        let result = wallet_authorize_userop_gas_v1(
+            senderBuffer.bytes.assumingMemoryBound(to: UInt8.self),
+            UInt32(sender.count),
+            nonceBuffer.bytes.assumingMemoryBound(to: UInt8.self),
+            UInt32(nonce.count),
+            initCodeBuffer.bytes.assumingMemoryBound(to: UInt8.self),
+            UInt32(initCode.count),
+            callDataBuffer.bytes.assumingMemoryBound(to: UInt8.self),
+            UInt32(callData.count),
+            callGasBuffer.bytes.assumingMemoryBound(to: UInt8.self),
+            UInt32(callGasLimit.count),
+            verificationGasBuffer.bytes.assumingMemoryBound(to: UInt8.self),
+            UInt32(verificationGasLimit.count),
+            maxFeeBuffer.bytes.assumingMemoryBound(to: UInt8.self),
+            UInt32(maxFeePerGas.count),
+            priorityBuffer.bytes.assumingMemoryBound(to: UInt8.self),
+            UInt32(maxPriorityFeePerGas.count),
+            paymasterBuffer.bytes.assumingMemoryBound(to: UInt8.self),
+            UInt32(paymasterAndData.count),
+            UInt32(signatureLength),
+            scopeMode,
+            sessionGasBudgetBuffer?.bytes.assumingMemoryBound(to: UInt8.self),
+            UInt32(sessionGasBudget?.count ?? 0),
+            accountGasLimitsBuffer.mutableBytes.assumingMemoryBound(to: UInt8.self),
+            preVerificationGasBuffer.mutableBytes.assumingMemoryBound(to: UInt8.self),
+            gasFeesBuffer.mutableBytes.assumingMemoryBound(to: UInt8.self),
+            authorizedLiabilityBuffer.mutableBytes.assumingMemoryBound(to: UInt8.self),
+            &policyVersion
+        )
+        try checkGasAuthorizationResult(result)
+        return AuthorizedGasPlan(
+            accountGasLimits: Data(referencing: accountGasLimitsBuffer),
+            preVerificationGas: Data(referencing: preVerificationGasBuffer),
+            gasFees: Data(referencing: gasFeesBuffer),
+            maxLiability: Data(referencing: authorizedLiabilityBuffer),
+            signatureLength: signatureLength,
+            policyVersion: policyVersion
+        )
     }
 
     public static func generateBundlerSecret() throws -> BundlerSecret {

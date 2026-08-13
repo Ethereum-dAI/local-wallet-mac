@@ -68,6 +68,7 @@
 		C3EDF8D9DFBAC3CE779616FB /* KeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0BC22C212DB57DCEC672193 /* KeyStore.swift */; };
 		C7372C6CA4E7765A2AA35B7A /* DemoModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9D44A78B0A9523321B9F367 /* DemoModels.swift */; };
 		C76D43CA4AE90A97B1B8ADA0 /* WalletNodeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 923CF6BF725AB85178781926 /* WalletNodeClient.swift */; };
+		C97DC52B23F37C0C3BE66C43 /* ExecutionFeeOracle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67B502247B100304EFA6AE81 /* ExecutionFeeOracle.swift */; };
 		CB436822EEDC4A11E0F65856 /* DeviceOwnerAuthenticationSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C181BA1816CAA2A5AB3F71D2 /* DeviceOwnerAuthenticationSession.swift */; };
 		D22634FEBE836B433F07F764 /* LocalLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 81F620ED9BB03B9080324735 /* LocalLLM */; };
 		D612FF089828F9AA74757307 /* HexEncoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71F6CC5F8F55F7C5D22BBD6F /* HexEncoding.swift */; };
@@ -109,6 +110,7 @@
 		59F31B5232BAD096F9535BAF /* GasPricing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GasPricing.swift; sourceTree = "<group>"; };
 		5FF9147DC25C40D4A7D8DA39 /* DemoSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoSettingsStore.swift; sourceTree = "<group>"; };
 		611B7A76D937ADC7B38FEDA8 /* WalletMacOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletMacOSApp.swift; sourceTree = "<group>"; };
+		67B502247B100304EFA6AE81 /* ExecutionFeeOracle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutionFeeOracle.swift; sourceTree = "<group>"; };
 		6BC4122D7CD6FE507FD2A461 /* PrefundPrecheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrefundPrecheck.swift; sourceTree = "<group>"; };
 		6CBD70736AA26349D04C84E5 /* ContextWindowPresets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextWindowPresets.swift; sourceTree = "<group>"; };
 		6D3E2EAC0AE7783C320B5E70 /* RailgunHelperClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RailgunHelperClient.swift; sourceTree = "<group>"; };
@@ -256,6 +258,7 @@
 				C181BA1816CAA2A5AB3F71D2 /* DeviceOwnerAuthenticationSession.swift */,
 				0BD8C504DFE574FA718B16B8 /* EmbeddedLlamaInferenceService.swift */,
 				0565FE58E3D3C819258A03C1 /* EtherAmountParser.swift */,
+				67B502247B100304EFA6AE81 /* ExecutionFeeOracle.swift */,
 				86D8851018BC1278F03B61B8 /* GasIndicatorView.swift */,
 				59F31B5232BAD096F9535BAF /* GasPricing.swift */,
 				71F97A3BE38D8D0EC2214B7C /* GGUFHeaderReader.swift */,
@@ -439,6 +442,7 @@
 				CB436822EEDC4A11E0F65856 /* DeviceOwnerAuthenticationSession.swift in Sources */,
 				3FF118FCF7A80FC444631D4F /* EmbeddedLlamaInferenceService.swift in Sources */,
 				82C23E6456D6B25C14A4338E /* EtherAmountParser.swift in Sources */,
+				C97DC52B23F37C0C3BE66C43 /* ExecutionFeeOracle.swift in Sources */,
 				46DEEDEA776152EC843EACF4 /* GGUFHeaderReader.swift in Sources */,
 				77B9D2DC01CEB8F611EBA699 /* GasIndicatorView.swift in Sources */,
 				5585A7F7AFC372BAB580154A /* GasPricing.swift in Sources */,

@@ -12,6 +12,26 @@ set -euo pipefail
 #
 # Forks latest Sepolia state, where Fusaka (EIP-7951 P256VERIFY at 0x100) is live.
 
+REQUIRED_FOUNDRY_VERSION="v1.7.1"
+
+if ! command -v anvil >/dev/null 2>&1 || ! command -v cast >/dev/null 2>&1; then
+  echo "Foundry ${REQUIRED_FOUNDRY_VERSION} or newer is required (missing anvil/cast)."
+  echo "Install current foundryup: curl -L https://foundry.paradigm.xyz | bash"
+  echo "Then install Foundry: foundryup --install ${REQUIRED_FOUNDRY_VERSION}"
+  exit 1
+fi
+
+# Forking imports remote state, but Anvil still supplies the local EVM rules and
+# precompiles. Feature-check Osaka instead of parsing a brittle version string so
+# an old Anvil cannot silently turn the P256VERIFY probe into a false negative.
+if ! anvil --hardfork osaka --version >/dev/null 2>&1; then
+  echo "Foundry ${REQUIRED_FOUNDRY_VERSION} or newer with Osaka support is required."
+  anvil --version || true
+  echo "Install current foundryup: curl -L https://foundry.paradigm.xyz | bash"
+  echo "Then upgrade Foundry: foundryup --install ${REQUIRED_FOUNDRY_VERSION}"
+  exit 1
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${WALLET_FORK_ENV_FILE:-${ROOT_DIR}/.env}"
 
@@ -41,6 +61,7 @@ anvil \
   --port "${FORK_PORT}" \
   --fork-url "${RPC_URL}" \
   --chain-id 11155111 \
+  --hardfork osaka \
   >"${ANVIL_LOG}" 2>&1 &
 ANVIL_PID=$!
 

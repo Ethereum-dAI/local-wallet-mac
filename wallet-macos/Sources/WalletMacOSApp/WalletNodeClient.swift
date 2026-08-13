@@ -21,6 +21,7 @@ struct WalletNodeClient {
 
             guard let endpointString,
                   let endpoint = URL(string: endpointString),
+                  isPermittedHTTPEndpoint(endpoint),
                   let token,
                   !token.isEmpty
             else {
@@ -28,6 +29,31 @@ struct WalletNodeClient {
             }
 
             return Configuration(transport: .http(endpoint), bearerToken: token)
+        }
+
+        /// Bearer credentials may cross the network only with server-authenticated
+        /// TLS. Plain HTTP remains available for an explicitly local development
+        /// daemon, using literal loopback addresses to avoid DNS rebinding.
+        static func isPermittedHTTPEndpoint(_ endpoint: URL) -> Bool {
+            guard endpoint.user == nil,
+                  endpoint.password == nil,
+                  let scheme = endpoint.scheme?.lowercased(),
+                  let host = endpoint.host?.lowercased()
+            else {
+                return false
+            }
+            if scheme == "https" {
+                return true
+            }
+            guard scheme == "http" else {
+                return false
+            }
+            if host == "::1" {
+                return true
+            }
+            var address = in_addr()
+            return host.withCString { inet_pton(AF_INET, $0, &address) == 1 }
+                && (UInt32(bigEndian: address.s_addr) >> 24) == 127
         }
     }
 
@@ -357,8 +383,17 @@ struct WalletNodeClient {
     static func decodeGasEstimate(_ object: [String: Any]) throws -> UserOperationGasEstimate {
         func quantity(_ value: String, _ field: String) throws -> Data {
             do {
-                return try Data.quantityString(value).leftPadded(to: 32)
+                let decoded = try Data.quantityString(value)
+                guard decoded.count <= 32 else {
+                    throw ClientError.transport(
+                        "wallet-node returned oversized \(field): \(decoded.count) bytes"
+                    )
+                }
+                return decoded.leftPadded(to: 32)
             } catch {
+                if let error = error as? ClientError {
+                    throw error
+                }
                 throw ClientError.transport("wallet-node returned invalid \(field): \(value)")
             }
         }
@@ -439,20 +474,20 @@ struct WalletNodeClient {
     }
 
     func sendUserOperation(
-        draft: UserOperationDraft,
-        signature: Data
+        operation signedOperation: SignedUserOperation
     ) async throws -> String {
+        let draft = signedOperation.draft
         let result = try await call(
             method: "localwallet_sendUserOperation",
             params: [
-                rpcUserOperation(draft: draft, signature: signature),
+                rpcUserOperation(draft: draft, signature: signedOperation.signature),
                 draft.entryPoint,
             ]
         )
         guard let userOpHash = result as? String else {
             throw ClientError.invalidResponse
         }
-        return userOpHash
+        return try signedOperation.validatingReturnedHash(userOpHash)
     }
 
     func getUserOperationReceipt(userOpHash: String) async throws -> UserOperationReceipt? {
@@ -874,8 +909,17 @@ struct WalletNodeClient {
 
     private func parseQuantity(_ value: String, field: String) throws -> Data {
         do {
-            return try Data.quantityString(value)
+            let decoded = try Data.quantityString(value)
+            guard decoded.count <= 32 else {
+                throw ClientError.transport(
+                    "wallet-node returned oversized \(field): \(decoded.count) bytes"
+                )
+            }
+            return decoded
         } catch {
+            if let error = error as? ClientError {
+                throw error
+            }
             throw ClientError.transport("wallet-node returned invalid \(field): \(value)")
         }
     }

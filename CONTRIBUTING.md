@@ -32,6 +32,14 @@ cd ../swift-bridge && swift test
 cd ../wallet-macos && swift build
 ```
 
+`build-ffi.sh` also generates `LocalWallet.xcodeproj` from `project.yml`. The project is a build artifact and is **not committed** — `xcodegen` bakes the app target's Swift sources into it file-by-file, so a checked-in copy went stale the moment anyone added a file, and the resulting build failure (`Cannot find type <X> in scope`, reported at a *caller* in a file that is perfectly fine) pointed nowhere near the real cause. If you add, rename, or delete a file under `wallet-macos/Sources/WalletMacOSApp`, do not touch the project by hand; re-run:
+
+```bash
+./scripts/generate-xcode-project.sh          # --force to regenerate unconditionally
+```
+
+It regenerates only when the project is missing or has drifted from the tree, and it carries your local signing team and bundle id forward — those two are the Keychain / Secure Enclave access group, and changing them orphans an existing wallet's key. Never commit a signing team or bundle id workaround.
+
 For release packaging:
 
 ```bash

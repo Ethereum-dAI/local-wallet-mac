@@ -45,8 +45,13 @@ LLAMA_SEARCH_DIRS=(
   "$REPO_ROOT/.llama/current/lib"
 )
 
+# The project is generated from project.yml and not committed, and a project left over from an
+# older tree would archive the wrong set of app sources. Sync it before archiving — the
+# generator is a no-op when it is already in step, and it preserves the local signing team.
+"$REPO_ROOT/scripts/generate-xcode-project.sh"
+
 if [[ ! -d "$PROJECT" ]]; then
-  echo "Missing LocalWallet.xcodeproj. Generate it from project.yml before packaging."
+  echo "Missing LocalWallet.xcodeproj. Generate it with ./scripts/generate-xcode-project.sh"
   exit 1
 fi
 

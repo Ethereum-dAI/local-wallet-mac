@@ -66,6 +66,27 @@ echo "=== Copying static library ==="
 mkdir -p "$BRIDGE_DIR/lib"
 cp "target/aarch64-apple-darwin/release/libwallet_ffi.a" "$BRIDGE_DIR/lib/"
 
+# LocalWallet.xcodeproj is generated from project.yml and is not committed, and
+# xcodegen bakes the app target's sources into it file-by-file — so a project
+# left over from before someone added a Swift file fails with "Cannot find type
+# <X> in scope" at a CALLER, which reads like a code bug in a file that is fine.
+# This script is the mandatory step before any Swift build, which makes it the
+# one place that can keep the project in sync without anyone remembering to.
+#
+# Soft on purpose: Rust-only and swift-bridge-only work needs libwallet_ffi.a
+# and has no use for the Xcode project, so a missing xcodegen warns instead of
+# failing the build. Set LOCAL_WALLET_SKIP_XCODEGEN=1 to skip it outright.
+if [[ "${LOCAL_WALLET_SKIP_XCODEGEN:-0}" == "1" ]]; then
+    echo "=== Skipping Xcode project generation (LOCAL_WALLET_SKIP_XCODEGEN=1) ==="
+elif command -v xcodegen >/dev/null 2>&1; then
+    echo "=== Syncing LocalWallet.xcodeproj with project.yml ==="
+    "$REPO_ROOT/scripts/generate-xcode-project.sh"
+else
+    echo "WARNING: 'xcodegen' not found on PATH; leaving LocalWallet.xcodeproj alone." >&2
+    echo "         The project is generated from project.yml and is not committed." >&2
+    echo "         Before opening Xcode: brew install xcodegen && ./scripts/generate-xcode-project.sh" >&2
+fi
+
 echo "=== Done ==="
 echo "Library: $BRIDGE_DIR/lib/libwallet_ffi.a"
 echo "Header:  $BRIDGE_DIR/Sources/WalletFFI/wallet_ffi.h"

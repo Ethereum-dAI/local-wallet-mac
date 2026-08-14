@@ -158,6 +158,28 @@ Run the FFI build script from the macOS repo root:
 
 This script builds `wallet-ffi` for `aarch64-apple-darwin`, runs `cbindgen`, and stages the generated static library and headers into `swift-bridge/`. These generated outputs are local build artifacts and are not committed.
 
+It also generates `LocalWallet.xcodeproj` from `project.yml`, which is a build artifact too — see [Generate the Xcode project](#generate-the-xcode-project) below.
+
+## Generate The Xcode Project
+
+`LocalWallet.xcodeproj` is **not committed**. It is generated from `project.yml` by `xcodegen`, and `scripts/build-ffi.sh` generates it for you, so on the happy path there is nothing extra to run. To generate it on its own:
+
+```bash
+./scripts/generate-xcode-project.sh
+```
+
+This matters more than it looks. `xcodegen` bakes the app target's Swift sources into the project **file-by-file**, so a project left over from an older tree fails in a way that points at the wrong place entirely:
+
+| Drift | What Xcode reports |
+|---|---|
+| File on disk, missing from the project | `Cannot find type <X> in scope` — at a *caller*, in a file that is perfectly fine |
+| File in the project, gone from the disk | `Build input file cannot be found` |
+
+The script detects both directions plus a `project.yml` newer than the project, and regenerates only then. Two things to know:
+
+- **Regenerating resets signing.** Team and bundle id go back to whatever `project.yml` says, and those two are the Keychain / Secure Enclave access group — changing them orphans an existing wallet's key. The script carries your current team and bundle id forward across regenerations for exactly that reason. Set your team once in Xcode → `LocalWalletApp` → Signing & Capabilities (or pass `DEVELOPMENT_TEAM=<your-team-id>`) and it sticks.
+- **Rust-only work does not need it.** `scripts/build-ffi.sh` only warns when `xcodegen` is absent; `LOCAL_WALLET_SKIP_XCODEGEN=1` skips the step outright.
+
 ## Build The Daemon
 
 Build `wallet-node` from the in-repo daemon directory:
@@ -168,7 +190,7 @@ cargo build -p wallet-node --release
 cd ..
 ```
 
-The checked-in Xcode scheme points at the release daemon by default:
+The generated Xcode scheme points at the release daemon by default:
 
 ```text
 local-wallet-daemon/target/release/wallet-node
@@ -297,10 +319,14 @@ rm -rf local-llm/.build wallet-macos/.build
 
 For release packaging, the pinned dylibs are `minos 13.3` and carry no external dependencies, so they clear the deployment-target and external-dependency gates in `scripts/package-macos-demo.sh` without a hand-built prefix.
 
-### Xcode project is out of date
+### `Cannot find type <X> in scope`, or the Xcode project is missing
 
-The checked-in Xcode project is generated from `project.yml`. If `project.yml` changes, regenerate the project from the macOS repo root:
+`LocalWallet.xcodeproj` is generated from `project.yml` and is not committed, and the app target's sources are baked into it file-by-file. A project generated before someone added a Swift file does not compile that file, so Xcode reports `Cannot find type <X> in scope` at whatever *calls* the missing type — a file that has nothing wrong with it. Regenerate from the macOS repo root:
 
 ```bash
-xcodegen generate
+./scripts/generate-xcode-project.sh
 ```
+
+`./scripts/build-ffi.sh` does this too, so the normal build sequence already covers it. `--force` regenerates unconditionally. Both preserve your local signing team; see [Generate the Xcode project](#generate-the-xcode-project).
+
+If the command is missing entirely: `brew install xcodegen`.

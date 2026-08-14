@@ -24,18 +24,21 @@ The direct Secure Enclave persistence model now uses permanent Keychain key item
 
 Note: repo-relative paths in this README — including `LocalWallet.xcodeproj`, `project.yml`, and `scripts/` — are relative to the repo root (the parent of `wallet-macos/`, where this README lives), not to `wallet-macos/` itself.
 
-1. Open `LocalWallet.xcodeproj` in Xcode.
-2. Select the `LocalWalletApp` scheme.
-3. In `Signing & Capabilities`, choose your Apple development team for the `LocalWalletApp` target.
-4. Build and run the app from Xcode.
+1. Run `./scripts/build-ffi.sh`, which generates `LocalWallet.xcodeproj` (it is not committed).
+2. Open `LocalWallet.xcodeproj` in Xcode.
+3. Select the `LocalWalletApp` scheme.
+4. In `Signing & Capabilities`, choose your Apple development team for the `LocalWalletApp` target.
+5. Build and run the app from Xcode.
 
 ## Regenerate The Project
 
-The Xcode project is generated from `project.yml` with `xcodegen`.
+The Xcode project is generated from `project.yml` with `xcodegen` and is **not committed**. Because the app target's sources are baked into it file-by-file, it must be regenerated whenever `project.yml` changes *or* the app gains or loses a Swift file — otherwise Xcode reports `Cannot find type <X> in scope` at a caller of the file it does not know about, or `Build input file cannot be found` for one that is gone.
 
 ```bash
-xcodegen generate
+./scripts/generate-xcode-project.sh          # --force to regenerate unconditionally
 ```
+
+It regenerates only when the project is missing or has drifted, and it carries your signing team and bundle id forward — those are the Keychain / Secure Enclave access group, and changing them orphans an existing wallet's key.
 
 ## Current Layout
 

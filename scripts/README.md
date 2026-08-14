@@ -43,7 +43,7 @@ Setting `LOCAL_LLAMA_PREFIX` skips provisioning entirely, matching `local-llm/Pa
 
 ### `build-ffi.sh`
 
-Provisions the pinned llama.cpp prefix (see above), builds the Rust FFI bridge for Apple Silicon macOS, generates the C header with `cbindgen`, copies the `wallet-node-api` version header, and stages the static library for Swift. The default deployment target is macOS 15.0.
+Provisions the pinned llama.cpp prefix (see above), builds the Rust FFI bridge for Apple Silicon macOS, generates the C header with `cbindgen`, copies the `wallet-node-api` version header, stages the static library for Swift, and syncs `LocalWallet.xcodeproj` (see [`generate-xcode-project.sh`](#generate-xcode-projectsh)). The default deployment target is macOS 15.0.
 
 Set `LOCAL_WALLET_SKIP_LLAMA_PROVISION=1` to skip the provisioning step. Useful for Rust-only or `swift-bridge`-only work, which needs `libwallet_ffi.a` from this script but has nothing to do with llama.cpp, and which would otherwise be blocked whenever the prefix needs rebuilding and GitHub is unreachable.
 
@@ -64,6 +64,23 @@ Prerequisites:
 - Rust target `aarch64-apple-darwin`
 - `cbindgen`
 - The script locates the Cargo `OUT_DIR` via `find`, first under `target/aarch64-apple-darwin/release/build` and then `target/release/build`; no `jq` is required.
+- `xcodegen`, for the Xcode project step only. Missing `xcodegen` is a warning, not a failure, so Rust-only work is never blocked on it; `LOCAL_WALLET_SKIP_XCODEGEN=1` skips the step outright.
+
+### `generate-xcode-project.sh`
+
+Generates `LocalWallet.xcodeproj` from `project.yml`. The project is a **build artifact and is gitignored** — every other script that needs it calls this one.
+
+```bash
+./scripts/generate-xcode-project.sh          # generate if missing, drifted, or older than project.yml
+./scripts/generate-xcode-project.sh --force  # regenerate unconditionally
+```
+
+Why this exists instead of a bare `xcodegen generate`:
+
+- **The project goes stale silently.** `xcodegen` bakes the app target's Swift sources into it file-by-file (the SwiftPM packages are resolved by Xcode and are unaffected), so a project generated before a file was added does not compile that file. Xcode then reports `Cannot find type <X> in scope` at whatever *calls* it — a file with nothing wrong with it — or `Build input file cannot be found` for a file deleted from the tree. The script checks both directions and regenerates only when it finds drift.
+- **Regenerating resets signing.** `DEVELOPMENT_TEAM` and `PRODUCT_BUNDLE_IDENTIFIER` revert to `project.yml`, and those two are the Keychain / Secure Enclave access group: resetting them orphans an existing wallet's key (`Secure Enclave key reference is missing`). The script carries the current project's values forward, so picking up a new source file never costs you your wallet.
+
+Env: `DEVELOPMENT_TEAM` / `PRODUCT_BUNDLE_IDENTIFIER` override what is baked in; `LOCAL_WALLET_SKIP_XCODEGEN=1` makes it a no-op.
 
 ### Kernel mainnet-fork fixture (moved)
 

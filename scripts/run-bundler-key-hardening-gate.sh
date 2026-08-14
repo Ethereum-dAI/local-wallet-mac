@@ -48,7 +48,9 @@ echo "=== signed macOS app target build ==="
     echo "xcodegen is required to verify the signed macOS app target" >&2
     exit 1
   fi
-  xcodegen generate
+  # Force: this gate verifies the app target against project.yml as written, not against
+  # whatever project happens to be lying around.
+  "${ROOT_DIR}/scripts/generate-xcode-project.sh" --force
   xcodebuild -project LocalWallet.xcodeproj \
     -scheme LocalWalletApp \
     -configuration Debug \

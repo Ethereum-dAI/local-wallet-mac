@@ -42,6 +42,15 @@ swift-bridge/Sources/WalletFFI/wallet_node_api_version.h
 # Website dependencies / build outputs
 node_modules/
 
+# Generated Xcode project. xcodegen bakes the app target's sources into it
+# file-by-file from project.yml, so a committed copy goes stale as soon as
+# anyone adds a Swift file and the build then fails at an unrelated caller with
+# "Cannot find type <X> in scope". Generate it with scripts/build-ffi.sh (which
+# calls scripts/generate-xcode-project.sh) — never commit it: it also carries
+# your local signing team and bundle id, which are half of the Keychain /
+# Secure Enclave access group.
+LocalWallet.xcodeproj/
+
 # Xcode user-specific state (catches xcuserdata at any depth)
 xcuserdata/
 *.xcuserstate

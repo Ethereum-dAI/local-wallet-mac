@@ -12,9 +12,10 @@ do {
     case "recognition": try await runRecognition(options: opts)
     case "round-trip":  try await runRoundTrip(options: opts)
     case "latency":     try await runLatency(options: opts)
+    case "userop":      try await runUserOp(options: opts)
     case "all":         try await runAll(options: opts)
     case "--help", "-h":
-        print("usage: wallet-eval <recognition|round-trip|latency|all> [--model PATH] [--repeats N] [--seed S] [--json PATH] [--filter CATEGORY] [--verbose]")
+        print("usage: wallet-eval <recognition|round-trip|latency|userop|all> [--model PATH] [--repeats N] [--seed S] [--json PATH] [--filter CATEGORY] [--verbose]")
     default:
         FileHandle.standardError.write(Data("unknown subcommand: \(sub)\n".utf8))
         exit(2)

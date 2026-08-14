@@ -11,15 +11,10 @@ struct WalletResetCleanup {
     var deleteSessionKeys: () throws -> Void
     var clearRelayerAddressCache: () throws -> Void
     var clearMetadata: () throws -> Void
-    // The removed RAILGUN privacy feature left spending entropy in the Keychain on alpha
-    // installs. Nothing reads it any more, but a reset that claims to clear every key class
-    // has to clear that one too rather than leave it behind for the launch-time purge.
-    var deleteLegacyRailgunSecrets: () throws -> Void
     // Its own step, and deliberately the last one: a surviving reuse window must not wave
     // through a read of whatever replaces the keys this reset just deleted. It is not
-    // folded into another step's closure because `run()` catches per step — a throw ahead
-    // of it inside a shared closure would silently skip the invalidation — and because
-    // every other step here is deletable (`deleteLegacyRailgunSecrets` explicitly so).
+    // folded into another step's closure because `run()` catches per step, so a throw
+    // ahead of it inside a shared closure would silently skip the invalidation.
     var invalidateBiometricContexts: () throws -> Void = {
         BiometricAuthenticationContexts.shared.invalidateAll()
     }
@@ -39,8 +34,7 @@ struct WalletResetCleanup {
                     ChainConfiguration.ethereumSepolia.id,
                 ])
             },
-            clearMetadata: { try metadataStore.clear() },
-            deleteLegacyRailgunSecrets: { try LegacyRailgunSecretsCleanup.purge() }
+            clearMetadata: { try metadataStore.clear() }
         )
     }
 
@@ -53,7 +47,6 @@ struct WalletResetCleanup {
             ("session-keys", deleteSessionKeys),
             ("relayer-address-cache", clearRelayerAddressCache),
             ("metadata", clearMetadata),
-            ("legacy-railgun-secrets", deleteLegacyRailgunSecrets),
             ("biometric-contexts", invalidateBiometricContexts),
         ]
 

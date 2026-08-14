@@ -13,15 +13,14 @@ import Testing
         deleteSessionKeys: { steps.append("session") },
         clearRelayerAddressCache: { steps.append("relayer-cache") },
         clearMetadata: { steps.append("metadata") },
-        deleteLegacyRailgunSecrets: { steps.append("legacy-railgun") },
         invalidateBiometricContexts: { steps.append("biometric") }
     )
 
     var completed: [String] = []
     try cleanup.run { completed.append($0) }
 
-    #expect(steps == ["root", "bundler", "session", "relayer-cache", "metadata", "legacy-railgun", "biometric"])
-    #expect(completed == ["secure-enclave-key", "relayer-keys", "session-keys", "relayer-address-cache", "metadata", "legacy-railgun-secrets", "biometric-contexts"])
+    #expect(steps == ["root", "bundler", "session", "relayer-cache", "metadata", "biometric"])
+    #expect(completed == ["secure-enclave-key", "relayer-keys", "session-keys", "relayer-address-cache", "metadata", "biometric-contexts"])
 }
 
 // The biometric reuse window has to close even when an earlier step fails: a step that
@@ -35,8 +34,7 @@ import Testing
         deleteBundlerKeys: {},
         deleteSessionKeys: {},
         clearRelayerAddressCache: {},
-        clearMetadata: {},
-        deleteLegacyRailgunSecrets: { throw Boom() },
+        clearMetadata: { throw Boom() },
         invalidateBiometricContexts: { invalidated = true }
     )
 
@@ -53,7 +51,6 @@ import Testing
         deleteSessionKeys: { steps.append("session") },
         clearRelayerAddressCache: { steps.append("relayer-cache") },
         clearMetadata: { steps.append("metadata") },
-        deleteLegacyRailgunSecrets: { steps.append("legacy-railgun") },
         invalidateBiometricContexts: { steps.append("biometric") }
     )
 
@@ -64,7 +61,7 @@ import Testing
         aggregated = error
     } catch {}
 
-    #expect(steps == ["bundler", "session", "relayer-cache", "metadata", "legacy-railgun", "biometric"])
+    #expect(steps == ["bundler", "session", "relayer-cache", "metadata", "biometric"])
     #expect(aggregated?.failures.count == 1)
     #expect(aggregated?.failures.first?.step == "secure-enclave-key")
 }

@@ -23,7 +23,6 @@
 		36F1776E10A529FC4F505610 /* ModelSwapPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11E180BF3D8F8D5B19BA9394 /* ModelSwapPlanner.swift */; };
 		3FBD891D7107BE8CA65791FA /* UserOperationSigning.swift in Sources */ = {isa = PBXBuildFile; fileRef = 587698F46EE6170D2C36A1A3 /* UserOperationSigning.swift */; };
 		3FF118FCF7A80FC444631D4F /* EmbeddedLlamaInferenceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BD8C504DFE574FA718B16B8 /* EmbeddedLlamaInferenceService.swift */; };
-		41B02077AC200CB71F2EB5F9 /* LegacyRailgunSecretsCleanup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2844E5539DFFDC8418421D18 /* LegacyRailgunSecretsCleanup.swift */; };
 		452F713693CC249455BA1E9F /* SmartAccountConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7EDA7770D91F75143A2D4E /* SmartAccountConfiguration.swift */; };
 		46DEEDEA776152EC843EACF4 /* GGUFHeaderReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71F97A3BE38D8D0EC2214B7C /* GGUFHeaderReader.swift */; };
 		4BA6065B7DED9F9D9CE32436 /* ModelLifecyclePlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3B143F860C80E10CF01F9A1 /* ModelLifecyclePlanner.swift */; };
@@ -90,7 +89,6 @@
 		10EF37094DF3BB75ADE15500 /* BundlerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundlerClient.swift; sourceTree = "<group>"; };
 		11E180BF3D8F8D5B19BA9394 /* ModelSwapPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSwapPlanner.swift; sourceTree = "<group>"; };
 		1B2090660CAE81D103494C90 /* KernelFactory.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = KernelFactory.json; sourceTree = "<group>"; };
-		2844E5539DFFDC8418421D18 /* LegacyRailgunSecretsCleanup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyRailgunSecretsCleanup.swift; sourceTree = "<group>"; };
 		2FDD97F68DC79C7A31430C30 /* ChatDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDashboardView.swift; sourceTree = "<group>"; };
 		338C3CE5B2A1B13400716881 /* BundlerKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundlerKeyStore.swift; sourceTree = "<group>"; };
 		4150C3CF3A8819F2B4A82289 /* ModelSelfTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSelfTest.swift; sourceTree = "<group>"; };
@@ -252,7 +250,6 @@
 				C169073460277ECF91AB0CCF /* InstalledModelStore.swift */,
 				F6220284599C5BA1AD595394 /* KernelAccountAddressPredictor.swift */,
 				D0BC22C212DB57DCEC672193 /* KeyStore.swift */,
-				2844E5539DFFDC8418421D18 /* LegacyRailgunSecretsCleanup.swift */,
 				87B7492C00C0FC4BF364591F /* LocalAIModelDownloadManager.swift */,
 				A65A9349550912C759EED6DC /* LocalHardwareInspector.swift */,
 				4DC4ED3DF868F54EF472978A /* LocalWalletSettingsView.swift */,
@@ -405,7 +402,6 @@
 				983C55F274A80646E5F7FA3E /* InstalledModelStore.swift in Sources */,
 				EABBBB4361487720CC466308 /* KernelAccountAddressPredictor.swift in Sources */,
 				C3EDF8D9DFBAC3CE779616FB /* KeyStore.swift in Sources */,
-				41B02077AC200CB71F2EB5F9 /* LegacyRailgunSecretsCleanup.swift in Sources */,
 				4D68E3171DC04C53AFBF1B08 /* LocalAIModelDownloadManager.swift in Sources */,
 				E1C3DCD8C60EB9C2062460DB /* LocalHardwareInspector.swift in Sources */,
 				687188C3574A4EB38F617EDF /* LocalWalletSettingsView.swift in Sources */,

@@ -5,32 +5,6 @@ enum EtherAmountParser {
         try units(fromDecimalString: value, decimals: 18)
     }
 
-    /// Wei as a base-10 string (e.g. "0.01" ETH → "10000000000000000"), for JSON-RPC
-    /// callers (the railgun-helper sidecar) that expect a decimal amount. Same validation
-    /// as `wei(fromETHString:)`.
-    static func weiDecimalString(fromETHString value: String) throws -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw AppError.invalidAmount }
-        let parts = trimmed.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count <= 2 else { throw AppError.invalidAmount }
-        let wholePart = String(parts[0])
-        let fractionalPart = parts.count == 2 ? String(parts[1]) : ""
-        let isAsciiDigit: (Character) -> Bool = { $0.isASCII && $0.isNumber }
-        guard wholePart.allSatisfy(isAsciiDigit), fractionalPart.allSatisfy(isAsciiDigit) else {
-            throw AppError.invalidAmount
-        }
-        if fractionalPart.count > 18 {
-            guard fractionalPart.dropFirst(18).allSatisfy({ $0 == "0" }) else {
-                throw AppError.invalidAmount
-            }
-        }
-        let clipped = String(fractionalPart.prefix(18))
-        let normalizedWhole = wholePart.isEmpty ? "0" : wholePart
-        let padded = clipped + String(repeating: "0", count: 18 - clipped.count)
-        let combined = String((normalizedWhole + padded).drop { $0 == "0" })
-        return combined.isEmpty ? "0" : combined
-    }
-
     static func units(fromDecimalString value: String, decimals: Int) throws -> Data {
         guard decimals >= 0 else {
             throw AppError.invalidAmount

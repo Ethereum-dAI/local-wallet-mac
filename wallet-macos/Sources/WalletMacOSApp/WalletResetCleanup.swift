@@ -11,10 +11,13 @@ struct WalletResetCleanup {
     var deleteSessionKeys: () throws -> Void
     var clearRelayerAddressCache: () throws -> Void
     var clearMetadata: () throws -> Void
-    // The RAILGUN entropy is another key class the app manages (stored in the Keychain; the
-    // sidecar's exit-sender key is derived from it, not stored separately). A full reset must
-    // wipe it too.
-    var deleteRailgunSecrets: () throws -> Void
+    // Its own step, and deliberately the last one: a surviving reuse window must not wave
+    // through a read of whatever replaces the keys this reset just deleted. It is not
+    // folded into another step's closure because `run()` catches per step, so a throw
+    // ahead of it inside a shared closure would silently skip the invalidation.
+    var invalidateBiometricContexts: () throws -> Void = {
+        BiometricAuthenticationContexts.shared.invalidateAll()
+    }
 
     static func standard(
         keyStore: KeyStore = KeyStore(),
@@ -31,13 +34,7 @@ struct WalletResetCleanup {
                     ChainConfiguration.ethereumSepolia.id,
                 ])
             },
-            clearMetadata: { try metadataStore.clear() },
-            deleteRailgunSecrets: {
-                try RailgunSecretsStore.clear()
-                // Every key this reset destroyed is gone; a surviving reuse window
-                // must not wave through a read of whatever replaces it.
-                BiometricAuthenticationContexts.shared.invalidateAll()
-            }
+            clearMetadata: { try metadataStore.clear() }
         )
     }
 
@@ -50,7 +47,7 @@ struct WalletResetCleanup {
             ("session-keys", deleteSessionKeys),
             ("relayer-address-cache", clearRelayerAddressCache),
             ("metadata", clearMetadata),
-            ("railgun-secrets", deleteRailgunSecrets),
+            ("biometric-contexts", invalidateBiometricContexts),
         ]
 
         var failures: [WalletResetCleanupError.StepFailure] = []

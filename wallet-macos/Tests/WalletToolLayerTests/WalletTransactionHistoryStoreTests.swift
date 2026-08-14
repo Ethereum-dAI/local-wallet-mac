@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import Testing
 @testable import WalletToolLayer
 
@@ -664,6 +665,44 @@ import Testing
         accountAddress: "0xabc0000000000000000000000000000000000000",
         chainID: 1
     ).isEmpty)
+}
+
+// A row written by a build whose operation vocabulary was wider than this one's — the
+// removed RAILGUN shield/unshield — must degrade to `.unknown`, not disappear: a dropped
+// row still consumes its SQL LIMIT slot, and an unfinalized one would never be reconciled
+// again while still holding its UNIQUE(chain_id, user_op_hash) key.
+@Test func walletHistoryDegradesUnrecognisedOperationsInsteadOfDroppingTheRow() throws {
+    let (store, url) = temporaryHistoryStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let account = "0xabc0000000000000000000000000000000000000"
+    try store.recordSubmitted(
+        WalletTransactionDraft(operation: .transfer, amount: "0.1", token: "ETH"),
+        userOpHash: "0xretired",
+        accountAddress: account,
+        chainID: 11_155_111,
+        chainName: "Ethereum Sepolia"
+    )
+    try rewriteOperationColumn(to: "shield", userOpHash: "0xretired", databaseURL: url)
+
+    let loaded = try store.loadRecords(accountAddress: account, chainID: 11_155_111)
+    #expect(loaded.count == 1)
+    #expect(loaded.first?.operation == .unknown)
+    #expect(loaded.first?.amount == "0.1")
+
+    // Still reachable by the receipt watcher, which is what keeps it from stranding.
+    #expect(try store.loadUnfinalizedRecords(accountAddress: account, chainID: 11_155_111).count == 1)
+}
+
+// Writes a raw operation string no current build can produce, which is the only way to
+// reconstruct a row persisted by an older one.
+private func rewriteOperationColumn(to operation: String, userOpHash: String, databaseURL: URL) throws {
+    var database: OpaquePointer?
+    #expect(sqlite3_open(databaseURL.path, &database) == SQLITE_OK)
+    defer { sqlite3_close(database) }
+    let sql = "UPDATE wallet_transactions SET operation = '\(operation)' WHERE user_op_hash = '\(userOpHash)'"
+    #expect(sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK)
+    #expect(sqlite3_changes(database) == 1)
 }
 
 private func temporaryHistoryStore() -> (WalletTransactionHistoryStore, URL) {

@@ -110,16 +110,12 @@ import WalletToolLayer
             chain: .ethereumSepolia
         )
 
-        for tool in [ToolIntent.Tool.transfer, .swap, .shield] {
+        for tool in [ToolIntent.Tool.transfer, .swap] {
             #expect(
                 BundlerGasPolicy.block(tool: tool, disposition: .pending, status: blocked) != nil,
                 "\(tool) is relayed by the bundler and must be declined"
             )
         }
-
-        // An unshield exit is paymaster-sponsored and publicly bundled, so the local bundler
-        // EOA's gas balance cannot block it.
-        #expect(BundlerGasPolicy.block(tool: .unshield, disposition: .pending, status: blocked) == nil)
 
         // History is not re-decorated: an already-confirmed card keeps its execution result.
         for disposition in [ToolIntent.Disposition.confirmed, .edited, .rejected] {

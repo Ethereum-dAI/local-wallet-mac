@@ -7,8 +7,6 @@ public enum WalletTransactionOperation: String, Codable, Equatable, Sendable, Ca
     case approval
     case batch
     case deploy
-    case shield
-    case unshield
     case unknown
 }
 
@@ -644,13 +642,20 @@ public final class WalletTransactionHistoryStore {
             let chainName = columnText(statement, 2),
             let accountAddress = columnText(statement, 3),
             let operationText = columnText(statement, 4),
-            let operation = WalletTransactionOperation(rawValue: operationText),
             let statusText = columnText(statement, 5),
             let status = WalletTransactionStatus(rawValue: statusText),
             let userOpHash = columnText(statement, 6)
         else {
             return nil
         }
+
+        // Rows written by a build with operations this one no longer knows (the removed
+        // RAILGUN shield/unshield) degrade to `.unknown` instead of being dropped.
+        // Dropping them is worse than showing them: `loadRecords` applies its LIMIT in
+        // SQL and filters here, so a dropped row silently shrinks the page, and an
+        // unfinalized one would never reach `loadUnfinalizedRecords` again while still
+        // holding its UNIQUE(chain_id, user_op_hash) key.
+        let operation = WalletTransactionOperation(rawValue: operationText) ?? .unknown
 
         return WalletTransactionRecord(
             id: id,

@@ -13,14 +13,33 @@ import Testing
         deleteSessionKeys: { steps.append("session") },
         clearRelayerAddressCache: { steps.append("relayer-cache") },
         clearMetadata: { steps.append("metadata") },
-        deleteRailgunSecrets: { steps.append("railgun") }
+        invalidateBiometricContexts: { steps.append("biometric") }
     )
 
     var completed: [String] = []
     try cleanup.run { completed.append($0) }
 
-    #expect(steps == ["root", "bundler", "session", "relayer-cache", "metadata", "railgun"])
-    #expect(completed == ["secure-enclave-key", "relayer-keys", "session-keys", "relayer-address-cache", "metadata", "railgun-secrets"])
+    #expect(steps == ["root", "bundler", "session", "relayer-cache", "metadata", "biometric"])
+    #expect(completed == ["secure-enclave-key", "relayer-keys", "session-keys", "relayer-address-cache", "metadata", "biometric-contexts"])
+}
+
+// The biometric reuse window has to close even when an earlier step fails: a step that
+// throws must not take the invalidation down with it, which is why it is its own step
+// rather than a tail call inside another closure.
+@Test func walletResetCleanupInvalidatesBiometricContextsEvenWhenAnEarlierStepThrows() {
+    struct Boom: Error {}
+    var invalidated = false
+    let cleanup = WalletResetCleanup(
+        deleteRootKey: {},
+        deleteBundlerKeys: {},
+        deleteSessionKeys: {},
+        clearRelayerAddressCache: {},
+        clearMetadata: { throw Boom() },
+        invalidateBiometricContexts: { invalidated = true }
+    )
+
+    #expect(throws: WalletResetCleanupError.self) { try cleanup.run() }
+    #expect(invalidated)
 }
 
 @Test func walletResetCleanupContinuesPastFailuresAndAggregates() {
@@ -32,7 +51,7 @@ import Testing
         deleteSessionKeys: { steps.append("session") },
         clearRelayerAddressCache: { steps.append("relayer-cache") },
         clearMetadata: { steps.append("metadata") },
-        deleteRailgunSecrets: { steps.append("railgun") }
+        invalidateBiometricContexts: { steps.append("biometric") }
     )
 
     var aggregated: WalletResetCleanupError?
@@ -42,7 +61,7 @@ import Testing
         aggregated = error
     } catch {}
 
-    #expect(steps == ["bundler", "session", "relayer-cache", "metadata", "railgun"])
+    #expect(steps == ["bundler", "session", "relayer-cache", "metadata", "biometric"])
     #expect(aggregated?.failures.count == 1)
     #expect(aggregated?.failures.first?.step == "secure-enclave-key")
 }

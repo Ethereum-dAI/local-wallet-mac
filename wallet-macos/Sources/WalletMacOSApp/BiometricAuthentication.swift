@@ -23,13 +23,11 @@ final class BiometricAuthenticationContexts: @unchecked Sendable {
     /// rest of the session anyway, so a reuse window grants nothing a live
     /// process does not already have.
     ///
-    /// RAILGUN's spending entropy was briefly in here and has been taken back
-    /// out. It failed the first half of the bar — it is read once per sidecar
-    /// launch, so the window almost never applied — while widening the second:
-    /// the entropy is the root every ephemeral exit sender is derived from, and
-    /// a fresh read of it is the one moment a person has to be present for.
-    /// Trading a prompt nobody was seeing for a five-minute unprompted window on
-    /// spending material is a bad trade in both directions.
+    /// Both halves have to hold. A secret read only once or twice per session
+    /// fails the first half — the window would suppress almost no prompts — and
+    /// adding a domain for it buys nothing while leaving a five-minute period in
+    /// which spending material could be unlocked with nobody present. A rare
+    /// prompt is not the kind of noise this is here to remove.
     enum Domain: String, CaseIterable {
         /// Handing the relayer secret to a freshly spawned `wallet-node`.
         case relayerLaunch

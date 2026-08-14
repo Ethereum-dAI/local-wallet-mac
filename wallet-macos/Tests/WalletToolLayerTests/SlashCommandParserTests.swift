@@ -34,53 +34,6 @@ import Testing
     #expect(intent.args == ["from_token": "ETH", "to_token": "USDC", "amount": "0.1", "amount_side": "input"])
 }
 
-@Test func parsesShieldPositionalShorthand() throws {
-    let intent = try SlashCommandParser().parse("/shield 0.01")
-    #expect(intent.tool == .shield)
-    #expect(intent.source == .slash)
-    #expect(intent.args == ["amount": "0.01", "token": "ETH"])
-}
-
-@Test func parsesShieldWithExplicitToken() throws {
-    let intent = try SlashCommandParser().parse("/shield 0.001 ETH")
-    #expect(intent.tool == .shield)
-    #expect(intent.source == .slash)
-    #expect(intent.args == ["amount": "0.001", "token": "ETH"])
-}
-
-@Test func parsesShieldKeyValue() throws {
-    let intent = try SlashCommandParser().parse("/shield amount=0.02 token=ETH")
-    #expect(intent.tool == .shield)
-    #expect(intent.args == ["amount": "0.02", "token": "ETH"])
-}
-
-@Test func shieldRequiresAmount() {
-    expectSlashParseError(try SlashCommandParser().parse("/shield")) { error in
-        guard case .missingRequiredArgument("amount") = error else { return false }
-        return true
-    }
-}
-
-@Test func parsesUnshieldPositionalShorthand() throws {
-    let intent = try SlashCommandParser().parse("/unshield 0.01 to 0x1111111111111111111111111111111111111111")
-    #expect(intent.tool == .unshield)
-    #expect(intent.source == .slash)
-    #expect(intent.args == ["amount": "0.01", "token": "ETH", "to": "0x1111111111111111111111111111111111111111"])
-}
-
-@Test func parsesUnshieldKeyValue() throws {
-    let intent = try SlashCommandParser().parse("/unshield amount=0.01 to=vitalik.eth")
-    #expect(intent.tool == .unshield)
-    #expect(intent.args == ["amount": "0.01", "to": "vitalik.eth", "token": "ETH"])
-}
-
-@Test func unshieldRequiresRecipient() {
-    expectSlashParseError(try SlashCommandParser().parse("/unshield 0.01")) { error in
-        guard case .missingRequiredArgument("to") = error else { return false }
-        return true
-    }
-}
-
 @Test func rejectsSwapOutputAmountSide() {
     expectSlashParseError(try SlashCommandParser().parse("/swap from_token=ETH to_token=USDC amount=0.1 amount_side=output")) { error in
         guard case .malformedArgument("amount_side", value: "only input is supported") = error else {

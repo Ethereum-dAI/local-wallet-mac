@@ -1,59 +1,47 @@
 #!/usr/bin/env bash
 #
-# One-shot dev runner for manually testing the RAILGUN /shield + /unshield flow in the
-# macOS app. Consolidates every build step so you don't have to run them by hand:
+# One-shot dev runner for the macOS app. Consolidates every build step so you don't have
+# to run them by hand:
 #
 #   1. build-ffi.sh                              (wallet-ffi + cbindgen -> swift-bridge)
 #   2. cargo build -p wallet-node --release      (the daemon the app spawns)
-#   3. cargo build --release --bins              (railgun-helper — one binary, no child
-#                                                  process; the app spawns it on first
-#                                                  /shield or /unshield)
-#   4. xcodegen generate                         (regenerate LocalWallet.xcodeproj)
-#   5. open LocalWallet.xcodeproj                (you hit Run — signing/Secure Enclave
+#   3. xcodegen generate                         (regenerate LocalWallet.xcodeproj)
+# Then it opens LocalWallet.xcodeproj            (you hit Run — signing/Secure Enclave
 #                                                  needs the signed Xcode bundle)
 #
-# Then in the app's chat: `/shield 0.01`, then `/unshield 0.01 to 0x<addr>`. The app
-# launches the sidecar on its active chain automatically — no manual sidecar or env vars.
-#
 # Usage:
-#   scripts/dev-run-railgun-app.sh              # steps 1-4, then open Xcode
-#   scripts/dev-run-railgun-app.sh --no-open    # steps 1-4 only (CI / re-build)
-#   scripts/dev-run-railgun-app.sh --xcodebuild # also compile the app via xcodebuild
-#   scripts/dev-run-railgun-app.sh --e2e        # skip the app; run the anvil fork e2e
-#                                               #   (needs RPC_URL_SEPOLIA) — the automated
-#                                               #   on-chain proof of shield+unshield
-#   scripts/dev-run-railgun-app.sh --doctor     # diagnose a Secure Enclave / signing error
-#   scripts/dev-run-railgun-app.sh --regen      # force-regenerate the Xcode project.
-#                                               #   Rarely needed: the project regenerates
-#                                               #   automatically whenever it disagrees with the
-#                                               #   app source tree (a branch added or removed a
-#                                               #   file). Either way your signing team is
-#                                               #   carried forward, so a regen no longer
-#                                               #   orphans an existing wallet.
+#   scripts/dev-run-app.sh              # steps 1-3, then open Xcode
+#   scripts/dev-run-app.sh --no-open    # steps 1-3 only (CI / re-build)
+#   scripts/dev-run-app.sh --xcodebuild # also compile the app via xcodebuild
+#   scripts/dev-run-app.sh --doctor     # diagnose a Secure Enclave / signing error
+#   scripts/dev-run-app.sh --regen      # force-regenerate the Xcode project.
+#                                       #   Rarely needed: the project regenerates
+#                                       #   automatically whenever it disagrees with the
+#                                       #   app source tree (a branch added or removed a
+#                                       #   file). Either way your signing team is
+#                                       #   carried forward, so a regen no longer
+#                                       #   orphans an existing wallet.
 #
-#   DEVELOPMENT_TEAM=<team-id> scripts/dev-run-railgun-app.sh
-#                                               # bake YOUR signing team into the generated
-#                                               #   project (fixes the Secure Enclave
-#                                               #   "Generation failed" onboarding error)
+#   DEVELOPMENT_TEAM=<team-id> scripts/dev-run-app.sh
+#                                       # bake YOUR signing team into the generated
+#                                       #   project (fixes the Secure Enclave
+#                                       #   "Generation failed" onboarding error)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
-export FOUNDRY_DISABLE_NIGHTLY_WARNING=1
 
 OPEN=1
 XCODEBUILD=0
-E2E=0
 DOCTOR=0
 REGEN=0
 for arg in "$@"; do
   case "$arg" in
     --no-open) OPEN=0 ;;
     --xcodebuild) XCODEBUILD=1 ;;
-    --e2e) E2E=1 ;;
     --doctor) DOCTOR=1 ;;
     --regen) REGEN=1 ;;
-    -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -109,31 +97,16 @@ fi
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "error: '$1' not found on PATH — $2" >&2; exit 1; }; }
 
-# --- e2e shortcut: the automated on-chain proof, no app needed ---------------------------
-if [[ "$E2E" == 1 ]]; then
-  need cargo "install Rust"
-  need anvil "install foundry (https://getfoundry.sh)"
-  : "${RPC_URL_SEPOLIA:?set RPC_URL_SEPOLIA to a Sepolia RPC URL for the fork e2e}"
-  step "RAILGUN fork e2e (shield + unshield on an anvil Sepolia fork)"
-  exec "$REPO_ROOT/local-wallet-railgun/scripts/e2e-fork.sh"
-fi
-
 # --- prerequisites -----------------------------------------------------------------------
 need cargo "install Rust (https://rustup.rs)"
 need cbindgen "cargo install cbindgen"
 need xcodegen "brew install xcodegen"
 
-step "1/4  Building wallet-ffi (build-ffi.sh)"
+step "1/3  Building wallet-ffi (build-ffi.sh)"
 "$REPO_ROOT/scripts/build-ffi.sh"
 
-step "2/4  Building the wallet-node daemon (release)"
+step "2/3  Building the wallet-node daemon (release)"
 ( cd "$REPO_ROOT/local-wallet-daemon" && cargo build -p wallet-node --release )
-
-step "3/4  Building the railgun sidecar (release: railgun-helper)"
-# One binary now: railgun-helper exits through RAILGUN's privacy paymaster as an ERC-4337
-# UserOperation submitted by a public bundler, so there is no broadcaster child to build,
-# spawn, or fund — `--bins` still works, it just resolves to one target.
-( cd "$REPO_ROOT/local-wallet-railgun" && cargo build --release --bins )
 
 PBXPROJ=LocalWallet.xcodeproj/project.pbxproj
 
@@ -178,21 +151,21 @@ TEAM="${DEVELOPMENT_TEAM:-$EXISTING_TEAM}"
 BUNDLE_ID="${PRODUCT_BUNDLE_IDENTIFIER:-$EXISTING_BUNDLE_ID}"
 
 if [[ ! -e LocalWallet.xcodeproj ]]; then
-  step "4/4  Generating LocalWallet.xcodeproj (xcodegen)"
+  step "3/3  Generating LocalWallet.xcodeproj (xcodegen)"
   xcodegen generate
   REGENERATED=1
 elif [[ "$REGEN" == 1 ]]; then
-  step "4/4  Regenerating LocalWallet.xcodeproj (--regen)"
+  step "3/3  Regenerating LocalWallet.xcodeproj (--regen)"
   xcodegen generate
   REGENERATED=1
 elif drift="$(app_sources_drifted_from_project)"; then
-  step "4/4  Regenerating LocalWallet.xcodeproj ($drift)"
+  step "3/3  Regenerating LocalWallet.xcodeproj ($drift)"
   echo "note: the project and the source tree disagree, so the build would fail somewhere"
   echo "      misleading. Regenerating and preserving your signing below."
   xcodegen generate
   REGENERATED=1
 else
-  step "4/4  Keeping existing LocalWallet.xcodeproj (signing preserved; --regen to rebuild it)"
+  step "3/3  Keeping existing LocalWallet.xcodeproj (signing preserved; --regen to rebuild it)"
   REGENERATED=0
 fi
 
@@ -238,14 +211,11 @@ fi
 step "Done"
 cat <<'NEXT'
 Next:
-  - The app resolves the sidecar from local-wallet-railgun/target/release and the daemon
-    from local-wallet-daemon/target/release automatically (via the Xcode scheme + source
-    paths) — nothing else to set.
+  - The app resolves the daemon from local-wallet-daemon/target/release automatically
+    (via the Xcode scheme) — nothing else to set.
   - In Xcode: select the LocalWalletApp scheme, choose your Apple Development team, Run.
     (Do NOT `swift run` the app — Secure Enclave/Keychain needs the signed bundle.)
-  - Finish onboarding (create wallet, set the Sepolia RPC), then in chat type:
-        /shield 0.01
-        /unshield 0.01 to 0x<recipient-address>
+  - Finish onboarding (create wallet, set the Sepolia RPC), then use the app's chat.
 NEXT
 
 if [[ "$OPEN" == 1 ]]; then

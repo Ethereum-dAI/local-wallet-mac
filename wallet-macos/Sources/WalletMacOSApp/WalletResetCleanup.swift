@@ -11,10 +11,10 @@ struct WalletResetCleanup {
     var deleteSessionKeys: () throws -> Void
     var clearRelayerAddressCache: () throws -> Void
     var clearMetadata: () throws -> Void
-    // The RAILGUN entropy is another key class the app manages (stored in the Keychain; the
-    // sidecar's exit-sender key is derived from it, not stored separately). A full reset must
-    // wipe it too.
-    var deleteRailgunSecrets: () throws -> Void
+    // The removed RAILGUN privacy feature left spending entropy in the Keychain on alpha
+    // installs. Nothing reads it any more, but a reset that claims to clear every key class
+    // has to clear that one too rather than leave it behind for the launch-time purge.
+    var deleteLegacyRailgunSecrets: () throws -> Void
 
     static func standard(
         keyStore: KeyStore = KeyStore(),
@@ -32,10 +32,13 @@ struct WalletResetCleanup {
                 ])
             },
             clearMetadata: { try metadataStore.clear() },
-            deleteRailgunSecrets: {
-                try RailgunSecretsStore.clear()
-                // Every key this reset destroyed is gone; a surviving reuse window
-                // must not wave through a read of whatever replaces it.
+            deleteLegacyRailgunSecrets: {
+                try LegacyRailgunSecretsCleanup.purge()
+                // Runs from the last step so it lands after every other key class is
+                // gone: a surviving reuse window must not wave through a read of
+                // whatever replaces them. If this step is ever dropped — see
+                // `LegacyRailgunSecretsCleanup` for when that becomes possible —
+                // the invalidation has to move to whichever step ends up last.
                 BiometricAuthenticationContexts.shared.invalidateAll()
             }
         )
@@ -50,7 +53,7 @@ struct WalletResetCleanup {
             ("session-keys", deleteSessionKeys),
             ("relayer-address-cache", clearRelayerAddressCache),
             ("metadata", clearMetadata),
-            ("railgun-secrets", deleteRailgunSecrets),
+            ("legacy-railgun-secrets", deleteLegacyRailgunSecrets),
         ]
 
         var failures: [WalletResetCleanupError.StepFailure] = []

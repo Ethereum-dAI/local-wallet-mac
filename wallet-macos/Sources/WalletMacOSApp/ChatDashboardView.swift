@@ -129,8 +129,6 @@ struct OnchainTransactionSummary: Codable, Equatable {
     enum Operation: String, Codable {
         case transfer
         case swap
-        case shield
-        case unshield
     }
 
     enum Status: String, Codable {
@@ -534,233 +532,6 @@ enum ChatPreflightReusePolicy {
     }
 }
 
-/// User-facing copy for a failed RAILGUN exit, keyed off the sidecar's stable failure codes.
-///
-/// Deliberately a free-standing pure type rather than a method on the view model: it is the
-/// only part of the exit-failure path worth testing directly, and the model is file-private.
-enum RailgunExitCopy {
-    /// Copy for a RAILGUN exit failure, or `nil` when `error` isn't one (so callers keep their
-    /// own message). Both the synchronous rejection (`rpcError`) and the async job failure
-    /// (`exitFailed`) carry a stable code, and they share one code space.
-    static func failureCopy(for error: Error) -> String? {
-        switch error as? RailgunHelperClient.ClientError {
-        case let .exitFailed(code, message, submitted):
-            return exitFailureMessage(code: code, message: message, submitted: submitted)
-        case let .rpcError(code, message):
-            // A synchronous rejection is by construction pre-send — the sidecar never reached
-            // `eth_sendUserOperation` — so it carries no `submitted` bit and needs none.
-            return exitFailureMessage(code: code, message: message, submitted: nil)
-        default:
-            return nil
-        }
-    }
-
-    /// Whether a failed poll is evidence that the EXIT failed — the only thing that justifies
-    /// flipping the card to Reverted.
-    ///
-    /// Only `exitFailed` qualifies: it is the sidecar's own report that the job reached a
-    /// terminal failure. Every other error is evidence about the POLL, not the exit, and each
-    /// one has a routine, non-failing cause:
-    ///
-    /// - `rpcError(unknownJobId)` — the sidecar evicts terminal jobs ON READ
-    ///   (`railgun-helper.rs`), and phase 1 returns on `done` as well as `submitted`. A fast
-    ///   inclusion means phase 1 already read the job to `done` and consumed it, so a phase-2
-    ///   poll finds nothing. The card is already correctly Done at that point.
-    /// - `connectFailed` — the helper was torn down and re-spawned (e.g. an RPC/chain switch,
-    ///   see `railgunHelperClient()`), so the socket the detached task is polling is gone.
-    /// - `ioFailed` — a poll queued behind a long UTXO sync exceeded the client timeout (the
-    ///   sidecar serves one connection to completion), or phase 1 hit its own deadline. The
-    ///   sidecar calls phase 1 UNBOUNDED, so any fixed client deadline can be exceeded while
-    ///   the job goes on to submit and deliver.
-    /// - `decodeFailed` — a wire-shape mismatch says nothing about the exit either.
-    ///
-    /// Reverting on any of those tells a user whose funds actually arrived that they didn't,
-    /// which is the worst outcome in this feature. It is the same invariant the sidecar keeps
-    /// on its side, where `await_exit` reports a budget overrun as `included: false` rather
-    /// than as an error, for exactly this reason.
-    ///
-    /// `exitFailed` is then refined by ONE code: `bundlerRejected` spans both sides of
-    /// `eth_sendUserOperation` (see `ExitError::BundlerRejected`). With `submitted == false` the
-    /// bundler refused during gas estimation, nothing was sent and nothing moved — Reverted is
-    /// correct. With `submitted == true` the send POST may have landed and the op may be in the
-    /// mempool, where it can still execute the unshield — Reverted would be the branch's only
-    /// outcome misreport. A MISSING bit (`nil`, e.g. an older sidecar) takes the hedged branch
-    /// too: leaving a card Submitted for a failed exit is recoverable by looking at the chain,
-    /// whereas telling a user their landed exit reverted is not.
-    static func shouldRevertCard(for error: Error) -> Bool {
-        guard let client = error as? RailgunHelperClient.ClientError,
-              case let .exitFailed(code, _, submitted) = client else { return false }
-        if code == "bundlerRejected", submitted != false { return false }
-        return true
-    }
-
-    /// Copy for a poll that gave up without learning anything about the exit. It must not read
-    /// as a failure — the exit is probably still in flight — and must steer the user away from
-    /// retrying, because a second exit would spend more notes.
-    static let exitStillInFlightMessage = "This exit is still in progress — the wallet stopped waiting for it, which is not the same as the exit stopping. Proving a first exit can take several minutes. Check the recipient's balance before trying again, so you don't exit twice."
-
-    /// The note for a wait that ended WITHOUT the card being reverted.
-    ///
-    /// Prefers the coded copy when the error carries one, and that is the point: a
-    /// `bundlerRejected` with `submitted == true` leaves the card Submitted (see
-    /// `shouldRevertCard`) but must still reach the user with the exit index + sender that locate
-    /// the notes if the op does land. The generic still-in-flight sentence would drop exactly that
-    /// recovery pointer. `unknownJobId` likewise has better copy of its own — reachable at all
-    /// only because `RailgunHelperClient.poll` ends the wait on that code (`isJobGone`) instead
-    /// of retrying it to the deadline; a deadline timeout carries no domain code and would fall
-    /// through to the generic note below. Anything else with no domain code — a dropped socket,
-    /// a timed-out read — falls back to that generic note.
-    static func inFlightNotice(for error: Error) -> String {
-        failureCopy(for: error) ?? exitStillInFlightMessage
-    }
-
-    /// Names the third parties an exit actually involves, honestly. The privacy paymaster is an
-    /// on-chain contract and sponsorship is permissionless, so no off-chain service sees the
-    /// user — but the public bundler that submits the UserOperation DOES see their IP address
-    /// alongside the recipient and amount (both of which become public on-chain moments later
-    /// anyway), and traffic is not yet routed over Tor. Must not overclaim, and must not bury
-    /// the bundler.
-    static let privacyDisclosure = """
-    Exits are sponsored by RAILGUN's privacy paymaster (an on-chain contract — sponsorship is \
-    permissionless, so no off-chain service sees you) and submitted by a public ERC-4337 \
-    bundler. The bundler sees your IP address alongside the recipient and amount; both become \
-    public on-chain moments later anyway. Traffic is not yet routed over Tor.
-    """
-
-    /// The "you will receive" breakdown. Both deductions must be visible: RAILGUN's 25 bps
-    /// treasury fee (which reduces what the recipient gets — there is deliberately no
-    /// gross-up) and the in-pool gas fee note, which is why 100% cannot be unshielded.
-    ///
-    /// Lives here (not on `ChatDashboardModel`) for the same reason `privacyDisclosure` does:
-    /// it's a pure function of its arguments, with no dependency on model instance state, so it
-    /// belongs on this already-internal, test-visible copy enum rather than requiring
-    /// `ChatDashboardModel` itself to widen past `private`.
-    static func unshieldBreakdown(
-        requestedWei: String,
-        receivableWei: String,
-        reserveWei: String
-    ) -> String {
-        // `ethDisplayString` already appends the " ETH" unit suffix — do NOT append it again
-        // here, or every amount reads as "0.01 ETH ETH".
-        let requested = WeiFormatter.ethDisplayString(fromHexWei: requestedWei)
-        let receivable = WeiFormatter.ethDisplayString(fromHexWei: receivableWei)
-        let reserve = WeiFormatter.ethDisplayString(fromHexWei: reserveWei)
-        return """
-        Unshielding \(requested) — the recipient receives \(receivable) after \
-        RAILGUN's 0.25% unshield fee. Gas is paid from your shielded balance \
-        (about \(reserve) held back), so you can't unshield your full balance.
-        """
-    }
-
-    /// Whether the Max affordance has nothing useful to offer right now.
-    ///
-    /// Two ways that happens, both ordinary: the pool is empty, or gas is expensive enough that
-    /// the in-pool fee reserve exceeds the whole shielded balance (`max_unshieldable` saturates to
-    /// 0 rather than going negative). Without this guard Max fills the composer with
-    /// `/unshield 0 to <recipient>` and the breakdown reads "Unshielding 0 ETH — the recipient
-    /// receives 0 ETH", never once saying that nothing can be unshielded; sending it then earns a
-    /// raw Rust sentence about the delivery guard.
-    ///
-    /// `renderedAmount` is checked as well as the raw wei because the composer scaffold takes a
-    /// DECIMAL ETH string: a non-zero dust ceiling that formats to a bare `0` fills exactly the
-    /// same useless command. Both inputs are passed in so this stays a pure, testable predicate.
-    static func hasNothingToUnshield(maxValueWei: String, renderedAmount: String) -> Bool {
-        let digits = maxValueWei.hasPrefix("0x") || maxValueWei.hasPrefix("0X")
-            ? String(maxValueWei.dropFirst(2))
-            : maxValueWei
-        if digits.isEmpty || digits.allSatisfy({ $0 == "0" }) { return true }
-        // A value that renders as zero is just as unsendable. A rendering this cannot parse is
-        // left alone rather than guessed at.
-        return Double(renderedAmount) == 0
-    }
-
-    /// Copy for `hasNothingToUnshield`. Says plainly that nothing is unshieldable AND why, since
-    /// "0" on its own reads as a bug rather than as a gas-vs-balance fact.
-    static let nothingUnshieldableMessage = "Nothing can be unshielded right now: gas for an exit is paid from a fee note inside the pool, and your shielded balance doesn't cover it yet. Shield a little more, or try again when gas is cheaper."
-
-    /// The Max affordance fills the composer with — and validates against — `maxValueWei`,
-    /// the largest `amountWei` the sidecar will accept for `unshield`. It deliberately does
-    /// NOT use `receivableAtMaxWei`, which is only what the recipient would net at that amount
-    /// (display-only, folded into `unshieldBreakdown` instead): filling with the receivable
-    /// figure would understate what can actually be requested, and validating against it would
-    /// reject a legitimate max-value request.
-    static func maxUnshieldFillAmountWei(_ max: RailgunHelperClient.MaxUnshieldable) -> String {
-        max.maxValueWei
-    }
-
-    /// Whether an edit to the composer should drop a previously computed `unshieldBreakdown`.
-    /// True whenever the composer no longer holds exactly what the Max affordance last filled
-    /// in — the user typed something else, edited the amount down, or picked a different slash
-    /// command — because a breakdown describing an amount that is no longer what's about to be
-    /// sent is worse than no breakdown at all (this is the whole reason the breakdown exists:
-    /// to be trustworthy). `lastMaxFillComposerText` is `nil` until Max has been used at least
-    /// once, so nothing is ever cleared before there is anything to clear.
-    ///
-    /// Deliberately does NOT try to recompute the breakdown for a hand-edited amount — that
-    /// would need a live sidecar round-trip (the same sync + gas probe `maxUnshieldable`
-    /// itself performs) on every keystroke, which is not worth it. Dropping it is the simplest
-    /// robust behavior: never show a figure that might not describe the pending action.
-    static func shouldClearMaxBreakdown(composerText: String, lastMaxFillComposerText: String?) -> Bool {
-        composerText != lastMaxFillComposerText
-    }
-
-    /// Map the sidecar's stable exit codes onto copy that tells the user what to do.
-    ///
-    /// Switching on the code is the whole point: the sidecar deliberately stripped its message
-    /// prefixes so that nobody substring-matches them. Unknown codes fall through to the raw
-    /// message rather than being swallowed into something generic — a code the sidecar grows
-    /// later must still say *something* true, and a generic string would hide it instead.
-    ///
-    /// `submitted` refines exactly one code — see `shouldRevertCard`. Every other code ignores it.
-    static func exitFailureMessage(code: String?, message: String, submitted: Bool? = nil) -> String {
-        switch code {
-        case "feeDidNotConverge":
-            return "Gas prices are moving too quickly to price this exit. Your shielded funds are untouched — please try again shortly."
-        case "bundlerRejected" where submitted == false:
-            // The pre-send half: the bundler refused during gas estimation, so
-            // `eth_sendUserOperation` was never called and no operation exists anywhere. This is
-            // the ONE branch of this code that may reassure — and it must, because the card is
-            // being reverted and an unexplained revert reads as lost funds.
-            return "No public bundler would take this exit, so nothing was submitted. Your shielded funds are untouched — please try again shortly.\n\(message)"
-        case "bundlerRejected":
-            // The possibly-submitted half (`submitted == true`, or absent). Deliberately NOT
-            // worded as "rejected", matching `ExitError::BundlerRejected`: if
-            // `eth_sendUserOperation` reached the bundler but the response was lost, the op is
-            // already in the mempool and may still land, pass validation and execute the
-            // unshield. So this must never claim the funds are untouched, and it must keep the
-            // sidecar's message, which carries the recoverable exit index and sender for
-            // exactly that case (`a_submitted_bundler_rejection_names_the_recoverable_index_and_sender`).
-            return "The bundler didn't confirm this exit, so it may or may not have been submitted. Check the recipient's balance before trying again — and keep the details below, which locate the funds if it did go through.\n\(message)"
-        case "bundlerUnavailable":
-            // Distinct from bundlerRejected: nothing was submitted, so nothing can be in flight.
-            return "No public bundler is reachable right now, so this exit can't be priced. Your shielded funds are untouched — please try again shortly."
-        case "paymasterNotConfigured":
-            return "RAILGUN's privacy paymaster isn't available on this network, so there is no way to exit the pool here. Your shielded funds are untouched."
-        case "deliveryReverted":
-            // The ONE case where the raw detail must survive: it carries the exit index, which
-            // is what makes stranded funds re-derivable. Keep it verbatim for a bug report.
-            //
-            // Deliberately does NOT say "recoverable" unqualified. Deriving the sender from the
-            // seed means the funds CAN be recovered, but nothing shipped here does it — no sweep
-            // command, no admin RPC — so promising recovery would leave the user holding a claim
-            // they can neither act on nor explain to someone who can.
-            return "The exit landed on-chain but delivery to the recipient failed. Your funds are not lost, but recovering them currently needs help from a developer — please report this with the details below.\n\(message)"
-        case "insufficientShieldedBalance":
-            // The sidecar's own sentence is deliberately NUMBER-FREE (naming the ceiling and the
-            // reserve would write the user's shielded balance — exactly their sum — into the
-            // macOS unified log via its handler-error `warn!`), so this copy has to carry the
-            // explanation itself and point at Max, which fetches the live ceiling.
-            return "That's more than this exit can move out of the pool right now. Gas is paid from a fee note inside the pool, so a little has to stay behind — use Max to fill in the largest amount that currently fits."
-        case "unknownJobId":
-            // The helper restarted mid-job, so its outcome is unknown to us. Never imply it did
-            // not happen — a user who assumes that may exit twice.
-            return "The privacy helper restarted before this exit finished, so its outcome is unknown. Check the recipient's balance before trying again."
-        default:
-            return message
-        }
-    }
-}
-
 enum ChatIntentPreviewPolicy {
     static func shouldAutomaticallyPreparePreview(
         for message: ChatMessage,
@@ -878,21 +649,7 @@ private enum ChatSidebarBucket: String, CaseIterable {
 
 @MainActor
 private final class ChatDashboardModel: ObservableObject {
-    @Published var inputText = "" {
-        didSet {
-            // The decision itself (`shouldClearMaxBreakdown`) is a pure, tested predicate on
-            // `RailgunExitCopy`; this `didSet` is just the thin binding that calls it on every
-            // composer edit. The Max affordance's own write (`fillMaxUnshieldAmount`) records
-            // the exact string it's about to set in `lastMaxFillComposerText` right before
-            // setting it, so that specific assignment is a no-op here — everything else (typing,
-            // editing the amount, picking a different slash command) clears the breakdown.
-            guard RailgunExitCopy.shouldClearMaxBreakdown(
-                composerText: inputText, lastMaxFillComposerText: lastMaxFillComposerText
-            ) else { return }
-            maxUnshieldableBreakdown = nil
-            maxUnshieldableError = nil
-        }
-    }
+    @Published var inputText = ""
     @Published private(set) var conversations: [ChatConversation]
     @Published private(set) var activeConversationID: UUID
     @Published private(set) var isGenerating = false
@@ -920,24 +677,8 @@ private final class ChatDashboardModel: ObservableObject {
     @Published private(set) var kernelTokenBalances: [ChatTokenBalance] = []
     @Published private(set) var bundlerTokenBalances: [ChatTokenBalance] = []
     @Published private(set) var isRefreshingTokenBalances = false
-    // Shielded (RAILGUN) balance, split by pool status. `confirmed` = cleared and spendable;
-    // `pending` = deposited but not yet included by the pool's approval set.
-    @Published private(set) var shieldedConfirmed: String?
-    @Published private(set) var shieldedPending: String?
-    @Published private(set) var isRefreshingShieldedBalance = false
-    @Published private(set) var shieldedBalanceError: String?
-    // Populated by the Max affordance (`fillMaxUnshieldAmount()`): the "you will receive"
-    // breakdown for the ceiling the sidecar just reported, or the error if the probe failed.
-    @Published private(set) var maxUnshieldableBreakdown: String?
-    @Published private(set) var isFetchingMaxUnshieldable = false
-    @Published private(set) var maxUnshieldableError: String?
-    // The exact composer string `fillMaxUnshieldAmount()` last set, so `inputText`'s `didSet`
-    // can tell "Max just wrote this" apart from "the user changed it since" and only clear the
-    // breakdown in the second case. See the `didSet` on `inputText` above.
-    private var lastMaxFillComposerText: String?
     // Which helper EOA is mid gas-funding, so its card shows a spinner and disables its Send
-    // button; nil when idle. Plus the last funding error. The bundler is the only gas-paying
-    // helper the user funds — exits are sponsored by RAILGUN's privacy paymaster.
+    // button; nil when idle. Plus the last funding error.
     @Published private(set) var fundingHelperAddress: String?
     @Published private(set) var helperFundError: String?
     @Published private(set) var helperFundErrorAddress: String?
@@ -960,13 +701,6 @@ private final class ChatDashboardModel: ObservableObject {
     private let onboardingSettingsStore: OnboardingSettingsStore
     private let walletModel: AppModel
     private var executingIntentIDs: Set<UUID> = []
-    /// The railgun-helper sidecar (spawned lazily on first /shield or /unshield, on the
-    /// app's active chain). Killed when this model is torn down (daemon deinit).
-    private var railgunDaemon: RailgunHelperDaemon?
-    // The active-chain RPC the cached `railgunDaemon` was launched with. If the active RPC
-    // changes (e.g. the user switches providers), the spawned helper is still bound to the old
-    // RPC, so we must tear it down and re-spawn — see `railgunHelperClient()`.
-    private var railgunDaemonRPC: String?
     private var lastTokenBalanceKey: String?
     private var lastTokenBalanceAttemptKey: String?
     private var lastTokenBalanceAttemptAt: Date?
@@ -1645,10 +1379,6 @@ private final class ChatDashboardModel: ObservableObject {
             return .transfer
         case .swap:
             return .swap
-        case .shield:
-            return .shield
-        case .unshield:
-            return .unshield
         case nil:
             return .unknown
         }
@@ -2161,10 +1891,6 @@ private final class ChatDashboardModel: ObservableObject {
                 return nil
             }
             return chatSigningPreview(for: walletModel.sessionSigningPreview(for: transactionIntent))
-        case .shield, .unshield:
-            // Shield goes through executeBatch (its own signing path); the unshield exit is
-            // signed by the sidecar — neither uses the session/passkey preview.
-            return nil
         }
     }
 
@@ -3050,134 +2776,6 @@ private final class ChatDashboardModel: ObservableObject {
         return intent
     }
 
-    /// Resolve a client for the railgun-helper sidecar (the wallet's privacy entry point).
-    /// Configured via env for now (`LOCAL_WALLET_PRIVACY_SOCKET` / `_TOKEN`); the in-app
-    /// sidecar-spawn + live (non-fork) mode are the next integration step.
-    private func railgunHelperClient() async throws -> RailgunHelperClient {
-        // Env override points at a manually-run sidecar (e.g. an anvil fork); otherwise the
-        // app spawns + owns one on its active chain.
-        let env = ProcessInfo.processInfo.environment
-        if let socket = env["LOCAL_WALLET_PRIVACY_SOCKET"],
-           let token = env["LOCAL_WALLET_PRIVACY_TOKEN"] {
-            return RailgunHelperClient(socketPath: socket, bearerToken: token)
-        }
-        let currentRPC = walletModel.activeChain.rpcURL.absoluteString
-        // Reuse the spawned sidecar only if it was launched on the CURRENT active-chain RPC.
-        // If the RPC changed under it (e.g. the user switched providers to escape rate limits),
-        // the helper is still bound to the old RPC — tear it down (deinit SIGTERMs it) and
-        // re-spawn on the new RPC.
-        if let daemon = railgunDaemon, railgunDaemonRPC == currentRPC {
-            return daemon.client
-        }
-        railgunDaemon = nil
-        railgunDaemonRPC = nil
-        let secrets = try RailgunSecretsStore.loadOrCreate()
-        let daemon = try await RailgunHelperDaemon.launch(
-            rpcURL: currentRPC,
-            secrets: secrets
-        )
-        railgunDaemon = daemon
-        railgunDaemonRPC = currentRPC
-        return daemon.client
-    }
-
-    /// Fetch the shielded (RAILGUN) balance from the sidecar and publish it split into
-    /// confirmed (cleared/spendable) vs pending (deposited, awaiting pool inclusion).
-    func refreshShieldedBalance() {
-        guard !isRefreshingShieldedBalance else { return }
-        isRefreshingShieldedBalance = true
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.isRefreshingShieldedBalance = false }
-            do {
-                let client = try await self.railgunHelperClient()
-                let split = try await client.balance()
-                self.shieldedConfirmed = WeiFormatter.ethDisplayString(fromHexWei: split.valid)
-                self.shieldedPending = WeiFormatter.ethDisplayString(fromHexWei: split.pending)
-                self.shieldedBalanceError = nil
-            } catch {
-                self.shieldedBalanceError = error.localizedDescription
-            }
-        }
-    }
-
-    /// After a shield/unshield, the RAILGUN pool (Subsquid index + note scan) lags the chain,
-    /// so a single immediate `refreshShieldedBalance()` reads stale totals. Poll for a bounded
-    /// window, refreshing each pass, until the confirmed/pending split changes from what it was
-    /// when the operation completed (or the window elapses).
-    func refreshShieldedBalanceUntilSettled(attempts: Int = 12, interval: TimeInterval = 3) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let baseline = [self.shieldedConfirmed, self.shieldedPending]
-            for _ in 0..<max(1, attempts) {
-                self.refreshShieldedBalance()
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-                if [self.shieldedConfirmed, self.shieldedPending] != baseline {
-                    return
-                }
-            }
-        }
-    }
-
-    /// Strips the " ETH" unit suffix `WeiFormatter.ethDisplayString` appends, so a wei amount
-    /// can be embedded in a `/unshield <amount> to <recipient>` composer scaffold (which takes
-    /// a bare decimal ETH string, the same shape `SlashCatalog`'s scaffold uses). Only edits the
-    /// already-formatted decimal string — no wei math happens here.
-    private nonisolated static func decimalETHAmount(fromHexWei hex: String) -> String {
-        let display = WeiFormatter.ethDisplayString(fromHexWei: hex)
-        guard display.hasSuffix(" ETH") else { return display }
-        return String(display.dropLast(" ETH".count))
-    }
-
-    /// The Max affordance: probe the sidecar's current spendable ceiling (a live RAILGUN sync +
-    /// bundler gas probe, same cost as `unshieldStatus`'s neighbours) and fill the composer with
-    /// a ready-to-send `/unshield` command at `maxValueWei`, alongside the breakdown showing what
-    /// the recipient would actually net (`receivableAtMaxWei`) and the gas reserve held back.
-    func fillMaxUnshieldAmount() {
-        guard !isFetchingMaxUnshieldable else { return }
-        isFetchingMaxUnshieldable = true
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.isFetchingMaxUnshieldable = false }
-            do {
-                let client = try await self.railgunHelperClient()
-                let max = try await client.maxUnshieldable()
-                let amountText = ChatDashboardModel.decimalETHAmount(
-                    fromHexWei: RailgunExitCopy.maxUnshieldFillAmountWei(max)
-                )
-                // Nothing to offer (empty pool, or gas high enough that the fee reserve exceeds
-                // the balance): say so and leave the composer alone. Filling it with
-                // `/unshield 0 to <recipient>` plus a "receives 0 ETH" breakdown would look like
-                // a working affordance and fail on send with a raw sidecar sentence.
-                guard !RailgunExitCopy.hasNothingToUnshield(
-                    maxValueWei: max.maxValueWei, renderedAmount: amountText
-                ) else {
-                    self.maxUnshieldableBreakdown = nil
-                    self.maxUnshieldableError = RailgunExitCopy.nothingUnshieldableMessage
-                    return
-                }
-                self.maxUnshieldableBreakdown = RailgunExitCopy.unshieldBreakdown(
-                    requestedWei: max.maxValueWei,
-                    receivableWei: max.receivableAtMaxWei,
-                    reserveWei: max.reserveWei
-                )
-                self.maxUnshieldableError = nil
-                // The Max affordance is the only writer that must NOT invalidate the breakdown
-                // it just computed — `inputText`'s `didSet` clears `maxUnshieldableBreakdown`
-                // on every OTHER edit (typing, a different slash command), because a stale
-                // breakdown would describe an amount the user is no longer sending. Recording
-                // the exact string here, before assigning it, is what lets `didSet` tell "Max
-                // just wrote this" apart from "the user changed it since".
-                let filled = "/unshield \(amountText) to <recipient>"
-                self.lastMaxFillComposerText = filled
-                self.inputText = filled
-                NotificationCenter.default.post(name: .chatComposerFocusRequested, object: nil)
-            } catch {
-                self.maxUnshieldableError = error.localizedDescription
-            }
-        }
-    }
-
     /// Top up the bundler EOA with native ETH so it can pay gas. The ETH comes from the Kernel
     /// account as a passkey-signed UserOp — the same primitive as a chat transfer. This only
     /// works once the bundler already has enough gas to relay one op; when it's empty, its
@@ -3302,412 +2900,13 @@ private final class ChatDashboardModel: ObservableObject {
         )
     }
 
-    /// `/shield <amount>` — deposit ETH into the RAILGUN pool. The sidecar builds the pool
-    /// deposit tx(s); the OWNER self-submits them as a Kernel `execute` UserOp (passkey).
-    private func executeShield(intent: ToolIntent, acknowledgedCallGasLimit: UInt64? = nil) async throws {
-        guard let amount = intent.args["amount"] else { throw AppError.invalidAmount }
-        let amountWei = try EtherAmountParser.weiDecimalString(fromETHString: amount)
-        let client = try await railgunHelperClient()
-        let txs = try await client.prepareShield(amountWei: amountWei)
-        let executions = try txs.map { try Self.kernelExecution(from: $0) }
-        let result = try await walletModel.executeBatch(
-            executions: executions,
-            logContext: "chat-shield",
-            signingReason: "Authorize shielding \(amount) ETH into the RAILGUN pool on \(walletModel.activeChain.name)",
-            acknowledgedCallGasLimit: acknowledgedCallGasLimit
-        )
-        appendShieldExecutionResult(result, amount: amount, for: intent)
-        refreshShieldedBalanceUntilSettled()
-    }
-
-    /// `/unshield <amount> to <addr>` — withdraw ETH from the pool to a recipient as native
-    /// ETH. The exit is an ERC-4337 UserOperation sponsored by RAILGUN's privacy paymaster and
-    /// submitted by a PUBLIC bundler, so the user needs no gas of their own. Async: the sidecar
-    /// returns a jobId while it proves + submits; we poll for the op hash, then for inclusion.
-    private func executeUnshield(intent: ToolIntent) async throws {
-        guard let amount = intent.args["amount"], let to = intent.args["to"] else {
-            throw AppError.invalidAmount
-        }
-        guard to.hasPrefix("0x"), to.count == 42 else {
-            throw RailgunHelperClient.ClientError.rpcError(
-                code: nil,
-                message: "unshield recipient must be a 0x address (ENS/contact resolution is not yet wired for unshield)"
-            )
-        }
-        let amountWei = try EtherAmountParser.weiDecimalString(fromETHString: amount)
-        // The exit is signed by the sidecar's own exit key and never crosses the Secure
-        // Enclave, so — unlike shield/transfer — it wouldn't prompt on its own. Require an
-        // explicit device-owner (biometric) authorization before moving funds out of the pool.
-        try await walletModel.authorizeDeviceOwner(
-            reason: "Authorize unshielding \(amount) ETH from the RAILGUN pool to \(to) on \(walletModel.activeChain.name)"
-        )
-        let client = try await railgunHelperClient()
-        let jobId = try await client.unshield(amountWei: amountWei, to: to)
-        // The sidecar accepted the job and is proving + submitting (tens of seconds). Show an
-        // immediate "submitted" card now; the exit is not a daemon UserOp, so nothing
-        // reconciles it for us — we drive the submitted → included transition by hand.
-        // Key the card by the per-command intent id, NOT the sidecar jobId: job_seq resets to
-        // 1 on every helper launch, so "unshield:job-1" collides across sessions and (via the
-        // history store's UNIQUE(chain_id, user_op_hash) upsert) makes a new unshield inherit a
-        // previous one's stale transactionHash. intent.id is globally unique per command.
-        let cardID = "unshield:\(intent.id.uuidString)"
-        // Capture the conversation the card was actually appended to and address every later
-        // update to it explicitly. Phase 2 can outlive the user's attention on this chat, and
-        // resolving the ACTIVE conversation at completion time would leave this card stuck on
-        // Submitted in conversation A while a failure notice lands in conversation B, which
-        // never had this intent.
-        let cardConversationID = appendUnshieldSubmittedCard(
-            id: cardID, amount: amount, to: to, for: intent
-        )
-        // Phase 1: wait only for a UserOperation hash.
-        //
-        // A failure here reverts the card ONLY if the sidecar itself reported the job failed.
-        // The client's deadline is not such a report: the sidecar calls phase 1 unbounded
-        // (first-exit circuit-artifact download plus up to ten Groth16 proofs across the
-        // authorised retry), so the deadline can pass while the job goes on to submit and
-        // deliver — and the first exit on a cold machine is both the likeliest to exceed it and
-        // the worst one to falsely mark reverted.
-        let submitted: JSONValue
-        do {
-            submitted = try await client.awaitUnshieldSubmitted(jobId: jobId)
-        } catch {
-            guard RailgunExitCopy.shouldRevertCard(for: error) else {
-                // The exit is probably still running. Leave the card submitted, say so, and do
-                // NOT throw — this is not an execution failure and must not be reported as one.
-                // `inFlightNotice` keeps a coded error's own copy, which for a possibly-submitted
-                // `bundlerRejected` is the only thing carrying the recoverable index and sender.
-                appendUnshieldStillInFlightNotice(
-                    for: intent, in: cardConversationID,
-                    text: RailgunExitCopy.inFlightNotice(for: error)
-                )
-                // The notes may already have left the pool, so still reconcile the balance.
-                refreshShieldedBalanceUntilSettled()
-                return
-            }
-            markUnshieldCardReverted(id: cardID, amount: amount, to: to, in: cardConversationID)
-            // Report in place rather than rethrowing: the generic catch resolves the ACTIVE
-            // conversation, and phase 1 can run for minutes, so a rethrow could revert the card
-            // in one conversation and explain it in another. Errors raised BEFORE the card
-            // exists still propagate normally, where "active" is by definition correct.
-            appendExecutionError(error, for: intent, in: cardConversationID)
-            return
-        }
-        confirmUnshieldCard(
-            id: cardID, result: submitted, amount: amount, to: to, in: cardConversationID
-        )
-        // Phase 1 returns on `submitted` OR `done`, so a fast inclusion is already complete —
-        // and that read EVICTED the terminal job from the sidecar's map. Spawning phase 2
-        // anyway would poll a job that no longer exists and get `unknownJobId` back.
-        guard submitted["included"]?.boolValue != true else {
-            refreshShieldedBalanceUntilSettled()
-            return
-        }
-        // Phase 2: inclusion runs on the bundler's schedule, so it must never block the user.
-        // `awaitUnshieldIncluded` returns nil on timeout meaning "still pending" — leave the
-        // card submitted in that case. Marking a slow-but-valid exit reverted would tell a user
-        // whose funds actually arrived that they didn't, the worst outcome in this feature.
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                guard let included = try await client.awaitUnshieldIncluded(jobId: jobId) else {
-                    // Still pending: the card stays submitted, but the pool may well have moved
-                    // by now, so reconcile the balance rather than leaving it stale until the
-                    // user happens to refresh by hand.
-                    self.refreshShieldedBalanceUntilSettled()
-                    return
-                }
-                self.confirmUnshieldCard(
-                    id: cardID, result: included, amount: amount, to: to, in: cardConversationID
-                )
-                self.refreshShieldedBalanceUntilSettled()
-            } catch {
-                guard RailgunExitCopy.shouldRevertCard(for: error) else {
-                    // The poll broke, not the exit (evicted job, re-spawned helper, timed-out
-                    // read). The card's current state — Submitted, or already Done — is still
-                    // the most accurate thing we know, so say nothing and change nothing; only
-                    // reconcile the balance, since the exit may well have landed.
-                    //
-                    // The exception: when the SIDECAR reported a failure we deliberately do not
-                    // revert on (a `bundlerRejected` whose op may be in the mempool), silence
-                    // would swallow the recovery pointer. Surface it as a note, not an error.
-                    if RailgunHelperClient.isTerminalExitFailure(error) {
-                        self.appendUnshieldStillInFlightNotice(
-                            for: intent, in: cardConversationID,
-                            text: RailgunExitCopy.inFlightNotice(for: error)
-                        )
-                    }
-                    self.refreshShieldedBalanceUntilSettled()
-                    return
-                }
-                // The sidecar reported a terminal failure. Nothing is awaiting this task, so
-                // surface the reason itself rather than letting the card revert unexplained.
-                self.markUnshieldCardReverted(
-                    id: cardID, amount: amount, to: to, in: cardConversationID
-                )
-                self.appendExecutionError(error, for: intent, in: cardConversationID)
-            }
-        }
-    }
-
-    /// Rich on-chain feedback for `/shield`, mirroring transfer: a tool-response message +
-    /// an on-chain transaction card (which also refreshes the wallet history panel).
-    private func appendShieldExecutionResult(
-        _ result: AppModel.UserOperationSendResult,
-        amount: String,
-        for intent: ToolIntent
-    ) {
-        guard let conversationID = activeConversationIDIfPresent else { return }
-        var payload: [String: Any] = [
-            "status": "submitted",
-            "intent_id": intent.id.uuidString,
-            "user_op_hash": result.userOpHash,
-            "signed_by": result.signedBySession ? "session_key" : "passkey",
-            "operation": "shield",
-        ]
-        if let tx = result.transactionHash { payload["transaction_hash"] = tx }
-        if let success = result.success { payload["success"] = success }
-        appendMessage(
-            ChatMessage(kind: .toolResponse, role: .tool, text: jsonString(payload), toolCallId: intent.id.uuidString),
-            to: conversationID
-        )
-
-        let status: OnchainTransactionSummary.Status =
-            result.success == true ? .included
-            : result.success == false ? .reverted
-            : result.transactionHash != nil ? .submitted : .pending
-        let summary = OnchainTransactionSummary(
-            chainName: walletModel.activeChain.name,
-            chainID: walletModel.activeChain.id,
-            amount: amount,
-            token: "ETH",
-            recipient: "RAILGUN shielded pool",
-            recipientName: nil,
-            resolvedRecipient: nil,
-            resolutionChainName: nil,
-            resolutionChainID: nil,
-            ccipReadUsed: nil,
-            operation: .shield,
-            signingMode: result.signedBySession ? "session" : "passkey",
-            amountOut: nil,
-            minimumReceived: nil,
-            route: nil,
-            userOpHash: result.userOpHash,
-            transactionHash: result.transactionHash,
-            status: status,
-            createdAt: Date()
-        )
-        appendMessage(.onchainTransaction(summary), to: conversationID)
-        reloadWalletHistory()
-    }
-
-    /// Build an unshield transaction card. `id` is a stable synthetic key (the exit is not a
-    /// *daemon* UserOp, so the daemon has no userOpHash for it) used to find and update the
-    /// card in place. `delivered` is display text, not raw wei — the card renders it verbatim.
-    ///
-    /// The real `userOpHash` therefore goes in the summary's `transactionHash` slot: it is the
-    /// hash the user can look up, and the summary's own `userOpHash` field is taken by `id`.
-    private func unshieldCardSummary(
-        id: String,
-        amount: String,
-        to: String,
-        status: OnchainTransactionSummary.Status,
-        userOpHash: String?,
-        delivered: String?,
-        createdAt: Date
-    ) -> OnchainTransactionSummary {
-        OnchainTransactionSummary(
-            chainName: walletModel.activeChain.name,
-            chainID: walletModel.activeChain.id,
-            amount: amount,
-            token: "ETH",
-            recipient: to,
-            recipientName: nil,
-            resolvedRecipient: nil,
-            resolutionChainName: nil,
-            resolutionChainID: nil,
-            ccipReadUsed: nil,
-            operation: .unshield,
-            signingMode: "privacy-paymaster",
-            amountOut: delivered,
-            minimumReceived: nil,
-            route: nil,
-            userOpHash: id,
-            transactionHash: userOpHash,
-            status: status,
-            createdAt: createdAt
-        )
-    }
-
-    /// `/unshield` accepted: emit the tool response and a "submitted" card immediately, before
-    /// proving + submission finish (mirrors how `/shield` shows a submitted card up front).
-    ///
-    /// Returns the conversation the card landed in, so every later update can address that
-    /// conversation explicitly instead of whichever one happens to be active by then.
-    private func appendUnshieldSubmittedCard(
-        id: String, amount: String, to: String, for intent: ToolIntent
-    ) -> UUID? {
-        guard let conversationID = activeConversationIDIfPresent else { return nil }
-        let payload: [String: Any] = [
-            "status": "submitted",
-            "intent_id": intent.id.uuidString,
-            "operation": "unshield",
-            "recipient": to,
-        ]
-        appendMessage(
-            ChatMessage(kind: .toolResponse, role: .tool, text: jsonString(payload), toolCallId: intent.id.uuidString),
-            to: conversationID
-        )
-        let summary = unshieldCardSummary(
-            id: id, amount: amount, to: to, status: .submitted,
-            userOpHash: nil, delivered: nil, createdAt: Date()
-        )
-        appendMessage(.onchainTransaction(summary), to: conversationID)
-        reloadWalletHistory()
-        return conversationID
-    }
-
-    /// The wallet stopped waiting for an exit that is probably still running. Deliberately an
-    /// assistant note rather than an error: nothing failed, and the user must not be nudged
-    /// into retrying and exiting twice.
-    ///
-    /// `text` lets a caller substitute copy that carries a recovery pointer — see
-    /// `RailgunExitCopy.inFlightNotice(for:)`.
-    private func appendUnshieldStillInFlightNotice(
-        for intent: ToolIntent,
-        in conversationID: UUID?,
-        text: String = RailgunExitCopy.exitStillInFlightMessage
-    ) {
-        guard let conversationID else { return }
-        appendMessage(
-            ChatMessage(
-                kind: .toolResponse,
-                role: .tool,
-                text: jsonString([
-                    "status": "in_flight",
-                    "intent_id": intent.id.uuidString,
-                    "operation": "unshield",
-                ]),
-                toolCallId: intent.id.uuidString
-            ),
-            to: conversationID
-        )
-        appendMessage(
-            ChatMessage(
-                // `.assistantText`, not `.assistantError`: nothing failed here.
-                kind: .assistantText,
-                role: .assistant,
-                text: text
-            ),
-            to: conversationID
-        )
-    }
-
-    /// Fold an exit outcome into the card. Called TWICE with the same `id` — once when the
-    /// bundler accepts the op (`included: false`) and once when it lands — which is exactly
-    /// what `updateOnchainCard` is for, so the status comes from the `included` flag rather
-    /// than from which call site produced it.
-    ///
-    /// There is no forward transaction: the unwrap and the forward ride inside the same
-    /// sponsored UserOperation, so the identifying hash is the UserOperation hash.
-    private func confirmUnshieldCard(
-        id: String, result: JSONValue, amount: String, to: String, in conversationID: UUID?
-    ) {
-        let userOpHash = result["userOpHash"]?.stringValue
-        let included = result["included"]?.boolValue ?? false
-        // `deliveredWei` is a 0x-hex STRING on the wire and must stay one all the way into
-        // WeiFormatter: 2^53 wei is 0.009 ETH, so any trip through Double would silently
-        // corrupt nearly every real amount.
-        let delivered = result["deliveredWei"]?.stringValue.map(WeiFormatter.ethDisplayString(fromHexWei:))
-        updateOnchainCard(userOpHash: id, in: conversationID) { [self] old in
-            // Fall back to what the card already shows: this runs twice, and the second call
-            // must never erase a hash or amount the first one displayed just because the later
-            // payload omitted the field.
-            unshieldCardSummary(
-                id: id, amount: amount, to: to,
-                status: included ? .included : .submitted,
-                userOpHash: userOpHash ?? old.transactionHash,
-                delivered: delivered ?? old.amountOut,
-                createdAt: old.createdAt
-            )
-        }
-    }
-
-    /// The exit failed: flip the card to "reverted" so it doesn't linger as submitted.
-    ///
-    /// Reachable ONLY when `RailgunExitCopy.shouldRevertCard(for:)` is true — i.e. the sidecar
-    /// reported the job terminally failed. Never for a slow inclusion, a client deadline, an
-    /// evicted job or a broken socket, all of which leave the card as it stands.
-    /// The error's own message reaches the user via `appendExecutionError`.
-    private func markUnshieldCardReverted(
-        id: String, amount: String, to: String, in conversationID: UUID?
-    ) {
-        updateOnchainCard(userOpHash: id, in: conversationID) { [self] old in
-            // Carry the existing hash and amount over: a failure AFTER submission is exactly
-            // when the user needs them to look the op up or report it.
-            unshieldCardSummary(
-                id: id, amount: amount, to: to, status: .reverted,
-                userOpHash: old.transactionHash, delivered: old.amountOut, createdAt: old.createdAt
-            )
-        }
-    }
-
-    /// Update an on-chain transaction card in place by its `userOpHash`, rewriting the most
-    /// recent matching message. Used for cards the daemon doesn't reconcile (unshield).
-    ///
-    /// `conversationID` is required rather than resolved from the active conversation: the only
-    /// callers update a card from a task that may finish long after the user has moved to a
-    /// different chat, and the card lives where it was appended.
-    private func updateOnchainCard(
-        userOpHash: String,
-        in conversationID: UUID?,
-        _ transform: (OnchainTransactionSummary) -> OnchainTransactionSummary
-    ) {
-        guard let conversationID,
-              let cIndex = conversations.firstIndex(where: { $0.id == conversationID })
-        else { return }
-        guard let mIndex = conversations[cIndex].messages.lastIndex(where: {
-            $0.kind == .onchainTransaction
-                && OnchainTransactionSummary.decode(from: $0)?.userOpHash == userOpHash
-        }),
-            let summary = OnchainTransactionSummary.decode(from: conversations[cIndex].messages[mIndex])
-        else { return }
-        conversations[cIndex].messages[mIndex].text = ChatMessage.onchainTransaction(transform(summary)).text
-        conversations[cIndex].updatedAt = Date()
-        try? chatStore.updateMessage(conversations[cIndex].messages[mIndex], in: conversationID)
-        reloadWalletHistory()
-    }
-
-    private static func kernelExecution(from tx: RailgunHelperClient.ShieldTx) throws -> KernelExecutionRequest {
-        KernelExecutionRequest(
-            target: tx.to,
-            value: try hexData(tx.value).leftPadded(to: 32),
-            callData: try hexData(tx.data)
-        )
-    }
-
-    private static func hexData(_ string: String) throws -> Data {
-        var hex = string.hasPrefix("0x") ? String(string.dropFirst(2)) : string
-        if hex.count % 2 != 0 { hex = "0" + hex }
-        var out = Data()
-        out.reserveCapacity(hex.count / 2)
-        var idx = hex.startIndex
-        while idx < hex.endIndex {
-            let next = hex.index(idx, offsetBy: 2)
-            guard let byte = UInt8(hex[idx..<next], radix: 16) else { throw AppError.invalidAmount }
-            out.append(byte)
-            idx = next
-        }
-        return out
-    }
-
     private func executeIfSupported(
         _ intent: ToolIntent,
         transferPreflightStatus: ChatTransferPreflightStatus? = nil,
         swapPreview: ChatSwapPreview? = nil,
         acknowledgedCallGasLimit: UInt64? = nil
     ) {
-        guard intent.tool == .transfer || intent.tool == .swap
-            || intent.tool == .shield || intent.tool == .unshield else {
+        guard intent.tool == .transfer || intent.tool == .swap else {
             return
         }
         guard !executingIntentIDs.contains(intent.id) else {
@@ -3770,15 +2969,6 @@ private final class ChatDashboardModel: ObservableObject {
                         acknowledgedCallGasLimit: acknowledgedCallGasLimit
                     )
                     self.appendSwapExecutionResult(result, for: intent, request: request)
-                case .shield:
-                    try await self.executeShield(intent: intent, acknowledgedCallGasLimit: acknowledgedCallGasLimit)
-                case .unshield:
-                    // Intentionally drops acknowledgedCallGasLimit. The exit IS a 4337 UserOp
-                    // now, but it is priced by the sidecar against a public bundler and never
-                    // reaches the *daemon's* gas estimation, so it cannot produce
-                    // .gasEstimationUnavailable and there is no acknowledgement to honour.
-                    // Thread it through only if the exit ever moves onto the daemon's path.
-                    try await self.executeUnshield(intent: intent)
                 }
             } catch {
                 self.appendExecutionError(error, for: intent)
@@ -4097,14 +3287,8 @@ private final class ChatDashboardModel: ObservableObject {
         )?.symbol ?? intent.args["token"] ?? "ETH"
     }
 
-    /// - Parameter conversationID: the conversation to report into. Defaults to the active one;
-    ///   the unshield paths pass an explicit id because their detached inclusion task can finish
-    ///   after the user has switched chats, and an error must not surface in a conversation that
-    ///   never ran the intent.
-    private func appendExecutionError(
-        _ error: Error, for intent: ToolIntent, in conversationID: UUID? = nil
-    ) {
-        guard let conversationID = conversationID ?? activeConversationIDIfPresent else {
+    private func appendExecutionError(_ error: Error, for intent: ToolIntent) {
+        guard let conversationID = activeConversationIDIfPresent else {
             return
         }
 
@@ -4152,10 +3336,8 @@ private final class ChatDashboardModel: ObservableObject {
 
         // Backstop for a relayer status too stale to pre-flight against: the daemon refused
         // after all, so replace its raw `-32002 … bundler_eoa_needs_topup` with the same
-        // sentence the intent card would have shown. A failed RAILGUN exit is checked first
-        // because it carries its own stable code and must not reach the chat as raw Rust text.
-        let message = RailgunExitCopy.failureCopy(for: error)
-            ?? BundlerGasStatus.friendlyMessage(for: error, status: accountIdentity.bundlerGas)
+        // sentence the intent card would have shown.
+        let message = BundlerGasStatus.friendlyMessage(for: error, status: accountIdentity.bundlerGas)
             ?? error.localizedDescription
 
         appendMessage(
@@ -4375,9 +3557,6 @@ struct LocalWalletChatDashboardView: View {
     // Account cards start hidden; clicking the chain bar reveals them. Persisted so the
     // choice sticks across launches.
     @AppStorage("localwallet.accountHeaderExpanded") private var isAccountHeaderExpanded = false
-    // Privacy on → show the RAILGUN pieces (the shielded balance row). Off → hide them and the
-    // wallet reads as a plain account. Persisted across launches.
-    @AppStorage("localwallet.privacyEnabled") private var privacyEnabled = true
     @State private var selectedSection: DashboardSection = .chat
     @State private var settingsInitialTab: LocalWalletSettingsTab = .info
     @State private var historyFilter: WalletHistoryFilter = .all
@@ -4757,41 +3936,6 @@ struct LocalWalletChatDashboardView: View {
         .padding(.top, 10)
     }
 
-    /// Toggles the RAILGUN surface (the shielded balance row) on/off.
-    private var privacyToggle: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.18)) { privacyEnabled.toggle() }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: privacyEnabled ? "lock.shield.fill" : "lock.open")
-                    .font(.system(size: 12, weight: .black))
-                Text("Privacy")
-                    .font(.system(size: 12, weight: .heavy))
-                Text(privacyEnabled ? "On" : "Off")
-                    .font(.system(size: 10, weight: .black))
-                    .foregroundStyle(privacyEnabled ? Color.white.opacity(0.85) : ChatPalette.mutedText)
-                    .padding(.horizontal, 6)
-                    .frame(height: 16)
-                    .background(Capsule().fill(privacyEnabled ? Color.white.opacity(0.18) : ChatPalette.buttonCircle))
-            }
-            .foregroundStyle(privacyEnabled ? Color.white : ChatPalette.secondaryText)
-            .padding(.horizontal, 12)
-            .frame(height: 34)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(privacyEnabled ? ChatPalette.accent : ChatPalette.panel.opacity(0.75))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(privacyEnabled ? ChatPalette.accent : ChatPalette.border.opacity(0.75), lineWidth: 1)
-                    )
-            )
-        }
-        .buttonStyle(.plain)
-        .help(privacyEnabled
-            ? "Privacy on — RAILGUN shielding is available. Click to hide it."
-            : "Privacy off — shielded balances are hidden. Click to show.")
-    }
-
     private var accountHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -4811,8 +3955,6 @@ struct LocalWalletChatDashboardView: View {
                     }
                 )
                 .frame(maxWidth: .infinity)
-
-                privacyToggle
 
                 Button {
                     model.refreshOnchainAccountStatus()
@@ -4881,99 +4023,11 @@ struct LocalWalletChatDashboardView: View {
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
-                if privacyEnabled {
-                    shieldedBalanceRow
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                }
             }
         }
         .padding(.top, 10)
         .padding(.bottom, 8)
         .animation(.easeInOut(duration: 0.18), value: isAccountHeaderExpanded)
-        .animation(.easeInOut(duration: 0.18), value: privacyEnabled)
-    }
-
-    /// Shielded (RAILGUN) balance row: confirmed = cleared/spendable, pending = deposited
-    /// but awaiting the pool's approval set. Refreshed after shield/unshield or manually.
-    ///
-    /// Also hosts the Max affordance (fills the composer with the sidecar's current spendable
-    /// ceiling + shows the "you will receive" breakdown) and the privacy disclosure, so the two
-    /// facts a user needs before exiting — what they'll actually get, and who sees the exit —
-    /// live next to the balance they're about to move.
-    private var shieldedBalanceRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Image(systemName: "lock.shield.fill")
-                    .foregroundStyle(.secondary)
-                Text("Shielded (RAILGUN)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if let confirmed = model.shieldedConfirmed {
-                    Text("Confirmed \(confirmed) · Pending \(model.shieldedPending ?? "0 ETH")")
-                        .font(.caption.monospacedDigit())
-                        .help("Confirmed = cleared and spendable. Pending = deposited but not yet included by the pool's approval set.")
-                } else if model.isRefreshingShieldedBalance {
-                    Text("Loading… (syncing the pool)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else if model.shieldedBalanceError != nil {
-                    Text("unavailable")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .help(model.shieldedBalanceError ?? "")
-                } else {
-                    Text("—")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Button {
-                    model.fillMaxUnshieldAmount()
-                } label: {
-                    if model.isFetchingMaxUnshieldable {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Text("Max")
-                            .font(.caption.bold())
-                    }
-                }
-                .buttonStyle(.plain)
-                .disabled(model.isFetchingMaxUnshieldable)
-                .help("Fill the composer with the most you can currently unshield")
-                Button {
-                    model.refreshShieldedBalance()
-                } label: {
-                    Image(systemName: model.isRefreshingShieldedBalance ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
-                }
-                .buttonStyle(.plain)
-                .disabled(model.isRefreshingShieldedBalance)
-                .help("Refresh shielded balance")
-            }
-            if let breakdown = model.maxUnshieldableBreakdown {
-                Text(breakdown)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if let maxUnshieldableError = model.maxUnshieldableError {
-                Text(maxUnshieldableError)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Text(RailgunExitCopy.privacyDisclosure)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.top, 2)
-        .task {
-            // Auto-load once when the account header first shows this row, so the balance
-            // is visible without hunting for the refresh button. (Starts the sidecar.)
-            if model.shieldedConfirmed == nil && model.shieldedBalanceError == nil {
-                model.refreshShieldedBalance()
-            }
-        }
     }
 
     private func explorerAddressURL(_ address: String) -> URL? {
@@ -6842,10 +5896,6 @@ private extension WalletTransactionRecord {
             return "Batch"
         case .deploy:
             return "Deploy account"
-        case .shield:
-            return "Shield"
-        case .unshield:
-            return "Unshield"
         case .unknown:
             return "Transaction"
         }
@@ -6917,10 +5967,6 @@ private extension WalletTransactionRecord {
             return "square.stack.3d.up.fill"
         case .deploy:
             return "shippingbox.fill"
-        case .shield:
-            return "lock.shield.fill"
-        case .unshield:
-            return "lock.open.fill"
         case .unknown:
             return "questionmark.circle.fill"
         }

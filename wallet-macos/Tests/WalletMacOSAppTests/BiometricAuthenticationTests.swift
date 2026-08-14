@@ -32,9 +32,9 @@ struct BiometricAuthenticationContextsTests {
     }
 
     /// The security boundary, asserted rather than assumed: launching the daemon
-    /// is the only unlock that may be reused. Nothing that authorises moving
-    /// funds — signing a transaction, or reading the RAILGUN spending entropy —
-    /// gets a window, so an unlock granted to the daemon can never cover one.
+    /// is the only unlock that may be reused. Nothing that authorises moving funds
+    /// — signing a transaction, enabling a session key — gets a window, so an
+    /// unlock granted to the daemon can never cover one.
     @Test func onlyTheDaemonLaunchUnlockIsReusable() {
         #expect(BiometricAuthenticationContexts.Domain.allCases.map(\.rawValue)
             == ["relayerLaunch"])

@@ -14,9 +14,7 @@ import WalletToolLayer
 /// 2. The gate is a *threshold*, not zero — 0.004 ETH dead-ends exactly like 0 ETH — so the UI
 ///    keys off the daemon's `needsTopup`, never a local `balance == 0` check.
 ///
-/// This is about the *local* bundler EOA only. A RAILGUN exit is sponsored by RAILGUN's privacy
-/// paymaster and submitted by a public bundler, so it needs none of the user's gas and this
-/// type does not gate it — see `BundlerGasPolicy.requiresBundlerGas`.
+/// This is about the *local* bundler EOA only — see `BundlerGasPolicy.requiresBundlerGas`.
 struct BundlerGasStatus: Equatable {
     /// The active bundler EOA, when the daemon has one installed.
     let address: String?
@@ -122,13 +120,9 @@ enum BundlerGasPolicy {
     /// Whether the tool's execution path is relayed by the local bundler EOA.
     static func requiresBundlerGas(_ tool: ToolIntent.Tool) -> Bool {
         switch tool {
-        case .transfer, .swap, .shield:
+        case .transfer, .swap:
             // All submitted as UserOperations the bundler relays and pays the gas for.
             return true
-        case .unshield:
-            // Sponsored by RAILGUN's privacy paymaster and submitted by a public bundler, so
-            // the local bundler EOA's balance is irrelevant to it.
-            return false
         }
     }
 

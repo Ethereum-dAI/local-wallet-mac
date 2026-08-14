@@ -77,6 +77,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Alpha installs that ran the removed RAILGUN privacy feature still have its
+        // spending entropy in the Keychain. Nothing reads it any more, so take it out on
+        // the first launch of a build without the feature. Guarded internally to run once
+        // per install, so this costs a UserDefaults read on every later launch.
+        LegacyRailgunSecretsCleanup.purgeOnceAtLaunch()
+
         // The wallet UI is designed dark-only (hardcoded dark ChatPalette/SettingsPalette
         // backgrounds), but many text elements use system-semantic colors. Pin the whole
         // app to dark so those don't render dark-on-dark for users whose macOS is in Light

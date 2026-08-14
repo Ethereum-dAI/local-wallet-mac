@@ -1467,9 +1467,9 @@ final class AppModel: ObservableObject {
 
     /// Prompt for local device-owner authentication (Touch ID, else password) and throw if
     /// the user cancels or it fails. Use this to gate sensitive actions that do NOT otherwise
-    /// cross the Secure Enclave — a RAILGUN unshield is signed by the sidecar's exit key and
-    /// bundler-EOA admin actions touch only Keychain, so neither prompts on its own the way a
-    /// passkey-signed UserOp (transfer/shield) does. This restores the user-presence gate.
+    /// cross the Secure Enclave — bundler-EOA admin actions touch only the Keychain, so they
+    /// never prompt on their own the way a passkey-signed UserOp (transfer/swap) does. This
+    /// restores the user-presence gate.
     func authorizeDeviceOwner(
         reason: String,
         fallbackError: Error = AppError.userAuthorizationCancelled

@@ -13,14 +13,14 @@ import Testing
         deleteSessionKeys: { steps.append("session") },
         clearRelayerAddressCache: { steps.append("relayer-cache") },
         clearMetadata: { steps.append("metadata") },
-        deleteRailgunSecrets: { steps.append("railgun") }
+        deleteLegacyRailgunSecrets: { steps.append("legacy-railgun") }
     )
 
     var completed: [String] = []
     try cleanup.run { completed.append($0) }
 
-    #expect(steps == ["root", "bundler", "session", "relayer-cache", "metadata", "railgun"])
-    #expect(completed == ["secure-enclave-key", "relayer-keys", "session-keys", "relayer-address-cache", "metadata", "railgun-secrets"])
+    #expect(steps == ["root", "bundler", "session", "relayer-cache", "metadata", "legacy-railgun"])
+    #expect(completed == ["secure-enclave-key", "relayer-keys", "session-keys", "relayer-address-cache", "metadata", "legacy-railgun-secrets"])
 }
 
 @Test func walletResetCleanupContinuesPastFailuresAndAggregates() {
@@ -32,7 +32,7 @@ import Testing
         deleteSessionKeys: { steps.append("session") },
         clearRelayerAddressCache: { steps.append("relayer-cache") },
         clearMetadata: { steps.append("metadata") },
-        deleteRailgunSecrets: { steps.append("railgun") }
+        deleteLegacyRailgunSecrets: { steps.append("legacy-railgun") }
     )
 
     var aggregated: WalletResetCleanupError?
@@ -42,7 +42,7 @@ import Testing
         aggregated = error
     } catch {}
 
-    #expect(steps == ["bundler", "session", "relayer-cache", "metadata", "railgun"])
+    #expect(steps == ["bundler", "session", "relayer-cache", "metadata", "legacy-railgun"])
     #expect(aggregated?.failures.count == 1)
     #expect(aggregated?.failures.first?.step == "secure-enclave-key")
 }

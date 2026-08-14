@@ -51,6 +51,32 @@ private func freshChatStore() -> (ChatSQLiteStore, URL) {
     return (ChatSQLiteStore(databaseURL: url), url)
 }
 
+// A card persisted by a build with an operation this one dropped (the removed RAILGUN
+// shield/unshield) must still decode. The synthesized decoder threw `DataCorrupted` for a
+// present-but-unrecognised raw value, and `case .onchainTransaction` renders nothing when
+// the summary is nil — so the whole card, amount and hash included, became an invisible
+// gap in the transcript.
+@Test func onchainCardSurvivesAnOperationThisBuildNoLongerKnows() throws {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    let json = try #require(
+        String(data: try encoder.encode(submittedSummary(userOpHash: "0xretired")), encoding: .utf8)
+    )
+    let retired = json.replacingOccurrences(of: #""operation":"transfer""#, with: #""operation":"shield""#)
+    #expect(retired != json)
+
+    let decoded = try #require(
+        OnchainTransactionSummary.decode(
+            from: ChatMessage(kind: .onchainTransaction, role: .assistant, text: retired)
+        )
+    )
+
+    #expect(decoded.operation == nil) // reads as a generic transaction
+    #expect(decoded.userOpHash == "0xretired")
+    #expect(decoded.amount == "0.1")
+    #expect(decoded.status == .submitted)
+}
+
 @Test func showsSpeedUpAndCancelOnlyWhenEscapable() {
     #expect(OnchainTransactionActions.canEscape(status: .submitted, blocked: false) == true)
     #expect(OnchainTransactionActions.canEscape(status: .pending, blocked: false) == true)

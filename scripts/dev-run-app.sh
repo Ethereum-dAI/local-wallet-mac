@@ -6,7 +6,7 @@
 #   1. build-ffi.sh                              (wallet-ffi + cbindgen -> swift-bridge)
 #   2. cargo build -p wallet-node --release      (the daemon the app spawns)
 #   3. xcodegen generate                         (regenerate LocalWallet.xcodeproj)
-#   4. open LocalWallet.xcodeproj                (you hit Run — signing/Secure Enclave
+# Then it opens LocalWallet.xcodeproj            (you hit Run — signing/Secure Enclave
 #                                                  needs the signed Xcode bundle)
 #
 # Usage:

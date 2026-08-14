@@ -13,33 +13,45 @@ import Security
 /// and no way back. Once no install can predate the removal — i.e. every user has
 /// launched a build that ran `purgeOnceAtLaunch()` at least once — this whole file
 /// and its call sites can be deleted.
+///
+/// Every coordinate is injectable purely so the tests can exercise the real delete
+/// paths against a scratch service/account and a scratch directory. Production always
+/// takes the defaults.
 enum LegacyRailgunSecretsCleanup {
     /// The exact Keychain coordinates the removed `RailgunSecretsStore` wrote:
     /// a generic password under this service/account pair. Nothing else keyed the
     /// item, so class + service + account is the whole identity — and matching on
     /// exactly those three is what keeps the purge from touching any other item
     /// the app owns.
-    private static let service = "com.localwallet.railgun-seed.app"
-    private static let account = "railgun-seed:v1"
+    static let defaultService = "com.localwallet.railgun-seed.app"
+    static let defaultAccount = "railgun-seed:v1"
 
-    /// The plaintext-JSON store that predated the Keychain one. The removed store
-    /// deleted it on every load and on every clear; the purge inherits that so a
-    /// two-generations-old install is cleaned up in one pass too.
-    private static let legacyPlaintextFileName = "railgun-secrets.json"
+    /// The plaintext-JSON store that predated the Keychain one, under
+    /// `<Application Support>/LocalWallet/`. The removed store deleted it on every
+    /// load and on every clear; the purge inherits that so a two-generations-old
+    /// install is cleaned up in one pass too.
+    static let legacyPlaintextPathComponents = ["LocalWallet", "railgun-secrets.json"]
 
     /// The sidecar's state directory (`<Application Support>/Local Wallet/railgun-helper`),
     /// which held the persisted per-exit rotation counter. Not secret, but it is
     /// state for a feature that no longer exists.
-    private static let legacySidecarDirectoryComponents = ["Local Wallet", "railgun-helper"]
+    static let legacySidecarDirectoryComponents = ["Local Wallet", "railgun-helper"]
 
-    private static let purgedDefaultsKey = "localwallet.legacyRailgunSecretsPurged"
+    static let purgedDefaultsKey = "localwallet.legacyRailgunSecretsPurged"
 
     /// Deletes the leftovers. Idempotent, and a no-op on a machine that never ran a
     /// build with the feature: `errSecItemNotFound` is the expected result there, so
     /// it is treated as success rather than surfaced as an error.
-    static func purge() throws {
-        deleteLegacyPlaintextFile()
-        deleteLegacySidecarState()
+    static func purge(
+        service: String = defaultService,
+        account: String = defaultAccount,
+        applicationSupport: URL? = nil,
+        fileManager: FileManager = .default
+    ) throws {
+        if let support = applicationSupport ?? applicationSupportDirectory(fileManager: fileManager) {
+            deleteLegacyPlaintextFile(in: support, fileManager: fileManager)
+            deleteLegacySidecarState(in: support, fileManager: fileManager)
+        }
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -59,7 +71,10 @@ enum LegacyRailgunSecretsCleanup {
     /// A failed purge deliberately does not set the flag: the next launch retries.
     /// Failure is otherwise ignored — leftover state from a removed feature is not a
     /// reason to block startup, and the in-app reset runs the same purge again.
-    static func purgeOnceAtLaunch(defaults: UserDefaults = .standard) {
+    static func purgeOnceAtLaunch(
+        defaults: UserDefaults = .standard,
+        purge: () throws -> Void = { try LegacyRailgunSecretsCleanup.purge() }
+    ) {
         guard !defaults.bool(forKey: purgedDefaultsKey) else {
             return
         }
@@ -84,25 +99,25 @@ enum LegacyRailgunSecretsCleanup {
 
     // MARK: internals
 
-    private static func deleteLegacyPlaintextFile() {
-        guard let support = try? FileManager.default.url(
+    private static func applicationSupportDirectory(fileManager: FileManager) -> URL? {
+        try? fileManager.url(
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: false
-        ) else { return }
-        let legacy = support
-            .appendingPathComponent("LocalWallet", isDirectory: true)
-            .appendingPathComponent(legacyPlaintextFileName, isDirectory: false)
-        try? FileManager.default.removeItem(at: legacy)
+        )
     }
 
-    private static func deleteLegacySidecarState() {
-        guard let support = try? FileManager.default.url(
-            for: .applicationSupportDirectory, in: .userDomainMask,
-            appropriateFor: nil, create: false
-        ) else { return }
+    private static func deleteLegacyPlaintextFile(in support: URL, fileManager: FileManager) {
+        let legacy = legacyPlaintextPathComponents.enumerated().reduce(support) { url, element in
+            let isDirectory = element.offset < legacyPlaintextPathComponents.count - 1
+            return url.appendingPathComponent(element.element, isDirectory: isDirectory)
+        }
+        try? fileManager.removeItem(at: legacy)
+    }
+
+    private static func deleteLegacySidecarState(in support: URL, fileManager: FileManager) {
         let directory = legacySidecarDirectoryComponents.reduce(support) {
             $0.appendingPathComponent($1, isDirectory: true)
         }
-        try? FileManager.default.removeItem(at: directory)
+        try? fileManager.removeItem(at: directory)
     }
 }

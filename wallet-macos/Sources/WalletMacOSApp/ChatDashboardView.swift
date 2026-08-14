@@ -230,6 +230,40 @@ struct OnchainTransactionSummary: Codable, Equatable {
         self.status = status
         self.createdAt = createdAt
     }
+
+    // Hand-written only to keep `operation` lenient. The synthesized decoder calls
+    // `decodeIfPresent`, which throws `DataCorrupted` for a raw value it does not
+    // recognise (it returns nil only when the key is absent) — so a card persisted by a
+    // build with an operation this one dropped (the removed RAILGUN shield/unshield)
+    // would fail the whole decode, and `case .onchainTransaction` renders nothing when
+    // `summary` is nil. Every other field is still good; an unrecognised operation just
+    // makes the card read as a generic transaction, which is what the optional is for.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.chainName = try container.decode(String.self, forKey: .chainName)
+        self.chainID = try container.decode(UInt64.self, forKey: .chainID)
+        self.amount = try container.decode(String.self, forKey: .amount)
+        self.token = try container.decode(String.self, forKey: .token)
+        self.recipient = try container.decode(String.self, forKey: .recipient)
+        self.recipientName = try container.decodeIfPresent(String.self, forKey: .recipientName)
+        self.resolvedRecipient = try container.decodeIfPresent(String.self, forKey: .resolvedRecipient)
+        self.resolutionChainName = try container.decodeIfPresent(String.self, forKey: .resolutionChainName)
+        self.resolutionChainID = try container.decodeIfPresent(UInt64.self, forKey: .resolutionChainID)
+        self.ccipReadUsed = try container.decodeIfPresent(Bool.self, forKey: .ccipReadUsed)
+        if let operationRaw = try container.decodeIfPresent(String.self, forKey: .operation) {
+            self.operation = Operation(rawValue: operationRaw)
+        } else {
+            self.operation = nil
+        }
+        self.signingMode = try container.decodeIfPresent(String.self, forKey: .signingMode)
+        self.amountOut = try container.decodeIfPresent(String.self, forKey: .amountOut)
+        self.minimumReceived = try container.decodeIfPresent(String.self, forKey: .minimumReceived)
+        self.route = try container.decodeIfPresent(String.self, forKey: .route)
+        self.userOpHash = try container.decode(String.self, forKey: .userOpHash)
+        self.transactionHash = try container.decodeIfPresent(String.self, forKey: .transactionHash)
+        self.status = try container.decode(Status.self, forKey: .status)
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+    }
 }
 
 enum OnchainTransactionActions {

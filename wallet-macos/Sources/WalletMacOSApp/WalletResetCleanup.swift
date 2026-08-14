@@ -15,6 +15,14 @@ struct WalletResetCleanup {
     // installs. Nothing reads it any more, but a reset that claims to clear every key class
     // has to clear that one too rather than leave it behind for the launch-time purge.
     var deleteLegacyRailgunSecrets: () throws -> Void
+    // Its own step, and deliberately the last one: a surviving reuse window must not wave
+    // through a read of whatever replaces the keys this reset just deleted. It is not
+    // folded into another step's closure because `run()` catches per step — a throw ahead
+    // of it inside a shared closure would silently skip the invalidation — and because
+    // every other step here is deletable (`deleteLegacyRailgunSecrets` explicitly so).
+    var invalidateBiometricContexts: () throws -> Void = {
+        BiometricAuthenticationContexts.shared.invalidateAll()
+    }
 
     static func standard(
         keyStore: KeyStore = KeyStore(),
@@ -32,15 +40,7 @@ struct WalletResetCleanup {
                 ])
             },
             clearMetadata: { try metadataStore.clear() },
-            deleteLegacyRailgunSecrets: {
-                try LegacyRailgunSecretsCleanup.purge()
-                // Runs from the last step so it lands after every other key class is
-                // gone: a surviving reuse window must not wave through a read of
-                // whatever replaces them. If this step is ever dropped — see
-                // `LegacyRailgunSecretsCleanup` for when that becomes possible —
-                // the invalidation has to move to whichever step ends up last.
-                BiometricAuthenticationContexts.shared.invalidateAll()
-            }
+            deleteLegacyRailgunSecrets: { try LegacyRailgunSecretsCleanup.purge() }
         )
     }
 
@@ -54,6 +54,7 @@ struct WalletResetCleanup {
             ("relayer-address-cache", clearRelayerAddressCache),
             ("metadata", clearMetadata),
             ("legacy-railgun-secrets", deleteLegacyRailgunSecrets),
+            ("biometric-contexts", invalidateBiometricContexts),
         ]
 
         var failures: [WalletResetCleanupError.StepFailure] = []

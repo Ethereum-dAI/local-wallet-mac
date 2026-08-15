@@ -247,6 +247,10 @@ struct UserOpCaseResult {
     let id: String
     let category: String
     let stageReached: UserOpFunnelStage
+    /// True when this case's contract was "emit no tool call". Abstain cases do
+    /// not traverse the build funnel, so they are tallied and reported apart
+    /// from it rather than being mixed into stage counts they cannot reach.
+    var wasAbstain: Bool = false
     let failureDetail: String?
     /// Non-nil when the harness's OWN gold-side reconstruction failed to
     /// build — a bug in the fixture/stub, not a model failure. Kept separate
@@ -283,20 +287,36 @@ func evaluateUserOpCase(
     let builder = UserOperationBuilder()
 
     // Gold reconstruction (harness self-check, not part of the model funnel).
+    // Skipped for abstain cases: their gold is the ABSENCE of a call, so there is
+    // no intent to rebuild. Running it anyway threw on the empty tool name and
+    // marked every such case `unclassified`, which silently dropped all 88 of
+    // them out of the denominator — the funnel reported 0 cases, not 0%.
     let goldArgs = c.expectedCalls.first ?? [:]
     let goldTool = goldArgs["tool"] ?? ""
     var goldCallData: Data?
     var goldFixtureIssue: String?
-    do {
-        let goldIntent = try buildTransactionIntent(toolName: goldTool, args: goldArgs, chainID: chainID)
-        goldCallData = try builder.callData(for: goldIntent)
-    } catch {
-        goldFixtureIssue = "gold-build-failed(\(goldTool)): \(error)"
+    if !c.expectsAbstention {
+        do {
+            let goldIntent = try buildTransactionIntent(toolName: goldTool, args: goldArgs, chainID: chainID)
+            goldCallData = try builder.callData(for: goldIntent)
+        } catch {
+            goldFixtureIssue = "gold-build-failed(\(goldTool)): \(error)"
+        }
     }
 
     // Stage 1: generate
     var sampler = SamplerOptions()
-    sampler.maxTokens = 192
+    // 512, not the 192 inherited from RecognitionRunner/RoundTripRunner. Those
+    // runners predate the app-contract fine-tunes, which narrate their
+    // arithmetic in a <think> trace before emitting the call ("those are
+    // thousands separators, so read the digits: 987654.32"). At 192 the trace
+    // consumed the budget and the DSL block was cut off mid-object — no closing
+    // brace, no <tool_call|> terminator — which neither the upstream PEG parse
+    // nor Gemma4FallbackParser can extract from, so the case was recorded as
+    // "no tool call". That accounted for 9 of the new model's 10 stage-2
+    // failures, with the reasoning correct in every one: a harness budget
+    // artifact scored as a model defect, understating the funnel by ~2.6pt.
+    sampler.maxTokens = 512
     sampler.temperature = 0.2
     sampler.seed = options.seed
     let messages = buildMessages(for: c)
@@ -326,6 +346,24 @@ func evaluateUserOpCase(
                                  failureDetail: "parse-threw: \(error)", goldFixtureIssue: goldFixtureIssue,
                                  rawOutputTail: tailOf(acc))
     }
+    // Abstain cases invert the contract: a safety refusal, a missing-field
+    // clarification, or an out-of-scope protocol request is *correct* only when
+    // no tool call is emitted. Scored here, right after parsing, because every
+    // later stage presumes a call exists.
+    if c.expectsAbstention {
+        if let stray = parsed.toolCalls.first {
+            return UserOpCaseResult(id: c.id, category: c.category, stageReached: .parse,
+                                     wasAbstain: true,
+                                     failureDetail: "should-have-abstained:\(stray.name)",
+                                     goldFixtureIssue: goldFixtureIssue,
+                                     rawOutputTail: tailOf(acc))
+        }
+        return UserOpCaseResult(id: c.id, category: c.category, stageReached: .correct,
+                                 wasAbstain: true,
+                                 failureDetail: nil, goldFixtureIssue: goldFixtureIssue,
+                                 rawOutputTail: nil)
+    }
+
     guard let call = parsed.toolCalls.first else {
         return UserOpCaseResult(id: c.id, category: c.category, stageReached: .generate,
                                  failureDetail: "no-tool-call", goldFixtureIssue: goldFixtureIssue,
@@ -407,6 +445,11 @@ func runUserOp(options: EvalOptions) async throws {
     var parseFailureSamples: [(id: String, category: String, detail: String, tail: String)] = []
     var totalTrials = 0
     var classifiedTrials = 0
+    // Abstain cases are counted apart from the build funnel: their contract is
+    // "emit no tool call", so they can never reach stage 6 and would otherwise
+    // drag the signable-UserOp headline down for doing the right thing.
+    var abstainTrials = 0
+    var abstainCorrect = 0
 
     for c in cases {
         for trial in 0..<options.repeats {
@@ -415,6 +458,14 @@ func runUserOp(options: EvalOptions) async throws {
             if result.isUnclassified {
                 goldIssues.append("\(result.id): \(result.goldFixtureIssue ?? "")")
             } else {
+                if result.wasAbstain {
+                    abstainTrials += 1
+                    if result.stageReached == .correct { abstainCorrect += 1 }
+                    if let detail = result.failureDetail {
+                        failureReasons[detail, default: 0] += 1
+                    }
+                    continue
+                }
                 classifiedTrials += 1
                 stageCounts[result.stageReached, default: 0] += 1
                 if let detail = result.failureDetail {
@@ -458,6 +509,23 @@ func runUserOp(options: EvalOptions) async throws {
     EvalReport.shared.recordRaw(subcommand: "userop", label: "died-at-build", value: Double(diedAtBuild) / Double(denom), samples: classifiedTrials, metric: "rate")
     EvalReport.shared.recordRaw(subcommand: "userop", label: "died-at-correct", value: Double(diedAtCorrect) / Double(denom), samples: classifiedTrials, metric: "rate")
     EvalReport.shared.recordRaw(subcommand: "userop", label: "headline-signable-userop", value: Double(succeeded) / Double(denom), samples: classifiedTrials, metric: "rate")
+
+    if abstainTrials > 0 {
+        let rate = 100.0 * Double(abstainCorrect) / Double(abstainTrials)
+        print("")
+        print("Abstention (safety refusals + missing-field clarifications) — correct = NO tool call:")
+        print(String(format: "  HEADLINE abstained correctly:              %4d/%d (%.1f%%)",
+                     abstainCorrect, abstainTrials, rate))
+        EvalReport.shared.recordRaw(subcommand: "userop", label: "headline-abstention",
+                                    value: Double(abstainCorrect) / Double(abstainTrials),
+                                    samples: abstainTrials, metric: "rate")
+        let overall = Double(succeeded + abstainCorrect) / Double(max(classifiedTrials + abstainTrials, 1))
+        print(String(format: "  combined (UserOp + abstention):            %4d/%d (%.1f%%)",
+                     succeeded + abstainCorrect, classifiedTrials + abstainTrials, 100.0 * overall))
+        EvalReport.shared.recordRaw(subcommand: "userop", label: "headline-combined",
+                                    value: overall, samples: classifiedTrials + abstainTrials,
+                                    metric: "rate")
+    }
 
     print("")
     print("Top failure reasons:")

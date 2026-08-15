@@ -26,9 +26,20 @@ struct UserOpDatasetCase: Codable {
     /// (to/amount/token or from_token/to_token/amount/amount_side). The
     /// conversion script guarantees exactly one element per case.
     let expectedCalls: [[String: String]]
+    /// `"call"` (build a correct UserOp) or `"abstain"` (emit no tool call at
+    /// all). Absent in datasets produced before abstention was scored, which are
+    /// all-call by construction — hence the optional and the default below.
+    let expectation: String?
+
+    /// True when the only correct behaviour is to emit no tool call: safety
+    /// refusals, missing-field clarifications, and out-of-scope protocol asks.
+    var expectsAbstention: Bool {
+        if let expectation { return expectation == "abstain" }
+        return expectedCalls.isEmpty
+    }
 
     enum CodingKeys: String, CodingKey {
-        case id, category, turns
+        case id, category, turns, expectation
         case protocolName = "protocol"
         case language
         case queryType = "query_type"

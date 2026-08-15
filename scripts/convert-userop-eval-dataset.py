@@ -60,7 +60,15 @@ def classify(case: dict) -> str:
     if len(calls) == 1 and calls[0]["tool"] in ("transfer", "swap"):
         return "eligible"
     if len(calls) == 0:
-        return "excluded-no-call"
+        # Zero gold calls used to be dropped, which made the funnel blind to half
+        # of what the wallet has to get right: declining. Three families land
+        # here — safety refusals, ablations (a required field is missing, so the
+        # model must ask rather than guess), and out-of-scope protocol requests
+        # (Aave/Safe, for which the app registers no tool). All three are scored
+        # the same way: emitting ANY tool call is the failure. Inventing a
+        # transfer to a lending pool is not a near miss, it is an unrecoverable
+        # loss of funds, so it belongs in the benchmark rather than outside it.
+        return "abstain"
     if len(calls) == 1 and calls[0]["tool"] == "executeTx":
         return "excluded-executeTx"
     if len(calls) == 1 and calls[0]["tool"] in ("shield", "unshield"):
@@ -84,17 +92,22 @@ def main() -> None:
     for c in all_cases:
         buckets[classify(c)].append(c)
 
-    eligible = buckets["eligible"]
+    # `expectation` tells the Swift runner which of the two contracts a case is
+    # under: build a correct UserOp, or emit no tool call at all.
+    eligible = [{**c, "expectation": "call"} for c in buckets["eligible"]]
+    abstain = [{**c, "expectation": "abstain"} for c in buckets["abstain"]]
+    cases = eligible + abstain
 
     with open(dst_path, "w", encoding="utf-8") as f:
-        json.dump({"schema": "userop-eval/v1", "cases": eligible}, f, indent=2, sort_keys=True)
+        json.dump({"schema": "userop-eval/v1", "cases": cases}, f, indent=2, sort_keys=True)
         f.write("\n")
 
     print(f"source: {src_path} ({len(all_cases)} total cases)")
-    print(f"wrote {len(eligible)} eligible cases to {dst_path}")
+    print(f"wrote {len(cases)} cases to {dst_path} "
+          f"({len(eligible)} call, {len(abstain)} abstain)")
     print()
     print("breakdown:")
-    for reason in ("eligible", "excluded-no-call", "excluded-executeTx", "excluded-railgun", "unclassified"):
+    for reason in ("eligible", "abstain", "excluded-executeTx", "excluded-railgun", "unclassified"):
         cases = buckets.get(reason, [])
         if not cases:
             continue

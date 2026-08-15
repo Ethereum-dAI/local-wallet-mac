@@ -423,6 +423,20 @@ extension LlamaRuntime {
         continuation.finish()
     }
 
+    /// The exact prompt string `chat(messages:tools:options:)` would feed the model,
+    /// without generating. Exposed so training data can be built against the same
+    /// bytes the app actually sends: the eval harness and the fine-tune dataset used
+    /// to render their own scaffold, and the drift between that and this was silent.
+    public func renderChatPrompt(messages: [ChatMessage],
+                                 tools: [ToolDefinition],
+                                 enableThinking: Bool = true) throws -> String {
+        let runtimeHandle = try requireRuntimeHandle()
+        return try renderChat(handle: runtimeHandle,
+                              messagesJSON: try encodeMessages(messages),
+                              toolsJSON: ToolDefinition.toOpenAISchemaJSON(tools),
+                              enableThinking: enableThinking)
+    }
+
     public func parseAssistantTurn(_ assistantOutput: String) throws -> ParsedAssistantTurn {
         let runtimeHandle = try requireRuntimeHandle()
         var err = [CChar](repeating: 0, count: 1024)

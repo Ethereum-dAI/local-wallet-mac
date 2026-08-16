@@ -893,3 +893,123 @@ final class WalletNodeDaemon: @unchecked Sendable {
     }
 
 }
+
+/// Exact state checks for the two halves of first-time relayer registration.
+///
+/// The first daemon must prove that wallet-node derived and loaded the expected
+/// identity from the supplied secret. The second daemon must prove that only the
+/// public mapping survived the restart. Keeping this separate from the process
+/// orchestration makes every fail-closed branch deterministic to test.
+enum RelayerBootstrapRegistrationPolicy {
+    enum Failure: LocalizedError, Equatable {
+        case unexpectedLoadedState(expected: Bool, actual: Bool)
+
+        var errorDescription: String? {
+            switch self {
+            case let .unexpectedLoadedState(expected, actual):
+                return expected
+                    ? "wallet-node did not load the relayer secret during registration (keyLoaded=\(actual))."
+                    : "wallet-node retained the relayer secret after the read-only restart (keyLoaded=\(actual))."
+            }
+        }
+    }
+
+    static func verify(
+        status: WalletNodeClient.RelayerStatus,
+        identity: VerifiedRelayerIdentity,
+        expectedKeyLoaded: Bool
+    ) throws {
+        guard status.keyLoaded == expectedKeyLoaded else {
+            throw Failure.unexpectedLoadedState(
+                expected: expectedKeyLoaded,
+                actual: status.keyLoaded
+            )
+        }
+        try RelayerIdentityBindingPolicy.verify(status: status, against: identity)
+    }
+}
+
+/// Registers a freshly provisioned relayer from the secret, then proves that a
+/// clean restart keeps only its public database row.
+///
+/// This service is used only by explicit setup/reset actions. Ordinary launches
+/// continue to pass an empty key list and never touch protected Keychain data.
+@MainActor
+struct RelayerBootstrapRegistrationService {
+    typealias Probe = @MainActor (
+        [BundlerSecretRecord],
+        ChainConfiguration,
+        WalletNodeDaemon.GasPolicy
+    ) async throws -> WalletNodeClient.RelayerStatus
+
+    private let probe: Probe
+
+    init() {
+        probe = Self.runProbe
+    }
+
+    init(probe: @escaping Probe) {
+        self.probe = probe
+    }
+
+    func register(
+        record: BundlerSecretRecord,
+        chain: ChainConfiguration,
+        gasPolicy: WalletNodeDaemon.GasPolicy
+    ) async throws -> VerifiedRelayerIdentity {
+        let identity = try VerifiedRelayerIdentity.derive(
+            keyRef: record.keyRef,
+            secret: record.secret
+        )
+        guard identity.chainID == chain.id else {
+            throw VerifiedRelayerIdentity.ValidationError.keyRefChainMismatch(
+                expected: chain.id,
+                actual: identity.chainID
+            )
+        }
+
+        let registeredStatus = try await probe([record], chain, gasPolicy)
+        try RelayerBootstrapRegistrationPolicy.verify(
+            status: registeredStatus,
+            identity: identity,
+            expectedKeyLoaded: true
+        )
+
+        let lockedStatus = try await probe([], chain, gasPolicy)
+        try RelayerBootstrapRegistrationPolicy.verify(
+            status: lockedStatus,
+            identity: identity,
+            expectedKeyLoaded: false
+        )
+        return identity
+    }
+
+    /// Helios is deliberately disabled for these short-lived registration
+    /// probes. The durable relayer mapping does not depend on consensus sync,
+    /// and the next normal launch restores the user's configured read mode.
+    private static func runProbe(
+        bundlerSecrets: [BundlerSecretRecord],
+        chain: ChainConfiguration,
+        gasPolicy: WalletNodeDaemon.GasPolicy
+    ) async throws -> WalletNodeClient.RelayerStatus {
+        let daemon = try await WalletNodeDaemon.launch(
+            bundlerSecrets: bundlerSecrets,
+            chain: chain,
+            gasPolicy: gasPolicy,
+            heliosVerificationEnabled: false
+        )
+        do {
+            let status = try await daemon.client.bundlerStatus()
+            try await daemon.terminateAndWait()
+            return status
+        } catch {
+            let originalError = error
+            daemon.terminate()
+            // Cleanup is load-bearing when this was the secret-bearing probe.
+            // Preserve the operation failure, but do not return until the child
+            // has had the bounded termination/reap sequence applied.
+            try? await daemon.terminateAndWait()
+            throw originalError
+        }
+    }
+}

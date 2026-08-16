@@ -18,6 +18,10 @@ use wallet_signature::{
     webauthn::{build_authenticator_data, build_client_data_json},
     wrap_enable_signature, wrap_installed_signature, PackedUserOperation,
 };
+use wallet_userop_policy::{
+    authorize_no_paymaster, v1_owner_caps, v1_session_caps, GasAuthorizationInput, GasPolicyError,
+    GasSchedule,
+};
 use zeroize::Zeroizing;
 
 /// Result codes for FFI functions.
@@ -26,6 +30,88 @@ pub enum WalletResult {
     Ok = 0,
     InvalidInput = -1,
     InternalError = -2,
+}
+
+/// Result codes for the versioned UserOperation gas-authorization boundary.
+///
+/// Values are intentionally stable because Swift turns them into actionable,
+/// fail-closed errors without parsing Rust strings across the C ABI.
+#[repr(i32)]
+pub enum WalletGasAuthorizationResult {
+    Ok = 0,
+    InvalidInput = -1,
+    InternalError = -2,
+    EntryPointCallGasWidth = -10,
+    EntryPointVerificationGasWidth = -11,
+    EntryPointPreVerificationGasWidth = -12,
+    EntryPointMaxFeeWidth = -13,
+    EntryPointPriorityFeeWidth = -14,
+    CallGasCapExceeded = -20,
+    VerificationGasCapExceeded = -21,
+    PreVerificationGasCapExceeded = -22,
+    MaxFeeCapExceeded = -23,
+    PriorityFeeCapExceeded = -24,
+    LiabilityCapExceeded = -25,
+    PriorityFeeAboveMaxFee = -30,
+    PaymasterNotSupported = -31,
+    ArithmeticOverflow = -32,
+    SignatureLengthTooLarge = -33,
+}
+
+/// Authorization scope selectors accepted by `wallet_authorize_userop_gas_v1`.
+///
+/// The C ABI accepts the raw `u8` so unknown future values can be rejected
+/// explicitly instead of invoking undefined enum behavior across FFI.
+#[repr(u8)]
+pub enum WalletGasAuthorizationScope {
+    Owner = 0,
+    Session = 1,
+}
+
+impl WalletGasAuthorizationResult {
+    fn from_policy_error(error: GasPolicyError) -> Self {
+        match error {
+            GasPolicyError::EntryPointFieldWidth {
+                field: "callGasLimit",
+            } => Self::EntryPointCallGasWidth,
+            GasPolicyError::EntryPointFieldWidth {
+                field: "verificationGasLimit",
+            } => Self::EntryPointVerificationGasWidth,
+            GasPolicyError::EntryPointFieldWidth {
+                field: "preVerificationGas",
+            } => Self::EntryPointPreVerificationGasWidth,
+            GasPolicyError::EntryPointFieldWidth {
+                field: "maxFeePerGas",
+            } => Self::EntryPointMaxFeeWidth,
+            GasPolicyError::EntryPointFieldWidth {
+                field: "maxPriorityFeePerGas",
+            } => Self::EntryPointPriorityFeeWidth,
+            GasPolicyError::EntryPointFieldWidth { .. } => Self::InvalidInput,
+            GasPolicyError::CapExceeded {
+                field: "callGasLimit",
+            } => Self::CallGasCapExceeded,
+            GasPolicyError::CapExceeded {
+                field: "verificationGasLimit",
+            } => Self::VerificationGasCapExceeded,
+            GasPolicyError::CapExceeded {
+                field: "preVerificationGas",
+            } => Self::PreVerificationGasCapExceeded,
+            GasPolicyError::CapExceeded {
+                field: "maxFeePerGas",
+            } => Self::MaxFeeCapExceeded,
+            GasPolicyError::CapExceeded {
+                field: "maxPriorityFeePerGas",
+            } => Self::PriorityFeeCapExceeded,
+            GasPolicyError::CapExceeded {
+                field: "maxLiability",
+            } => Self::LiabilityCapExceeded,
+            GasPolicyError::CapExceeded { .. } => Self::InvalidInput,
+            GasPolicyError::PriorityFeeAboveMaxFee => Self::PriorityFeeAboveMaxFee,
+            GasPolicyError::PaymasterNotSupported => Self::PaymasterNotSupported,
+            GasPolicyError::ArithmeticOverflow { .. } => Self::ArithmeticOverflow,
+            GasPolicyError::SignatureLengthTooLarge => Self::SignatureLengthTooLarge,
+        }
+    }
 }
 
 fn fixed_32(slice: &[u8]) -> Result<[u8; 32], WalletResult> {
@@ -476,6 +562,179 @@ pub unsafe extern "C" fn wallet_compute_userop_hash(
     });
 
     result.unwrap_or(WalletResult::InternalError as i32)
+}
+
+/// Authorize every gas field that will be signed into a no-paymaster
+/// EntryPoint v0.7 UserOperation.
+///
+/// The daemon's `preVerificationGas` and `requiredPrefund` are deliberately not
+/// inputs. This function derives pre-verification gas from the exact operation
+/// shape, recomputes maximum liability with checked U256 arithmetic, and
+/// returns the only packed gas values allowed to cross the signing boundary.
+///
+/// # Safety
+/// Fixed-width input buffers must be valid for their supplied lengths. Variable
+/// buffers may be null only when their length is zero. Owner scope requires a
+/// null, zero-length session budget. Session scope requires an exact 32-byte
+/// budget. Output pointers must be writable for 32 bytes, except
+/// `out_policy_version`, which must be writable for one `u32`.
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn wallet_authorize_userop_gas_v1(
+    sender: *const u8,
+    sender_len: u32,
+    nonce: *const u8,
+    nonce_len: u32,
+    init_code: *const u8,
+    init_code_len: u32,
+    call_data: *const u8,
+    call_data_len: u32,
+    call_gas_limit: *const u8,
+    call_gas_limit_len: u32,
+    verification_gas_limit: *const u8,
+    verification_gas_limit_len: u32,
+    max_fee_per_gas: *const u8,
+    max_fee_per_gas_len: u32,
+    max_priority_fee_per_gas: *const u8,
+    max_priority_fee_per_gas_len: u32,
+    paymaster_and_data: *const u8,
+    paymaster_and_data_len: u32,
+    signature_len: u32,
+    authorization_scope: u8,
+    session_gas_budget: *const u8,
+    session_gas_budget_len: u32,
+    out_account_gas_limits: *mut u8,
+    out_pre_verification_gas: *mut u8,
+    out_gas_fees: *mut u8,
+    out_max_liability: *mut u8,
+    out_policy_version: *mut u32,
+) -> i32 {
+    let result = catch_unwind(|| {
+        if sender_len != 20
+            || nonce_len != 32
+            || call_gas_limit_len != 32
+            || verification_gas_limit_len != 32
+            || max_fee_per_gas_len != 32
+            || max_priority_fee_per_gas_len != 32
+            || sender.is_null()
+            || nonce.is_null()
+            || call_gas_limit.is_null()
+            || verification_gas_limit.is_null()
+            || max_fee_per_gas.is_null()
+            || max_priority_fee_per_gas.is_null()
+            || out_account_gas_limits.is_null()
+            || out_pre_verification_gas.is_null()
+            || out_gas_fees.is_null()
+            || out_max_liability.is_null()
+            || out_policy_version.is_null()
+            || (init_code_len > 0 && init_code.is_null())
+            || (call_data_len > 0 && call_data.is_null())
+            || (paymaster_and_data_len > 0 && paymaster_and_data.is_null())
+        {
+            return WalletGasAuthorizationResult::InvalidInput as i32;
+        }
+
+        let sender = Address::from_slice(std::slice::from_raw_parts(sender, sender_len as usize));
+        let nonce = U256::from_be_slice(std::slice::from_raw_parts(nonce, nonce_len as usize));
+        let init_code = if init_code_len == 0 {
+            Bytes::new()
+        } else {
+            Bytes::copy_from_slice(std::slice::from_raw_parts(
+                init_code,
+                init_code_len as usize,
+            ))
+        };
+        let call_data = if call_data_len == 0 {
+            Bytes::new()
+        } else {
+            Bytes::copy_from_slice(std::slice::from_raw_parts(
+                call_data,
+                call_data_len as usize,
+            ))
+        };
+        let paymaster_and_data = if paymaster_and_data_len == 0 {
+            Bytes::new()
+        } else {
+            Bytes::copy_from_slice(std::slice::from_raw_parts(
+                paymaster_and_data,
+                paymaster_and_data_len as usize,
+            ))
+        };
+        let call_gas_limit = U256::from_be_slice(std::slice::from_raw_parts(
+            call_gas_limit,
+            call_gas_limit_len as usize,
+        ));
+        let verification_gas_limit = U256::from_be_slice(std::slice::from_raw_parts(
+            verification_gas_limit,
+            verification_gas_limit_len as usize,
+        ));
+        let max_fee_per_gas = U256::from_be_slice(std::slice::from_raw_parts(
+            max_fee_per_gas,
+            max_fee_per_gas_len as usize,
+        ));
+        let max_priority_fee_per_gas = U256::from_be_slice(std::slice::from_raw_parts(
+            max_priority_fee_per_gas,
+            max_priority_fee_per_gas_len as usize,
+        ));
+        let caps = match authorization_scope {
+            value if value == WalletGasAuthorizationScope::Owner as u8 => {
+                if session_gas_budget_len != 0 || !session_gas_budget.is_null() {
+                    return WalletGasAuthorizationResult::InvalidInput as i32;
+                }
+                v1_owner_caps()
+            }
+            value if value == WalletGasAuthorizationScope::Session as u8 => {
+                if session_gas_budget_len != 32 || session_gas_budget.is_null() {
+                    return WalletGasAuthorizationResult::InvalidInput as i32;
+                }
+                let configured_budget = U256::from_be_slice(std::slice::from_raw_parts(
+                    session_gas_budget,
+                    session_gas_budget_len as usize,
+                ));
+                v1_session_caps(configured_budget)
+            }
+            _ => return WalletGasAuthorizationResult::InvalidInput as i32,
+        };
+
+        let input = GasAuthorizationInput {
+            sender,
+            nonce,
+            init_code,
+            call_data,
+            call_gas_limit,
+            verification_gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            paymaster_and_data,
+            signature_len: signature_len as usize,
+        };
+        let authorized =
+            match authorize_no_paymaster(&input, &caps, GasSchedule::EthereumPectraSingleOpV07V1) {
+                Ok(authorized) => authorized,
+                Err(error) => return WalletGasAuthorizationResult::from_policy_error(error) as i32,
+            };
+
+        std::ptr::copy_nonoverlapping(
+            authorized.account_gas_limits.as_slice().as_ptr(),
+            out_account_gas_limits,
+            32,
+        );
+        std::ptr::copy_nonoverlapping(
+            authorized.pre_verification_gas.to_be_bytes::<32>().as_ptr(),
+            out_pre_verification_gas,
+            32,
+        );
+        std::ptr::copy_nonoverlapping(authorized.gas_fees.as_slice().as_ptr(), out_gas_fees, 32);
+        std::ptr::copy_nonoverlapping(
+            authorized.max_liability.to_be_bytes::<32>().as_ptr(),
+            out_max_liability,
+            32,
+        );
+        *out_policy_version = authorized.policy_version;
+        WalletGasAuthorizationResult::Ok as i32
+    });
+
+    result.unwrap_or(WalletGasAuthorizationResult::InternalError as i32)
 }
 
 /// # Safety
@@ -1107,6 +1366,303 @@ mod tests {
         len_bytes.copy_from_slice(&tail[offset + 24..offset + 32]);
         let len = u64::from_be_bytes(len_bytes) as usize;
         tail[offset + 32..offset + 32 + len].to_vec()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authorize_gas(
+        sender: &[u8],
+        nonce: &[u8],
+        call_data: &[u8],
+        call_gas: &[u8],
+        verification_gas: &[u8],
+        max_fee: &[u8],
+        priority_fee: &[u8],
+        paymaster: &[u8],
+        signature_len: u32,
+        authorization_scope: u8,
+        session_gas_budget: Option<&[u8]>,
+    ) -> (i32, [u8; 32], [u8; 32], [u8; 32], [u8; 32], u32) {
+        let mut account_gas_limits = [0u8; 32];
+        let mut pre_verification_gas = [0u8; 32];
+        let mut gas_fees = [0u8; 32];
+        let mut liability = [0u8; 32];
+        let mut version = 0;
+        let (session_gas_budget_ptr, session_gas_budget_len) = session_gas_budget
+            .map(|budget| (budget.as_ptr(), budget.len() as u32))
+            .unwrap_or((std::ptr::null(), 0));
+        let result = unsafe {
+            wallet_authorize_userop_gas_v1(
+                sender.as_ptr(),
+                sender.len() as u32,
+                nonce.as_ptr(),
+                nonce.len() as u32,
+                std::ptr::null(),
+                0,
+                call_data.as_ptr(),
+                call_data.len() as u32,
+                call_gas.as_ptr(),
+                call_gas.len() as u32,
+                verification_gas.as_ptr(),
+                verification_gas.len() as u32,
+                max_fee.as_ptr(),
+                max_fee.len() as u32,
+                priority_fee.as_ptr(),
+                priority_fee.len() as u32,
+                paymaster.as_ptr(),
+                paymaster.len() as u32,
+                signature_len,
+                authorization_scope,
+                session_gas_budget_ptr,
+                session_gas_budget_len,
+                account_gas_limits.as_mut_ptr(),
+                pre_verification_gas.as_mut_ptr(),
+                gas_fees.as_mut_ptr(),
+                liability.as_mut_ptr(),
+                &mut version,
+            )
+        };
+        (
+            result,
+            account_gas_limits,
+            pre_verification_gas,
+            gas_fees,
+            liability,
+            version,
+        )
+    }
+
+    fn word(value: u64) -> [u8; 32] {
+        U256::from(value).to_be_bytes::<32>()
+    }
+
+    #[test]
+    fn ffi_authorizes_and_returns_checked_v1_gas_plan() {
+        let sender = [0x11; 20];
+        let nonce = word(7);
+        let call_data = [0x42; 96];
+        let call_gas = word(125_000);
+        let verification_gas = word(250_000);
+        let max_fee = word(10_000_000_000);
+        let priority = word(1_000_000_000);
+        let (result, packed_limits, pvg, packed_fees, liability, version) = authorize_gas(
+            &sender,
+            &nonce,
+            &call_data,
+            &call_gas,
+            &verification_gas,
+            &max_fee,
+            &priority,
+            &[],
+            480,
+            WalletGasAuthorizationScope::Owner as u8,
+            None,
+        );
+
+        assert_eq!(result, WalletGasAuthorizationResult::Ok as i32);
+        assert_eq!(&packed_limits[..16], &verification_gas[16..]);
+        assert_eq!(&packed_limits[16..], &call_gas[16..]);
+        assert_eq!(&packed_fees[..16], &priority[16..]);
+        assert_eq!(&packed_fees[16..], &max_fee[16..]);
+        assert_ne!(pvg, [0u8; 32]);
+        assert_ne!(liability, [0u8; 32]);
+        assert_eq!(version, wallet_userop_policy::V1_POLICY_VERSION);
+    }
+
+    #[test]
+    fn ffi_authorization_rejects_invalid_widths_and_null_outputs() {
+        let unit_word = word(1);
+        let (result, ..) = authorize_gas(
+            &[0x11; 19],
+            &unit_word,
+            &[],
+            &unit_word,
+            &unit_word,
+            &unit_word,
+            &unit_word,
+            &[],
+            65,
+            WalletGasAuthorizationScope::Owner as u8,
+            None,
+        );
+        assert_eq!(result, WalletGasAuthorizationResult::InvalidInput as i32);
+
+        let result = unsafe {
+            wallet_authorize_userop_gas_v1(
+                [0x11; 20].as_ptr(),
+                20,
+                unit_word.as_ptr(),
+                32,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                unit_word.as_ptr(),
+                32,
+                unit_word.as_ptr(),
+                32,
+                unit_word.as_ptr(),
+                32,
+                unit_word.as_ptr(),
+                32,
+                std::ptr::null(),
+                0,
+                65,
+                WalletGasAuthorizationScope::Owner as u8,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(result, WalletGasAuthorizationResult::InvalidInput as i32);
+    }
+
+    #[test]
+    fn ffi_authorization_rejects_every_cap_without_truncation() {
+        let sender = [0x11; 20];
+        let nonce = word(7);
+        let call_data = [0x42; 96];
+        let cases = [
+            (
+                word(wallet_userop_policy::V1_MAX_CALL_GAS_LIMIT + 1),
+                word(250_000),
+                word(10_000_000_000),
+                word(1_000_000_000),
+                WalletGasAuthorizationResult::CallGasCapExceeded,
+            ),
+            (
+                word(125_000),
+                word(wallet_userop_policy::V1_MAX_VERIFICATION_GAS_LIMIT + 1),
+                word(10_000_000_000),
+                word(1_000_000_000),
+                WalletGasAuthorizationResult::VerificationGasCapExceeded,
+            ),
+            (
+                word(125_000),
+                word(250_000),
+                word(wallet_userop_policy::V1_MAX_FEE_PER_GAS_WEI + 1),
+                word(1_000_000_000),
+                WalletGasAuthorizationResult::MaxFeeCapExceeded,
+            ),
+            (
+                word(125_000),
+                word(250_000),
+                word(10_000_000_000),
+                word(wallet_userop_policy::V1_MAX_PRIORITY_FEE_PER_GAS_WEI + 1),
+                WalletGasAuthorizationResult::PriorityFeeCapExceeded,
+            ),
+        ];
+
+        for (call, verification, fee, priority, expected) in cases {
+            let (result, ..) = authorize_gas(
+                &sender,
+                &nonce,
+                &call_data,
+                &call,
+                &verification,
+                &fee,
+                &priority,
+                &[],
+                480,
+                WalletGasAuthorizationScope::Owner as u8,
+                None,
+            );
+            assert_eq!(result, expected as i32);
+        }
+    }
+
+    #[test]
+    fn ffi_authorization_rejects_paymaster_priority_order_and_invalid_scopes() {
+        let sender = [0x11; 20];
+        let nonce = word(7);
+        let call_data = [0x42; 96];
+        let call = word(125_000);
+        let verification = word(250_000);
+        let (paymaster_result, ..) = authorize_gas(
+            &sender,
+            &nonce,
+            &call_data,
+            &call,
+            &verification,
+            &word(10),
+            &word(1),
+            &[0x01],
+            65,
+            WalletGasAuthorizationScope::Owner as u8,
+            None,
+        );
+        assert_eq!(
+            paymaster_result,
+            WalletGasAuthorizationResult::PaymasterNotSupported as i32
+        );
+
+        let (priority_result, ..) = authorize_gas(
+            &sender,
+            &nonce,
+            &call_data,
+            &call,
+            &verification,
+            &word(1),
+            &word(2),
+            &[],
+            65,
+            WalletGasAuthorizationScope::Owner as u8,
+            None,
+        );
+        assert_eq!(
+            priority_result,
+            WalletGasAuthorizationResult::PriorityFeeAboveMaxFee as i32
+        );
+
+        let session_budget = word(1);
+        let (liability_result, ..) = authorize_gas(
+            &sender,
+            &nonce,
+            &call_data,
+            &call,
+            &verification,
+            &word(10),
+            &word(1),
+            &[],
+            65,
+            WalletGasAuthorizationScope::Session as u8,
+            Some(&session_budget),
+        );
+        assert_eq!(
+            liability_result,
+            WalletGasAuthorizationResult::LiabilityCapExceeded as i32
+        );
+
+        for (scope, budget) in [
+            (
+                WalletGasAuthorizationScope::Owner as u8,
+                Some(session_budget.as_slice()),
+            ),
+            (WalletGasAuthorizationScope::Session as u8, None),
+            (
+                WalletGasAuthorizationScope::Session as u8,
+                Some(&session_budget[..31]),
+            ),
+            (0xff, None),
+        ] {
+            let (result, ..) = authorize_gas(
+                &sender,
+                &nonce,
+                &call_data,
+                &call,
+                &verification,
+                &word(10),
+                &word(1),
+                &[],
+                65,
+                scope,
+                budget,
+            );
+            assert_eq!(result, WalletGasAuthorizationResult::InvalidInput as i32);
+        }
     }
 
     #[test]

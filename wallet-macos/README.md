@@ -7,14 +7,14 @@ What this demo currently exercises:
 - Secure Enclave + Keychain persistence for the device-bound P-256 signing key
 - public-key derivation and local wallet metadata persistence
 - precomputed Kernel smart-account address derivation
-- balance/deployment inspection on Ethereum Sepolia or mainnet
+- balance/deployment inspection on Ethereum Sepolia
 - local ERC-4337 UserOperation building for native ETH transfers, ERC-20 transfers, exact-input Uniswap v3 swaps, and approval+swap batches when ERC-20 input swaps need allowance
 - Secure Enclave passkey signing, session-key signing for in-policy actions, and local `wallet-node` submission through the app-owned bundler EOA
 - session-key policy controls for ETH caps, ERC-20 token caps, SwapRouter02 approvals, rate limits, gas budget, session duration, and inactivity timeout
 - debug logging for bootstrap, inspection, gas estimation, signing, submission, and receipt polling
 - on-device chat (wallet-tuned Gemma 4 E4B by default) with streaming, tool intent recognition (transfer / swap), slash commands, and an in-chat review card — the chat layer is documented in [Chat layer](#chat-layer) and [Tool layer](#tool-layer) below
 
-The package also contains `SpawnHelper`, the process-launch shim for the local `wallet-node` daemon. Confirmed chat intents use the daemon for Helios-backed reads, gas estimation, UserOperation submission, receipt polling, swap quotes, and relayer-key admin flows (rotate/export/delete the bundler EOA via admin challenges).
+The package also contains `SpawnHelper`, the process-launch shim for the local `wallet-node` daemon. Confirmed chat intents use `wallet-node` for Helios-backed reads, gas estimation, UserOperation submission, receipt polling, swap quotes, and relayer-key admin flows (rotate/export/delete the bundler EOA via admin challenges).
 
 This app must be run as a signed macOS app bundle.
 
@@ -89,7 +89,7 @@ xcodegen generate
 - `DemoModels.swift`
   - View-model structs used by the current demo dashboard and transaction composer.
 - `DemoSettingsStore.swift`
-  - Persistent demo-time settings (e.g., testnet-mode toggle).
+  - Persistent Sepolia endpoint, gas, and verification settings.
 - `WalletNodeClient.swift`
   - JSON-RPC client for the local `wallet-node` daemon over Unix socket or HTTP, including Helios-backed chain reads, admin-authorized rotate/export/delete bundler-EOA flows, ENS resolution, and Uniswap v3 swap quotes.
 - `WalletNodeDaemon.swift`
@@ -130,7 +130,7 @@ xcodegen generate
 
 ## Current Limits
 
-- Mainnet and Sepolia are the supported app chains.
+- Sepolia is the only supported app chain. Mainnet is shown during onboarding as disabled and coming soon.
 - The chat tool path supports native ETH transfers, ERC-20 transfers from the local token registry, and exact-input Uniswap v3 swaps.
 - ERC-20 input swaps can include an approval+swap batch when allowance is missing. Session policy limits approvals to known SwapRouter02 spenders by default and caps approval amounts by token.
 - Session keys require a deployed Kernel account. If the account is not deployed, or if an intent is outside the active policy, the app falls back to Secure Enclave passkey approval.
@@ -139,7 +139,8 @@ xcodegen generate
 
 ## Daemon Spawn Test
 
-The daemon binary comes from the in-repo `local-wallet-daemon` directory. Build it first:
+The Xcode app target builds the release daemon automatically. When running the Swift package's
+spawn test directly, build the daemon from the in-repo `local-wallet-daemon` directory first:
 
 ```bash
 cd local-wallet-daemon
@@ -154,7 +155,7 @@ cd wallet-macos
 swift test --filter SpawnHelperTests
 ```
 
-Set `WALLET_NODE_BIN=/absolute/path/to/wallet-node` to point at a non-default daemon binary location. The fd-3 ready / fd-4 alive contract used by the spawn helper is documented in [`Sources/Spawn/README.md`](Sources/Spawn/README.md).
+For local development, a **Debug** build accepts `WALLET_NODE_BIN=/absolute/path/to/wallet-node` to point at a non-default daemon binary. Release builds ignore executable overrides and source-tree fallbacks; they use only the signed, manifested helper inside the app bundle. The fd-3 ready / fd-4 alive / fd-5 secret contract is documented in [`Sources/Spawn/README.md`](Sources/Spawn/README.md).
 
 ## Legacy Hosted Bundler Configuration
 
@@ -170,7 +171,9 @@ For packaged demo builds, use the same variable when running the package script:
 LOCAL_WALLET_SEPOLIA_BUNDLER_URL="https://..." ./scripts/package-macos-demo.sh
 ```
 
-The package script builds the in-repo `wallet-node` daemon, embeds it at `Contents/Resources/bin/wallet-node`, copies llama.cpp/ggml dynamic libraries into `Contents/Frameworks`, verifies embedded Mach-O deployment targets, injects the URL into the built app's `Info.plist` when set, re-signs that copied app bundle, and checks that the final signature has the application identifier entitlement required by Secure Enclave. For testers outside your own Macs, use the Developer ID notarization path in `scripts/README.md` (`LOCAL_WALLET_NOTARIZE=1` plus a Developer ID Application identity and notarytool credentials) so Gatekeeper accepts the app without per-user Terminal re-signing. Removing quarantine from a trusted copy is less destructive than ad-hoc re-signing; ad-hoc re-signing breaks the entitlement identity needed for wallet creation.
+The package script builds the in-repo `wallet-node` daemon, embeds it under `Contents/Resources/bin`, copies llama.cpp/ggml dynamic libraries into `Contents/Frameworks`, verifies embedded Mach-O deployment targets, injects the URL into the built app's `Info.plist` when set, re-signs that copied app bundle, and checks that the final signature has the application identifier entitlement required by Secure Enclave. wallet-node receives a stable hardened-runtime identity and is pinned by path, signing identifier, Team ID, and CDHash in the outer-signature-sealed `Contents/Resources/trusted-helpers.json`. Packaging fails if the helper, manifest, or outer app identity disagrees; ad-hoc release packaging is not supported.
+
+For testers outside your own Macs, use the Developer ID notarization path in `scripts/README.md` (`LOCAL_WALLET_NOTARIZE=1` plus a Developer ID Application identity and notarytool credentials) so Gatekeeper accepts the app without per-user Terminal re-signing. Removing quarantine from a trusted copy is less destructive than ad-hoc re-signing; ad-hoc re-signing invalidates the helper trust chain and breaks the entitlement identity needed for wallet creation.
 
 The v0.1 alpha zip targets macOS 15+ on Apple Silicon and does not embed the recommended GGUF model by default; onboarding installs the model during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` only for a large self-contained demo build. If the bundler URL variable is not set, the app still builds and the chat tool path can use local `wallet-node`; hosted composer submission is disabled. llama.cpp/ggml come from the pinned prefix (`local-llm/LLAMA_CPP_PIN`), whose dylibs are built `minos 13.3`, so packaging needs no macOS 15-compatible hand-built prefix.
 
@@ -205,7 +208,7 @@ Two ways to surface a card:
 
 Transfers support native ETH, ERC-20 tokens in `WalletTokenRegistry`, `0x` recipients, and ENS names. ENS resolution runs through `wallet-node`, including CCIP Read when required by the resolver. The review card shows the resolved address before signing.
 
-Swaps support exact-input Uniswap v3 routes on mainnet and Sepolia. The app asks `wallet-node` for an on-chain quote using local token metadata, direct pools, one-hop intermediate routes, the configured Uniswap v3 factory, QuoterV2, and SwapRouter02 addresses. ETH input swaps can execute directly; ERC-20 input swaps that need more allowance are submitted as an approval + swap batch UserOperation, policy-bounded to known SwapRouter02 spenders.
+Swaps support exact-input Uniswap v3 routes on Sepolia. The app asks `wallet-node` for an on-chain quote using local token metadata, direct pools, one-hop intermediate routes, the configured Uniswap v3 factory, QuoterV2, and SwapRouter02 addresses. ETH input swaps can execute directly; ERC-20 input swaps that need more allowance are submitted as an approval + swap batch UserOperation, policy-bounded to known SwapRouter02 spenders.
 
 When the user acts on the card, a synthetic `.toolResponse` `ChatMessage` (role `.tool`) is appended to the conversation so the *next* model turn sees the disposition (`acknowledged` / `acknowledged + edited` / `rejected`) and continues coherently. Successful submissions also append an on-chain summary card with copy actions and an Etherscan link. The user can rate the recognition with thumbs-up / thumbs-down (with an optional note on thumbs-down); ratings are stored in the `tool_intent_feedback` table (`ChatSQLiteMigration` v1→v2) keyed by conversation + message + intent, reload with the conversation, and can be exported as a single JSON file via the chat-header gear menu's **Download rankings** action.
 

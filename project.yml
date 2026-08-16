@@ -20,6 +20,22 @@ targets:
       - path: wallet-macos/App/Assets.xcassets
     resources:
       - path: wallet-macos/Sources/WalletMacOSApp/Resources
+    preBuildScripts:
+      - name: Build wallet-node
+        basedOnDependencyAnalysis: false
+        showEnvVars: false
+        script: |
+          set -eu
+          LW_CARGO_BIN="${CARGO:-${HOME}/.cargo/bin/cargo}"
+          if [ ! -x "${LW_CARGO_BIN}" ]; then
+            LW_CARGO_BIN="$(command -v cargo || true)"
+          fi
+          if [ -z "${LW_CARGO_BIN}" ] || [ ! -x "${LW_CARGO_BIN}" ]; then
+            echo "error: Cargo was not found. Install Rust with rustup before building Local Wallet." >&2
+            exit 1
+          fi
+          cd "${SRCROOT}/local-wallet-daemon"
+          "${LW_CARGO_BIN}" build -p wallet-node --release
     info:
       path: wallet-macos/App/Info.plist
       properties:

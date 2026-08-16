@@ -21,6 +21,12 @@ pub struct Erc7579SingleExecution {
     pub call_data: Bytes,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Erc7579CallValueError {
+    MalformedExecutionCallData,
+    ArithmeticOverflow,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryPointWithdrawTo {
     pub withdraw_address: Address,
@@ -149,6 +155,20 @@ pub fn decode_erc7579_executions(call_data: &[u8]) -> Option<Vec<Erc7579SingleEx
         }
         _ => None,
     }
+}
+
+/// Total native value dispatched by a canonical ERC-7579 single or batch
+/// execution. This is an authorization input, so malformed/unknown modes and
+/// uint256 overflow are rejected instead of being interpreted as zero.
+pub fn total_erc7579_call_value(call_data: &[u8]) -> Result<U256, Erc7579CallValueError> {
+    decode_erc7579_executions(call_data)
+        .ok_or(Erc7579CallValueError::MalformedExecutionCallData)?
+        .into_iter()
+        .try_fold(U256::ZERO, |total, execution| {
+            total
+                .checked_add(execution.value)
+                .ok_or(Erc7579CallValueError::ArithmeticOverflow)
+        })
 }
 
 /// Call-gas limit to suggest when estimation is unavailable.
@@ -470,6 +490,36 @@ mod tests {
         assert_eq!(decoded[1].target, other);
         assert_eq!(decoded[1].value, U256::from(2));
         assert!(decoded[1].call_data.is_empty());
+    }
+
+    #[test]
+    fn totals_native_value_across_single_and_batch_executions() {
+        let target = ENTRY_POINT_V07;
+        let single = encode_erc7579_single_execution(target, U256::from(7), Bytes::new());
+        assert_eq!(total_erc7579_call_value(&single), Ok(U256::from(7)));
+
+        let batch = encode_batch_execution(&[
+            (target, U256::from(11), Bytes::new()),
+            (target, U256::from(13), Bytes::new()),
+        ]);
+        assert_eq!(total_erc7579_call_value(&batch), Ok(U256::from(24)));
+    }
+
+    #[test]
+    fn call_value_total_rejects_malformed_calldata_and_overflow() {
+        assert_eq!(
+            total_erc7579_call_value(&[0xde, 0xad, 0xbe, 0xef]),
+            Err(Erc7579CallValueError::MalformedExecutionCallData)
+        );
+
+        let overflow = encode_batch_execution(&[
+            (ENTRY_POINT_V07, U256::MAX, Bytes::new()),
+            (ENTRY_POINT_V07, U256::from(1), Bytes::new()),
+        ]);
+        assert_eq!(
+            total_erc7579_call_value(&overflow),
+            Err(Erc7579CallValueError::ArithmeticOverflow)
+        );
     }
 
     #[test]

@@ -36,14 +36,11 @@ enum OnboardingChainReadinessError: LocalizedError {
 
 @MainActor
 struct OnboardingChainReadinessService {
-    private let onboardingSettingsStore: OnboardingSettingsStore
     private let networkSettingsStore: DemoSettingsStore
 
     init(
-        onboardingSettingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
         networkSettingsStore: DemoSettingsStore = DemoSettingsStore()
     ) {
-        self.onboardingSettingsStore = onboardingSettingsStore
         self.networkSettingsStore = networkSettingsStore
     }
 
@@ -57,20 +54,15 @@ struct OnboardingChainReadinessService {
         let networkSettings = networkSettingsStore.networkSettings
         let chain = networkSettings.activeChain
         let gasPolicy = networkSettings.resolvedDaemonGasPolicy
-        onEvent("launch: preparing wallet-node for \(chain.name) chainId=\(chain.id)")
-        let bundlerSecrets = try BundlerKeyStore.shared.unlockAllForOnboardingDaemonLaunch(chainId: chain.id)
-        onEvent("launch: unlocked \(bundlerSecrets.count) bundler key(s) for chainId=\(chain.id)")
-        if let primary = bundlerSecrets.first {
-            syncUnlockedRelayerAddress(keyRef: primary.keyRef, secret: primary.secret)
-        }
+        onEvent("launch: preparing read-only wallet-node for \(chain.name) chainId=\(chain.id)")
 
         let daemon = try await WalletNodeDaemon.launch(
-            bundlerSecrets: bundlerSecrets,
+            bundlerSecrets: [],
             chain: chain,
             gasPolicy: gasPolicy,
             heliosVerificationEnabled: networkSettings.isHeliosVerificationActive
         )
-        onEvent("launch: wallet-node started; polling network status")
+        onEvent("launch: wallet-node started read-only; polling network status")
         if let logURL = WalletNodeDaemon.managedLogFileURL() {
             onEvent("launch: wallet-node logs \(logURL.path)")
         }
@@ -130,24 +122,6 @@ struct OnboardingChainReadinessService {
             let remaining = max(0.1, timing.timeout - Date().timeIntervalSince(startedAt))
             let delay = min(timing.pollInterval, remaining)
             try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-        }
-    }
-
-    private func syncUnlockedRelayerAddress(keyRef: String, secret: Data) {
-        guard let chainId = BundlerLaunchKeyPolicy.chainId(ofKeyRef: keyRef) else {
-            return
-        }
-        do {
-            let address = try RelayerAddressCachePolicy.address(fromSecret: secret)
-            onboardingSettingsStore.setBundlerKeyRef(keyRef, chainId: chainId)
-            if RelayerAddressCachePolicy.shouldUpdate(
-                cached: onboardingSettingsStore.bundlerAddress(chainId: chainId),
-                unlocked: address
-            ) {
-                onboardingSettingsStore.setBundlerAddress(address, chainId: chainId)
-            }
-        } catch {
-            onboardingSettingsStore.setBundlerKeyRef(keyRef, chainId: chainId)
         }
     }
 }

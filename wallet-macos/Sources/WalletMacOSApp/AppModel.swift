@@ -23,6 +23,530 @@ enum SessionSigningPreview: Equatable {
     case passkey(SessionSigningPasskeyReason)
 }
 
+enum WalletResetDestination: Equatable {
+    case dashboard
+    case onboarding
+
+    var recreatesRelayer: Bool { self == .dashboard }
+    var rebootstrapsWallet: Bool { self == .dashboard }
+    var marksOnboardingIncomplete: Bool { self == .onboarding }
+}
+
+private enum UserOperationExecutionPurpose {
+    case standard
+    case bundlerTopUp(expectedIdentity: VerifiedRelayerIdentity)
+
+    var allowsSessionSigning: Bool {
+        if case .standard = self { return true }
+        return false
+    }
+}
+
+/// Validates the one recoverable rotation crash window: the app journal and
+/// immutable public record already name the pending candidate, but wallet-node
+/// never persisted it because the previous install stopped after the journal
+/// append. An absent daemon candidate is acceptable only while retrying that
+/// exact app-owned identity; any different daemon observation still fails closed.
+enum RelayerPendingRotationBindingPolicy {
+    enum Failure: Error, Equatable {
+        case duplicateKeyReference(String)
+        case duplicateAddress(String)
+        case invalidKeyReference(String)
+        case invalidAddress(String)
+        case activeHistoryMismatch(String)
+        case pendingHistoryMismatch(String)
+        case unrelatedLiveLifecycle(keyRef: String, lifecycle: String)
+        case retiringStatePresent(reported: Int, observed: Int)
+        case replacementStateMissing
+        case replacementInProgress
+    }
+
+    static func validate(
+        status: WalletNodeClient.RelayerStatus,
+        expectedChainID: UInt64,
+        expectedOwnerScope: String,
+        expectedNetworkProfile: String,
+        snapshot: RelayerChainSnapshot,
+        expectedIdentity: VerifiedRelayerIdentity,
+        allowUninstalledDaemonCandidate: Bool,
+        identityForKeyRef: (String) throws -> VerifiedRelayerIdentity?
+    ) throws {
+        let activeIdentity = try PassiveRelayerIdentityResolver.resolve(
+            status: status,
+            expectedChainID: expectedChainID,
+            expectedOwnerScope: expectedOwnerScope,
+            expectedNetworkProfile: expectedNetworkProfile,
+            snapshot: snapshot,
+            identityForKeyRef: identityForKeyRef
+        )
+        guard !status.compromiseSubmissionBlocked else {
+            throw RelayerRotationCoordinator.Failure.daemonLifecycleMismatch(
+                expected: "uncompromised",
+                actual: "compromised"
+            )
+        }
+        guard snapshot.head.pendingKeyRef == expectedIdentity.keyRef,
+              status.pendingFunding.count <= 1 else {
+            throw RelayerRotationCoordinator.Failure.unexpectedPendingTransition(
+                status.pendingFunding.first?.keyRef ?? "none"
+            )
+        }
+        let authority = try RelayerIdentityAuthority.resolve(
+            head: snapshot.head,
+            identityForKeyRef: identityForKeyRef
+        )
+        guard authority.pending == expectedIdentity else {
+            throw RelayerRotationCoordinator.Failure.candidatePublicIdentityMismatch(
+                expectedIdentity.keyRef
+            )
+        }
+
+        guard let replacement = status.replacement else {
+            throw Failure.replacementStateMissing
+        }
+        let replacementHasLiveState = replacement.eligible
+            || replacement.blocked
+            || replacement.blockedReason != nil
+            || replacement.txHash != nil
+            || replacement.userOpHash != nil
+            || replacement.nonce != nil
+        guard !replacementHasLiveState else {
+            throw Failure.replacementInProgress
+        }
+
+        var seenKeyRefs = Set<String>()
+        var seenAddresses = Set<String>()
+        var normalizedHistory: [(entry: WalletNodeClient.RelayerStatus.KeyHistoryEntry, address: String)] = []
+        normalizedHistory.reserveCapacity(status.keyHistory.count)
+        for entry in status.keyHistory {
+            guard RelayerKeyReferenceAuthorityPolicy.matches(
+                entry.keyRef,
+                ownerScope: expectedOwnerScope,
+                chainID: expectedChainID
+            ) else {
+                throw Failure.invalidKeyReference(entry.keyRef)
+            }
+            let address: String
+            do {
+                address = try VerifiedRelayerIdentity.normalizedAddress(entry.eoa)
+            } catch {
+                throw Failure.invalidAddress(entry.eoa)
+            }
+            guard seenKeyRefs.insert(entry.keyRef).inserted else {
+                throw Failure.duplicateKeyReference(entry.keyRef)
+            }
+            guard seenAddresses.insert(address).inserted else {
+                throw Failure.duplicateAddress(address)
+            }
+            normalizedHistory.append((entry, address))
+        }
+
+        let activeRows = normalizedHistory.filter { $0.entry.lifecycle == "active" }
+        guard activeRows.count == 1,
+              let activeRow = activeRows.first,
+              activeRow.entry.keyRef == activeIdentity.keyRef,
+              activeRow.address == activeIdentity.address,
+              status.lifecycle == "active" else {
+            throw Failure.activeHistoryMismatch(activeIdentity.keyRef)
+        }
+
+        let retiringRows = normalizedHistory.filter { $0.entry.lifecycle == "retiring" }
+        guard status.retiringCount == 0, retiringRows.isEmpty else {
+            throw Failure.retiringStatePresent(
+                reported: status.retiringCount,
+                observed: retiringRows.count
+            )
+        }
+
+        for row in normalizedHistory
+        where row.entry.keyRef != activeIdentity.keyRef
+            && row.entry.keyRef != expectedIdentity.keyRef {
+            guard row.entry.lifecycle == "retired" || row.entry.lifecycle == "deleted" else {
+                throw Failure.unrelatedLiveLifecycle(
+                    keyRef: row.entry.keyRef,
+                    lifecycle: row.entry.lifecycle
+                )
+            }
+        }
+
+        guard let pending = status.pendingFunding.first else {
+            let candidateAppearsInHistory = normalizedHistory.contains {
+                $0.entry.keyRef == expectedIdentity.keyRef
+                    || $0.address == expectedIdentity.address
+            }
+            guard allowUninstalledDaemonCandidate,
+                  !candidateAppearsInHistory else {
+                throw RelayerRotationCoordinator.Failure.unexpectedPendingTransition(
+                    candidateAppearsInHistory
+                        ? expectedIdentity.keyRef
+                        : "none"
+                )
+            }
+            return
+        }
+        guard pending.keyRef == expectedIdentity.keyRef else {
+            throw RelayerRotationCoordinator.Failure.unexpectedPendingTransition(
+                pending.keyRef
+            )
+        }
+        let authorization = try authority.authorize(.init(
+            chainID: expectedChainID,
+            keyRef: pending.keyRef,
+            address: pending.eoa,
+            lifecycle: "pending_funding"
+        ))
+        guard authorization.role == .pending,
+              authorization.identity == expectedIdentity else {
+            throw RelayerRotationCoordinator.Failure.candidatePublicIdentityMismatch(
+                expectedIdentity.keyRef
+            )
+        }
+        let candidateRows = normalizedHistory.filter {
+            $0.entry.keyRef == expectedIdentity.keyRef
+                || $0.address == expectedIdentity.address
+        }
+        guard candidateRows.count == 1,
+              let candidateRow = candidateRows.first,
+              candidateRow.entry.keyRef == expectedIdentity.keyRef,
+              candidateRow.address == expectedIdentity.address,
+              candidateRow.entry.lifecycle == "pending_funding" else {
+            throw Failure.pendingHistoryMismatch(expectedIdentity.keyRef)
+        }
+    }
+}
+
+/// Accepts a promotion observation only when wallet-node reports one coherent
+/// lifecycle transition: the exact journal-pending identity is the sole active
+/// row, the exact prior journal-active identity is retiring or retired, and no
+/// pending daemon candidate remains. Extra or duplicate lifecycle claims cannot
+/// mutate the app-owned journal.
+enum RelayerPromotionObservationPolicy {
+    enum Failure: Error, Equatable {
+        case compromiseBlocked
+        case wrongOwnerScope(expected: String, actual: String)
+        case wrongNetworkProfile(expected: String, actual: String)
+        case pendingCandidateRemains
+        case duplicateKeyReference(String)
+        case duplicateAddress(String)
+        case activeHistoryMismatch(String)
+        case priorHistoryMismatch(String)
+        case unrelatedLiveLifecycle(keyRef: String, lifecycle: String)
+        case retiringCountMismatch(expected: Int, actual: Int)
+        case replacementStateMissing
+        case replacementInProgress
+        case invalidAddress(String)
+        case invalidKeyReference(String)
+    }
+
+    struct Observations: Equatable, Sendable {
+        let daemonActive: RelayerRotationCoordinator.DaemonIdentityObservation
+        let priorActive: RelayerRotationCoordinator.DaemonIdentityObservation
+    }
+
+    static func validate(
+        status: WalletNodeClient.RelayerStatus,
+        snapshot: RelayerChainSnapshot,
+        expectedOwnerScope: String,
+        expectedNetworkProfile: String
+    ) throws -> Observations? {
+        guard let pendingKeyRef = snapshot.head.pendingKeyRef,
+              let priorActiveKeyRef = snapshot.head.activeKeyRef,
+              status.keyRef == pendingKeyRef else {
+            return nil
+        }
+        guard !status.compromiseSubmissionBlocked else {
+            throw Failure.compromiseBlocked
+        }
+        guard status.ownerScope == expectedOwnerScope else {
+            throw Failure.wrongOwnerScope(
+                expected: expectedOwnerScope,
+                actual: status.ownerScope
+            )
+        }
+        guard status.networkProfile == expectedNetworkProfile else {
+            throw Failure.wrongNetworkProfile(
+                expected: expectedNetworkProfile,
+                actual: status.networkProfile
+            )
+        }
+        guard status.pendingFunding.isEmpty else {
+            throw Failure.pendingCandidateRemains
+        }
+        guard let replacement = status.replacement else {
+            throw Failure.replacementStateMissing
+        }
+        guard !replacement.eligible,
+              !replacement.blocked,
+              replacement.blockedReason == nil,
+              replacement.txHash == nil,
+              replacement.userOpHash == nil,
+              replacement.nonce == nil else {
+            throw Failure.replacementInProgress
+        }
+        guard let chainID = UInt64(exactly: status.chainId) else {
+            throw PassiveRelayerIdentityResolver.Failure.invalidDaemonChainID(
+                status.chainId
+            )
+        }
+        guard chainID == snapshot.head.chainID else {
+            throw PassiveRelayerIdentityResolver.Failure.wrongDaemonChain(
+                expected: snapshot.head.chainID,
+                actual: chainID
+            )
+        }
+
+        var seenKeyRefs = Set<String>()
+        var seenAddresses = Set<String>()
+        for entry in status.keyHistory {
+            guard RelayerKeyReferenceAuthorityPolicy.matches(
+                entry.keyRef,
+                ownerScope: expectedOwnerScope,
+                chainID: chainID
+            ) else {
+                throw Failure.invalidKeyReference(entry.keyRef)
+            }
+            guard seenKeyRefs.insert(entry.keyRef).inserted else {
+                throw Failure.duplicateKeyReference(entry.keyRef)
+            }
+            let address: String
+            do {
+                address = try VerifiedRelayerIdentity.normalizedAddress(entry.eoa)
+            } catch {
+                throw Failure.invalidAddress(entry.eoa)
+            }
+            guard seenAddresses.insert(address).inserted else {
+                throw Failure.duplicateAddress(address)
+            }
+        }
+
+        let activeRows = status.keyHistory.filter { $0.lifecycle == "active" }
+        guard activeRows.count == 1,
+              let activeRow = activeRows.first,
+              activeRow.keyRef == pendingKeyRef,
+              activeRow.eoa.caseInsensitiveCompare(status.eoa) == .orderedSame,
+              status.lifecycle == "active" else {
+            throw Failure.activeHistoryMismatch(pendingKeyRef)
+        }
+        let priorRows = status.keyHistory.filter { $0.keyRef == priorActiveKeyRef }
+        guard priorRows.count == 1,
+              let priorRow = priorRows.first,
+              priorRow.lifecycle == "retiring" || priorRow.lifecycle == "retired" else {
+            throw Failure.priorHistoryMismatch(priorActiveKeyRef)
+        }
+        for entry in status.keyHistory
+        where entry.keyRef != pendingKeyRef && entry.keyRef != priorActiveKeyRef {
+            guard entry.lifecycle == "retired" || entry.lifecycle == "deleted" else {
+                throw Failure.unrelatedLiveLifecycle(
+                    keyRef: entry.keyRef,
+                    lifecycle: entry.lifecycle
+                )
+            }
+        }
+        let retiringCount = status.keyHistory.lazy.filter {
+            $0.lifecycle == "retiring"
+        }.count
+        guard status.retiringCount == retiringCount else {
+            throw Failure.retiringCountMismatch(
+                expected: retiringCount,
+                actual: status.retiringCount
+            )
+        }
+
+        return Observations(
+            daemonActive: .init(
+                chainID: chainID,
+                keyRef: pendingKeyRef,
+                address: status.eoa,
+                lifecycle: status.lifecycle
+            ),
+            priorActive: .init(
+                chainID: chainID,
+                keyRef: priorRow.keyRef,
+                address: priorRow.eoa,
+                lifecycle: priorRow.lifecycle
+            )
+        )
+    }
+}
+
+/// Executes the one explicit legacy-relayer migration action.
+///
+/// The prompt-free candidate shown by the UI is only an observation. This coordinator
+/// revalidates that observation before authentication, after authentication, and after the
+/// single protected Keychain read. Only the last fresh daemon observation may authorize the
+/// immutable public identity and journal genesis. A successfully committed candidate remains
+/// completed even if the final passive UI refresh fails, so a stale button cannot prompt again.
+@MainActor
+final class LegacyRelayerVerificationCoordinator {
+    struct StatusObservation {
+        let status: WalletNodeClient.RelayerStatus
+        let generation: UInt64
+    }
+
+    struct Dependencies {
+        let fetchStatus: @MainActor () async throws -> StatusObservation
+        let currentGeneration: @MainActor () -> UInt64
+        let candidateForStatus: @MainActor (
+            WalletNodeClient.RelayerStatus
+        ) throws -> LegacyRelayerMigrationCandidate?
+        let makeAuthenticationSession: @MainActor () -> DeviceOwnerAuthenticationSession
+        let readBoundSecret: @MainActor (
+            VerifiedRelayerIdentity,
+            DeviceOwnerAuthenticationSession
+        ) async throws -> BundlerSecretRecord
+        let finalizeIdentity: @MainActor (
+            VerifiedRelayerIdentity
+        ) throws -> VerifiedRelayerIdentity
+        let didCommit: @MainActor (LegacyRelayerMigrationCandidate) -> Void
+        let refreshPassively: @MainActor () async throws -> Void
+    }
+
+    enum Failure: Error, Equatable, LocalizedError {
+        case candidateUnavailable
+        case candidateChanged
+        case staleDaemonGeneration
+        case finalAuthorityMismatch(String)
+        case alreadyCommitted(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .candidateUnavailable:
+                return "The legacy relayer is no longer available for verification. Refresh and try again."
+            case .candidateChanged:
+                return "The local relayer changed during verification. Refresh and review it before trying again."
+            case .staleDaemonGeneration:
+                return "wallet-node restarted during relayer verification. Refresh and try again."
+            case .finalAuthorityMismatch(let keyRef):
+                return "The verified relayer authority could not be finalized for \(keyRef)."
+            case .alreadyCommitted(let keyRef):
+                return "The relayer identity for \(keyRef) has already been verified."
+            }
+        }
+    }
+
+    private struct InFlight {
+        let id: UUID
+        let candidate: LegacyRelayerMigrationCandidate
+        let task: Task<VerifiedRelayerIdentity, Error>
+    }
+
+    private var inFlight: InFlight?
+    private var committedCandidates: [LegacyRelayerMigrationCandidate] = []
+
+    func verify(
+        _ clickedCandidate: LegacyRelayerMigrationCandidate,
+        dependencies: Dependencies
+    ) async throws -> VerifiedRelayerIdentity {
+        if committedCandidates.contains(clickedCandidate) {
+            throw Failure.alreadyCommitted(clickedCandidate.identity.keyRef)
+        }
+        if let inFlight {
+            guard inFlight.candidate == clickedCandidate else {
+                throw Failure.candidateChanged
+            }
+            return try await inFlight.task.value
+        }
+
+        let id = UUID()
+        let task = Task { @MainActor [self] in
+            try await run(clickedCandidate, dependencies: dependencies)
+        }
+        inFlight = InFlight(id: id, candidate: clickedCandidate, task: task)
+        do {
+            let identity = try await task.value
+            if inFlight?.id == id {
+                inFlight = nil
+            }
+            return identity
+        } catch {
+            if inFlight?.id == id {
+                inFlight = nil
+            }
+            throw error
+        }
+    }
+
+    private func run(
+        _ clickedCandidate: LegacyRelayerMigrationCandidate,
+        dependencies: Dependencies
+    ) async throws -> VerifiedRelayerIdentity {
+        try await requireFreshCandidate(
+            clickedCandidate,
+            dependencies: dependencies
+        )
+
+        let authentication = dependencies.makeAuthenticationSession()
+        let authenticatedIdentity = try await authentication.withAuthorizedContext { _ in
+            try Task.checkCancellation()
+
+            // AppModel routes this through readBoundRelayerSecret, the sole protected
+            // BundlerKeyStore query boundary. That helper revalidates the exact legacy
+            // candidate immediately before and after the query using this same session.
+            _ = try await dependencies.readBoundSecret(
+                clickedCandidate.identity,
+                authentication
+            )
+            try Task.checkCancellation()
+            let authenticatedIdentity = clickedCandidate.identity
+            let finalized = try dependencies.finalizeIdentity(authenticatedIdentity)
+            guard finalized == authenticatedIdentity else {
+                throw Failure.finalAuthorityMismatch(authenticatedIdentity.keyRef)
+            }
+
+            if !self.committedCandidates.contains(clickedCandidate) {
+                self.committedCandidates.append(clickedCandidate)
+            }
+            dependencies.didCommit(clickedCandidate)
+            return authenticatedIdentity
+        }
+
+        // The authorization context has already been invalidated. This is display refresh
+        // only: authority is committed, and a failure must never offer Verify again.
+        try await dependencies.refreshPassively()
+        return authenticatedIdentity
+    }
+
+    private func requireFreshCandidate(
+        _ clickedCandidate: LegacyRelayerMigrationCandidate,
+        dependencies: Dependencies
+    ) async throws {
+        let observation = try await dependencies.fetchStatus()
+        guard observation.generation == dependencies.currentGeneration() else {
+            throw Failure.staleDaemonGeneration
+        }
+        guard let currentCandidate = try dependencies.candidateForStatus(
+            observation.status
+        ) else {
+            throw Failure.candidateUnavailable
+        }
+        guard currentCandidate == clickedCandidate else {
+            throw Failure.candidateChanged
+        }
+    }
+}
+
+enum LegacyRelayerVerificationErrorPolicy {
+    enum CandidateDisposition: Equatable {
+        case preserve
+        case clear
+    }
+
+    static func candidateDisposition(for error: Error) -> CandidateDisposition {
+        if error is CancellationError {
+            return .preserve
+        }
+        if let appError = error as? AppError,
+           case .userAuthorizationCancelled = appError {
+            return .preserve
+        }
+        if let authenticationError = error as? LAError,
+           [.userCancel, .appCancel, .systemCancel].contains(authenticationError.code) {
+            return .preserve
+        }
+        return .clear
+    }
+}
+
 // AppModel drives the signed macOS demo shell. It is intentionally opinionated
 // around the current demo scope (Sepolia, ETH transfer first, local wallet-node)
 // and should not be treated as the final wallet product architecture.
@@ -48,6 +572,7 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var walletRecord: WalletRecord?
+    @Published private(set) var walletRecoveryReason: WalletKeyRecoveryReason?
     @Published private(set) var bridgeStatus = "Not checked"
     @Published private(set) var lastError: String?
     @Published private(set) var isBootstrapping = false
@@ -55,6 +580,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var isRefreshingBalance = false
     @Published private(set) var isBuildingUserOperation = false
     @Published private(set) var isSendingUserOperation = false
+    @Published private(set) var isResettingWallet = false
     @Published private(set) var configuration: DemoAppConfiguration
     @Published private(set) var accountInspection: AccountInspection?
     @Published private(set) var transactionComposer = TransactionComposerState()
@@ -64,13 +590,25 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastSubmittedUserOperationHash: String?
     @Published private(set) var lastBundledTransactionHash: String?
     @Published private(set) var debugLogText = ""
-    @Published private(set) var localRelayerStatus: WalletNodeClient.RelayerStatus?
+    @Published private(set) var localRelayerStatus: WalletNodeClient.RelayerStatus? {
+        didSet {
+            guard localRelayerStatus == nil else { return }
+            verifiedLocalRelayerIdentity = nil
+            passiveRelayerIdentityIssue = nil
+            legacyRelayerMigrationCandidate = nil
+        }
+    }
+    @Published private(set) var verifiedLocalRelayerIdentity: VerifiedRelayerIdentity?
+    @Published private(set) var passiveRelayerIdentityIssue: PassiveRelayerIdentityIssue?
+    @Published private(set) var legacyRelayerMigrationCandidate: LegacyRelayerMigrationCandidate?
     @Published private(set) var localRelayerMessage = "Local daemon not connected"
+    @Published private(set) var relayerAccessState: RelayerAccessState = .locked
     @Published private(set) var isRefreshingLocalRelayer = false
+    @Published private(set) var isVerifyingLegacyRelayer = false
     @Published private(set) var isRotatingLocalRelayer = false
     @Published private(set) var isExportingLocalRelayer = false
     @Published private(set) var isDeletingLocalRelayer = false
-    @Published private(set) var unlockRelayerOnLaunch: Bool
+    @Published private(set) var isReplacingPendingOperation = false
     @Published private(set) var swapSlippageBps: UInt64
     @Published private(set) var liveGasPrice: WalletNodeClient.UserOperationGasPrice?
     @Published private(set) var liveBaseFeeWei: Data?
@@ -104,7 +642,7 @@ final class AppModel: ObservableObject {
     /// five-flag condition — it was open-coded in three places plus `WalletIdleGate`, so a sixth
     /// in-flight flag would have had to be added to each of them.
     var isWalletIdle: Bool {
-        WalletIdleGate.allowed(
+        !isResettingWallet && !isVerifyingLegacyRelayer && WalletIdleGate.allowed(
             isBootstrapping: isBootstrapping,
             isRunningDemo: isRunningDemo,
             isRefreshingBalance: isRefreshingBalance,
@@ -118,14 +656,26 @@ final class AppModel: ObservableObject {
     }
 
     private let keyStore: KeyStore
+    private let walletKeyValidator: WalletKeyValidator
     private let metadataStore: WalletMetadataStore
     private let settingsStore: DemoSettingsStore
     private let onboardingSettingsStore: OnboardingSettingsStore
     private let kernelAccountAddressPredictor: KernelAccountAddressPredictor
+    private let relayerBootstrapRegistrationService: RelayerBootstrapRegistrationService
+    private let relayerChainStateJournalStore: RelayerChainStateJournalStore
+    private let relayerPublicIdentityStore: RelayerPublicIdentityStore
+    private let bundlerKeyStore: BundlerKeyStore
+    private let legacyRelayerVerificationCoordinator = LegacyRelayerVerificationCoordinator()
     private var walletNodeClient: WalletNodeClient?
     private var walletNodeDaemon: WalletNodeDaemon?
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
+    private var walletNodeLaunchID: UUID?
     private var walletNodeLaunchFailure: WalletNodeLaunchFailure?
+    private var walletNodeGeneration: UInt64 = 0
+    private var relayerInstallTask: Task<WalletNodeClient, Error>?
+    private var relayerInstallAuthorizationPlan: RelayerSecretAuthorizationPlan?
+    private var installedRelayerAuthorizationPlan: RelayerSecretAuthorizationPlan?
+    private var relayerStatusRefreshToken = UUID()
     private var optimisticNextNonce: [String: UInt64] = [:]
     private var pendingSessionInstallByUserOpHash: [String: SessionRecord] = [:]
     private var pendingSessionRevokeByUserOpHash: [String: SessionRecord] = [:]
@@ -182,7 +732,12 @@ final class AppModel: ObservableObject {
         metadataStore: WalletMetadataStore = WalletMetadataStore(),
         settingsStore: DemoSettingsStore = DemoSettingsStore(),
         onboardingSettingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
+        walletKeyValidator: WalletKeyValidator? = nil,
         kernelAccountAddressPredictor: KernelAccountAddressPredictor = KernelAccountAddressPredictor(),
+        relayerBootstrapRegistrationService: RelayerBootstrapRegistrationService? = nil,
+        relayerChainStateJournalStore: RelayerChainStateJournalStore = .shared,
+        relayerPublicIdentityStore: RelayerPublicIdentityStore = .shared,
+        bundlerKeyStore: BundlerKeyStore = .shared,
         walletNodeClient: WalletNodeClient? = WalletNodeClient.Configuration.fromEnvironment().map {
             WalletNodeClient(configuration: $0)
         },
@@ -190,15 +745,19 @@ final class AppModel: ObservableObject {
         walletHistoryStore: WalletTransactionHistoryStore = WalletTransactionHistoryStore()
     ) {
         self.keyStore = keyStore
+        self.walletKeyValidator = walletKeyValidator ?? WalletKeyValidator(keyStore: keyStore)
         self.metadataStore = metadataStore
         self.settingsStore = settingsStore
         self.onboardingSettingsStore = onboardingSettingsStore
         self.kernelAccountAddressPredictor = kernelAccountAddressPredictor
+        self.relayerBootstrapRegistrationService = relayerBootstrapRegistrationService ?? .init()
+        self.relayerChainStateJournalStore = relayerChainStateJournalStore
+        self.relayerPublicIdentityStore = relayerPublicIdentityStore
+        self.bundlerKeyStore = bundlerKeyStore
         self.walletNodeClient = walletNodeClient
         self.userOperationBuilder = userOperationBuilder
         self.walletHistoryStore = walletHistoryStore
         self.configuration = DemoAppConfiguration(networkSettings: settingsStore.networkSettings)
-        self.unlockRelayerOnLaunch = settingsStore.unlockRelayerOnLaunch
         self.swapSlippageBps = settingsStore.swapSlippageBps
         self.localRelayerMessage = walletNodeClient == nil
             ? "Local wallet-node daemon will start on refresh."
@@ -213,6 +772,7 @@ final class AppModel: ObservableObject {
         appendSection("Bootstrap")
 
         isBootstrapping = true
+        walletRecoveryReason = nil
         lastError = nil
         accountInspection = nil
         builtUserOperationDraft = nil
@@ -232,32 +792,13 @@ final class AppModel: ObservableObject {
             if let existing = try metadataStore.load() {
                 appendLog("bootstrap: loaded wallet metadata for \(existing.walletId.uuidString)")
 
-                if existing.keyTag != keyStore.keyTag {
-                    appendLog("bootstrap: stored metadata does not match the current Secure Enclave key")
-
-                    let hasExistingKey = try keyStore.loadKey() != nil
-                    guard !hasExistingKey else {
-                        appendLog("bootstrap: refusing automatic recovery because an existing key was loaded")
-                        throw AppError.metadataKeyMismatch
-                    }
-
-                    let coordinates = try keyStore.createOrLoadPublicKeyCoordinates()
-                    appendLog("bootstrap: public key x=\(coordinates.x.shortHex) y=\(coordinates.y.shortHex)")
-
-                    appendLog("bootstrap: replacing stale metadata for the newly created key")
-                    try metadataStore.clear()
-
-                    let created = try createFreshWalletRecord(coordinates: coordinates, now: now)
-                    try metadataStore.save(created)
-                    walletRecord = created
-                        appendLog("bootstrap: stored new wallet record with predicted account \(created.kernelAccountAddress ?? "unavailable")")
-                    shouldInspectAfterBootstrap = true
-                } else {
+                switch try walletKeyValidator.validate(existing) {
+                case .available:
                     let coordinates = PublicKeyCoordinates(
                         x: existing.pubkeyX,
                         y: existing.pubkeyY
                     )
-                    appendLog("bootstrap: using cached public key x=\(coordinates.x.shortHex) y=\(coordinates.y.shortHex)")
+                    appendLog("bootstrap: validated accessible wallet key x=\(coordinates.x.shortHex) y=\(coordinates.y.shortHex)")
 
                     let predictedAddress = try kernelAccountAddressPredictor.predictedAddress(
                         chain: activeChain,
@@ -284,6 +825,11 @@ final class AppModel: ObservableObject {
                     walletRecord = refreshed
                     appendLog("bootstrap: refreshed predicted account \(predictedAddress)")
                     shouldInspectAfterBootstrap = true
+                case let .recoveryRequired(reason):
+                    walletRecord = nil
+                    walletRecoveryReason = reason
+                    appendLog("bootstrap: wallet key validation requires explicit recovery")
+                    throw AppError.walletKeyRecoveryRequired(reason)
                 }
             } else {
                 appendLog("bootstrap: metadata store empty; creating the first wallet record")
@@ -310,7 +856,7 @@ final class AppModel: ObservableObject {
         } catch {
             lastError = error.localizedDescription
             bridgeStatus = "Bootstrap failed"
-            appendLog("bootstrap: failed — \(error.localizedDescription)")
+            appendLog("bootstrap: failed: \(error.localizedDescription)")
         }
 
         expireExpiredSessionIfNeeded(now: Date(), logContext: "bootstrap")
@@ -319,11 +865,7 @@ final class AppModel: ObservableObject {
         if shouldInspectAfterBootstrap {
             runDemo()
         }
-        if unlockRelayerOnLaunch {
-            refreshLocalRelayerStatus()
-        } else {
-            localRelayerMessage = "Local relayer unlock on launch is disabled."
-        }
+        localRelayerMessage = "Local relayer locked until a transaction needs it."
     }
 
     private func createFreshWalletRecord(coordinates: PublicKeyCoordinates, now: Date) throws -> WalletRecord {
@@ -352,10 +894,64 @@ final class AppModel: ObservableObject {
     }
 
     func resetDemoWallet() {
-        guard isWalletIdle else {
-            appendLog("reset: ignored because another wallet operation is still running")
-            return
+        Task {
+            do {
+                try await resetDemoWalletAuthorized()
+            } catch {
+                lastError = error.localizedDescription
+                bridgeStatus = "Demo wallet reset cancelled"
+                appendLog("reset: authorization failed: \(error.localizedDescription)")
+            }
         }
+    }
+
+    /// A real macOS session lock is a security boundary; an ordinary app focus change is not.
+    /// Drop only in-memory secrets here. Durable metadata and Keychain items remain intact, so
+    /// the next explicit money action can unlock once and continue normally.
+    func lockSecretRuntimesForSystemSession() async {
+        walletNodeLaunchTask?.cancel()
+        walletNodeLaunchTask = nil
+        walletNodeLaunchID = nil
+        walletNodeLaunchFailure = nil
+        relayerInstallTask?.cancel()
+        relayerInstallTask = nil
+        relayerInstallAuthorizationPlan = nil
+        installedRelayerAuthorizationPlan = nil
+        relayerStatusRefreshToken = UUID()
+        isRefreshingLocalRelayer = false
+        let daemon = walletNodeDaemon
+        walletNodeDaemon = nil
+        walletNodeClient = WalletNodeClient.Configuration.fromEnvironment().map {
+            WalletNodeClient(configuration: $0)
+        }
+        walletNodeGeneration &+= 1
+        relayerAccessState = .locked
+        localRelayerStatus = nil
+        localRelayerMessage = "Local relayer locked after the macOS session was secured."
+        do {
+            try await daemon?.terminateAndWait()
+        } catch {
+            daemon?.terminate()
+            appendLog("security: wallet-node shutdown after session lock was not confirmed: \(error.localizedDescription)")
+        }
+    }
+
+    func resetDemoWalletAuthorized() async throws {
+        try await resetDemoWalletAuthorized(destination: .dashboard)
+    }
+
+    func resetWalletForRecoveryAuthorized() async throws {
+        try await resetDemoWalletAuthorized(destination: .onboarding)
+    }
+
+    private func resetDemoWalletAuthorized(destination: WalletResetDestination) async throws {
+        guard !isResettingWallet, hasNoSecretResetConflict else {
+            appendLog("reset: ignored because another wallet operation is still running")
+            throw AppError.walletOperationInProgress
+        }
+
+        isResettingWallet = true
+        defer { isResettingWallet = false }
 
         appendSection("Reset Demo Wallet")
 
@@ -363,40 +959,189 @@ final class AppModel: ObservableObject {
             records: walletRecord?.sessionRecords ?? [],
             now: Date()
         ) {
-            appendLog("reset: warning — \(warning)")
+            appendLog("reset: warning: \(warning)")
         }
 
+        // Static ownership validation is non-secret. Do it before Touch ID so an external
+        // sidecar that this app cannot securely erase never causes a pointless prompt.
+        try WalletResetPreflight.ensureNoOtherLocalWalletInstance()
+        try WalletResetPreflight.ensureNoExternalSecretRuntimes()
+
+        let authentication = DeviceOwnerAuthenticationSession(
+            reason: "Reset this wallet and delete its local keys"
+        )
+        defer { authentication.invalidate() }
+        try await authentication.authorize()
+
+        // Authentication suspends this actor. Recheck before crossing the destructive boundary
+        // in case an operation was already queued when reset claimed its gate.
+        guard hasNoSecretResetConflict else {
+            appendLog("reset: cancelled because a wallet operation started during authorization")
+            throw AppError.walletOperationInProgress
+        }
+        var localCleanupStarted = false
         do {
+            try await quiesceManagedWalletNodeForSecretReset()
+
+            // This is explicitly a Demo Wallet factory reset. The daemon database contains the
+            // old relayer address/keyRef mapping; preserving it while replacing the Keychain
+            // secret makes the replacement impossible to install. Clear only its SQLite store
+            // (not logs/config/Helios data) after the managed process has been terminated.
+            try WalletNodeManagedStoreCleanup.clear()
+
+            localCleanupStarted = true
             try WalletResetCleanup.standard(
+                authenticationContext: authentication.context,
                 keyStore: keyStore,
                 metadataStore: metadataStore,
-                onboardingSettingsStore: onboardingSettingsStore
+                onboardingSettingsStore: onboardingSettingsStore,
+                relayerPublicIdentityStore: relayerPublicIdentityStore,
+                relayerChainStateJournalStore: relayerChainStateJournalStore
             ).run { step in
                 appendLog("reset: cleared \(step)")
             }
 
-            walletRecord = nil
-            accountInspection = nil
-            builtUserOperationDraft = nil
-            lastUserOperationBuildError = nil
-            lastSubmittedUserOperationHash = nil
-            lastBundledTransactionHash = nil
-            activeBundlerStatus = "Bundler not checked"
+            if destination.recreatesRelayer {
+                // The user remains past onboarding after a settings reset. Recreate the relayer
+                // identity inside this already-authorized action so the next transaction does not
+                // dead-end with an empty Keychain and no funding address.
+                let replacementRelayerKeyRef = "bundler-eoa:default:\(activeChain.id):1"
+                let replacementRelayer = try bundlerKeyStore.createIfNeeded(
+                    keyRef: replacementRelayerKeyRef,
+                    reason: authentication.reason,
+                    authenticationContext: authentication.context
+                )
+                let expectedIdentity = try VerifiedRelayerIdentity.derive(
+                    keyRef: replacementRelayer.keyRef,
+                    secret: replacementRelayer.secret
+                )
+                let registeredIdentity = try await relayerBootstrapRegistrationService.register(
+                    record: replacementRelayer,
+                    chain: activeChain,
+                    gasPolicy: networkSettings.resolvedDaemonGasPolicy
+                )
+                guard registeredIdentity == expectedIdentity else {
+                    throw VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch
+                }
+                let persistedIdentity = try relayerProvisioningService(
+                    chain: activeChain
+                ).finalizeRegisteredBundlerIdentity(registeredIdentity)
+                guard persistedIdentity == expectedIdentity else {
+                    throw VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch
+                }
+                syncUnlockedRelayerAddress(
+                    keyRef: replacementRelayerKeyRef,
+                    secret: replacementRelayer.secret
+                )
+                appendLog("reset: created fresh relayer identity")
+            }
+
+            clearInMemoryWalletStateAfterReset()
+            if destination.marksOnboardingIncomplete {
+                onboardingSettingsStore.markIncomplete()
+            }
+            if destination == .dashboard {
+                walletRecoveryReason = nil
+            }
             lastError = nil
-            bridgeStatus = "Demo wallet reset. Creating a fresh Secure Enclave key…"
-            appendLog("reset: starting fresh bootstrap")
+            bridgeStatus = destination == .dashboard
+                ? "Demo wallet reset. Creating a fresh Secure Enclave key…"
+                : "Local wallet reset. Return to onboarding to create a new identity."
+            appendLog(
+                destination == .dashboard
+                    ? "reset: starting fresh bootstrap"
+                    : "reset: returning to onboarding without creating replacement keys"
+            )
         } catch {
+            // The cleanup runner is intentionally best-effort. Once any irreversible local-key
+            // deletion has started, never leave the old wallet record presented as usable.
+            if localCleanupStarted {
+                clearInMemoryWalletStateAfterReset()
+            }
             lastError = error.localizedDescription
             bridgeStatus = "Demo wallet reset failed"
-            appendLog("reset: failed — \(error.localizedDescription)")
-            return
+            appendLog("reset: failed: \(error.localizedDescription)")
+            throw error
         }
 
-        bootstrap()
+        if destination.rebootstrapsWallet {
+            bootstrap()
+        }
+    }
+
+    private func relayerProvisioningService(
+        chain: ChainConfiguration
+    ) -> OnboardingProvisioningService {
+        OnboardingProvisioningService(
+            keyStore: keyStore,
+            metadataStore: metadataStore,
+            walletKeyValidator: walletKeyValidator,
+            settingsStore: onboardingSettingsStore,
+            addressPredictor: kernelAccountAddressPredictor,
+            chain: chain,
+            bundlerKeyStore: bundlerKeyStore,
+            relayerPublicIdentityStore: relayerPublicIdentityStore,
+            relayerChainStateJournalStore: relayerChainStateJournalStore
+        )
+    }
+
+    private var hasNoSecretResetConflict: Bool {
+        WalletIdleGate.allowed(
+            isBootstrapping: isBootstrapping,
+            isRunningDemo: isRunningDemo,
+            isRefreshingBalance: isRefreshingBalance,
+            isBuildingUserOperation: isBuildingUserOperation,
+            isSendingUserOperation: isSendingUserOperation
+        ) && !isRotatingLocalRelayer
+            && !isExportingLocalRelayer
+            && !isDeletingLocalRelayer
+            && !isReplacingPendingOperation
+            && !isVerifyingLegacyRelayer
+    }
+
+    private func quiesceManagedWalletNodeForSecretReset() async throws {
+        stopUserOperationReconciler()
+        walletNodeLaunchTask?.cancel()
+        walletNodeLaunchTask = nil
+        walletNodeLaunchID = nil
+        relayerInstallTask?.cancel()
+        relayerInstallTask = nil
+        relayerInstallAuthorizationPlan = nil
+        installedRelayerAuthorizationPlan = nil
+        relayerStatusRefreshToken = UUID()
+        isRefreshingLocalRelayer = false
+        try await walletNodeDaemon?.terminateAndWait()
+        walletNodeDaemon = nil
+        walletNodeGeneration &+= 1
+        relayerAccessState = .locked
+        walletNodeClient = WalletNodeClient.Configuration.fromEnvironment().map {
+            WalletNodeClient(configuration: $0)
+        }
+        walletNodeLaunchFailure = nil
+        localRelayerStatus = nil
+        localRelayerMessage = "Local relayer locked until a transaction needs it."
+        optimisticNextNonce.removeAll()
+    }
+
+    private func clearInMemoryWalletStateAfterReset() {
+        walletRecord = nil
+        accountInspection = nil
+        builtUserOperationDraft = nil
+        lastUserOperationBuildError = nil
+        lastSubmittedUserOperationHash = nil
+        lastBundledTransactionHash = nil
+        activeBundlerStatus = "Bundler not checked"
+        relayerInstallTask?.cancel()
+        relayerInstallTask = nil
+        relayerInstallAuthorizationPlan = nil
+        installedRelayerAuthorizationPlan = nil
+        relayerStatusRefreshToken = UUID()
+        isRefreshingLocalRelayer = false
+        relayerAccessState = .locked
     }
 
     func runDemo() {
-        guard !isRunningDemo, !isRefreshingBalance, walletRecord != nil else {
+        guard !isResettingWallet, !isRunningDemo, !isRefreshingBalance, walletRecord != nil else {
             return
         }
 
@@ -416,7 +1161,7 @@ final class AppModel: ObservableObject {
             } catch {
                 lastError = error.localizedDescription
                 bridgeStatus = "Account inspection failed"
-                appendLog("inspect: failed — \(error.localizedDescription)")
+                appendLog("inspect: failed: \(error.localizedDescription)")
             }
 
             isRunningDemo = false
@@ -443,7 +1188,7 @@ final class AppModel: ObservableObject {
                 _ = try await refreshAccountInspection(logContext: "refresh-balance")
                 appendLog("refresh-balance: completed quietly")
             } catch {
-                appendLog("refresh-balance: failed — \(error.localizedDescription)")
+                appendLog("refresh-balance: failed: \(error.localizedDescription)")
             }
 
             isRefreshingBalance = false
@@ -454,28 +1199,6 @@ final class AppModel: ObservableObject {
         appendSection("Refresh Onchain Status")
         refreshBalance()
         refreshLocalRelayerStatus()
-    }
-
-    func setTestnetModeEnabled(_ isEnabled: Bool) {
-        guard configuration.isTestnetModeEnabled != isEnabled else {
-            return
-        }
-
-        appendSection("Switch Chain")
-        appendLog("chain: toggled testnet mode \(isEnabled ? "on" : "off")")
-
-        var settings = networkSettings
-        settings.isTestnetModeEnabled = isEnabled
-        settingsStore.setNetworkSettings(settings)
-        configuration = DemoAppConfiguration(networkSettings: settings)
-        resetWalletNodeConnectionAfterNetworkChange()
-        accountInspection = nil
-        builtUserOperationDraft = nil
-        lastUserOperationBuildError = nil
-        activeBundlerStatus = "Bundler not checked"
-        lastSubmittedUserOperationHash = nil
-        lastBundledTransactionHash = nil
-        bootstrap()
     }
 
     func updateNetworkSettings(_ settings: DemoNetworkSettings) throws {
@@ -572,6 +1295,9 @@ final class AppModel: ObservableObject {
         // left, funded the account from a faucet or another wallet, and came back to check. With
         // no poll, this is the only trigger that catches money the app didn't move itself.
         Task { await refreshAccountBalanceQuietly(logContext: "balance-resume") }
+        // Relayer status is public state. Refresh it without unlocking the relayer so returning
+        // from a faucet updates the funding UI without asking for Touch ID.
+        refreshLocalRelayerStatus()
         // Same reasoning as the balance: coming back is when a stale gas number is
         // most likely to be looked at, and about to be acted on.
         Task { await refreshLiveGasPricesIfStale(now: now) }
@@ -687,7 +1413,7 @@ final class AppModel: ObservableObject {
     /// profile surfaces later as the "Size unknown" verdict, by design.
     func downloadModel(
         _ request: ModelDownloadRequest,
-        progress: @escaping @MainActor (Double) -> Void
+        progress: @escaping LocalAIModelDownloadProgressHandler
     ) async throws {
         if let hardwareBudget {
             try LocalAIModelDownloadManager.assertDiskSpace(neededBytes: request.sizeBytes, budget: hardwareBudget)
@@ -762,7 +1488,7 @@ final class AppModel: ObservableObject {
         ) {
         case .nothingToRemove:
             throw AppError.localDaemonLaunchFailed(
-                "There is nothing to remove — no file for this model is on disk."
+                "There is nothing to remove. No file for this model is on disk."
             )
         case .bundledOnly(let displayName):
             throw AppError.localDaemonLaunchFailed(
@@ -812,20 +1538,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
-        guard unlockRelayerOnLaunch != isEnabled else {
-            return
-        }
-        settingsStore.setUnlockRelayerOnLaunch(isEnabled)
-        unlockRelayerOnLaunch = isEnabled
-        appendLog("security: unlock relayer on launch \(isEnabled ? "enabled" : "disabled")")
-        if isEnabled, localRelayerStatus == nil {
-            refreshLocalRelayerStatus()
-        } else if !isEnabled, localRelayerStatus == nil {
-            localRelayerMessage = "Local relayer unlock on launch is disabled."
-        }
-    }
-
     func testNetworkSettings(_ settings: DemoNetworkSettings) async throws -> String {
         let validated = try settings.validated()
         let chain = validated.activeChain
@@ -839,8 +1551,18 @@ final class AppModel: ObservableObject {
     private func resetWalletNodeConnectionAfterNetworkChange() {
         walletNodeLaunchTask?.cancel()
         walletNodeLaunchTask = nil
+        walletNodeLaunchID = nil
         walletNodeLaunchFailure = nil
+        walletNodeDaemon?.terminate()
         walletNodeDaemon = nil
+        walletNodeGeneration &+= 1
+        relayerInstallTask?.cancel()
+        relayerInstallTask = nil
+        relayerInstallAuthorizationPlan = nil
+        installedRelayerAuthorizationPlan = nil
+        relayerStatusRefreshToken = UUID()
+        isRefreshingLocalRelayer = false
+        relayerAccessState = .locked
         walletNodeClient = WalletNodeClient.Configuration.fromEnvironment().map {
             WalletNodeClient(configuration: $0)
         }
@@ -853,7 +1575,7 @@ final class AppModel: ObservableObject {
         lastGasIndicatorReadAt = nil
         localRelayerStatus = nil
         localRelayerMessage = walletNodeClient == nil
-            ? "Local wallet-node daemon will restart with the selected network."
+            ? "Local wallet-node will restart read-only; relayer stays locked until needed."
             : "External wallet-node is configured from environment."
     }
 
@@ -978,8 +1700,10 @@ final class AppModel: ObservableObject {
 
     private func debugBundlerStatusLines() async -> [String] {
         do {
-            let status = try await fetchLocalRelayerStatusWithBalanceRetry()
-            localRelayerStatus = status
+            let (status, generation) = try await fetchLocalRelayerStatusWithBalanceRetry()
+            guard publishLocalRelayerStatus(status, expectedGeneration: generation) else {
+                throw AppError.localDaemonLaunchFailed("wallet-node status became stale")
+            }
             localRelayerMessage = status.ready
                 ? "Local relayer ready on \(status.networkProfile)."
                 : "Local relayer needs attention."
@@ -1036,36 +1760,204 @@ final class AppModel: ObservableObject {
     }
 
     func refreshLocalRelayerStatus() {
-        guard !isRefreshingLocalRelayer else {
+        guard !isRefreshingLocalRelayer,
+              !isVerifyingLegacyRelayer,
+              !isResettingWallet,
+              !isRotatingLocalRelayer,
+              !isDeletingLocalRelayer else {
             return
         }
 
+        let refreshToken = UUID()
+        relayerStatusRefreshToken = refreshToken
         isRefreshingLocalRelayer = true
         Task {
             do {
-                let status = try await fetchLocalRelayerStatusWithBalanceRetry()
-                localRelayerStatus = status
-                localRelayerMessage = status.ready
-                    ? "Local relayer ready on \(status.networkProfile)."
-                    : "Local relayer needs attention."
+                let (status, generation) = try await fetchLocalRelayerStatusWithBalanceRetry()
+                guard relayerStatusRefreshToken == refreshToken else { return }
+                guard publishLocalRelayerStatus(status, expectedGeneration: generation) else { return }
                 appendLog("relayer: status \(status.lifecycle) \(status.eoa.shortAddress)")
             } catch {
+                guard relayerStatusRefreshToken == refreshToken else { return }
                 localRelayerStatus = nil
-                localRelayerMessage = error.localizedDescription
-                appendLog("relayer: status failed — \(error.localizedDescription)")
+                localRelayerMessage = "Local relayer locked until a transaction needs it."
+                appendLog("relayer: status failed: \(error.localizedDescription)")
             }
-            isRefreshingLocalRelayer = false
+            if relayerStatusRefreshToken == refreshToken {
+                isRefreshingLocalRelayer = false
+            }
         }
     }
 
     func checkLocalRelayerStatusForDiagnostics() async throws -> WalletNodeClient.RelayerStatus {
-        let status = try await fetchLocalRelayerStatusWithBalanceRetry()
-        localRelayerStatus = status
-        localRelayerMessage = status.ready
-            ? "Local relayer ready on \(status.networkProfile)."
-            : "Local relayer needs attention."
+        let (status, generation) = try await fetchLocalRelayerStatusWithBalanceRetry()
+        guard publishLocalRelayerStatus(status, expectedGeneration: generation) else {
+            throw AppError.localDaemonLaunchFailed("wallet-node status became stale")
+        }
         appendLog("relayer: diagnostic status \(status.lifecycle) \(status.eoa.shortAddress)")
         return status
+    }
+
+    /// Explicitly proves one prompt-free legacy candidate against the protected secret.
+    /// Passive refreshes only publish the candidate; they never invoke this method.
+    func verifyLegacyRelayer(
+        _ candidate: LegacyRelayerMigrationCandidate
+    ) async {
+        guard legacyRelayerMigrationCandidate == candidate else {
+            appendLog("relayer: ignored stale legacy verification request")
+            return
+        }
+
+        let isJoiningExistingVerification = isVerifyingLegacyRelayer
+        if !isJoiningExistingVerification {
+            guard hasNoSecretResetConflict, relayerInstallTask == nil else {
+                lastError = AppError.walletOperationInProgress.localizedDescription
+                return
+            }
+            isVerifyingLegacyRelayer = true
+            // Invalidate a passive refresh that started before this explicit action. Its
+            // completion must not republish a candidate from an older observation.
+            relayerStatusRefreshToken = UUID()
+            isRefreshingLocalRelayer = false
+            lastError = nil
+            localRelayerMessage = "Verifying the existing local relayer."
+            appendSection("Verify Legacy Local Relayer")
+        }
+        defer {
+            if !isJoiningExistingVerification {
+                isVerifyingLegacyRelayer = false
+            }
+        }
+
+        let expectedChain = activeChain
+        var verificationClient: WalletNodeClient?
+        var verificationGeneration: UInt64?
+        do {
+            let identity = try await legacyRelayerVerificationCoordinator.verify(
+                candidate,
+                dependencies: .init(
+                    fetchStatus: { [self] in
+                        let client: WalletNodeClient
+                        let generation: UInt64
+                        if let existingClient = verificationClient,
+                           let existingGeneration = verificationGeneration {
+                            client = existingClient
+                            generation = existingGeneration
+                        } else {
+                            let connection = try await ensureWalletNodeClientWithGeneration()
+                            client = connection.client
+                            generation = connection.generation
+                            verificationClient = client
+                            verificationGeneration = generation
+                        }
+                        try requireCurrentRelayerConnection(
+                            client: client,
+                            generation: generation
+                        )
+                        let status = try await client.bundlerStatus()
+                        try requireCurrentRelayerConnection(
+                            client: client,
+                            generation: generation
+                        )
+                        return .init(status: status, generation: generation)
+                    },
+                    currentGeneration: { [self] in walletNodeGeneration },
+                    candidateForStatus: { [self] status in
+                        try legacyRelayerMigrationCandidate(
+                            for: status,
+                            chain: expectedChain
+                        )
+                    },
+                    makeAuthenticationSession: {
+                        DeviceOwnerAuthenticationSession(
+                            reason: "Verify the existing local relayer identity"
+                        )
+                    },
+                    readBoundSecret: { [self] identity, authentication in
+                        guard let client = verificationClient,
+                              let generation = verificationGeneration else {
+                            throw LegacyRelayerVerificationCoordinator.Failure
+                                .staleDaemonGeneration
+                        }
+                        return try await readBoundRelayerSecret(
+                            identity: identity,
+                            client: client,
+                            generation: generation,
+                            authenticationSession: authentication,
+                            validateAuthority: {
+                                try self.requireCurrentRelayerConnection(
+                                    client: client,
+                                    generation: generation
+                                )
+                                let status = try await client.bundlerStatus()
+                                try self.requireCurrentRelayerConnection(
+                                    client: client,
+                                    generation: generation
+                                )
+                                guard try self.legacyRelayerMigrationCandidate(
+                                    for: status,
+                                    chain: expectedChain
+                                ) == candidate else {
+                                    throw LegacyRelayerVerificationCoordinator.Failure
+                                        .candidateChanged
+                                }
+                            }
+                        )
+                    },
+                    finalizeIdentity: { [self] identity in
+                        try relayerProvisioningService(
+                            chain: expectedChain
+                        ).finalizeRegisteredBundlerIdentity(identity)
+                    },
+                    didCommit: { [self] committedCandidate in
+                        if legacyRelayerMigrationCandidate == committedCandidate {
+                            legacyRelayerMigrationCandidate = nil
+                        }
+                        verifiedLocalRelayerIdentity = nil
+                        passiveRelayerIdentityIssue = .unavailable
+                    },
+                    refreshPassively: { [self] in
+                        guard let client = verificationClient,
+                              let generation = verificationGeneration else {
+                            throw LegacyRelayerVerificationCoordinator.Failure
+                                .staleDaemonGeneration
+                        }
+                        try requireCurrentRelayerConnection(
+                            client: client,
+                            generation: generation
+                        )
+                        let status = try await client.bundlerStatus()
+                        try requireCurrentRelayerConnection(
+                            client: client,
+                            generation: generation
+                        )
+                        guard publishLocalRelayerStatus(
+                            status,
+                            expectedGeneration: generation
+                        ) else {
+                            throw LegacyRelayerVerificationCoordinator.Failure
+                                .staleDaemonGeneration
+                        }
+                    }
+                )
+            )
+            lastError = nil
+            localRelayerMessage = "Local relayer identity verified."
+            appendLog("relayer: verified legacy identity \(identity.address.shortAddress)")
+        } catch {
+            if LegacyRelayerVerificationErrorPolicy.candidateDisposition(
+                for: error
+            ) == .clear {
+                if legacyRelayerMigrationCandidate == candidate {
+                    legacyRelayerMigrationCandidate = nil
+                }
+                verifiedLocalRelayerIdentity = nil
+                passiveRelayerIdentityIssue = .unavailable
+            }
+            lastError = error.localizedDescription
+            localRelayerMessage = error.localizedDescription
+            appendLog("relayer: legacy verification failed: \(error.localizedDescription)")
+        }
     }
 
     func monitorHeliosCheckpointAfterNetworkSettingsChange(
@@ -1103,71 +1995,593 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func fetchLocalRelayerStatusWithBalanceRetry() async throws -> WalletNodeClient.RelayerStatus {
-        var status = try await withWalletNodeClient(operation: "status") { client in
+    private func fetchLocalRelayerStatusWithBalanceRetry() async throws -> (
+        status: WalletNodeClient.RelayerStatus,
+        generation: UInt64
+    ) {
+        var observation = try await withWalletNodeClientGeneration(operation: "status") { client in
             try await client.bundlerStatus()
         }
-        for delay in Self.relayerBalanceRetryDelays where Self.isRelayerBalanceUnavailable(status.balance) {
-            localRelayerStatus = status
-            localRelayerMessage = "Checking local relayer balance..."
-            appendLog("relayer: status returned without balance; retrying")
+        var status = observation.value
+        var generation = observation.generation
+        for delay in Self.relayerBalanceRetryDelays
+        where status.keyLoaded && Self.isRelayerBalanceUnavailable(status.balance) {
+            if RelayerGenerationGate.accepts(
+                resultGeneration: generation,
+                currentGeneration: walletNodeGeneration
+            ) {
+                publishLocalRelayerStatus(status, expectedGeneration: generation)
+                localRelayerMessage = "Checking local relayer balance..."
+                appendLog("relayer: status returned without balance; retrying")
+            }
             try await Task.sleep(nanoseconds: delay)
-            status = try await withWalletNodeClient(operation: "status retry") { client in
+            observation = try await withWalletNodeClientGeneration(operation: "status retry") { client in
                 try await client.bundlerStatus()
             }
+            status = observation.value
+            generation = observation.generation
         }
-        return status
+        return (status, generation)
+    }
+
+    @discardableResult
+    private func publishLocalRelayerStatus(
+        _ status: WalletNodeClient.RelayerStatus,
+        expectedGeneration: UInt64
+    ) -> Bool {
+        guard RelayerGenerationGate.accepts(
+            resultGeneration: expectedGeneration,
+            currentGeneration: walletNodeGeneration
+        ) else {
+            return false
+        }
+
+        do {
+            _ = try promotePendingRelayerIfReady(status: status)
+            let snapshot = try relayerChainStateJournalStore.snapshot(
+                chainID: activeChain.id
+            )
+            verifiedLocalRelayerIdentity = try PassiveRelayerIdentityResolver.resolve(
+                status: status,
+                expectedChainID: activeChain.id,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: activeChain.shortName,
+                snapshot: snapshot,
+                identityForKeyRef: { keyRef in
+                    try relayerPublicIdentityStore.identity(forKeyRef: keyRef)
+                }
+            )
+            passiveRelayerIdentityIssue = nil
+            legacyRelayerMigrationCandidate = nil
+        } catch PassiveRelayerIdentityResolver.Failure.migrationRequired {
+            verifiedLocalRelayerIdentity = nil
+            do {
+                legacyRelayerMigrationCandidate = try legacyRelayerMigrationCandidate(
+                    for: status,
+                    chain: activeChain
+                )
+                passiveRelayerIdentityIssue = legacyRelayerMigrationCandidate == nil
+                    ? .unavailable
+                    : .migrationRequired
+                appendLog(
+                    legacyRelayerMigrationCandidate == nil
+                        ? "relayer: missing journal is not eligible for legacy verification"
+                        : "relayer: explicit legacy identity verification is available"
+                )
+            } catch {
+                legacyRelayerMigrationCandidate = nil
+                passiveRelayerIdentityIssue = .unavailable
+                appendLog(
+                    "relayer: legacy identity eligibility failed: \(String(describing: error))"
+                )
+            }
+        } catch {
+            verifiedLocalRelayerIdentity = nil
+            passiveRelayerIdentityIssue = .unavailable
+            legacyRelayerMigrationCandidate = nil
+            appendLog("relayer: passive identity verification failed: \(String(describing: error))")
+        }
+
+        localRelayerStatus = status
+        if !status.keyLoaded, case .installing = relayerAccessState {
+            // Do not let a racing passive poll overwrite an install already in progress.
+        } else if !status.keyLoaded {
+            installedRelayerAuthorizationPlan = nil
+            relayerAccessState = .locked
+        }
+
+        if let passiveRelayerIdentityIssue {
+            localRelayerMessage = passiveRelayerIdentityIssue.message
+            return true
+        }
+
+        switch status.reason {
+        case "bundler_eoa_missing", "bundler_eoa_locked":
+            localRelayerMessage = "Local relayer locked until a transaction needs it."
+        default:
+            localRelayerMessage = status.ready
+                ? "Local relayer ready on \(status.networkProfile)."
+                : "Local relayer needs funding or attention."
+        }
+        return true
+    }
+
+    private func legacyRelayerMigrationCandidate(
+        for status: WalletNodeClient.RelayerStatus,
+        chain: ChainConfiguration
+    ) throws -> LegacyRelayerMigrationCandidate? {
+        try LegacyRelayerMigrationPolicy.candidate(
+            status: status,
+            expectedChainID: chain.id,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: chain.shortName,
+            snapshot: try relayerChainStateJournalStore.snapshot(chainID: chain.id),
+            identityForKeyRef: { keyRef in
+                try relayerPublicIdentityStore.identity(forKeyRef: keyRef)
+            }
+        )
+    }
+
+    /// Resolves protected-secret authority directly from the validated journal,
+    /// immutable public identities, and one fresh daemon observation. Neither
+    /// UserDefaults nor daemon-selected key references are authorization sources.
+    private func relayerSecretAuthorizationPlan(
+        for status: WalletNodeClient.RelayerStatus
+    ) throws -> RelayerSecretAuthorizationPlan {
+        try RelayerSecretAuthorizationPolicy.resolve(
+            status: status,
+            expectedChainID: activeChain.id,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: activeChain.shortName,
+            snapshot: try relayerChainStateJournalStore.snapshot(
+                chainID: activeChain.id
+            ),
+            identityForKeyRef: { keyRef in
+                try relayerPublicIdentityStore.identity(forKeyRef: keyRef)
+            }
+        )
+    }
+
+    private func requiredRelayerSnapshot() throws -> RelayerChainSnapshot {
+        guard let snapshot = try relayerChainStateJournalStore.snapshot(
+            chainID: activeChain.id
+        ) else {
+            throw PassiveRelayerIdentityResolver.Failure.migrationRequired(
+                chainID: activeChain.id
+            )
+        }
+        return snapshot
+    }
+
+    /// Validates the daemon's pending candidate against both app-owned public
+    /// authority layers. The daemon may observe a candidate, but it cannot choose
+    /// which protected secret rotation is allowed to read or install.
+    private func requirePendingRotationBinding(
+        status: WalletNodeClient.RelayerStatus,
+        snapshot: RelayerChainSnapshot,
+        expectedIdentity: VerifiedRelayerIdentity,
+        allowUninstalledDaemonCandidate: Bool = false
+    ) throws {
+        try RelayerPendingRotationBindingPolicy.validate(
+            status: status,
+            expectedChainID: activeChain.id,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: activeChain.shortName,
+            snapshot: snapshot,
+            expectedIdentity: expectedIdentity,
+            allowUninstalledDaemonCandidate: allowUninstalledDaemonCandidate,
+            identityForKeyRef: { keyRef in
+                try relayerPublicIdentityStore.identity(forKeyRef: keyRef)
+            }
+        )
+    }
+
+    private func requireRotationPreflight(
+        status: WalletNodeClient.RelayerStatus,
+        snapshot: RelayerChainSnapshot,
+        plan: RelayerRotationCoordinator.Plan
+    ) throws {
+        let active = try PassiveRelayerIdentityResolver.resolve(
+            status: status,
+            expectedChainID: activeChain.id,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: activeChain.shortName,
+            snapshot: snapshot,
+            identityForKeyRef: { keyRef in
+                try relayerPublicIdentityStore.identity(forKeyRef: keyRef)
+            }
+        )
+        guard active.keyRef == plan.activeKeyRef,
+              !status.compromiseSubmissionBlocked else {
+            throw RelayerRotationCoordinator.Failure.daemonKeyRefMismatch(
+                expected: plan.activeKeyRef,
+                actual: status.keyRef ?? "none"
+            )
+        }
+
+        switch plan.mode {
+        case .createCandidate:
+            guard snapshot.head.pendingKeyRef == nil,
+                  status.pendingFunding.isEmpty else {
+                throw RelayerRotationCoordinator.Failure.unexpectedPendingTransition(
+                    status.pendingFunding.first?.keyRef
+                        ?? snapshot.head.pendingKeyRef
+                        ?? "none"
+                )
+            }
+        case .reusePending:
+            guard let identity = try relayerPublicIdentityStore.identity(
+                forKeyRef: plan.candidateKeyRef
+            ) else {
+                throw RelayerRotationCoordinator.Failure.candidatePublicIdentityMismatch(
+                    plan.candidateKeyRef
+                )
+            }
+            try requirePendingRotationBinding(
+                status: status,
+                snapshot: snapshot,
+                expectedIdentity: identity,
+                allowUninstalledDaemonCandidate: true
+            )
+        }
+    }
+
+    /// Promotes a journaled candidate only after one fresh daemon status proves
+    /// the exact candidate active and the exact prior active identity retiring or
+    /// retired. Merely seeing a historical or stored key is never sufficient.
+    @discardableResult
+    private func promotePendingRelayerIfReady(
+        status: WalletNodeClient.RelayerStatus
+    ) throws -> RelayerChainState? {
+        let snapshot = try requiredRelayerSnapshot()
+        guard let observations = try RelayerPromotionObservationPolicy.validate(
+            status: status,
+            snapshot: snapshot,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: activeChain.shortName
+        ) else {
+            return nil
+        }
+        let promoted = try RelayerRotationCoordinator.promoteIfReady(
+            snapshot: snapshot,
+            daemonActive: observations.daemonActive,
+            priorActive: observations.priorActive,
+            identityForKeyRef: { keyRef in
+                try relayerPublicIdentityStore.identity(forKeyRef: keyRef)
+            },
+            appendJournal: { transition in
+                try relayerChainStateJournalStore.append(transition)
+            }
+        )
+        if promoted != nil {
+            relayerInstallAuthorizationPlan = nil
+            installedRelayerAuthorizationPlan = nil
+            relayerAccessState = .locked
+            appendLog("relayer: promoted exact journaled rotation candidate")
+        }
+        return promoted
+    }
+
+    /// The one protected relayer-secret query boundary. Every caller supplies
+    /// a fresh authority check that runs both before and after the Keychain read,
+    /// while this function enforces exact secret-to-public identity binding.
+    private func readBoundRelayerSecret(
+        identity: VerifiedRelayerIdentity,
+        client: WalletNodeClient,
+        generation: UInt64,
+        authenticationSession: DeviceOwnerAuthenticationSession,
+        validateAuthority: () async throws -> Void
+    ) async throws -> BundlerSecretRecord {
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        try await validateAuthority()
+        try Task.checkCancellation()
+        let record = try bundlerKeyStore.read(
+            keyRef: identity.keyRef,
+            reason: authenticationSession.reason,
+            authenticationContext: authenticationSession.context
+        )
+        guard record.keyRef == identity.keyRef else {
+            throw RelayerSecretAuthorizationPolicy.Failure.authenticatedRecordKeyRefMismatch(
+                expected: identity.keyRef,
+                actual: record.keyRef
+            )
+        }
+        let authenticatedIdentity = try VerifiedRelayerIdentity.derive(
+            keyRef: record.keyRef,
+            secret: record.secret
+        )
+        guard authenticatedIdentity == identity else {
+            throw RelayerSecretAuthorizationPolicy.Failure.authenticatedIdentityMismatch(
+                expected: identity,
+                actual: authenticatedIdentity
+            )
+        }
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        try await validateAuthority()
+        return record
+    }
+
+    /// The sole protected relayer read used by unlock, export, and top-up.
+    ///
+    /// Authority is checked immediately before the Keychain query and again
+    /// after authentication. A daemon restart, journal transition, public-record
+    /// change, or relayer lifecycle change during the prompt invalidates the read.
+    private func readAuthorizedRelayerSecret(
+        authorization: RelayerSecretAuthorization,
+        expectedPlan: RelayerSecretAuthorizationPlan,
+        client: WalletNodeClient,
+        generation: UInt64,
+        authenticationSession: DeviceOwnerAuthenticationSession
+    ) async throws -> BundlerSecretRecord {
+        try await readBoundRelayerSecret(
+            identity: authorization.identity,
+            client: client,
+            generation: generation,
+            authenticationSession: authenticationSession,
+            validateAuthority: {
+                try self.requireCurrentRelayerConnection(
+                    client: client,
+                    generation: generation
+                )
+                let status = try await client.bundlerStatus()
+                try self.requireCurrentRelayerConnection(
+                    client: client,
+                    generation: generation
+                )
+                let plan = try self.relayerSecretAuthorizationPlan(for: status)
+                guard plan == expectedPlan,
+                      plan.authorization(
+                        forKeyRef: authorization.identity.keyRef
+                      ) == authorization else {
+                    throw RelayerSecretAuthorizationPolicy.Failure.unauthorizedKeyRef(
+                        authorization.identity.keyRef
+                    )
+                }
+            }
+        )
+    }
+
+    private func requireCurrentRelayerConnection(
+        client: WalletNodeClient,
+        generation: UInt64
+    ) throws {
+        guard RelayerGenerationGate.accepts(
+            resultGeneration: generation,
+            currentGeneration: walletNodeGeneration
+        ), walletNodeClient?.hasSameConnection(as: client) == true else {
+            throw AppError.localDaemonLaunchFailed(
+                "wallet-node restarted while relayer authority was being verified. Retry the action."
+            )
+        }
+    }
+
+    /// Selects the app-authorized active relayer that wallet-node must still be
+    /// using under its lifecycle lock when it accepts this UserOperation.
+    private func expectedRelayerIdentityForSubmission(
+        client: WalletNodeClient,
+        generation: UInt64
+    ) async throws -> VerifiedRelayerIdentity {
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        let status = try await client.bundlerStatus()
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        guard publishLocalRelayerStatus(
+            status,
+            expectedGeneration: generation
+        ), passiveRelayerIdentityIssue == nil else {
+            throw AppError.localDaemonLaunchFailed(
+                "wallet-node changed or failed relayer authority verification before submission."
+            )
+        }
+        let plan = try relayerSecretAuthorizationPlan(for: status)
+        return plan.active.identity
     }
 
     func rotateLocalRelayerKey() async throws {
-        guard !isRotatingLocalRelayer else {
-            return
+        guard !isRotatingLocalRelayer,
+              hasNoSecretResetConflict,
+              relayerInstallTask == nil else {
+            throw AppError.walletOperationInProgress
         }
 
         isRotatingLocalRelayer = true
         defer { isRotatingLocalRelayer = false }
-        let walletNodeClient = try await ensureWalletNodeClient()
         appendSection("Rotate Local Relayer")
-        let keyRef = nextBundlerKeyRef()
-        let challenge = try await walletNodeClient.beginAdminAction(
-            action: "install_bundler_eoa",
-            chainId: localRelayerStatus?.chainId ?? Int(activeChain.id),
-            keyRef: keyRef
-        )
-        try await authorizeLocalRelayerAdminAction(summary: challenge.summary)
-        let record = try BundlerKeyStore.shared.createIfNeeded(keyRef: keyRef)
-        let status = try await walletNodeClient.installBundlerEOA(
-            keyRef: keyRef,
-            secret: record.secret,
-            authorization: WalletNodeClient.AdminAuthorization(
-                adminActionId: challenge.adminActionId,
-                nonce: challenge.nonce
-            )
-        )
-        localRelayerStatus = status
-        localRelayerMessage = "New relayer key is waiting for top-up."
-        appendLog("relayer: rotation requested; active view \(status.eoa.shortAddress)")
-    }
 
-    private func nextBundlerKeyRef() -> String {
-        let prefix = "bundler-eoa:default:\(activeChain.id):"
-        let existingRefs = ([localRelayerStatus?.keyRef] + (localRelayerStatus?.keyHistory.map(\.keyRef) ?? []))
-            .compactMap { $0 }
-        let maxSuffix = existingRefs.compactMap { ref -> Int? in
-            guard ref.hasPrefix(prefix) else {
-                return nil
+        let (client, generation) = try await ensureWalletNodeClientWithGeneration()
+        let initialStatus = try await client.bundlerStatus()
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        _ = publishLocalRelayerStatus(
+            initialStatus,
+            expectedGeneration: generation
+        )
+        let initialSnapshot = try requiredRelayerSnapshot()
+        let plan = try RelayerRotationCoordinator.plan(from: initialSnapshot)
+        try requireRotationPreflight(
+            status: initialStatus,
+            snapshot: initialSnapshot,
+            plan: plan
+        )
+
+        let challenge = try await client.beginAdminAction(
+            action: "install_bundler_eoa",
+            chainId: Int(activeChain.id),
+            keyRef: plan.candidateKeyRef
+        )
+        let authentication = DeviceOwnerAuthenticationSession(reason: challenge.summary)
+        defer { authentication.invalidate() }
+        try await authentication.authorize()
+
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        let authenticatedStatus = try await client.bundlerStatus()
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        let authenticatedSnapshot = try requiredRelayerSnapshot()
+        guard authenticatedSnapshot == initialSnapshot else {
+            throw RelayerRotationCoordinator.Failure.stalePlan
+        }
+        try requireRotationPreflight(
+            status: authenticatedStatus,
+            snapshot: authenticatedSnapshot,
+            plan: plan
+        )
+
+        var candidateRecord: BundlerSecretRecord?
+        var installedStatus: WalletNodeClient.RelayerStatus?
+        let expectedPendingHead = plan.pendingTransition ?? authenticatedSnapshot.head
+        let prepared = try await RelayerRotationCoordinator.prepareAndInstall(
+            plan: plan,
+            snapshot: authenticatedSnapshot,
+            createCandidateIdentity: { keyRef in
+                let record = try self.bundlerKeyStore.createIfNeeded(
+                    keyRef: keyRef,
+                    reason: authentication.reason,
+                    authenticationContext: authentication.context
+                )
+                candidateRecord = record
+                return try VerifiedRelayerIdentity.derive(
+                    keyRef: record.keyRef,
+                    secret: record.secret
+                )
+            },
+            identityForKeyRef: { keyRef in
+                try self.relayerPublicIdentityStore.identity(forKeyRef: keyRef)
+            },
+            persistPublicIdentity: { identity in
+                try self.relayerPublicIdentityStore.insertOrRequireIdentity(identity)
+            },
+            appendJournal: { transition in
+                try self.relayerChainStateJournalStore.append(transition)
+            },
+            installDaemon: { identity in
+                try self.requireCurrentRelayerConnection(
+                    client: client,
+                    generation: generation
+                )
+                let beforeInstallSnapshot = try self.requiredRelayerSnapshot()
+                guard beforeInstallSnapshot.head == expectedPendingHead else {
+                    throw RelayerRotationCoordinator.Failure.stalePlan
+                }
+                let beforeInstallStatus = try await client.bundlerStatus()
+                try self.requireCurrentRelayerConnection(
+                    client: client,
+                    generation: generation
+                )
+
+                let record: BundlerSecretRecord
+                switch plan.mode {
+                case .createCandidate:
+                    _ = try PassiveRelayerIdentityResolver.resolve(
+                        status: beforeInstallStatus,
+                        expectedChainID: self.activeChain.id,
+                        expectedOwnerScope: "default",
+                        expectedNetworkProfile: self.activeChain.shortName,
+                        snapshot: beforeInstallSnapshot,
+                        identityForKeyRef: { keyRef in
+                            try self.relayerPublicIdentityStore.identity(forKeyRef: keyRef)
+                        }
+                    )
+                    guard beforeInstallStatus.pendingFunding.isEmpty,
+                          let createdRecord = candidateRecord else {
+                        throw RelayerRotationCoordinator.Failure.unexpectedPendingTransition(
+                            beforeInstallStatus.pendingFunding.first?.keyRef ?? "none"
+                        )
+                    }
+                    record = createdRecord
+                case .reusePending:
+                    record = try await self.readBoundRelayerSecret(
+                        identity: identity,
+                        client: client,
+                        generation: generation,
+                        authenticationSession: authentication,
+                        validateAuthority: {
+                            let snapshot = try self.requiredRelayerSnapshot()
+                            guard snapshot.head == expectedPendingHead else {
+                                throw RelayerRotationCoordinator.Failure.stalePlan
+                            }
+                            let status = try await client.bundlerStatus()
+                            try self.requireCurrentRelayerConnection(
+                                client: client,
+                                generation: generation
+                            )
+                            try self.requirePendingRotationBinding(
+                                status: status,
+                                snapshot: snapshot,
+                                expectedIdentity: identity,
+                                allowUninstalledDaemonCandidate: true
+                            )
+                        }
+                    )
+                    candidateRecord = record
+                }
+
+                let recordIdentity = try VerifiedRelayerIdentity.derive(
+                    keyRef: record.keyRef,
+                    secret: record.secret
+                )
+                guard recordIdentity == identity else {
+                    throw RelayerRotationCoordinator.Failure.candidateIdentityMismatch(
+                        expected: identity.keyRef,
+                        actual: record.keyRef
+                    )
+                }
+                let status = try await client.installBundlerEOA(
+                    keyRef: identity.keyRef,
+                    secret: record.secret,
+                    authorization: WalletNodeClient.AdminAuthorization(
+                        adminActionId: challenge.adminActionId,
+                        nonce: challenge.nonce
+                    )
+                )
+                try self.requireCurrentRelayerConnection(
+                    client: client,
+                    generation: generation
+                )
+                installedStatus = status
             }
-            return Int(ref.dropFirst(prefix.count))
-        }.max() ?? 0
-        return "\(prefix)\(maxSuffix + 1)"
+        )
+
+        guard let status = installedStatus else {
+            throw AppError.localDaemonLaunchFailed(
+                "wallet-node did not return relayer rotation status."
+            )
+        }
+
+        let currentSnapshot = try requiredRelayerSnapshot()
+        if status.keyRef == prepared.candidateIdentity.keyRef {
+            _ = try promotePendingRelayerIfReady(status: status)
+            let promotedSnapshot = try requiredRelayerSnapshot()
+            guard promotedSnapshot.head.activeKeyRef == prepared.candidateIdentity.keyRef,
+                  promotedSnapshot.head.pendingKeyRef == nil else {
+                throw RelayerRotationCoordinator.Failure.stalePlan
+            }
+        } else {
+            guard currentSnapshot.head == prepared.journalHead else {
+                throw RelayerRotationCoordinator.Failure.stalePlan
+            }
+            try requirePendingRotationBinding(
+                status: status,
+                snapshot: currentSnapshot,
+                expectedIdentity: prepared.candidateIdentity
+            )
+        }
+
+        relayerInstallAuthorizationPlan = nil
+        installedRelayerAuthorizationPlan = nil
+        relayerAccessState = .locked
+        _ = publishLocalRelayerStatus(status, expectedGeneration: generation)
+        localRelayerMessage = status.keyRef == prepared.candidateIdentity.keyRef
+            ? "New relayer key is active."
+            : "New relayer key is waiting for top-up."
+        appendLog(
+            "relayer: rotation prepared exact candidate \(prepared.candidateIdentity.address.shortAddress)"
+        )
     }
 
     func exportLocalRelayerKey(
         keyRef targetKeyRef: String? = nil,
         label targetLabel: String? = nil
     ) async throws -> String {
-        guard let status = localRelayerStatus, let keyRef = targetKeyRef ?? status.keyRef else {
-            throw AppError.localRelayerKeyMissing
+        guard hasNoSecretResetConflict else {
+            throw AppError.walletOperationInProgress
         }
         guard !isExportingLocalRelayer else {
             throw AppError.localRelayerKeyMissing
@@ -1176,62 +2590,224 @@ final class AppModel: ObservableObject {
         isExportingLocalRelayer = true
         defer { isExportingLocalRelayer = false }
         appendSection("Export Local Relayer")
-        let record = try BundlerKeyStore.shared.read(
-            keyRef: keyRef,
+
+        let (client, generation) = try await ensureWalletNodeClientWithGeneration()
+        let status = try await client.bundlerStatus()
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        let plan = try relayerSecretAuthorizationPlan(for: status)
+        let keyRef = targetKeyRef ?? plan.active.identity.keyRef
+        guard let authorization = plan.authorization(forKeyRef: keyRef) else {
+            throw RelayerSecretAuthorizationPolicy.Failure.unauthorizedKeyRef(keyRef)
+        }
+
+        let authentication = DeviceOwnerAuthenticationSession(
             reason: "Reveal the local relayer private key"
+        )
+        defer { authentication.invalidate() }
+        try await authentication.authorize()
+        let record = try await readAuthorizedRelayerSecret(
+            authorization: authorization,
+            expectedPlan: plan,
+            client: client,
+            generation: generation,
+            authenticationSession: authentication
         )
         let privateKey = "0x" + record.secret.lowercaseHexString
         localRelayerMessage = "Relayer key exported after local authentication."
-        appendLog("relayer: exported key for \(targetLabel ?? status.eoa.shortAddress)")
+        appendLog(
+            "relayer: exported key for \(targetLabel ?? authorization.identity.address.shortAddress)"
+        )
         refreshLocalRelayerStatus()
         return privateKey
     }
 
     func deleteLocalRelayerKey(
-        keyRef targetKeyRef: String? = nil,
-        label targetLabel: String? = nil,
-        unsafeReset: Bool
+        keyRef: String,
+        label targetLabel: String? = nil
     ) async throws {
-        let walletNodeClient = try await ensureWalletNodeClient()
-        guard let status = localRelayerStatus, let keyRef = targetKeyRef ?? status.keyRef else {
-            throw AppError.localRelayerKeyMissing
-        }
-        guard !isDeletingLocalRelayer else {
-            return
+        guard !isDeletingLocalRelayer,
+              hasNoSecretResetConflict,
+              !isRotatingLocalRelayer,
+              relayerInstallTask == nil else {
+            throw AppError.walletOperationInProgress
         }
 
         isDeletingLocalRelayer = true
         defer { isDeletingLocalRelayer = false }
-        appendSection(unsafeReset ? "Unsafe Reset Local Relayer" : "Delete Local Relayer")
-        let challenge = try await walletNodeClient.beginAdminAction(
+        appendSection("Delete Retired Local Relayer")
+
+        let (client, generation) = try await ensureWalletNodeClientWithGeneration()
+        let status = try await client.bundlerStatus()
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        let initialAuthorization = try targetedRelayerDeletionAuthorization(
+            status: status,
+            keyRef: keyRef
+        )
+        let challenge = try await client.beginAdminAction(
             action: "delete_bundler_eoa",
             chainId: status.chainId,
             keyRef: keyRef
         )
-        try await authorizeLocalRelayerAdminAction(summary: challenge.summary)
-        try await walletNodeClient.deleteBundlerEOA(
+        let authentication = DeviceOwnerAuthenticationSession(reason: challenge.summary)
+        defer { authentication.invalidate() }
+        try await authentication.authorize()
+
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        let authenticatedStatus = try await client.bundlerStatus()
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        let authenticatedAuthorization = try targetedRelayerDeletionAuthorization(
+            status: authenticatedStatus,
+            keyRef: keyRef
+        )
+        guard authenticatedAuthorization == initialAuthorization else {
+            throw RelayerTargetedDeletionPolicy.Failure.lifecycleNotRetired(
+                "authority_changed"
+            )
+        }
+
+        try await quiesceRelayerInstallForTargetedDeletion(
+            client: client,
+            generation: generation
+        )
+        // Daemon state is removed before either local record. The protected
+        // secret is then deleted before its inert public identity so a crash can
+        // never strand an unreferenced signing secret in Keychain.
+        try await client.deleteBundlerEOA(
             keyRef: keyRef,
-            unsafeReset: unsafeReset,
+            unsafeReset: false,
             authorization: WalletNodeClient.AdminAuthorization(
                 adminActionId: challenge.adminActionId,
                 nonce: challenge.nonce
             )
         )
-        try BundlerKeyStore.shared.delete(keyRef: keyRef)
+
+        try await terminateManagedWalletNodeAfterTargetedDeletion(client: client)
+        try bundlerKeyStore.delete(
+            keyRef: keyRef,
+            authenticationContext: authentication.context
+        )
+        try relayerPublicIdentityStore.delete(keyRef: keyRef)
         localRelayerStatus = nil
-        localRelayerMessage = unsafeReset
-            ? "Relayer key reset. Submissions stay blocked until a funded relayer exists."
-            : "Relayer key deleted. Submissions stay blocked until a funded relayer exists."
-        appendLog("relayer: \(unsafeReset ? "unsafe reset" : "delete") completed for \(targetLabel ?? status.eoa.shortAddress)")
+        localRelayerMessage = "Retired relayer key deleted."
+        appendLog(
+            "relayer: targeted delete completed for \(targetLabel ?? initialAuthorization.identity.address.shortAddress)"
+        )
         refreshLocalRelayerStatus()
+    }
+
+    /// Prompt-free UI eligibility uses the exact same journal, public identity,
+    /// and daemon-history policy as deletion itself. A retained daemon `deleted`
+    /// row therefore stops offering cleanup as soon as its local public record
+    /// has already been removed.
+    func canDeleteLocalRelayerKey(keyRef: String) -> Bool {
+        guard let status = localRelayerStatus else { return false }
+        return (try? targetedRelayerDeletionAuthorization(
+            status: status,
+            keyRef: keyRef
+        )) != nil
+    }
+
+    private func targetedRelayerDeletionAuthorization(
+        status: WalletNodeClient.RelayerStatus,
+        keyRef: String
+    ) throws -> RelayerTargetedDeletionPolicy.Authorization {
+        let snapshot = try requiredRelayerSnapshot()
+        guard let daemonChainID = UInt64(exactly: status.chainId) else {
+            throw PassiveRelayerIdentityResolver.Failure.invalidDaemonChainID(
+                status.chainId
+            )
+        }
+        guard status.ownerScope == "default" else {
+            throw PassiveRelayerIdentityResolver.Failure.wrongOwnerScope(
+                expected: "default",
+                actual: status.ownerScope
+            )
+        }
+        guard status.networkProfile == activeChain.shortName else {
+            throw PassiveRelayerIdentityResolver.Failure.wrongNetworkProfile(
+                expected: activeChain.shortName,
+                actual: status.networkProfile
+            )
+        }
+        let matches = status.keyHistory.filter { $0.keyRef == keyRef }
+        guard matches.count == 1, let claim = matches.first else {
+            throw RelayerTargetedDeletionPolicy.Failure.nonHistoricalIdentity(keyRef)
+        }
+        return try RelayerTargetedDeletionPolicy.authorizeIndividualDeletion(
+            snapshot: snapshot,
+            daemonClaim: .init(
+                chainID: daemonChainID,
+                keyRef: claim.keyRef,
+                address: claim.eoa,
+                lifecycle: claim.lifecycle
+            ),
+            unsafeReset: false,
+            identityForKeyRef: { candidateKeyRef in
+                try relayerPublicIdentityStore.identity(forKeyRef: candidateKeyRef)
+            }
+        )
+    }
+
+    /// Invalidates the daemon generation only after proving no relayer install
+    /// exists. Targeted deletion never cancels a live install: it rejects before
+    /// authentication instead, so an already-read secret cannot race deletion.
+    private func quiesceRelayerInstallForTargetedDeletion(
+        client: WalletNodeClient,
+        generation: UInt64
+    ) async throws {
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        guard relayerInstallTask == nil else {
+            throw AppError.walletOperationInProgress
+        }
+        walletNodeGeneration &+= 1
+        relayerInstallTask = nil
+        relayerInstallAuthorizationPlan = nil
+        installedRelayerAuthorizationPlan = nil
+        relayerStatusRefreshToken = UUID()
+        isRefreshingLocalRelayer = false
+        relayerAccessState = .locked
+    }
+
+    private func terminateManagedWalletNodeAfterTargetedDeletion(
+        client: WalletNodeClient
+    ) async throws {
+        guard let daemon = walletNodeDaemon,
+              daemon.client.hasSameConnection(as: client) else {
+            return
+        }
+        walletNodeLaunchTask?.cancel()
+        walletNodeLaunchTask = nil
+        walletNodeLaunchID = nil
+        walletNodeDaemon = nil
+        walletNodeClient = WalletNodeClient.Configuration.fromEnvironment().map {
+            WalletNodeClient(configuration: $0)
+        }
+        do {
+            try await daemon.terminateAndWait()
+        } catch {
+            daemon.terminate()
+            throw error
+        }
+        walletNodeLaunchFailure = nil
     }
 
     @discardableResult
     func cancelPendingOperation(userOpHash: String) async -> Bool {
+        guard hasNoSecretResetConflict else { return false }
+        isReplacingPendingOperation = true
+        defer { isReplacingPendingOperation = false }
         defer { refreshLocalRelayerStatus() }
         do {
             appendSection("Cancel Pending Operation")
-            let txHash = try await withWalletNodeClient(operation: "cancel pending") {
+            let authentication = DeviceOwnerAuthenticationSession(
+                reason: "Cancel the pending wallet operation"
+            )
+            defer { authentication.invalidate() }
+            try await authentication.authorize()
+            let txHash = try await withPrivilegedWalletNodeClient(
+                operation: "cancel pending",
+                authenticationSession: authentication
+            ) {
                 try await $0.cancelPendingOperation(userOpHash: userOpHash)
             }
             appendLog("relayer: cancel submitted tx \(txHash ?? "<none>")")
@@ -1271,10 +2847,21 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func speedUpPendingOperation(userOpHash: String) async -> Bool {
+        guard hasNoSecretResetConflict else { return false }
+        isReplacingPendingOperation = true
+        defer { isReplacingPendingOperation = false }
         defer { refreshLocalRelayerStatus() }
         do {
             appendSection("Speed Up Pending Operation")
-            let txHash = try await withWalletNodeClient(operation: "speed up pending") {
+            let authentication = DeviceOwnerAuthenticationSession(
+                reason: "Speed up the pending wallet operation"
+            )
+            defer { authentication.invalidate() }
+            try await authentication.authorize()
+            let txHash = try await withPrivilegedWalletNodeClient(
+                operation: "speed up pending",
+                authenticationSession: authentication
+            ) {
                 try await $0.speedUpPendingOperation(userOpHash: userOpHash)
             }
             appendLog("relayer: speed-up submitted tx \(txHash ?? "<none>")")
@@ -1325,14 +2912,14 @@ final class AppModel: ObservableObject {
     }
 
     private func ensureWalletNodeClient() async throws -> WalletNodeClient {
+        guard !isResettingWallet else {
+            throw AppError.walletOperationInProgress
+        }
         if let walletNodeClient {
             return walletNodeClient
         }
-        if let walletNodeLaunchTask {
-            let daemon = try await walletNodeLaunchTask.value
-            walletNodeDaemon = daemon
-            walletNodeClient = daemon.client
-            return daemon.client
+        if let walletNodeLaunchTask, let walletNodeLaunchID {
+            return try await finishWalletNodeLaunch(walletNodeLaunchTask, launchID: walletNodeLaunchID)
         }
         if let walletNodeLaunchFailure {
             let now = Date()
@@ -1345,38 +2932,53 @@ final class AppModel: ObservableObject {
             self.walletNodeLaunchFailure = nil
         }
 
-        localRelayerMessage = "Starting local wallet-node daemon..."
+        localRelayerMessage = "Starting local wallet-node daemon in read-only mode..."
         let chain = activeChain
         let gasPolicy = networkSettings.resolvedDaemonGasPolicy
         let heliosVerificationEnabled = networkSettings.isHeliosVerificationActive
         let launchTask = Task {
-            let bundlerSecrets = try BundlerKeyStore.shared.unlockAllForDaemonLaunch(chainId: chain.id)
-            if let primary = bundlerSecrets.first {
-                syncUnlockedRelayerAddress(keyRef: primary.keyRef, secret: primary.secret)
-            }
             return try await WalletNodeDaemon.launch(
-                bundlerSecrets: bundlerSecrets,
+                bundlerSecrets: [],
                 chain: chain,
                 gasPolicy: gasPolicy,
                 heliosVerificationEnabled: heliosVerificationEnabled
             )
         }
+        let launchID = UUID()
         walletNodeLaunchTask = launchTask
+        walletNodeLaunchID = launchID
+        return try await finishWalletNodeLaunch(launchTask, launchID: launchID)
+    }
 
+    private func finishWalletNodeLaunch(
+        _ task: Task<WalletNodeDaemon, Error>,
+        launchID: UUID
+    ) async throws -> WalletNodeClient {
         do {
-            let daemon = try await launchTask.value
-            walletNodeLaunchTask = nil
-            walletNodeLaunchFailure = nil
-            walletNodeDaemon = daemon
-            walletNodeClient = daemon.client
-            localRelayerMessage = "Local wallet-node daemon connected."
-            appendLog("relayer: wallet-node daemon started")
-            if let logURL = WalletNodeDaemon.managedLogFileURL() {
-                appendLog("relayer: wallet-node logs \(logURL.path)")
+            let daemon = try await task.value
+
+            // A cancelled detached launch can still finish. Only the launch that still owns the
+            // current token may publish a daemon. Another waiter may already have adopted the
+            // exact same result, which is also safe.
+            guard walletNodeLaunchID == launchID || walletNodeDaemon === daemon else {
+                daemon.terminate()
+                throw AppError.localDaemonLaunchFailed(
+                    "wallet-node launch became stale after a connection reset"
+                )
+            }
+            if walletNodeDaemon !== daemon {
+                walletNodeLaunchTask = nil
+                walletNodeLaunchID = nil
+                walletNodeLaunchFailure = nil
+                adoptManagedWalletNodeDaemon(daemon)
             }
             return daemon.client
         } catch {
+            guard walletNodeLaunchID == launchID else {
+                throw error
+            }
             walletNodeLaunchTask = nil
+            walletNodeLaunchID = nil
             walletNodeLaunchFailure = WalletNodeLaunchFailure(
                 error: error,
                 retryAfter: WalletNodeLaunchFailureGate.retryAfter(
@@ -1384,6 +2986,140 @@ final class AppModel: ObservableObject {
                     cooldown: Self.walletNodeLaunchFailureCooldownSeconds
                 )
             )
+            throw error
+        }
+    }
+
+    private func adoptManagedWalletNodeDaemon(_ daemon: WalletNodeDaemon) {
+        guard walletNodeDaemon !== daemon else { return }
+        walletNodeDaemon = daemon
+        walletNodeClient = daemon.client
+        walletNodeGeneration &+= 1
+        relayerInstallTask?.cancel()
+        relayerInstallTask = nil
+        relayerInstallAuthorizationPlan = nil
+        installedRelayerAuthorizationPlan = nil
+        relayerAccessState = .locked
+        localRelayerMessage = "Local wallet-node connected; relayer locked until needed."
+        appendLog("relayer: wallet-node daemon started read-only")
+        if let logURL = WalletNodeDaemon.managedLogFileURL() {
+            appendLog("relayer: wallet-node logs \(logURL.path)")
+        }
+    }
+
+    /// Installs only the relayer keys needed by the active daemon generation. The managed
+    /// daemon deliberately starts without secrets, so reads remain prompt-free; the first
+    /// privileged action supplies its short-lived authentication context here.
+    private func ensureRelayerUnlocked(
+        using authenticationSession: DeviceOwnerAuthenticationSession
+    ) async throws -> WalletNodeClient {
+        guard !isDeletingLocalRelayer else {
+            throw AppError.walletOperationInProgress
+        }
+        let (client, generation) = try await ensureWalletNodeClientWithGeneration()
+        guard client.usesUnixSocketTransport, walletNodeDaemon != nil else {
+            // An externally managed daemon owns its own relayer-key lifecycle.
+            return client
+        }
+
+        let observedStatus = try await client.bundlerStatus()
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        guard publishLocalRelayerStatus(
+            observedStatus,
+            expectedGeneration: generation
+        ), passiveRelayerIdentityIssue == nil else {
+            throw AppError.localDaemonLaunchFailed(
+                "The relayer authority could not be verified after refreshing wallet-node status."
+            )
+        }
+        // A status read may atomically activate a funded journal-pending key.
+        // Publish first so exact promotion advances the app journal before the
+        // protected-secret plan is derived from that now-current authority.
+        let authorizationPlan = try relayerSecretAuthorizationPlan(for: observedStatus)
+
+        if relayerAccessState.isAvailable(for: walletNodeGeneration),
+           installedRelayerAuthorizationPlan == authorizationPlan {
+            return client
+        }
+        if let relayerInstallTask {
+            guard relayerInstallAuthorizationPlan == authorizationPlan else {
+                throw AppError.localDaemonLaunchFailed(
+                    "Relayer authority changed while another key installation was in progress. Retry the action."
+                )
+            }
+            return try await relayerInstallTask.value
+        }
+
+        relayerAccessState = .installing(generation: generation)
+        localRelayerMessage = "Unlocking the local relayer for this action..."
+        let task = Task { @MainActor [self] in
+            var latestStatus = observedStatus
+            for authorization in authorizationPlan.ordered {
+                try Task.checkCancellation()
+                try requireCurrentRelayerConnection(client: client, generation: generation)
+                let keyRef = authorization.identity.keyRef
+                let challenge = try await client.beginAdminAction(
+                    action: "install_bundler_eoa",
+                    chainId: Int(activeChain.id),
+                    keyRef: keyRef
+                )
+                let record = try await readAuthorizedRelayerSecret(
+                    authorization: authorization,
+                    expectedPlan: authorizationPlan,
+                    client: client,
+                    generation: generation,
+                    authenticationSession: authenticationSession
+                )
+                // Only the active identity may update the compatibility cache. Retiring keys are
+                // loaded solely so pending replacements remain signable and must never overwrite the cached
+                // funding address shown before the next daemon has status metadata.
+                if authorization.role == .active {
+                    syncUnlockedRelayerAddress(keyRef: keyRef, secret: record.secret)
+                }
+                latestStatus = try await client.installBundlerEOA(
+                    keyRef: keyRef,
+                    secret: record.secret,
+                    authorization: WalletNodeClient.AdminAuthorization(
+                        adminActionId: challenge.adminActionId,
+                        nonce: challenge.nonce
+                    )
+                )
+            }
+
+            try requireCurrentRelayerConnection(client: client, generation: generation)
+            guard try relayerSecretAuthorizationPlan(for: latestStatus) == authorizationPlan else {
+                throw AppError.localDaemonLaunchFailed(
+                    "The relayer authority changed while keys were being installed. Retry the action."
+                )
+            }
+            _ = publishLocalRelayerStatus(latestStatus, expectedGeneration: generation)
+            installedRelayerAuthorizationPlan = authorizationPlan
+            relayerAccessState = .available(generation: generation)
+            localRelayerMessage = "Local relayer available for this wallet-node session."
+            appendLog(
+                "relayer: installed \(authorizationPlan.ordered.count) journal-authorized key(s) for daemon generation \(generation)"
+            )
+            return client
+        }
+        relayerInstallTask = task
+        relayerInstallAuthorizationPlan = authorizationPlan
+
+        do {
+            let installedClient = try await task.value
+            relayerInstallTask = nil
+            relayerInstallAuthorizationPlan = nil
+            return installedClient
+        } catch {
+            relayerInstallTask = nil
+            relayerInstallAuthorizationPlan = nil
+            installedRelayerAuthorizationPlan = nil
+            if walletNodeGeneration == generation {
+                relayerAccessState = .failed(
+                    generation: generation,
+                    message: error.localizedDescription
+                )
+                localRelayerMessage = error.localizedDescription
+            }
             throw error
         }
     }
@@ -1410,14 +3146,46 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func ensureWalletNodeClientWithGeneration() async throws -> (
+        client: WalletNodeClient,
+        generation: UInt64
+    ) {
+        let client = try await ensureWalletNodeClient()
+        let generation = walletNodeGeneration
+        guard walletNodeClient?.hasSameConnection(as: client) == true else {
+            throw AppError.localDaemonLaunchFailed(
+                "wallet-node connection changed before the operation could start"
+            )
+        }
+        return (client, generation)
+    }
+
+    private func withWalletNodeClientGeneration<T: Sendable>(
+        operation: String,
+        _ body: (WalletNodeClient) async throws -> T
+    ) async throws -> (value: T, generation: UInt64) {
+        try await withWalletNodeClient(operation: operation) { client in
+            let value = try await body(client)
+            return (value, self.walletNodeGeneration)
+        }
+    }
+
     private func withWalletNodeClient<T: Sendable>(
         operation: String,
+        afterRelaunch: ((WalletNodeClient) async throws -> Void)? = nil,
         _ body: (WalletNodeClient) async throws -> T
     ) async throws -> T {
         let client = try await ensureWalletNodeClient()
+        let generation = walletNodeGeneration
 
         do {
-            return try await body(client)
+            let result = try await body(client)
+            guard walletNodeGeneration == generation else {
+                throw AppError.localDaemonLaunchFailed(
+                    "wallet-node connection changed while \(operation) was in flight"
+                )
+            }
+            return result
         } catch {
             guard client.usesUnixSocketTransport,
                   walletNodeDaemon != nil,
@@ -1428,12 +3196,45 @@ final class AppModel: ObservableObject {
 
             appendLog("relayer: \(operation) lost wallet-node socket; relaunching daemon and retrying once")
             walletNodeLaunchTask = nil
+            walletNodeLaunchID = nil
             walletNodeClient = nil
+            walletNodeDaemon?.terminate()
             walletNodeDaemon = nil
+            walletNodeGeneration &+= 1
+            relayerInstallTask?.cancel()
+            relayerInstallTask = nil
+            relayerInstallAuthorizationPlan = nil
+            installedRelayerAuthorizationPlan = nil
+            relayerAccessState = .locked
 
             let relaunchedClient = try await ensureWalletNodeClient()
-            return try await body(relaunchedClient)
+            let relaunchedGeneration = walletNodeGeneration
+            try await afterRelaunch?(relaunchedClient)
+            let result = try await body(relaunchedClient)
+            guard walletNodeGeneration == relaunchedGeneration else {
+                throw AppError.localDaemonLaunchFailed(
+                    "wallet-node connection changed while retrying \(operation)"
+                )
+            }
+            return result
         }
+    }
+
+    private func withPrivilegedWalletNodeClient<T: Sendable>(
+        operation: String,
+        authenticationSession: DeviceOwnerAuthenticationSession,
+        _ body: (WalletNodeClient) async throws -> T
+    ) async throws -> T {
+        _ = try await withWalletNodeClient(operation: "\(operation) relayer unlock") { _ in
+            try await self.ensureRelayerUnlocked(using: authenticationSession)
+        }
+        return try await withWalletNodeClient(
+            operation: operation,
+            afterRelaunch: { [self] _ in
+                _ = try await ensureRelayerUnlocked(using: authenticationSession)
+            },
+            body
+        )
     }
 
     private func withWalletNodeWarmupRetry<T: Sendable>(
@@ -1459,32 +3260,6 @@ final class AppModel: ObservableObject {
             }
         }
         throw lastError ?? AppError.localDaemonLaunchFailed("wallet-node warm-up retry ended without an error")
-    }
-
-    private func authorizeLocalRelayerAdminAction(summary: String) async throws {
-        try await authorizeDeviceOwner(reason: summary, fallbackError: AppError.localRelayerKeyMissing)
-    }
-
-    /// Prompt for local device-owner authentication (Touch ID, else password) and throw if
-    /// the user cancels or it fails. Use this to gate sensitive actions that do NOT otherwise
-    /// cross the Secure Enclave — bundler-EOA admin actions touch only the Keychain, so they
-    /// never prompt on their own the way a passkey-signed UserOp (transfer/swap) does. This
-    /// restores the user-presence gate.
-    func authorizeDeviceOwner(
-        reason: String,
-        fallbackError: Error = AppError.userAuthorizationCancelled
-    ) async throws {
-        let context = LAContext()
-        context.localizedReason = reason
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, error in
-                if success {
-                    continuation.resume()
-                } else {
-                    continuation.resume(throwing: error ?? fallbackError)
-                }
-            }
-        }
     }
 
     func buildCurrentUserOperationDraft(isDeployedOverride: Bool? = nil) async throws -> UserOperationDraft {
@@ -1657,7 +3432,12 @@ final class AppModel: ObservableObject {
     }
 
     func buildUserOperationDraftPreview() {
-        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+        guard !isResettingWallet,
+              !isBootstrapping,
+              !isBuildingUserOperation,
+              !isSendingUserOperation,
+              !isRotatingLocalRelayer,
+              !isDeletingLocalRelayer else {
             appendLog("build: ignored because another wallet operation is still running")
             return
         }
@@ -1690,7 +3470,7 @@ final class AppModel: ObservableObject {
                 lastUserOperationBuildError = error.localizedDescription
                 activeBundlerStatus = "Bundler check failed"
                 bridgeStatus = "UserOperation draft build failed"
-                appendLog("build: failed — \(error.localizedDescription)")
+                appendLog("build: failed: \(error.localizedDescription)")
             }
 
             isBuildingUserOperation = false
@@ -1698,7 +3478,12 @@ final class AppModel: ObservableObject {
     }
 
     func sendCurrentUserOperation() {
-        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+        guard !isResettingWallet,
+              !isBootstrapping,
+              !isBuildingUserOperation,
+              !isSendingUserOperation,
+              !isRotatingLocalRelayer,
+              !isDeletingLocalRelayer else {
             appendLog("send: ignored because another wallet operation is still running")
             return
         }
@@ -1715,7 +3500,7 @@ final class AppModel: ObservableObject {
                 lastError = error.localizedDescription
                 bridgeStatus = "UserOperation send failed"
                 activeBundlerStatus = "Submission failed"
-                appendLog("send: failed — \(error.localizedDescription)")
+                appendLog("send: failed: \(error.localizedDescription)")
             }
 
             isSendingUserOperation = false
@@ -1724,7 +3509,12 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func enableSessionKeys(now: Date = Date()) async throws -> SessionRecord {
-        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+        guard !isResettingWallet,
+              !isBootstrapping,
+              !isBuildingUserOperation,
+              !isSendingUserOperation,
+              !isRotatingLocalRelayer,
+              !isDeletingLocalRelayer else {
             throw AppError.walletOperationInProgress
         }
         if walletRecord == nil {
@@ -1793,7 +3583,7 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func revokeSessionKeys() async throws -> UserOperationSendResult {
-        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+        guard !isResettingWallet, !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
             throw AppError.walletOperationInProgress
         }
         if walletRecord == nil {
@@ -1843,6 +3633,7 @@ final class AppModel: ObservableObject {
             logContext: "session-revoke",
             signingReason: "Revoke session keys for \(activeChain.name)",
             intent: nil,
+            callValue: UserOperationCallValue.zero,
             historyDraft: SessionRevokeAssembler.historyDraft(
                 accountAddress: accountAddress,
                 validationNonce: sessionRecord.validationNonce
@@ -1961,6 +3752,7 @@ final class AppModel: ObservableObject {
             logContext: "\(logContext) session-install",
             signingReason: "Activate session key for \(activeChain.name)",
             intent: nil,
+            callValue: UserOperationCallValue.zero,
             historyDraft: SessionInstallAssembler.historyDraft(
                 accountAddress: accountAddress,
                 validationNonce: installNonce
@@ -2025,6 +3817,129 @@ final class AppModel: ObservableObject {
             signingReason: signingReason ?? "Authorize ETH transfer on \(activeChain.name)",
             acknowledgedCallGasLimit: acknowledgedCallGasLimit
         )
+    }
+
+    /// A Kernel-funded relayer top-up is always owner-authorized. Before any
+    /// authentication, its finalized UserOperation is checked against a fresh
+    /// daemon balance using the same outer-transaction gas formula as wallet-node.
+    func executeBundlerTopUp(
+        identity: VerifiedRelayerIdentity,
+        amountETH: String,
+        logContext: String,
+        signingReason: String
+    ) async throws -> UserOperationSendResult {
+        try await executeTransfer(
+            intent: .nativeTransfer(recipient: identity.address, amountETH: amountETH),
+            logContext: logContext,
+            signingReason: signingReason,
+            purpose: .bundlerTopUp(expectedIdentity: identity)
+        )
+    }
+
+    struct BundlerTopUpSendResult: Equatable {
+        let recipient: String
+        let sendResult: UserOperationSendResult
+    }
+
+    /// Resolves the current relayer from trusted daemon state and refuses an
+    /// intent whose reviewed destination is no longer current. The delegated
+    /// send performs the exact relay-cost check again before authentication.
+    func executeCurrentBundlerTopUp(
+        expectedIdentity: VerifiedRelayerIdentity,
+        amountETH: String,
+        logContext: String,
+        signingReason: String
+    ) async throws -> BundlerTopUpSendResult {
+        let observation = try await fetchLocalRelayerStatusWithBalanceRetry()
+        guard publishLocalRelayerStatus(
+            observation.status,
+            expectedGeneration: observation.generation
+        ) else {
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "The local relayer status changed while preparing the top-up."
+            )
+        }
+        do {
+            let plan = try relayerSecretAuthorizationPlan(for: observation.status)
+            guard plan.active.identity == expectedIdentity else {
+                throw RelayerSecretAuthorizationPolicy.Failure.unauthorizedKeyRef(
+                    expectedIdentity.keyRef
+                )
+            }
+        } catch {
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "The local relayer identity changed while preparing the top-up."
+            )
+        }
+
+        let sendResult = try await executeBundlerTopUp(
+            identity: expectedIdentity,
+            amountETH: amountETH,
+            logContext: logContext,
+            signingReason: signingReason
+        )
+        return BundlerTopUpSendResult(
+            recipient: expectedIdentity.address,
+            sendResult: sendResult
+        )
+    }
+
+    /// One authoritative gate shared before and after authentication. The second call catches
+    /// daemon restarts, relayer rotation, compromise flags, and balance movement during the
+    /// Touch ID window without duplicating the identity or relay-cost policy.
+    private func verifiedBundlerRelayDecision(
+        expectedIdentity: VerifiedRelayerIdentity,
+        gasPlan: UserOperationGasPlan,
+        requiredPrefund: Data,
+        logContext: String,
+        phase: String
+    ) async throws -> BundlerRelayPrecheck.Decision {
+        let observation: (status: WalletNodeClient.RelayerStatus, generation: UInt64)
+        do {
+            observation = try await fetchLocalRelayerStatusWithBalanceRetry()
+        } catch {
+            appendLog("\(logContext): \(phase) relayer status unavailable: \(error.localizedDescription)")
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "Could not verify the local relayer status."
+            )
+        }
+        guard publishLocalRelayerStatus(
+            observation.status,
+            expectedGeneration: observation.generation
+        ) else {
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "The local relayer status changed while checking the top-up."
+            )
+        }
+
+        do {
+            let plan = try relayerSecretAuthorizationPlan(for: observation.status)
+            guard plan.active.identity == expectedIdentity else {
+                throw RelayerSecretAuthorizationPolicy.Failure.unauthorizedKeyRef(
+                    expectedIdentity.keyRef
+                )
+            }
+        } catch {
+            appendLog("\(logContext): \(phase) relayer identity rejected: \(String(describing: error))")
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "The local relayer identity or safety state changed."
+            )
+        }
+
+        do {
+            return try BundlerRelayPrecheck.evaluate(
+                gasPlan: gasPlan,
+                requiredPrefund: requiredPrefund,
+                status: observation.status,
+                expectedChainID: activeChain.id,
+                expectedEOA: expectedIdentity.address
+            )
+        } catch {
+            appendLog("\(logContext): \(phase) relay data rejected: \(String(describing: error))")
+            throw AppError.bundlerRelayPreflightUnavailable(
+                "The local relayer returned inconsistent balance or gas data."
+            )
+        }
     }
 
     func executeERC20Transfer(
@@ -2167,10 +4082,12 @@ final class AppModel: ObservableObject {
         signingReason: String? = nil,
         acknowledgedCallGasLimit: UInt64? = nil
     ) async throws -> UserOperationSendResult {
-        try await executeUserOperation(
+        let callValue = try UserOperationCallValue.wei(for: executions)
+        return try await executeUserOperation(
             logContext: logContext,
             signingReason: signingReason ?? "Authorize \(executions.count) transaction batch on \(activeChain.name)",
             intent: nil,
+            callValue: callValue,
             historyDraft: WalletTransactionDraft(
                 operation: .batch,
                 amount: String(executions.count),
@@ -2190,17 +4107,23 @@ final class AppModel: ObservableObject {
         intent: TransactionIntent,
         logContext: String,
         signingReason: String,
-        acknowledgedCallGasLimit: UInt64? = nil
+        acknowledgedCallGasLimit: UInt64? = nil,
+        purpose: UserOperationExecutionPurpose = .standard
     ) async throws -> UserOperationSendResult {
         // Lazily install the session permission on its first use (a separate
         // passkey-validated op) so the one-time install runs in execution and is
         // not charged to the session GasPolicy. Afterwards this send is installed-mode.
-        try await installSessionPermissionIfNeeded(for: intent, logContext: logContext)
+        if purpose.allowsSessionSigning {
+            try await installSessionPermissionIfNeeded(for: intent, logContext: logContext)
+        }
+        let callValue = try UserOperationCallValue.wei(for: intent)
         return try await executeUserOperation(
             logContext: logContext,
             signingReason: signingReason,
             intent: intent,
+            callValue: callValue,
             historyDraft: historyDraft(for: intent),
+            purpose: purpose,
             acknowledgedCallGasLimit: acknowledgedCallGasLimit
         ) { [self] buildContext in
             try await buildUserOperationDraft(
@@ -2215,12 +4138,19 @@ final class AppModel: ObservableObject {
         logContext: String,
         signingReason: String,
         intent: TransactionIntent?,
+        callValue: Data,
         historyDraft: WalletTransactionDraft?,
+        purpose: UserOperationExecutionPurpose = .standard,
         afterSubmit: ((String) -> Void)? = nil,
         acknowledgedCallGasLimit: UInt64? = nil,
         buildDraft: @escaping (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
     ) async throws -> UserOperationSendResult {
-        guard !isBootstrapping, !isBuildingUserOperation, !isSendingUserOperation else {
+        guard !isResettingWallet,
+              !isBootstrapping,
+              !isBuildingUserOperation,
+              !isSendingUserOperation,
+              !isRotatingLocalRelayer,
+              !isDeletingLocalRelayer else {
             throw AppError.walletOperationInProgress
         }
         if walletRecord == nil {
@@ -2242,7 +4172,9 @@ final class AppModel: ObservableObject {
                 logContext: logContext,
                 signingReason: signingReason,
                 intent: intent,
+                callValue: callValue,
                 historyDraft: historyDraft,
+                purpose: purpose,
                 afterSubmit: afterSubmit,
                 acknowledgedCallGasLimit: acknowledgedCallGasLimit,
                 buildDraft: buildDraft
@@ -2260,7 +4192,9 @@ final class AppModel: ObservableObject {
         logContext: String,
         signingReason: String,
         intent: TransactionIntent?,
+        callValue: Data,
         historyDraft: WalletTransactionDraft?,
+        purpose: UserOperationExecutionPurpose,
         afterSubmit: ((String) -> Void)? = nil,
         acknowledgedCallGasLimit: UInt64? = nil,
         buildDraft: (_ buildContext: UserOperationBuildContext) async throws -> UserOperationDraft
@@ -2270,9 +4204,11 @@ final class AppModel: ObservableObject {
         let liveInspection = try await refreshAccountInspectionWithRetry(logContext: "\(logContext)-preflight")
         appendLog("\(logContext): using \(liveInspection.isDeployed ? "deployed" : "precomputed") account path")
 
-        let sessionPlan = intent.flatMap {
-            liveInspection.isDeployed ? activeSessionPlan(for: $0, now: Date()) : nil
-        }
+        var sessionPlan = purpose.allowsSessionSigning
+            ? intent.flatMap {
+                liveInspection.isDeployed ? activeSessionPlan(for: $0, now: Date()) : nil
+            }
+            : nil
         if let sessionPlan {
             let modeLabel = sessionPlan.signatureMode == .installed ? "installed" : "enable"
             appendLog("\(logContext): using silent session-key path (\(modeLabel) mode)")
@@ -2284,7 +4220,7 @@ final class AppModel: ObservableObject {
             isDeployed: liveInspection.isDeployed,
             sessionPlan: sessionPlan
         )
-        let draft: UserOperationDraft
+        var draft: UserOperationDraft
         do {
             draft = try await buildDraft(buildContext)
         } catch {
@@ -2295,7 +4231,27 @@ final class AppModel: ObservableObject {
 
         let usePrecompiled = await resolveUsePrecompiled(logContext: logContext)
 
-        let enriched: EnrichedUserOperation
+        func rebuildFreshOwnerOperation(
+            context: String
+        ) async throws -> (UserOperationDraft, EnrichedUserOperation) {
+            let ownerDraft = try await buildDraft(
+                UserOperationBuildContext(
+                    isDeployed: liveInspection.isDeployed,
+                    sessionPlan: nil
+                )
+            )
+            appendDraftLogSummary(ownerDraft, context: context)
+            let ownerOperation = try await enrichDraftWithLocalBundlerEstimation(
+                ownerDraft,
+                logContext: context,
+                usePrecompiled: usePrecompiled,
+                sessionPlan: nil,
+                acknowledgedCallGasLimit: acknowledgedCallGasLimit
+            )
+            return (ownerDraft, ownerOperation)
+        }
+
+        var enriched: EnrichedUserOperation
         do {
             enriched = try await enrichDraftWithLocalBundlerEstimation(
                 draft,
@@ -2305,22 +4261,96 @@ final class AppModel: ObservableObject {
                 acknowledgedCallGasLimit: acknowledgedCallGasLimit
             )
         } catch {
+            guard SessionGasAuthorizationFallback.requiresFreshOwnerDraft(
+                after: error,
+                hadSessionPlan: sessionPlan != nil
+            ) else {
+                clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+                throw error
+            }
+
+            // A session nonce/signature shape is not valid input to the owner
+            // signer. Throw it away and rebuild from the original intent using
+            // the root nonce path, then obtain a fresh fee quote and authorize
+            // that distinct operation independently.
+            appendLog(
+                "\(logContext): session gas liability exceeds its local budget; rebuilding a fresh owner operation"
+            )
+            clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+            sessionPlan = nil
+            (draft, enriched) = try await rebuildFreshOwnerOperation(
+                context: "\(logContext)-owner-fallback"
+            )
+        }
+
+        // Estimation can itself take long enough for the fee quote to age. Do
+        // one complete rebuild before prompting. This avoids asking for Touch ID
+        // and only then discovering that the operation was already stale.
+        do {
+            for refreshAttempt in 0..<2 {
+                let head = try await ExecutionFeeOracle().currentBlockNumber(
+                    rpcURL: activeChain.rpcURL,
+                    expectedChainID: activeChain.id
+                )
+                do {
+                    try enriched.operation.feeQuote.validateFreshness(
+                        now: Date(),
+                        currentBlockNumber: head
+                    )
+                    break
+                } catch {
+                    guard refreshAttempt == 0,
+                          FeeAuthorizationRefreshPolicy.shouldRefresh(after: error)
+                    else {
+                        throw error
+                    }
+                    appendLog(
+                        "\(logContext): fee quote aged during estimation; rebuilding authorization before key access"
+                    )
+                    do {
+                        enriched = try await enrichDraftWithLocalBundlerEstimation(
+                            draft,
+                            logContext: "\(logContext)-fee-refresh",
+                            usePrecompiled: usePrecompiled,
+                            sessionPlan: sessionPlan,
+                            acknowledgedCallGasLimit: acknowledgedCallGasLimit
+                        )
+                    } catch {
+                        guard SessionGasAuthorizationFallback.requiresFreshOwnerDraft(
+                            after: error,
+                            hadSessionPlan: sessionPlan != nil
+                        ) else {
+                            throw error
+                        }
+                        clearPendingSessionInstallAfterPreSubmitFailure(
+                            sessionPlan,
+                            logContext: logContext
+                        )
+                        sessionPlan = nil
+                        (draft, enriched) = try await rebuildFreshOwnerOperation(
+                            context: "\(logContext)-fee-refresh-owner-fallback"
+                        )
+                    }
+                }
+            }
+        } catch {
             clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
             throw error
         }
         let enrichedDraft = enriched.draft
         builtUserOperationDraft = enrichedDraft
 
-        // Pre-signature affordability check, scoped to the gas-headroom retry.
-        // This is the only point where it helps: callGasLimit is inside the
-        // UserOperation hash, so nothing downstream can change it without
-        // invalidating the signature we are about to request.
+        // Every operation must be affordable at its locally authorized maximum
+        // liability, including native value sent by the call, before any signing
+        // key is touched. callGasLimit is inside the UserOperation hash, so
+        // nothing downstream can change it without invalidating the signature
+        // we are about to request.
         switch await PrefundPrecheck.decision(
-            acknowledgedCallGasLimit: acknowledgedCallGasLimit,
             requiredPrefund: enriched.requiredPrefund,
+            callValue: callValue,
             callGasLimit: enrichedDraft.gasPlan.callGasLimit,
             maxFeePerGas: enrichedDraft.gasPlan.maxFeePerGas,
-            feeQuoteAtPolicyCeiling: enriched.feeQuoteAtPolicyCeiling,
+            feeQuoteAtPolicyCeiling: false,
             readWalletStatus: {
                 try await withWalletNodeClient(operation: "\(logContext) wallet status") { client in
                     try await client.walletStatus(smartAccount: enrichedDraft.sender)
@@ -2331,25 +4361,143 @@ final class AppModel: ObservableObject {
             break
         case let .statusUnavailable(error):
             appendLog(
-                "\(logContext): wallet status unavailable (\(error.localizedDescription)); skipping prefund precheck"
+                "\(logContext): wallet status unavailable (\(error.localizedDescription)); declining before signature"
+            )
+            clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+            throw AppError.localDaemonLaunchFailed(
+                "Could not verify the account balance and EntryPoint deposit before signing. Retry when wallet-node is available."
             )
         case let .decline(report):
             appendLog(
-                "\(logContext): declining before signature — requiredPrefund=\(report.requiredPrefundWeiHex) available=\(report.availableWeiHex) deficit=\(report.deficitWeiHex)"
+                "\(logContext): declining before signature: requiredPrefund=\(report.requiredPrefundWeiHex) available=\(report.availableWeiHex) deficit=\(report.deficitWeiHex)"
             )
             clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
             throw AppError.prefundShortfall(report)
+        case let .accountBalanceDecline(report):
+            appendLog(
+                "\(logContext): declining native-value operation before signature: callValue=\(report.callValueWeiHex) gasBalanceRequired=\(report.gasBalanceRequiredWeiHex) minimumAccountBalance=\(report.minimumAccountBalanceWeiHex) accountBalance=\(report.accountBalanceWeiHex) deficit=\(report.deficitWeiHex)"
+            )
+            clearPendingSessionInstallAfterPreSubmitFailure(sessionPlan, logContext: logContext)
+            throw AppError.accountBalanceShortfall(report)
         }
 
-        let signatureResult: UserOperationSignatureResult
+        if case let .bundlerTopUp(expectedIdentity) = purpose {
+            let relayDecision: BundlerRelayPrecheck.Decision
+            do {
+                relayDecision = try await verifiedBundlerRelayDecision(
+                    expectedIdentity: expectedIdentity,
+                    gasPlan: enrichedDraft.gasPlan,
+                    requiredPrefund: enriched.requiredPrefund,
+                    logContext: logContext,
+                    phase: "pre-auth"
+                )
+            } catch {
+                clearPendingSessionInstallAfterPreSubmitFailure(
+                    sessionPlan,
+                    logContext: logContext
+                )
+                throw error
+            }
+
+            switch relayDecision {
+            case .proceed:
+                appendLog("\(logContext): exact relayer-cost preflight passed")
+            case .externalFundingRequired(let report):
+                appendLog(
+                    "\(logContext): relayer preflight declined: balance=\(report.balanceWeiHex) required=\(report.requiredBalanceWeiHex) deficit=\(report.deficitWeiHex)"
+                )
+                clearPendingSessionInstallAfterPreSubmitFailure(
+                    sessionPlan,
+                    logContext: logContext
+                )
+                throw AppError.bundlerRelayShortfall(report)
+            }
+        }
+
+        // Everything above is non-secret preflight. Only now, once the operation is known to be
+        // buildable and affordable, create the action context and make the relayer available.
+        // A session-key send with an already-running relayer therefore remains prompt-free;
+        // passkey sends reuse this same context for the Secure Enclave signature below.
+        // Never accept a previously authorized context here. Some upstream
+        // workflows must unlock a different secret before the gas envelope can
+        // be known. Reusing that context would let an owner signature happen
+        // without ever presenting the exact locally authorized liability.
+        let actionAuthentication = DeviceOwnerAuthenticationSession.ownerUserOperation(
+            action: signingReason,
+            maximumLiability: enriched.requiredPrefund
+        )
+        let gasAwareSigningReason = actionAuthentication.reason
+        defer { actionAuthentication.invalidate() }
+        let authorizedRelayerClient = try await ensureRelayerUnlocked(
+            using: actionAuthentication
+        )
+        let authorizedRelayerGeneration = walletNodeGeneration
+        let expectedSubmissionRelayer = try await expectedRelayerIdentityForSubmission(
+            client: authorizedRelayerClient,
+            generation: authorizedRelayerGeneration
+        )
+
+        if case let .bundlerTopUp(expectedIdentity) = purpose {
+            // Re-derive the destination from the protected secret with this action's context.
+            // This binds the owner signature below to secret material, not public metadata.
+            try requireCurrentRelayerConnection(
+                client: authorizedRelayerClient,
+                generation: authorizedRelayerGeneration
+            )
+            let authenticatedStatus = try await authorizedRelayerClient.bundlerStatus()
+            let authenticatedPlan = try relayerSecretAuthorizationPlan(
+                for: authenticatedStatus
+            )
+            guard expectedSubmissionRelayer == expectedIdentity,
+                  authenticatedPlan.active.identity == expectedIdentity else {
+                throw AppError.bundlerRelayPreflightUnavailable(
+                    "The authenticated relayer is no longer the active destination."
+                )
+            }
+            _ = try await readAuthorizedRelayerSecret(
+                authorization: authenticatedPlan.active,
+                expectedPlan: authenticatedPlan,
+                client: authorizedRelayerClient,
+                generation: authorizedRelayerGeneration,
+                authenticationSession: actionAuthentication
+            )
+
+            switch try await verifiedBundlerRelayDecision(
+                expectedIdentity: expectedIdentity,
+                gasPlan: enrichedDraft.gasPlan,
+                requiredPrefund: enriched.requiredPrefund,
+                logContext: logContext,
+                phase: "post-auth"
+            ) {
+            case .proceed:
+                appendLog("\(logContext): post-auth relayer identity and cost recheck passed")
+            case .externalFundingRequired(let report):
+                throw AppError.bundlerRelayShortfall(report)
+            }
+        }
+
+        // Re-read the independent execution-RPC head after any relayer unlock or
+        // biometric delay. UserOperationSigning repeats the time/block check
+        // before touching either owner or session key.
+        let feeQuoteHead = try await ExecutionFeeOracle().currentBlockNumber(
+            rpcURL: activeChain.rpcURL,
+            expectedChainID: activeChain.id
+        )
+
+        let signatureResult: SignedUserOperation
         do {
             signatureResult = try UserOperationSigning.signForSend(
-                draft: enrichedDraft,
+                operation: enriched.operation,
+                currentBlockNumber: feeQuoteHead,
                 session: sessionPlan?.signingContext,
                 passkeySigner: { [self] preimage in
                     appendLog("\(logContext): computed signing preimage (\(preimage.count) bytes)")
                     appendLog("\(logContext): requesting Secure Enclave signature")
-                    let signature = try keyStore.sign(preimage: preimage, reason: signingReason)
+                    let signature = try keyStore.sign(
+                        preimage: preimage,
+                        reason: gasAwareSigningReason,
+                        authenticationContext: actionAuthentication.context
+                    )
                     appendLog("\(logContext): signature components r=\(signature.r.shortHex) s=\(signature.s.shortHex)")
                     return signature
                 },
@@ -2402,10 +4550,20 @@ final class AppModel: ObservableObject {
 
         let sentUserOpHash: String
         do {
-            sentUserOpHash = try await withWalletNodeClient(operation: "\(logContext) submit") { client in
-                try await client.sendUserOperation(
-                    draft: enrichedDraft,
-                    signature: signatureResult.signature
+            sentUserOpHash = try await withPrivilegedWalletNodeClient(
+                operation: "\(logContext) submit",
+                authenticationSession: actionAuthentication
+            ) { client in
+                try await UserOperationSubmission.submit(
+                    operation: signatureResult,
+                    rpcURL: activeChain.rpcURL,
+                    expectedChainID: activeChain.id,
+                    transport: { operation in
+                        try await client.sendUserOperation(
+                            operation: operation,
+                            expectedRelayer: expectedSubmissionRelayer
+                        )
+                    }
                 )
             }
         } catch {
@@ -2485,7 +4643,7 @@ final class AppModel: ObservableObject {
                 reason: "cleared pending session key locally after pre-submit failure; no onchain permission was installed"
             )
         } catch {
-            appendLog("\(logContext): pending session key cleanup failed — \(error.localizedDescription)")
+            appendLog("\(logContext): pending session key cleanup failed: \(error.localizedDescription)")
         }
     }
 
@@ -2548,14 +4706,14 @@ final class AppModel: ObservableObject {
             }
             appendLog("\(logContext): \(reason.logLabel); disabled local session signing")
         } catch {
-            appendLog("\(logContext): failed to persist expired session cleanup — \(error.localizedDescription)")
+            appendLog("\(logContext): failed to persist expired session cleanup: \(error.localizedDescription)")
         }
 
         do {
             try SessionKeyStore.shared.delete(keyRef: sessionRecord.sessionKeyRef)
             appendLog("\(logContext): deleted expired session key from Keychain")
         } catch {
-            appendLog("\(logContext): expired session key cleanup failed — \(error.localizedDescription)")
+            appendLog("\(logContext): expired session key cleanup failed: \(error.localizedDescription)")
         }
     }
 
@@ -2596,7 +4754,7 @@ final class AppModel: ObservableObject {
                 appendLog("session: refreshed activity after \(source)")
             }
         } catch {
-            appendLog("session: failed to persist activity after \(source) — \(error.localizedDescription)")
+            appendLog("session: failed to persist activity after \(source): \(error.localizedDescription)")
         }
     }
 
@@ -2682,7 +4840,11 @@ final class AppModel: ObservableObject {
     /// app, confirming a transaction, opening the account cards, hitting Refresh — so the app
     /// never reads the chain on its own schedule. The known gap: ETH arriving from someone else
     /// while the app stays focused is not picked up until one of those happens.
-    func refreshAccountBalanceQuietly(logContext: String, now: Date = Date()) async {
+    func refreshAccountBalanceQuietly(
+        logContext: String,
+        now: Date = Date(),
+        bypassThrottle: Bool = false
+    ) async {
         guard walletRecord?.kernelAccountAddress != nil else { return }
         // Another operation already owns the daemon connection and will refresh the inspection
         // itself; skipping avoids a redundant chain read and a racing `accountInspection` write.
@@ -2690,7 +4852,8 @@ final class AppModel: ObservableObject {
         guard BackgroundBalanceReadGate.allowed(
             now: now,
             lastReadAt: lastBackgroundBalanceReadAt,
-            minInterval: Self.backgroundBalanceReadMinInterval
+            minInterval: Self.backgroundBalanceReadMinInterval,
+            bypassThrottle: bypassThrottle
         ) else { return }
         // Stamped BEFORE the await, so this is also the in-flight guard: two triggers firing
         // together (a receipt landing just as the app is activated) would otherwise issue
@@ -2713,7 +4876,7 @@ final class AppModel: ObservableObject {
             // `withWalletNodeClient` already logs its own attempt.
             if !suppressedBalanceReadFailure {
                 suppressedBalanceReadFailure = true
-                appendLog("\(logContext): balance read failed, will retry — \(error.localizedDescription)")
+                appendLog("\(logContext): balance read failed, will retry: \(error.localizedDescription)")
             }
         }
     }
@@ -2791,12 +4954,12 @@ final class AppModel: ObservableObject {
             "\(logContext): fee quote maxPriority=\(feeQuote.maxPriorityFeePerGas.shortHex) maxFee=\(feeQuote.maxFeePerGas.shortHex)"
         )
 
-        // Quoted *before* estimating so the submitted draft carries real fees and
-        // the daemon's requiredPrefund comes back as a real number rather than
-        // (limits x 0). Do not move this back below the estimate.
-        let gasFees = pack128(
-            high: feeQuote.maxPriorityFeePerGas,
-            low: feeQuote.maxFeePerGas
+        // Quote before estimating so simulation sees the same locally selected
+        // fees. The daemon's preVerificationGas and requiredPrefund remain
+        // diagnostic only and never cross the authorization boundary.
+        let gasFees = try UserOperationGasAuthorizer.checkedPackedGasFees(
+            maxPriorityFeePerGas: feeQuote.maxPriorityFeePerGas,
+            maxFeePerGas: feeQuote.maxFeePerGas
         )
         let pricedDraft = draft.updatingGasPlan(
             UserOperationGasPlan(
@@ -2820,23 +4983,31 @@ final class AppModel: ObservableObject {
             "\(logContext): gas estimate call=\(estimate.callGasLimit.shortHex) verification=\(estimate.verificationGasLimit.shortHex) preVerification=\(estimate.preVerificationGas.shortHex) requiredPrefund=\(estimate.requiredPrefund.shortHex)"
         )
 
+        let authorizationScope: WalletSignature.GasAuthorizationScope
+        if let gasBudgetWei = sessionPlan?.record.policyConfigSnapshot.gasBudgetWei {
+            authorizationScope = .session(
+                gasBudget: try Data.quantityString(gasBudgetWei).leftPadded(to: 32)
+            )
+        } else {
+            authorizationScope = .owner
+        }
+        let authorized = try UserOperationGasAuthorizer.authorize(
+            draft: draft,
+            callGasLimit: estimate.callGasLimit,
+            verificationGasLimit: estimate.verificationGasLimit,
+            maxPriorityFeePerGas: feeQuote.maxPriorityFeePerGas,
+            maxFeePerGas: feeQuote.maxFeePerGas,
+            expectedSignatureLength: dummySignature.count,
+            authorizationScope: authorizationScope,
+            feeQuote: feeQuote.quote
+        )
+        appendLog(
+            "\(logContext): locally authorized pvg=\(authorized.draft.gasPlan.preVerificationGas.shortHex) maxLiability=\(authorized.maxLiability.shortHex) policy=v\(authorized.gasPolicyVersion); daemon pvg/prefund ignored"
+        )
+
         activeBundlerStatus = "Local wallet-node ready on \(activeChain.name)"
 
-        return EnrichedUserOperation(
-            draft: pricedDraft.updatingGasPlan(
-                UserOperationGasPlan(
-                    accountGasLimits: pack128(
-                        high: estimate.verificationGasLimit,
-                        low: estimate.callGasLimit
-                    ),
-                    preVerificationGas: estimate.preVerificationGas,
-                    gasFees: gasFees,
-                    paymasterAndData: Data()
-                )
-            ),
-            requiredPrefund: estimate.requiredPrefund,
-            feeQuoteAtPolicyCeiling: feeQuote.atPolicyCeiling
-        )
+        return EnrichedUserOperation(operation: authorized)
     }
 
     private func pollForLocalReceipt(
@@ -2927,7 +5098,7 @@ final class AppModel: ObservableObject {
                 limit: limit
             )
         } catch {
-            appendLog("history: load failed — \(error.localizedDescription)")
+            appendLog("history: load failed: \(error.localizedDescription)")
             return []
         }
     }
@@ -3051,8 +5222,13 @@ final class AppModel: ObservableObject {
             attempt = ReconcilerLoopStep.nextAttempt(current: attempt, stillPending: stillPending)
             guard stillPending else {
                 // Everything this loop was watching has finalised, so the balance almost
-                // certainly moved. Pick it up now instead of at the next poll tick.
-                await refreshAccountBalanceQuietly(logContext: "balance-receipt")
+                // certainly moved. Pick up both sides of the relayed operation now instead of
+                // leaving the Kernel or bundler balance stale until a manual refresh.
+                await refreshAccountBalanceQuietly(
+                    logContext: "balance-receipt",
+                    bypassThrottle: true
+                )
+                refreshLocalRelayerStatus()
                 return
             }
             try? await Task.sleep(nanoseconds: Self.reconcilerDelay(forAttempt: attempt))
@@ -3075,7 +5251,7 @@ final class AppModel: ObservableObject {
             )
             appendLog("\(logContext): wallet history recorded submitted operation")
         } catch {
-            appendLog("\(logContext): wallet history record failed — \(error.localizedDescription)")
+            appendLog("\(logContext): wallet history record failed: \(error.localizedDescription)")
         }
     }
 
@@ -3110,7 +5286,7 @@ final class AppModel: ObservableObject {
                 logContext: logContext
             )
         } catch {
-            appendLog("\(logContext): wallet history receipt update failed — \(error.localizedDescription)")
+            appendLog("\(logContext): wallet history receipt update failed: \(error.localizedDescription)")
         }
     }
 
@@ -3146,7 +5322,7 @@ final class AppModel: ObservableObject {
             self.walletRecord = refreshed
             appendLog("\(logContext): marked session permission installed")
         } catch {
-            appendLog("\(logContext): session permission install update failed — \(error.localizedDescription)")
+            appendLog("\(logContext): session permission install update failed: \(error.localizedDescription)")
         }
     }
 
@@ -3182,11 +5358,11 @@ final class AppModel: ObservableObject {
             do {
                 try SessionKeyStore.shared.delete(keyRef: pendingRecord.sessionKeyRef)
             } catch {
-                appendLog("\(logContext): session key cleanup failed — \(error.localizedDescription)")
+                appendLog("\(logContext): session key cleanup failed: \(error.localizedDescription)")
             }
             appendLog("\(logContext): cleared local session-key state")
         } catch {
-            appendLog("\(logContext): session permission revoke cleanup failed — \(error.localizedDescription)")
+            appendLog("\(logContext): session permission revoke cleanup failed: \(error.localizedDescription)")
         }
     }
 
@@ -3195,7 +5371,7 @@ final class AppModel: ObservableObject {
             try walletHistoryStore.markPending(userOpHash: userOpHash, chainID: chainID)
             appendLog("\(logContext): wallet history left pending until receipt is available")
         } catch {
-            appendLog("\(logContext): wallet history pending update failed — \(error.localizedDescription)")
+            appendLog("\(logContext): wallet history pending update failed: \(error.localizedDescription)")
         }
     }
 
@@ -3215,7 +5391,7 @@ final class AppModel: ObservableObject {
             )
             appendLog("\(logContext): wallet history marked \(status.rawValue) without receipt")
         } catch {
-            appendLog("\(logContext): wallet history terminal update failed — \(error.localizedDescription)")
+            appendLog("\(logContext): wallet history terminal update failed: \(error.localizedDescription)")
         }
     }
 
@@ -3353,35 +5529,29 @@ final class AppModel: ObservableObject {
         return String(data: data, encoding: .utf8)
     }
 
-    private func pack128(high: Data, low: Data) -> Data {
-        high.suffix(16) + low.suffix(16)
-    }
-
     private func suggestedUserOperationFees(
         logContext: String
-    ) async throws -> (maxPriorityFeePerGas: Data, maxFeePerGas: Data, atPolicyCeiling: Bool) {
-        let gasPrice = try await withWalletNodeWarmupRetry(operation: "\(logContext) gas price") {
-            try await withWalletNodeClient(operation: "\(logContext) gas price") { client in
-                try await client.userOperationGasPrice()
-            }
-        }
+    ) async throws -> (
+        quote: ExecutionFeeQuote,
+        maxPriorityFeePerGas: Data,
+        maxFeePerGas: Data
+    ) {
+        let quote = try await ExecutionFeeOracle().quote(
+            rpcURL: activeChain.rpcURL,
+            expectedChainID: activeChain.id
+        )
         let settings = networkSettings
-        let resolved = GasPricing.resolveUserOperationFees(
-            gasPrice: gasPrice,
+        let resolved = try GasPricing.resolveUserOperationFees(
+            quote: quote,
             autoEnabled: settings.autoGasModeEnabled,
             autoTier: settings.autoGasTier,
             manualCap: settings.activeGasPolicy
         )
         appendLog("\(logContext): gas fee mode \(settings.autoGasModeEnabled ? "auto/\(settings.autoGasTier.rawValue)" : "manual(capped to \(settings.activeMaxFeePerGasGwei)/\(settings.activeMaxPriorityFeePerGasGwei) gwei)")")
-        // Every tier at the configured ceiling means the live price is at or above
-        // the cap (`gas_price.rs` clamps there). The fee is still the one we will
-        // sign with, but a prefund floor derived from it is cap-driven, so the card
-        // must not present funding as the only lever.
-        let atPolicyCeiling = GasPricing.isPolicyCeilingQuote(gasPrice)
-        if atPolicyCeiling {
-            appendLog("\(logContext): every gas tier came back at the policy ceiling; live price is at or above the cap")
-        }
-        return (resolved.maxPriorityFeePerGas, resolved.maxFeePerGas, atPolicyCeiling)
+        appendLog(
+            "\(logContext): independent fee quote block=\(quote.blockNumber) age=0s six-block ceiling"
+        )
+        return (quote, resolved.maxPriorityFeePerGas, resolved.maxFeePerGas)
     }
 
     /// Fetch the current live gas tiers + base fee for the chat indicator.
@@ -3399,7 +5569,7 @@ final class AppModel: ObservableObject {
             )
             liveGasUpdatedAt = Date()
         } catch {
-            appendLog("gas: live price refresh failed — \(error.localizedDescription)")
+            appendLog("gas: live price refresh failed: \(error.localizedDescription)")
         }
     }
 
@@ -3546,7 +5716,13 @@ enum GasIndicatorRefreshGate {
 }
 
 enum BackgroundBalanceReadGate {
-    static func allowed(now: Date, lastReadAt: Date?, minInterval: TimeInterval) -> Bool {
+    static func allowed(
+        now: Date,
+        lastReadAt: Date?,
+        minInterval: TimeInterval,
+        bypassThrottle: Bool = false
+    ) -> Bool {
+        if bypassThrottle { return true }
         guard let lastReadAt else { return true }
         return now.timeIntervalSince(lastReadAt) >= minInterval
     }
@@ -3557,9 +5733,6 @@ enum NetworkSettingsChangePolicy {
         from old: DemoNetworkSettings,
         to new: DemoNetworkSettings
     ) -> Bool {
-        if old.isTestnetModeEnabled != new.isTestnetModeEnabled {
-            return true
-        }
         if old.activeRPCURL != new.activeRPCURL
             || old.activeArchiveNodeURL != new.activeArchiveNodeURL
             || old.activeConsensusRPCURL != new.activeConsensusRPCURL {
@@ -3580,7 +5753,6 @@ enum NetworkSettingsChangePolicy {
         }
         return old.activeConsensusRPCURL != new.activeConsensusRPCURL
             || old.isHeliosVerificationActive == false
-            || old.isTestnetModeEnabled != new.isTestnetModeEnabled
     }
 }
 

@@ -8,50 +8,9 @@ pub(crate) const THRESHOLD_LOW: &str = "0x11c37937e08000"; // 0.005 ETH
 pub async fn handle(
     state: &DaemonState,
 ) -> Result<serde_json::Value, wallet_node_api::JsonRpcError> {
-    let active = super::bundler_account::ensure_active_bundler_account(state).await?;
-    let address = active
-        .address
-        .parse()
-        .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
-    let threshold =
-        alloy_primitives::U256::from_str_radix(THRESHOLD_LOW.trim_start_matches("0x"), 16)
-            .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
-    let balance = match state.chain.eth_get_balance(address, BlockTag::Latest).await {
-        Ok(balance) => Some(balance),
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "bundler EOA balance unavailable for wallet_bundlerStatus"
-            );
-            None
-        }
-    };
-    let compromise = match balance {
-        Some(balance) => {
-            super::bundler_account::compromise_status(state, &active, balance, threshold).await?
-        }
-        None => None,
-    };
-    let replacement = replacement_status(state, &active.address)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(
-                error = ?error,
-                "replacement status unavailable for wallet_bundlerStatus"
-            );
-            serde_json::json!({
-                "eligible": false,
-                "blocked": false,
-                "blockedReason": null,
-                "txHash": null,
-                "userOpHash": null,
-                "nonce": null,
-                "submittedAtBlock": null,
-                "currentBlock": null,
-                "minAgeBlocks": wallet_bundler::DEFAULT_REPLACEMENT_ELIGIBILITY_BLOCKS,
-                "reason": "replacement_status_unavailable"
-            })
-        });
+    // Funding an already-created rotation candidate may advance its lifecycle,
+    // but a passive status read must never mint a new relayer or key.
+    super::bundler_account::maybe_activate_pending_funding(state).await?;
     let accounts = state
         .store
         .bundler_account_list_for_owner(
@@ -71,14 +30,99 @@ pub async fn handle(
         )
         .await
         .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
+    let Some(active) = accounts
+        .iter()
+        .find(|account| account.lifecycle == BundlerLifecycle::Active)
+    else {
+        return Ok(serde_json::json!({
+            "ready": false,
+            "reason": "bundler_eoa_missing",
+            "ownerScope": wallet_node_store::DEFAULT_OWNER_SCOPE,
+            "chainId": state.config.network.chain_id,
+            "networkProfile": state.config.network_profile().as_str(),
+            "entryPoints": state.config.bundler.entry_points,
+            "eoa": null,
+            "keyRef": null,
+            "keyLoaded": false,
+            "balance": "unavailable",
+            "balanceUnavailable": true,
+            "thresholdLow": THRESHOLD_LOW,
+            "needsTopup": false,
+            "lifecycle": null,
+            "rotation": rotation,
+            "keyHistory": key_history,
+            "auditEvents": audit_events,
+            "replacement": unavailable_replacement("bundler_eoa_missing"),
+            "compromise": {
+                "suspected": false,
+                "reason": null,
+                "submissionBlocked": false
+            }
+        }));
+    };
+    let key_loaded = state
+        .bundler_keys
+        .is_key_loaded(&active.key_ref)
+        .map_err(super::bundler_account::map_key_error)?;
+    let address = active
+        .address
+        .parse()
+        .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
+    let threshold =
+        alloy_primitives::U256::from_str_radix(THRESHOLD_LOW.trim_start_matches("0x"), 16)
+            .map_err(|_| wallet_node_api::JsonRpcError::internal())?;
+    let balance = match state.chain.eth_get_balance(address, BlockTag::Latest).await {
+        Ok(balance) => Some(balance),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "bundler EOA balance unavailable for wallet_bundlerStatus"
+            );
+            None
+        }
+    };
+    let compromise = match super::bundler_account::recorded_compromise_status(state, active).await?
+    {
+        Some(reason) => Some(reason),
+        None => match balance {
+            Some(balance) => {
+                super::bundler_account::compromise_status(state, active, balance, threshold).await?
+            }
+            None => None,
+        },
+    };
+    let replacement = replacement_status(state, &active.address)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                error = ?error,
+                "replacement status unavailable for wallet_bundlerStatus"
+            );
+            unavailable_replacement("replacement_status_unavailable")
+        });
+    let ready =
+        key_loaded && balance.is_some_and(|balance| balance >= threshold) && compromise.is_none();
+    let reason = if compromise.is_some() {
+        Some("bundler_eoa_compromise_suspected")
+    } else if !key_loaded {
+        Some("bundler_eoa_locked")
+    } else if balance.is_none() {
+        Some("bundler_balance_unavailable")
+    } else if balance.is_some_and(|balance| balance < threshold) {
+        Some("bundler_eoa_needs_topup")
+    } else {
+        None
+    };
     Ok(serde_json::json!({
-        "ready": balance.is_some_and(|balance| balance >= threshold) && compromise.is_none(),
+        "ready": ready,
+        "reason": reason,
         "ownerScope": active.owner_scope,
         "chainId": state.config.network.chain_id,
         "networkProfile": state.config.network_profile().as_str(),
         "entryPoints": state.config.bundler.entry_points,
         "eoa": active.address,
         "keyRef": active.key_ref,
+        "keyLoaded": key_loaded,
         "balance": balance
             .map(wallet_bundler::gas::u256_hex)
             .unwrap_or_else(|| "unavailable".to_string()),
@@ -96,6 +140,21 @@ pub async fn handle(
             "submissionBlocked": compromise.is_some()
         }
     }))
+}
+
+fn unavailable_replacement(reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "eligible": false,
+        "blocked": false,
+        "blockedReason": null,
+        "txHash": null,
+        "userOpHash": null,
+        "nonce": null,
+        "submittedAtBlock": null,
+        "currentBlock": null,
+        "minAgeBlocks": wallet_bundler::DEFAULT_REPLACEMENT_ELIGIBILITY_BLOCKS,
+        "reason": reason
+    })
 }
 
 async fn replacement_status(

@@ -26,6 +26,17 @@ pub async fn handle(
     let authorization = params
         .authorization
         .ok_or_else(|| super::admin_action::invalid("admin_authorization_required"))?;
+    super::bundler_account::validate_managed_key_ref(
+        &params.key_ref,
+        state.config.network.chain_id,
+    )?;
+    let _relayer_lifecycle_guard = state
+        .relayer_lifecycle_locks
+        .acquire(
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            state.config.network.chain_id,
+        )
+        .await;
     state.admin_challenges.consume(
         &AdminAuthorization {
             admin_action_id: authorization.admin_action_id,
@@ -36,14 +47,6 @@ pub async fn handle(
         state.config.network.chain_id,
         Some(&params.key_ref),
     )?;
-
-    let _relayer_lifecycle_guard = state
-        .relayer_lifecycle_locks
-        .acquire(
-            wallet_node_store::DEFAULT_OWNER_SCOPE,
-            state.config.network.chain_id,
-        )
-        .await;
     let account = state
         .store
         .bundler_account_list_for_owner(
@@ -57,6 +60,11 @@ pub async fn handle(
         .ok_or_else(|| super::admin_action::invalid("relayer_key_not_found"))?;
     if account.lifecycle == BundlerLifecycle::Deleted {
         return Ok(deleted_response(&account, false, false, &[]));
+    }
+    if !params.unsafe_reset && account.lifecycle != BundlerLifecycle::Retired {
+        return Err(super::admin_action::invalid(
+            "relayer_lifecycle_not_retired",
+        ));
     }
     let live: Vec<_> = state
         .store
@@ -116,21 +124,24 @@ pub async fn handle(
     };
     let was_active = account.lifecycle == BundlerLifecycle::Active;
 
-    if let Err(err) = state.bundler_keys.delete_key(&account.key_ref) {
-        let _ = super::relayer_audit::record(
-            state,
-            if params.unsafe_reset {
-                "relayer_key_reset_completed"
-            } else {
-                "relayer_key_deleted"
-            },
-            &account,
-            Some("delete_bundler_eoa"),
-            "failure",
-            Some("keychain_delete_failed"),
-        )
-        .await;
-        return Err(super::bundler_account::map_key_error(err));
+    match state.bundler_keys.delete_key(&account.key_ref) {
+        Ok(()) | Err(crate::bundler_keys::BundlerKeyError::KeyNotFound(_)) => {}
+        Err(err) => {
+            let _ = super::relayer_audit::record(
+                state,
+                if params.unsafe_reset {
+                    "relayer_key_reset_completed"
+                } else {
+                    "relayer_key_deleted"
+                },
+                &account,
+                Some("delete_bundler_eoa"),
+                "failure",
+                Some("keychain_delete_failed"),
+            )
+            .await;
+            return Err(super::bundler_account::map_key_error(err));
+        }
     }
     if state
         .store

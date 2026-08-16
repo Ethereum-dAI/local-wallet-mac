@@ -44,20 +44,6 @@ struct BiometricAuthenticationContextsTests {
     @Test func reuseIsCappedAtTheOSMaximum() {
         #expect(BiometricAuthenticationContexts.maximumReuseDuration
             == LATouchIDAuthenticationMaximumAllowableReuseDuration)
-        #expect(BundlerSecretPromptReusePolicy.authenticationReuseDuration
-            == BiometricAuthenticationContexts.maximumReuseDuration)
-    }
-
-    /// A respawn during one session used to fall outside the 10-second window and
-    /// re-prompt. It has to comfortably outlast a daemon restart now.
-    @Test func theLaunchCacheOutlastsADaemonRestart() {
-        #expect(BundlerSecretPromptReusePolicy.cacheTTL >= 10 * 60)
-        let now = Date()
-        let expiry = BundlerSecretPromptReusePolicy.expiry(now: now)
-        #expect(BundlerSecretPromptReusePolicy.shouldUseCached(
-            now: now.addingTimeInterval(5 * 60),
-            expiresAt: expiry
-        ))
     }
 }
 

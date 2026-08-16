@@ -6,6 +6,101 @@ final class WalletSignatureTests: XCTestCase {
 
     let entryPoint = Data(hexString: "0000000071727De22E5E9d8BAf0edAc6f37da032")!
 
+    private func word(_ value: UInt64) -> Data {
+        var bigEndian = value.bigEndian
+        return withUnsafeBytes(of: &bigEndian) { bytes in
+            Data(repeating: 0, count: 24) + Data(bytes)
+        }
+    }
+
+    func testAuthorizeUserOperationGasV1ReturnsCheckedLocalPlan() throws {
+        let plan = try WalletSignature.authorizeUserOperationGasV1(
+            sender: Data(repeating: 0x11, count: 20),
+            nonce: word(7),
+            initCode: Data(),
+            callData: Data(repeating: 0x42, count: 96),
+            callGasLimit: word(125_000),
+            verificationGasLimit: word(250_000),
+            maxFeePerGas: word(10_000_000_000),
+            maxPriorityFeePerGas: word(1_000_000_000),
+            paymasterAndData: Data(),
+            signatureLength: 480,
+            scope: .owner
+        )
+
+        XCTAssertEqual(plan.accountGasLimits.prefix(16), word(250_000).suffix(16))
+        XCTAssertEqual(plan.accountGasLimits.suffix(16), word(125_000).suffix(16))
+        XCTAssertEqual(plan.gasFees.prefix(16), word(1_000_000_000).suffix(16))
+        XCTAssertEqual(plan.gasFees.suffix(16), word(10_000_000_000).suffix(16))
+        XCTAssertNotEqual(plan.preVerificationGas, Data(repeating: 0, count: 32))
+        XCTAssertNotEqual(plan.maxLiability, Data(repeating: 0, count: 32))
+        XCTAssertEqual(plan.signatureLength, 480)
+        XCTAssertEqual(plan.policyVersion, 1)
+    }
+
+    func testAuthorizeUserOperationGasV1RejectsMalformedWidthBeforeFFI() {
+        XCTAssertThrowsError(
+            try WalletSignature.authorizeUserOperationGasV1(
+                sender: Data(repeating: 0x11, count: 19),
+                nonce: word(7),
+                initCode: Data(),
+                callData: Data(),
+                callGasLimit: word(1),
+                verificationGasLimit: word(1),
+                maxFeePerGas: word(1),
+                maxPriorityFeePerGas: word(1),
+                paymasterAndData: Data(),
+                signatureLength: 65,
+                scope: .owner
+            )
+        ) { error in
+            XCTAssertEqual(error as? WalletGasAuthorizationError, .invalidInput)
+        }
+    }
+
+    func testAuthorizeUserOperationGasV1RejectsCapPlusOneWithoutTruncation() {
+        XCTAssertThrowsError(
+            try WalletSignature.authorizeUserOperationGasV1(
+                sender: Data(repeating: 0x11, count: 20),
+                nonce: word(7),
+                initCode: Data(),
+                callData: Data(),
+                callGasLimit: word(10_000_001),
+                verificationGasLimit: word(1),
+                maxFeePerGas: word(1),
+                maxPriorityFeePerGas: word(1),
+                paymasterAndData: Data(),
+                signatureLength: 65,
+                scope: .owner
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? WalletGasAuthorizationError,
+                .capExceeded(field: "callGasLimit")
+            )
+        }
+    }
+
+    func testAuthorizeUserOperationGasV1RejectsMalformedSessionBudgetBeforeFFI() {
+        XCTAssertThrowsError(
+            try WalletSignature.authorizeUserOperationGasV1(
+                sender: Data(repeating: 0x11, count: 20),
+                nonce: word(7),
+                initCode: Data(),
+                callData: Data(),
+                callGasLimit: word(1),
+                verificationGasLimit: word(1),
+                maxFeePerGas: word(1),
+                maxPriorityFeePerGas: word(1),
+                paymasterAndData: Data(),
+                signatureLength: 65,
+                scope: .session(gasBudget: Data(repeating: 0, count: 31))
+            )
+        ) { error in
+            XCTAssertEqual(error as? WalletGasAuthorizationError, .invalidInput)
+        }
+    }
+
     func testComputeUserOpHashReturns32Bytes() throws {
         let hash = try WalletSignature.computeUserOpHash(
             sender: Data(hexString: "d73c7780b1c1da1586a8332d5499f36b7cbb33c2")!,
@@ -45,6 +140,25 @@ final class WalletSignatureTests: XCTestCase {
         )
         XCTAssert(!encoded.isEmpty)
         XCTAssertEqual(encoded.count % 32, 0, "ABI encoding must be 32-byte aligned")
+    }
+
+    func testOwnerDummyAndFinalSignatureLengthsMatchInBothVerifierModes() throws {
+        let hash = Data(repeating: 0x42, count: 32)
+        let r = Data(repeating: 0x11, count: 32)
+        let s = Data(repeating: 0x22, count: 32)
+
+        for usePrecompiled in [false, true] {
+            let dummy = try WalletSignature.abiEncodeDummySignature(
+                usePrecompiled: usePrecompiled
+            )
+            let final = try WalletSignature.abiEncodeSignature(
+                userOpHash: hash,
+                r: r,
+                s: s,
+                usePrecompiled: usePrecompiled
+            )
+            XCTAssertEqual(dummy.count, final.count)
+        }
     }
 
     func testPredictKernelAccountAddressMatchesPinnedVector() throws {
@@ -154,6 +268,51 @@ final class WalletSignatureTests: XCTestCase {
             calldata.hexString,
             "0x1f1b92e30000000000000000000000000000000000000000000000000000000000000007"
         )
+    }
+
+    func testInstalledSessionDummyAndFinalSignatureLengthsMatch() throws {
+        let secret = Data(hexString: "4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9c46f30d7d21715b23b1d")!
+        let hash = Data(repeating: 0x42, count: 32)
+        let dummy = try WalletSignature.sessionDummySignature(mode: .installed)
+        let final = try WalletSignature.sessionSignAndWrap(
+            secret: secret,
+            userOpHash: hash,
+            mode: .installed
+        )
+
+        XCTAssertEqual(dummy.count, final.count)
+    }
+
+    func testEnableSessionDummyAndFinalSignatureLengthsMatchInBothVerifierModes() throws {
+        let secret = Data(hexString: "4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9c46f30d7d21715b23b1d")!
+        let hash = Data(repeating: 0x42, count: 32)
+        let enableData = Data(repeating: 0x33, count: 96)
+        let selectorData = Data(repeating: 0x44, count: 64)
+
+        for usePrecompiled in [false, true] {
+            let dummy = try WalletSignature.sessionDummySignature(
+                mode: .enable,
+                enableData: enableData,
+                selectorData: selectorData,
+                usePrecompiled: usePrecompiled
+            )
+            let rootEnableSignature = try WalletSignature.abiEncodeSignature(
+                userOpHash: hash,
+                r: Data(repeating: 0x11, count: 32),
+                s: Data(repeating: 0x22, count: 32),
+                usePrecompiled: usePrecompiled
+            )
+            let final = try WalletSignature.sessionSignAndWrap(
+                secret: secret,
+                userOpHash: hash,
+                mode: .enable,
+                enableData: enableData,
+                selectorData: selectorData,
+                enableSig: rootEnableSignature
+            )
+
+            XCTAssertEqual(dummy.count, final.count)
+        }
     }
 
     func testSessionEmptyPermissionDeinitDataMatchesEnableEntryCount() throws {

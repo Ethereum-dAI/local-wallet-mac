@@ -75,10 +75,83 @@ enum SessionSigningAvailability {
     }
 }
 
-struct UserOperationSignatureResult: Equatable {
+/// The only UserOperation representation accepted by submission transports.
+/// Its fileprivate initializer makes the signing boundary the only production
+/// code that can mint one.
+struct SignedUserOperation: Equatable {
+    let operation: AuthorizedUserOperation
     let userOpHash: Data
     let signature: Data
     let usedSession: Bool
+
+    var draft: UserOperationDraft {
+        operation.draft
+    }
+
+    var userOpHashHex: String {
+        "0x" + userOpHash.hexEncodedString
+    }
+
+    func validatingReturnedHash(_ returnedHash: String) throws -> String {
+        guard returnedHash.caseInsensitiveCompare(userOpHashHex) == .orderedSame else {
+            throw UserOperationBoundaryError.returnedHashMismatch(
+                expected: userOpHashHex,
+                actual: returnedHash
+            )
+        }
+        return userOpHashHex
+    }
+
+    fileprivate init(
+        operation: AuthorizedUserOperation,
+        signature: Data,
+        usedSession: Bool
+    ) throws {
+        guard signature.count == operation.expectedSignatureLength else {
+            throw UserOperationBoundaryError.signatureLengthMismatch(
+                expected: operation.expectedSignatureLength,
+                actual: signature.count
+            )
+        }
+        self.operation = operation
+        self.userOpHash = try operation.draft.userOpHash()
+        self.signature = signature
+        self.usedSession = usedSession
+    }
+}
+
+/// The final boundary between a signed UserOperation and any submission
+/// transport. Authentication can outlive the fee quote that was checked before
+/// signing, so every transport attempt must re-read the independent execution
+/// head and validate wall-clock freshness after that read completes.
+enum UserOperationSubmission {
+    @MainActor
+    static func submit(
+        operation: SignedUserOperation,
+        rpcURL: URL,
+        expectedChainID: UInt64,
+        oracle: ExecutionFeeOracle = ExecutionFeeOracle(),
+        now: () -> Date = Date.init,
+        transport: (SignedUserOperation) async throws -> String
+    ) async throws -> String {
+        let quote = operation.operation.feeQuote
+        guard quote.chainID == expectedChainID else {
+            throw ExecutionFeeOracleError.wrongChain(
+                expected: expectedChainID,
+                actual: quote.chainID
+            )
+        }
+
+        let currentBlockNumber = try await oracle.currentBlockNumber(
+            rpcURL: rpcURL,
+            expectedChainID: expectedChainID
+        )
+        try quote.validateFreshness(
+            now: now(),
+            currentBlockNumber: currentBlockNumber
+        )
+        return try await transport(operation)
+    }
 }
 
 enum UserOperationSigning {
@@ -103,14 +176,23 @@ enum UserOperationSigning {
     ) throws -> Data
 
     static func signForSend(
-        draft: UserOperationDraft,
+        operation: AuthorizedUserOperation,
+        currentBlockNumber: UInt64,
+        now: Date = Date(),
         session: SessionContext?,
         passkeySigner: PasskeySigner,
         passkeyWrapper: PasskeyWrapper,
         sessionSecretReader: SessionSecretReader,
         sessionWrapper: SessionWrapper
-    ) throws -> UserOperationSignatureResult {
-        let userOpHash = try draft.userOpHash()
+    ) throws -> SignedUserOperation {
+        // This check is deliberately before hashing, key reads, and every signer
+        // callback. A quote that aged while the relayer was unlocking or Touch ID
+        // was on screen must be rebuilt, never signed optimistically.
+        try operation.feeQuote.validateFreshness(
+            now: now,
+            currentBlockNumber: currentBlockNumber
+        )
+        let userOpHash = try operation.draft.userOpHash()
 
         if let session {
             let secret = try sessionSecretReader(session.keyRef)
@@ -122,8 +204,8 @@ enum UserOperationSigning {
                 session.selectorData,
                 session.enableSig
             )
-            return UserOperationSignatureResult(
-                userOpHash: userOpHash,
+            return try SignedUserOperation(
+                operation: operation,
                 signature: signature,
                 usedSession: true
             )
@@ -131,8 +213,8 @@ enum UserOperationSigning {
 
         let preimage = try WalletSignature.computeSigningPreimage(userOpHash: userOpHash)
         let passkeySignature = try passkeySigner(preimage)
-        return UserOperationSignatureResult(
-            userOpHash: userOpHash,
+        return try SignedUserOperation(
+            operation: operation,
             signature: try passkeyWrapper(userOpHash, passkeySignature),
             usedSession: false
         )

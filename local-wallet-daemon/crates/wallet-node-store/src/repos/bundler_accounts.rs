@@ -255,6 +255,55 @@ pub(crate) fn bundler_account_replace_active_for_owner(
     Ok(())
 }
 
+pub(crate) fn bundler_account_rollback_replacement_for_owner(
+    conn: &mut Connection,
+    owner_scope: &str,
+    chain_id: u64,
+    transient_address: &str,
+    transient_key_ref: &str,
+    restored_address: &str,
+    restored_key_ref: &str,
+) -> Result<(), StoreError> {
+    let tx = conn.transaction()?;
+    let removed = tx.execute(
+        "DELETE FROM bundler_accounts
+          WHERE owner_scope = ?
+            AND chain_id = ?
+            AND address = ?
+            AND key_ref = ?
+            AND lifecycle = 'active'",
+        params![owner_scope, chain_id, transient_address, transient_key_ref],
+    )?;
+    if removed != 1 {
+        return Err(StoreError::DataIntegrity {
+            table: TABLE,
+            reason: "transient active replacement row not found for rollback",
+        });
+    }
+
+    let restored = tx.execute(
+        "UPDATE bundler_accounts
+            SET lifecycle = 'active',
+                retired_at = NULL,
+                deleted_at = NULL
+          WHERE owner_scope = ?
+            AND chain_id = ?
+            AND address = ?
+            AND key_ref = ?
+            AND lifecycle = 'retired'",
+        params![owner_scope, chain_id, restored_address, restored_key_ref],
+    )?;
+    if restored != 1 {
+        return Err(StoreError::DataIntegrity {
+            table: TABLE,
+            reason: "retired replacement predecessor not found for rollback",
+        });
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
 pub(crate) fn bundler_account_mark_used(
     conn: &Connection,
     owner_scope: &str,

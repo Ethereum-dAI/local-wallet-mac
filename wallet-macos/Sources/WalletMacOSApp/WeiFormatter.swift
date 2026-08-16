@@ -2,24 +2,12 @@ import Foundation
 
 enum WeiFormatter {
     static func ethDisplayString(fromHexWei value: String) -> String {
-        let normalized = value.hasPrefix("0x") ? String(value.dropFirst(2)) : value
-        let trimmed = normalized.drop { $0 == "0" }
-
-        guard !trimmed.isEmpty else {
+        guard let decimal = decimalWeiString(fromHexWei: value) else {
+            return "\(value) wei"
+        }
+        guard decimal != "0" else {
             return "0 ETH"
         }
-
-        var digits = [Int](repeating: 0, count: 1)
-        for scalar in trimmed.lowercased() {
-            guard let hexValue = scalar.hexDigitValue else {
-                return "\(value) wei"
-            }
-
-            multiplyDecimalDigitsBy16(&digits)
-            addHexValue(hexValue, to: &digits)
-        }
-
-        let decimal = digits.reversed().map(String.init).joined()
         let splitIndex = max(decimal.count - 18, 0)
         let whole = splitIndex == 0 ? "0" : String(decimal.prefix(splitIndex))
         let fractionRaw = splitIndex == 0 ? String(decimal).leftPadding(to: 18, with: "0") : String(decimal.suffix(18))
@@ -30,6 +18,77 @@ enum WeiFormatter {
         }
 
         return "\(whole).\(fraction) ETH"
+    }
+
+    /// Formats a maximum fee without ever displaying less than the authorized
+    /// amount. Ordinary balance formatting truncates after six decimals; that
+    /// is unsafe for a signing prompt because a non-zero liability could appear
+    /// as zero. This rounds upward to the nearest micro-ETH instead.
+    static func ethUpperBoundDisplayString(fromHexWei value: String) -> String {
+        guard let decimal = decimalWeiString(fromHexWei: value) else {
+            return "\(value) wei"
+        }
+        guard decimal != "0" else {
+            return "0 ETH"
+        }
+
+        let discardedDigitCount = 12 // 18 ETH decimals - 6 displayed decimals
+        let quotient: String
+        let remainder: Substring
+        if decimal.count > discardedDigitCount {
+            let splitIndex = decimal.index(decimal.endIndex, offsetBy: -discardedDigitCount)
+            quotient = String(decimal[..<splitIndex])
+            remainder = decimal[splitIndex...]
+        } else {
+            quotient = "0"
+            remainder = decimal[decimal.startIndex...]
+        }
+
+        let roundedMicroETH = remainder.allSatisfy({ $0 == "0" })
+            ? quotient
+            : incrementDecimalString(quotient)
+        let splitIndex = max(roundedMicroETH.count - 6, 0)
+        let whole = splitIndex == 0 ? "0" : String(roundedMicroETH.prefix(splitIndex))
+        let fractionRaw = splitIndex == 0
+            ? roundedMicroETH.leftPadding(to: 6, with: "0")
+            : String(roundedMicroETH.suffix(6))
+        let fraction = fractionRaw.trimmingTrailingZeros()
+
+        return fraction.isEmpty ? "\(whole) ETH" : "\(whole).\(fraction) ETH"
+    }
+
+    private static func decimalWeiString(fromHexWei value: String) -> String? {
+        let normalized = value.hasPrefix("0x") ? String(value.dropFirst(2)) : value
+        let trimmed = normalized.drop { $0 == "0" }
+        guard !trimmed.isEmpty else {
+            return "0"
+        }
+
+        var digits = [Int](repeating: 0, count: 1)
+        for scalar in trimmed.lowercased() {
+            guard let hexValue = scalar.hexDigitValue else {
+                return nil
+            }
+            multiplyDecimalDigitsBy16(&digits)
+            addHexValue(hexValue, to: &digits)
+        }
+        return digits.reversed().map(String.init).joined()
+    }
+
+    private static func incrementDecimalString(_ value: String) -> String {
+        var digits = value.reversed().compactMap(\.wholeNumberValue)
+        var carry = 1
+        var index = 0
+        while carry > 0 {
+            if index == digits.count {
+                digits.append(0)
+            }
+            let sum = digits[index] + carry
+            digits[index] = sum % 10
+            carry = sum / 10
+            index += 1
+        }
+        return digits.reversed().map(String.init).joined()
     }
 
     private static func multiplyDecimalDigitsBy16(_ digits: inout [Int]) {

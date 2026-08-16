@@ -12,6 +12,7 @@ crate-type = ["staticlib", "lib"]
 [dependencies]
 wallet-signature  = { workspace = true }
 wallet-kernel     = { workspace = true }
+wallet-userop-policy = { workspace = true }
 wallet-node-api   = { workspace = true }
 alloy-primitives  = { workspace = true }
 serde             = { workspace = true }

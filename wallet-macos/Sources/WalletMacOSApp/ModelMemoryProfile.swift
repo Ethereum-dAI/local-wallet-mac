@@ -176,7 +176,7 @@ enum OnboardingModelGate {
                 contextTokens: contextTokens,
                 comfortable: true
             ))
-            return "This Mac has \(available) available for the model, which is below the \(needed) it needs — it wants a Mac with about \(minimum). You can still install it, but expect swapping or a failed load."
+            return "This Mac has \(available) available for the model, which is below the \(needed) it needs. It wants a Mac with about \(minimum). You can still install it, but expect swapping or a failed load."
         }
     }
 }

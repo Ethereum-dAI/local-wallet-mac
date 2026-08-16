@@ -168,14 +168,31 @@ private func stubbedClient() -> WalletNodeClient {
 @Test func decodesBundlerStatusReplacementBlock() throws {
     var json: [String: Any] = [
         "ready": true,
+        "keyLoaded": true,
+        "reason": NSNull(),
         "ownerScope": "default",
         "chainId": 11_155_111,
         "networkProfile": "sepolia",
-        "eoa": "0xabc",
+        "eoa": "0xa000000000000000000000000000000000000001",
+        "keyRef": "bundler-eoa:default:11155111:1",
         "balance": "0x1",
         "thresholdLow": "0x0",
         "needsTopup": false,
         "lifecycle": "active",
+        "rotation": ["rotating": false, "pendingFunding": [], "retiring": []],
+        "keyHistory": [[
+            "ownerScope": "default",
+            "chainId": 11_155_111,
+            "eoa": "0xa000000000000000000000000000000000000001",
+            "keyRef": "bundler-eoa:default:11155111:1",
+            "lifecycle": "active",
+            "createdAt": 1,
+        ]],
+        "compromise": [
+            "suspected": false,
+            "reason": NSNull(),
+            "submissionBlocked": false,
+        ],
     ]
     json["replacement"] = [
         "eligible": true,
@@ -197,39 +214,157 @@ private func stubbedClient() -> WalletNodeClient {
 @Test func decodesBlockedReplacementWithReason() throws {
     var json: [String: Any] = [
         "ready": true,
+        "keyLoaded": true,
+        "reason": NSNull(),
         "ownerScope": "default",
         "chainId": 11_155_111,
         "networkProfile": "sepolia",
-        "eoa": "0xabc",
+        "eoa": "0xa000000000000000000000000000000000000001",
+        "keyRef": "bundler-eoa:default:11155111:1",
         "balance": "0x1",
         "thresholdLow": "0x0",
         "needsTopup": false,
         "lifecycle": "active",
+        "rotation": ["rotating": false, "pendingFunding": [], "retiring": []],
+        "keyHistory": [[
+            "ownerScope": "default",
+            "chainId": 11_155_111,
+            "eoa": "0xa000000000000000000000000000000000000001",
+            "keyRef": "bundler-eoa:default:11155111:1",
+            "lifecycle": "active",
+            "createdAt": 1,
+        ]],
+        "compromise": [
+            "suspected": false,
+            "reason": NSNull(),
+            "submissionBlocked": false,
+        ],
     ]
     json["replacement"] = [
         "eligible": false,
         "blocked": true,
         "blockedReason": "gas_relay_stuck",
+        "txHash": NSNull(),
+        "userOpHash": NSNull(),
+        "nonce": NSNull(),
     ]
     let status = try WalletNodeClient.RelayerStatus(json: json)
     #expect(status.replacement?.blocked == true)
     #expect(status.replacement?.blockedReason == "gas_relay_stuck")
 }
 
-@Test func absentReplacementBlockDecodesToNil() throws {
+@Test func absentReplacementBlockFailsClosed() {
     let json: [String: Any] = [
         "ready": true,
+        "keyLoaded": true,
+        "reason": NSNull(),
         "ownerScope": "default",
         "chainId": 11_155_111,
         "networkProfile": "sepolia",
-        "eoa": "0xabc",
+        "eoa": "0xa000000000000000000000000000000000000001",
+        "keyRef": "bundler-eoa:default:11155111:1",
         "balance": "0x1",
         "thresholdLow": "0x0",
         "needsTopup": false,
         "lifecycle": "active",
+        "rotation": ["rotating": false, "pendingFunding": [], "retiring": []],
+        "keyHistory": [[
+            "ownerScope": "default",
+            "chainId": 11_155_111,
+            "eoa": "0xa000000000000000000000000000000000000001",
+            "keyRef": "bundler-eoa:default:11155111:1",
+            "lifecycle": "active",
+            "createdAt": 1,
+        ]],
+        "compromise": [
+            "suspected": false,
+            "reason": NSNull(),
+            "submissionBlocked": false,
+        ],
+    ]
+    #expect(throws: (any Error).self) {
+        _ = try WalletNodeClient.RelayerStatus(json: json)
+    }
+}
+
+@Test func decodesManagedDaemonRelayerLockState() throws {
+    let json: [String: Any] = [
+        "ready": false,
+        "keyLoaded": false,
+        "reason": "bundler_eoa_locked",
+        "ownerScope": "default",
+        "chainId": 11_155_111,
+        "networkProfile": "sepolia",
+        "eoa": "0xa000000000000000000000000000000000000001",
+        "keyRef": "bundler-eoa:default:11155111:1",
+        "balance": "0x1",
+        "thresholdLow": "0x0",
+        "needsTopup": false,
+        "lifecycle": "active",
+        "rotation": ["rotating": false, "pendingFunding": [], "retiring": []],
+        "keyHistory": [[
+            "ownerScope": "default",
+            "chainId": 11_155_111,
+            "eoa": "0xa000000000000000000000000000000000000001",
+            "keyRef": "bundler-eoa:default:11155111:1",
+            "lifecycle": "active",
+            "createdAt": 1,
+        ]],
+        "replacement": [
+            "eligible": false,
+            "blocked": false,
+            "blockedReason": NSNull(),
+            "txHash": NSNull(),
+            "userOpHash": NSNull(),
+            "nonce": NSNull(),
+        ],
+        "compromise": [
+            "suspected": false,
+            "reason": NSNull(),
+            "submissionBlocked": false,
+        ],
     ]
     let status = try WalletNodeClient.RelayerStatus(json: json)
-    #expect(status.replacement == nil)
+    #expect(status.keyLoaded == false)
+    #expect(status.ready == false)
+    #expect(status.reason == "bundler_eoa_locked")
+}
+
+@Test func decodesFreshReadOnlyDaemonWithoutAnActiveRelayer() throws {
+    let json: [String: Any] = [
+        "ready": false,
+        "reason": "bundler_eoa_missing",
+        "keyLoaded": false,
+        "ownerScope": "default",
+        "chainId": 11_155_111,
+        "networkProfile": "sepolia",
+        "eoa": NSNull(),
+        "keyRef": NSNull(),
+        "balance": "unavailable",
+        "thresholdLow": "0x11c37937e08000",
+        "needsTopup": false,
+        "lifecycle": NSNull(),
+        "rotation": ["rotating": false, "pendingFunding": [], "retiring": []],
+        "keyHistory": [],
+        "replacement": [
+            "eligible": false,
+            "blocked": false,
+            "blockedReason": NSNull(),
+            "txHash": NSNull(),
+            "userOpHash": NSNull(),
+            "nonce": NSNull(),
+        ],
+        "compromise": [
+            "suspected": false,
+            "reason": NSNull(),
+            "submissionBlocked": false,
+        ],
+    ]
+    let status = try WalletNodeClient.RelayerStatus(json: json)
+    #expect(status.eoa == "Not available")
+    #expect(status.lifecycle == "missing")
+    #expect(status.keyLoaded == false)
+    #expect(status.reason == "bundler_eoa_missing")
 }
 
 @Test func cancelPendingOperationSendsRpcAndReturnsTxHash() async throws {

@@ -65,22 +65,41 @@ struct KeyStore {
         try loadDirectKey(authenticationContext: authenticationContext)
     }
 
+    func loadPublicKeyCoordinates(
+        authenticationContext: LAContext? = nil
+    ) throws -> PublicKeyCoordinates? {
+        guard let key = try loadKey(authenticationContext: authenticationContext) else {
+            return nil
+        }
+        return try publicKeyCoordinates(for: key)
+    }
+
     // Provisioning entry point: the only path allowed to mint a new root key.
-    func createOrLoadPublicKeyCoordinates() throws -> PublicKeyCoordinates {
-        let key = try createOrLoadKey()
+    func createOrLoadPublicKeyCoordinates(
+        authenticationContext: LAContext? = nil
+    ) throws -> PublicKeyCoordinates {
+        let key = try createOrLoadKey(authenticationContext: authenticationContext)
         return try publicKeyCoordinates(for: key)
     }
 
     // Signing must never mint a replacement key: metadata may still describe
     // an account owned by the old key, and a silently regenerated key would
     // produce signatures the account rejects with no local diagnosis.
-    func sign(preimage: Data, reason: String) throws -> SignatureComponents {
-        // Never a reused context: every signature — a transaction, a session-key
-        // enablement — is authorised on its own. The relayer-launch unlock is the
-        // one path allowed to hold a reuse window; signing is not.
-        BiometricPromptLog.shared.record(reason: reason, reusable: false)
-        let context = LAContext()
-        context.localizedReason = reason
+    func sign(
+        preimage: Data,
+        reason: String,
+        authenticationContext: LAContext? = nil
+    ) throws -> SignatureComponents {
+        let ownsContext = authenticationContext == nil
+        let context = authenticationContext ?? LAContext()
+        if ownsContext {
+            context.localizedReason = reason
+        }
+        defer {
+            if ownsContext {
+                context.invalidate()
+            }
+        }
 
         guard let key = try loadKey(authenticationContext: context) else {
             throw AppError.missingKeyReference

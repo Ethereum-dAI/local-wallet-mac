@@ -53,6 +53,174 @@ struct ModelDownloadRequest: Equatable {
     }
 }
 
+struct ModelDownloadProgress: Equatable, Sendable {
+    let completedBytes: Int64
+    let totalBytes: Int64
+    let bytesPerSecond: Double?
+
+    init(completedBytes: Int64, totalBytes: Int64, bytesPerSecond: Double?) {
+        self.totalBytes = max(0, totalBytes)
+        self.completedBytes = min(max(0, completedBytes), max(0, totalBytes))
+        if let bytesPerSecond, bytesPerSecond.isFinite, bytesPerSecond > 0 {
+            self.bytesPerSecond = bytesPerSecond
+        } else {
+            self.bytesPerSecond = nil
+        }
+    }
+
+    var fractionCompleted: Double {
+        guard totalBytes > 0 else { return 0 }
+        return min(1, max(0, Double(completedBytes) / Double(totalBytes)))
+    }
+
+    var estimatedSecondsRemaining: TimeInterval? {
+        guard let bytesPerSecond else { return nil }
+        return Double(totalBytes - completedBytes) / bytesPerSecond
+    }
+
+    var statusText: String {
+        var parts = [Self.progressText(completedBytes: completedBytes, totalBytes: totalBytes)]
+        if let bytesPerSecond {
+            parts.append("\(Self.rateText(bytesPerSecond))/s")
+        }
+        if let seconds = estimatedSecondsRemaining, seconds > 0 {
+            parts.append(Self.etaText(seconds))
+        }
+        return parts.joined(separator: " - ")
+    }
+
+    func isVisibleChange(from current: ModelDownloadProgress) -> Bool {
+        Int(fractionCompleted * 100) != Int(current.fractionCompleted * 100)
+            || statusText != current.statusText
+    }
+
+    private static func progressText(completedBytes: Int64, totalBytes: Int64) -> String {
+        let completed = byteValue(Double(completedBytes), includeDecimalBelowTen: false)
+        let total = byteValue(Double(totalBytes), includeDecimalBelowTen: false)
+        if completed.unit == total.unit {
+            return "\(completed.number) of \(total.number) \(total.unit)"
+        }
+        return "\(completed.number) \(completed.unit) of \(total.number) \(total.unit)"
+    }
+
+    private static func rateText(_ bytesPerSecond: Double) -> String {
+        decimalText(bytesPerSecond, includeDecimalBelowTen: true)
+    }
+
+    private static func decimalText(_ bytes: Double, includeDecimalBelowTen: Bool) -> String {
+        let value = byteValue(bytes, includeDecimalBelowTen: includeDecimalBelowTen)
+        return "\(value.number) \(value.unit)"
+    }
+
+    private static func byteValue(
+        _ bytes: Double,
+        includeDecimalBelowTen: Bool
+    ) -> (number: String, unit: String) {
+        let units = [(1_000_000_000.0, "GB"), (1_000_000.0, "MB"), (1_000.0, "KB")]
+        guard let (scale, unit) = units.first(where: { bytes >= $0.0 }) else {
+            return ("\(Int(bytes.rounded()))", "B")
+        }
+        let value = bytes / scale
+        let decimals: Int
+        if includeDecimalBelowTen {
+            decimals = value < 100 ? 1 : 0
+        } else if abs(value - value.rounded()) < 0.005 {
+            decimals = 0
+        } else {
+            decimals = value < 10 ? 2 : 0
+        }
+        return (String(format: "%.*f", decimals, value), unit)
+    }
+
+    private static func etaText(_ seconds: TimeInterval) -> String {
+        if seconds < 60 {
+            return "less than 1 min left"
+        }
+        let minutes = max(1, Int((seconds / 60).rounded()))
+        if minutes < 60 {
+            return "about \(minutes) min left"
+        }
+        let hours = max(1, Int((Double(minutes) / 60).rounded()))
+        return "about \(hours) hr left"
+    }
+}
+
+/// Builds stable transfer telemetry from URLSession's noisy per-chunk callbacks.
+/// Each download owns one estimator, so samples from separate downloads can never
+/// contaminate one another.
+final class ModelDownloadProgressEstimator: @unchecked Sendable {
+    private let lock = NSLock()
+    private let smoothingFactor: Double
+    private let minimumSampleInterval: TimeInterval
+    private var lastDate: Date
+    private var lastBytes: Int64 = 0
+    private var smoothedBytesPerSecond: Double?
+    private var hasBaseline = false
+
+    init(
+        startedAt: Date = Date(),
+        smoothingFactor: Double = 0.2,
+        minimumSampleInterval: TimeInterval = 0.75
+    ) {
+        self.lastDate = startedAt
+        self.smoothingFactor = min(1, max(0, smoothingFactor))
+        self.minimumSampleInterval = max(0, minimumSampleInterval)
+    }
+
+    func record(
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64,
+        at date: Date = Date()
+    ) -> ModelDownloadProgress {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard hasBaseline else {
+            hasBaseline = true
+            lastDate = date
+            lastBytes = max(0, totalBytesWritten)
+            return ModelDownloadProgress(
+                completedBytes: totalBytesWritten,
+                totalBytes: totalBytesExpectedToWrite,
+                bytesPerSecond: nil
+            )
+        }
+
+        let elapsed = date.timeIntervalSince(lastDate)
+        let byteDelta = totalBytesWritten - lastBytes
+        if elapsed >= minimumSampleInterval, byteDelta >= 0 {
+            let instantaneous = Double(byteDelta) / elapsed
+            if instantaneous.isFinite, instantaneous > 0 {
+                if let existing = smoothedBytesPerSecond {
+                    smoothedBytesPerSecond = smoothingFactor * instantaneous
+                        + (1 - smoothingFactor) * existing
+                } else {
+                    smoothedBytesPerSecond = instantaneous
+                }
+            }
+            lastDate = date
+            lastBytes = max(lastBytes, totalBytesWritten)
+        }
+
+        return ModelDownloadProgress(
+            completedBytes: totalBytesWritten,
+            totalBytes: totalBytesExpectedToWrite,
+            bytesPerSecond: smoothedBytesPerSecond
+        )
+    }
+}
+
+typealias LocalAIModelDownloadProgressHandler = @MainActor @Sendable (ModelDownloadProgress) -> Void
+
+protocol LocalAIModelManaging: Sendable {
+    func existingFileURL(for model: LocalAIModel) -> URL?
+    func verifyExistingFile(_ model: LocalAIModel, at fileURL: URL) async throws -> URL
+    func download(
+        _ model: LocalAIModel,
+        progress: @escaping LocalAIModelDownloadProgressHandler
+    ) async throws -> URL
+}
+
 enum LocalAIModelDownloadError: LocalizedError {
     case invalidResponse
     case httpStatus(Int)
@@ -74,7 +242,7 @@ enum LocalAIModelDownloadError: LocalizedError {
         case .sizeMismatch(let expected, let actual):
             let expectedText = ByteCountFormatter.string(fromByteCount: Int64(expected), countStyle: .file)
             let actualText = ByteCountFormatter.string(fromByteCount: Int64(actual), countStyle: .file)
-            return "The download is incomplete — \(actualText) of \(expectedText) arrived. Try downloading it again."
+            return "The download is incomplete: \(actualText) of \(expectedText) arrived. Try downloading it again."
         case .missingDownload:
             return "The downloaded model file could not be found."
         case .insufficientDisk(let needed, let available):
@@ -126,8 +294,8 @@ final class DownloadSlot<Occupant>: @unchecked Sendable {
     }
 }
 
-final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    typealias ProgressHandler = @MainActor (Double) -> Void
+final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, LocalAIModelManaging, @unchecked Sendable {
+    typealias ProgressHandler = LocalAIModelDownloadProgressHandler
 
     private struct ActiveDownload {
         let expectedSHA256: String?
@@ -135,6 +303,7 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
         /// `didFinishDownloadingTo`.
         let expectedSizeBytes: UInt64?
         let destinationURL: URL
+        let progressEstimator: ModelDownloadProgressEstimator
         let progressHandler: ProgressHandler
         let continuation: CheckedContinuation<URL, Error>
     }
@@ -212,15 +381,33 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
         return bundle.url(forResource: baseName, withExtension: fileExtension, subdirectory: "Models")
     }
 
-    func isInstalled(_ model: LocalAIModel) -> Bool {
+    func existingFileURL(for model: LocalAIModel) -> URL? {
+        if let localURL = try? localFileURL(for: model),
+           FileManager.default.fileExists(atPath: localURL.path) {
+            return localURL
+        }
         if let bundledURL = bundledFileURL(for: model),
            FileManager.default.fileExists(atPath: bundledURL.path) {
-            return true
+            return bundledURL
         }
-        guard let url = try? localFileURL(for: model) else {
-            return false
+        return nil
+    }
+
+    func verifyExistingFile(_ model: LocalAIModel, at fileURL: URL) async throws -> URL {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            throw LocalAIModelDownloadError.missingDownload
         }
-        return FileManager.default.fileExists(atPath: url.path)
+
+        let actualChecksum = try await Task.detached(priority: .utility) {
+            try Self.sha256Hex(of: fileURL)
+        }.value
+        guard actualChecksum == model.sha256.lowercased() else {
+            throw LocalAIModelDownloadError.checksumMismatch(
+                expected: model.sha256,
+                actual: actualChecksum
+            )
+        }
+        return fileURL
     }
 
     func download(
@@ -229,11 +416,15 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
     ) async throws -> URL {
         let destinationURL = try localFileURL(for: model)
         if FileManager.default.fileExists(atPath: destinationURL.path) {
-            return destinationURL
+            do {
+                return try await verifyExistingFile(model, at: destinationURL)
+            } catch LocalAIModelDownloadError.checksumMismatch {
+                try? FileManager.default.removeItem(at: destinationURL)
+            }
         }
         if let bundledURL = bundledFileURL(for: model),
            FileManager.default.fileExists(atPath: bundledURL.path) {
-            return bundledURL
+            return try await verifyExistingFile(model, at: bundledURL)
         }
 
         try FileManager.default.createDirectory(
@@ -246,6 +437,7 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
                 expectedSHA256: model.sha256,
                 expectedSizeBytes: nil,
                 destinationURL: destinationURL,
+                progressEstimator: ModelDownloadProgressEstimator(),
                 progressHandler: progress,
                 continuation: continuation
             )
@@ -254,6 +446,7 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
                 return
             }
             let task = session.downloadTask(with: model.artifactURL)
+            task.priority = URLSessionTask.highPriority
             setActiveTask(task)
             task.resume()
         }
@@ -276,6 +469,7 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
                 expectedSHA256: request.expectedSHA256,
                 expectedSizeBytes: request.expectedSizeBytes,
                 destinationURL: destinationURL,
+                progressEstimator: ModelDownloadProgressEstimator(),
                 progressHandler: progress,
                 continuation: continuation
             )
@@ -284,6 +478,7 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
                 return
             }
             let task = session.downloadTask(with: request.url)
+            task.priority = URLSessionTask.highPriority
             setActiveTask(task)
             task.resume()
         }
@@ -300,9 +495,12 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
             return
         }
 
-        let fraction = min(0.99, max(0, Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)))
+        let progress = activeDownload.progressEstimator.record(
+            totalBytesWritten: totalBytesWritten,
+            totalBytesExpectedToWrite: totalBytesExpectedToWrite
+        )
         Task { @MainActor in
-            activeDownload.progressHandler(fraction)
+            activeDownload.progressHandler(progress)
         }
     }
 
@@ -359,9 +557,12 @@ final class LocalAIModelDownloadManager: NSObject, URLSessionDownloadDelegate, @
                 }
             }
 
-            Task { @MainActor in
-                activeDownload.progressHandler(1)
-            }
+            let completedBytes = Int64(try Self.fileSize(of: activeDownload.destinationURL))
+            let completedProgress = activeDownload.progressEstimator.record(
+                totalBytesWritten: completedBytes,
+                totalBytesExpectedToWrite: completedBytes
+            )
+            Task { @MainActor in activeDownload.progressHandler(completedProgress) }
             activeDownload.continuation.resume(returning: activeDownload.destinationURL)
         } catch {
             activeDownload.continuation.resume(throwing: error)

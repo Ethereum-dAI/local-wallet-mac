@@ -118,20 +118,32 @@ impl UserOperation {
     }
 
     pub fn pack_fields(&self) -> Result<PackedUserOperationFields> {
+        wallet_userop_policy::validate_entrypoint_v07_width(
+            self.call_gas_limit,
+            self.verification_gas_limit,
+            self.pre_verification_gas,
+            self.max_fee_per_gas,
+            self.max_priority_fee_per_gas,
+        )?;
+        if self.max_priority_fee_per_gas > self.max_fee_per_gas {
+            return Err(BundlerError::InvalidUserOperation(
+                "maxPriorityFeePerGas exceeds maxFeePerGas".to_string(),
+            ));
+        }
         let mut account_gas_limits = [0u8; 32];
-        account_gas_limits[..16].copy_from_slice(&u256_to_u128_be(
+        account_gas_limits[..16].copy_from_slice(&u256_to_u120_be(
             self.verification_gas_limit,
             "verificationGasLimit",
         )?);
         account_gas_limits[16..]
-            .copy_from_slice(&u256_to_u128_be(self.call_gas_limit, "callGasLimit")?);
+            .copy_from_slice(&u256_to_u120_be(self.call_gas_limit, "callGasLimit")?);
 
         let mut gas_fees = [0u8; 32];
-        gas_fees[..16].copy_from_slice(&u256_to_u128_be(
+        gas_fees[..16].copy_from_slice(&u256_to_u120_be(
             self.max_priority_fee_per_gas,
             "maxPriorityFeePerGas",
         )?);
-        gas_fees[16..].copy_from_slice(&u256_to_u128_be(self.max_fee_per_gas, "maxFeePerGas")?);
+        gas_fees[16..].copy_from_slice(&u256_to_u120_be(self.max_fee_per_gas, "maxFeePerGas")?);
 
         let mut init_code = Vec::new();
         if let Some(factory) = self.factory {
@@ -142,11 +154,11 @@ impl UserOperation {
         let mut paymaster_and_data = Vec::new();
         if let Some(paymaster) = self.paymaster {
             paymaster_and_data.extend_from_slice(paymaster.as_slice());
-            paymaster_and_data.extend_from_slice(&u256_to_u128_be(
+            paymaster_and_data.extend_from_slice(&u256_to_u120_be(
                 self.paymaster_verification_gas_limit.unwrap_or(U256::ZERO),
                 "paymasterVerificationGasLimit",
             )?);
-            paymaster_and_data.extend_from_slice(&u256_to_u128_be(
+            paymaster_and_data.extend_from_slice(&u256_to_u120_be(
                 self.paymaster_post_op_gas_limit.unwrap_or(U256::ZERO),
                 "paymasterPostOpGasLimit",
             )?);
@@ -175,10 +187,15 @@ impl UserOperation {
         })
     }
 
-    pub fn required_prefund(&self) -> U256 {
+    pub fn required_prefund(&self) -> Result<U256> {
         // EntryPoint v0.7 adds paymaster gas terms here, but Phase 4 rejects paymasters.
-        (self.call_gas_limit + self.verification_gas_limit + self.pre_verification_gas)
-            * self.max_fee_per_gas
+        wallet_userop_policy::checked_max_liability_no_paymaster(
+            self.call_gas_limit,
+            self.verification_gas_limit,
+            self.pre_verification_gas,
+            self.max_fee_per_gas,
+        )
+        .map_err(Into::into)
     }
 
     pub fn user_op_hash(&self, entry_point: Address, chain_id: u64) -> Result<[u8; 32]> {
@@ -265,8 +282,8 @@ fn parse_u256(field: &'static str, value: &str) -> Result<U256> {
         .map_err(|err| BundlerError::InvalidUserOperation(format!("{field}: {err}")))
 }
 
-fn u256_to_u128_be(value: U256, field: &'static str) -> Result<[u8; 16]> {
-    if value > U256::from(u128::MAX) {
+fn u256_to_u120_be(value: U256, field: &'static str) -> Result<[u8; 16]> {
+    if value > wallet_userop_policy::ENTRY_POINT_V07_FIELD_MAX {
         return Err(BundlerError::PolicyCapExceeded { field });
     }
     Ok((value.to::<u128>()).to_be_bytes())
@@ -301,7 +318,7 @@ mod tests {
             address!("d73c7780b1c1da1586a8332d5499f36b7cbb33c2")
         );
         assert_eq!(op.nonce, U256::from(1));
-        assert_eq!(op.required_prefund(), U256::from(0x1800u64));
+        assert_eq!(op.required_prefund().unwrap(), U256::from(0x1800u64));
     }
 
     #[test]
@@ -310,7 +327,7 @@ mod tests {
 
         assert!(op.paymaster_data.is_empty());
         assert_eq!(
-            op.required_prefund(),
+            op.required_prefund().unwrap(),
             (op.call_gas_limit + op.verification_gas_limit + op.pre_verification_gas)
                 * op.max_fee_per_gas
         );
@@ -325,6 +342,50 @@ mod tests {
         assert_eq!(fields.account_gas_limits[31], 0x10);
         assert_eq!(fields.gas_fees[15], 0x05);
         assert_eq!(fields.gas_fees[31], 0x40);
+    }
+
+    #[test]
+    fn packing_accepts_uint120_max_and_rejects_next_value() {
+        let mut op = UserOperation::parse(sample()).unwrap();
+        op.call_gas_limit = wallet_userop_policy::ENTRY_POINT_V07_FIELD_MAX;
+        let fields = op.pack_fields().unwrap();
+        assert_eq!(fields.account_gas_limits[16], 0);
+        assert!(fields.account_gas_limits[17..]
+            .iter()
+            .all(|byte| *byte == 0xff));
+
+        op.call_gas_limit = wallet_userop_policy::ENTRY_POINT_V07_FIELD_MAX + U256::from(1);
+        assert!(matches!(
+            op.pack_fields().unwrap_err(),
+            BundlerError::PolicyCapExceeded {
+                field: "callGasLimit"
+            }
+        ));
+    }
+
+    #[test]
+    fn required_prefund_rejects_arithmetic_overflow() {
+        let mut op = UserOperation::parse(sample()).unwrap();
+        op.call_gas_limit = U256::MAX;
+        op.verification_gas_limit = U256::MAX;
+
+        assert!(matches!(
+            op.required_prefund().unwrap_err(),
+            BundlerError::InvalidUserOperation(reason)
+                if reason == "arithmetic overflow while computing gas limit sum"
+        ));
+    }
+
+    #[test]
+    fn packing_rejects_priority_fee_above_max_fee() {
+        let mut op = UserOperation::parse(sample()).unwrap();
+        op.max_priority_fee_per_gas = op.max_fee_per_gas + U256::from(1);
+
+        assert!(matches!(
+            op.pack_fields().unwrap_err(),
+            BundlerError::InvalidUserOperation(reason)
+                if reason == "maxPriorityFeePerGas exceeds maxFeePerGas"
+        ));
     }
 
     #[test]

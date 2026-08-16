@@ -1,7 +1,8 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
@@ -29,36 +30,20 @@ fn fd_handshake_full_lifecycle() {
         .expect("write secret payload");
     drop(secret_writer);
 
-    wait_for_readable(&ready_read_fd, READY_TIMEOUT);
-    let mut ready_reader = BufReader::new(File::from(ready_read_fd));
-    let mut ready_line = String::new();
-    let bytes_read = ready_reader
-        .read_line(&mut ready_line)
-        .expect("read ready line from fd");
-    assert!(bytes_read > 0, "ready fd closed without data");
-    assert!(
-        ready_line.ends_with('\n'),
-        "ready event should be newline-terminated: {ready_line:?}"
-    );
-
-    let ready: Value = serde_json::from_str(ready_line.trim_end()).expect("ready event JSON");
-    assert_eq!(ready["apiVersion"], 1);
-    let socket_path = ready["socketPath"]
-        .as_str()
-        .expect("socketPath should be a string");
-    assert!(
-        socket_path.ends_with("wallet-node.sock"),
-        "unexpected socketPath: {socket_path}"
-    );
-    assert!(ready["httpAddr"].is_null(), "httpAddr should be null");
-    let token = ready["token"].as_str().expect("token should be a string");
-    assert_eq!(token.len(), 43, "token should be 43 chars");
+    let ready = read_ready_event(ready_read_fd);
 
     assert!(
-        wait_for_path(socket_path, Duration::from_secs(5)),
-        "socket file should exist at {socket_path}"
+        wait_for_path(
+            ready
+                .socket_path
+                .to_str()
+                .expect("socket path should be UTF-8"),
+            Duration::from_secs(5)
+        ),
+        "socket file should exist at {}",
+        ready.socket_path.display()
     );
-    assert_secret_fd_inserted_active_bundler_account(socket_path);
+    assert_secret_fd_inserted_active_bundler_account(&ready.socket_path);
 
     drop(alive_write_fd);
 
@@ -66,6 +51,57 @@ fn fd_handshake_full_lifecycle() {
         .wait_for_exit(Duration::from_secs(3))
         .expect("wallet-node should exit within 3 seconds after alive pipe EOF");
     assert!(status.success(), "wallet-node exited with {status}");
+
+    let Spawned {
+        mut process,
+        ready_read_fd,
+        alive_write_fd,
+        secret_write_fd,
+    } = spawn_wallet_node(&test_home);
+
+    let mut secret_writer = File::from(secret_write_fd);
+    secret_writer
+        .write_all(br#"{"keys":[]}"#)
+        .expect("write read-only secret payload");
+    drop(secret_writer);
+
+    let ready = read_ready_event(ready_read_fd);
+    assert!(
+        wait_for_path(
+            ready
+                .socket_path
+                .to_str()
+                .expect("socket path should be UTF-8"),
+            Duration::from_secs(5)
+        ),
+        "read-only socket file should exist at {}",
+        ready.socket_path.display()
+    );
+    let response = send_json_rpc(
+        &ready.socket_path,
+        &ready.token,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "wallet_bundlerStatus",
+            "params": [],
+            "id": 1,
+        }),
+    );
+    let result = &response["result"];
+    assert_eq!(result["keyRef"], "bundler-eoa:default:1:1");
+    assert_eq!(result["eoa"], "0x1a642f0e3c3af545e7acbd38b07251b3990914f1");
+    assert_eq!(result["lifecycle"], "active");
+    assert_eq!(result["keyLoaded"], false);
+    assert_eq!(result["reason"], "bundler_eoa_locked");
+
+    drop(alive_write_fd);
+    let status = process
+        .wait_for_exit(Duration::from_secs(3))
+        .expect("read-only wallet-node should exit within 3 seconds after alive pipe EOF");
+    assert!(
+        status.success(),
+        "read-only wallet-node exited with {status}"
+    );
 }
 
 /// A fatal startup failure must reach the parent as a JSON `error` line on the
@@ -267,8 +303,80 @@ impl Drop for TestProcess {
     }
 }
 
-fn assert_secret_fd_inserted_active_bundler_account(socket_path: &str) {
-    let db_path = Path::new(socket_path)
+struct ReadyEvent {
+    socket_path: PathBuf,
+    token: String,
+}
+
+fn read_ready_event(ready_read_fd: std::os::fd::OwnedFd) -> ReadyEvent {
+    wait_for_readable(&ready_read_fd, READY_TIMEOUT);
+    let mut ready_reader = BufReader::new(File::from(ready_read_fd));
+    let mut ready_line = String::new();
+    let bytes_read = ready_reader
+        .read_line(&mut ready_line)
+        .expect("read ready line from fd");
+    assert!(bytes_read > 0, "ready fd closed without data");
+    assert!(
+        ready_line.ends_with('\n'),
+        "ready event should be newline-terminated: {ready_line:?}"
+    );
+
+    let ready: Value = serde_json::from_str(ready_line.trim_end()).expect("ready event JSON");
+    assert_eq!(ready["apiVersion"], 1);
+    let socket_path = ready["socketPath"]
+        .as_str()
+        .expect("socketPath should be a string");
+    assert!(
+        socket_path.ends_with("wallet-node.sock"),
+        "unexpected socketPath: {socket_path}"
+    );
+    assert!(ready["httpAddr"].is_null(), "httpAddr should be null");
+    let token = ready["token"].as_str().expect("token should be a string");
+    assert_eq!(token.len(), 43, "token should be 43 chars");
+
+    ReadyEvent {
+        socket_path: PathBuf::from(socket_path),
+        token: token.to_owned(),
+    }
+}
+
+fn send_json_rpc(socket_path: &Path, token: &str, body: &Value) -> Value {
+    let body = serde_json::to_string(body).expect("serialize JSON-RPC body");
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: wallet-node.local\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len(),
+    );
+    let mut stream = UnixStream::connect(socket_path).unwrap_or_else(|error| {
+        panic!(
+            "connect to wallet-node Unix socket at {}: {error}",
+            socket_path.display()
+        )
+    });
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("set RPC read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .expect("set RPC write timeout");
+    stream
+        .write_all(request.as_bytes())
+        .expect("write authenticated JSON-RPC request");
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read JSON-RPC response");
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    let (_, response_body) = response
+        .split_once("\r\n\r\n")
+        .expect("HTTP response should have a body");
+    let value: Value = serde_json::from_str(response_body).expect("response body should be JSON");
+    assert!(value.get("error").is_none(), "{value}");
+    value
+}
+
+fn assert_secret_fd_inserted_active_bundler_account(socket_path: &Path) {
+    let db_path = socket_path
         .parent()
         .expect("socket path should have parent")
         .join("node.sqlite");

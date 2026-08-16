@@ -2,21 +2,48 @@ use wallet_node_store::{BundlerAccount, BundlerLifecycle};
 
 use crate::state::DaemonState;
 
+pub(crate) fn validate_managed_key_ref(
+    key_ref: &str,
+    chain_id: u64,
+) -> Result<(), wallet_node_api::JsonRpcError> {
+    let parsed = crate::bundler_keys::parse_canonical_key_ref(key_ref);
+    if parsed.is_ok_and(|parsed| {
+        parsed.owner_scope == wallet_node_store::DEFAULT_OWNER_SCOPE && parsed.chain_id == chain_id
+    }) {
+        return Ok(());
+    }
+    Err(wallet_node_api::JsonRpcError {
+        code: wallet_node_api::INVALID_REQUEST,
+        message: "Invalid bundler keyRef".to_string(),
+        data: Some(serde_json::json!({
+            "reason": "invalid_bundler_key_ref",
+            "keyRef": key_ref,
+        })),
+    })
+}
+
+#[cfg(test)]
 pub(crate) async fn ensure_active_bundler_account(
     state: &DaemonState,
 ) -> Result<BundlerAccount, wallet_node_api::JsonRpcError> {
-    maybe_activate_pending_funding(state).await?;
-    if let Some(active) = state
-        .store
-        .bundler_account_active_for_owner(
+    let _relayer_lifecycle_guard = state
+        .relayer_lifecycle_locks
+        .acquire(
             wallet_node_store::DEFAULT_OWNER_SCOPE,
             state.config.network.chain_id,
         )
-        .await
-        .map_err(|_| {
-            wallet_node_api::JsonRpcError::internal_with_reason("relayer_active_lookup_failed")
-        })?
-    {
+        .await;
+    ensure_active_bundler_account_locked(state).await
+}
+
+/// Resolves the active relayer while the caller holds the owner/chain lifecycle lock.
+/// Keeping this separate prevents a recursive acquisition when submission performs its
+/// final authority check under that same lock.
+#[cfg(test)]
+pub(crate) async fn ensure_active_bundler_account_locked(
+    state: &DaemonState,
+) -> Result<BundlerAccount, wallet_node_api::JsonRpcError> {
+    if let Some(active) = active_bundler_account_locked(state).await? {
         return Ok(active);
     }
 
@@ -41,6 +68,58 @@ pub(crate) async fn ensure_active_bundler_account(
     }
 
     create_bundler_account(state, BundlerLifecycle::Active).await
+}
+
+/// Resolves existing relayer authority without creating a new key or database row.
+/// Submission uses this fail-closed path so an unbound request cannot bootstrap
+/// daemon authority as a side effect of being rejected.
+pub(crate) async fn resolve_active_bundler_account(
+    state: &DaemonState,
+) -> Result<BundlerAccount, wallet_node_api::JsonRpcError> {
+    let _relayer_lifecycle_guard = state
+        .relayer_lifecycle_locks
+        .acquire(
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            state.config.network.chain_id,
+        )
+        .await;
+    resolve_active_bundler_account_locked(state).await
+}
+
+/// Non-creating active lookup for callers that already hold the owner/chain
+/// lifecycle lock. A funded pending candidate may be promoted atomically first.
+pub(crate) async fn resolve_active_bundler_account_locked(
+    state: &DaemonState,
+) -> Result<BundlerAccount, wallet_node_api::JsonRpcError> {
+    active_bundler_account_locked(state)
+        .await?
+        .ok_or_else(relayer_key_setup_required)
+}
+
+async fn active_bundler_account_locked(
+    state: &DaemonState,
+) -> Result<Option<BundlerAccount>, wallet_node_api::JsonRpcError> {
+    maybe_activate_pending_funding_locked(state).await?;
+    state
+        .store
+        .bundler_account_active_for_owner(
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            state.config.network.chain_id,
+        )
+        .await
+        .map_err(|_| {
+            wallet_node_api::JsonRpcError::internal_with_reason("relayer_active_lookup_failed")
+        })
+}
+
+fn relayer_key_setup_required() -> wallet_node_api::JsonRpcError {
+    wallet_node_api::JsonRpcError {
+        code: wallet_node_api::NOT_READY,
+        message: "Not ready: relayer_key_setup_required".to_string(),
+        data: Some(serde_json::json!({
+            "reason": "relayer_key_setup_required"
+        })),
+    }
 }
 
 pub(crate) async fn rotate_bundler_account(
@@ -83,7 +162,8 @@ async fn create_bundler_account(
         wallet_node_store::DEFAULT_OWNER_SCOPE,
         state.config.network.chain_id,
         accounts.iter().map(|account| account.key_ref.as_str()),
-    );
+    )
+    .map_err(map_key_error)?;
     let address = state
         .bundler_keys
         .create_key(&key_ref)
@@ -162,7 +242,20 @@ async fn create_bundler_account(
     Ok(account)
 }
 
-async fn maybe_activate_pending_funding(
+pub(crate) async fn maybe_activate_pending_funding(
+    state: &DaemonState,
+) -> Result<(), wallet_node_api::JsonRpcError> {
+    let _relayer_lifecycle_guard = state
+        .relayer_lifecycle_locks
+        .acquire(
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            state.config.network.chain_id,
+        )
+        .await;
+    maybe_activate_pending_funding_locked(state).await
+}
+
+async fn maybe_activate_pending_funding_locked(
     state: &DaemonState,
 ) -> Result<(), wallet_node_api::JsonRpcError> {
     let Some(pending) = state
@@ -260,12 +353,11 @@ pub(crate) async fn compromise_status(
     balance: alloy_primitives::U256,
     threshold: alloy_primitives::U256,
 ) -> Result<Option<String>, wallet_node_api::JsonRpcError> {
-    let compromised_key = compromise_meta_key(state.config.network.chain_id, &account.address);
-    if let Some(reason) = state.store.meta_get(&compromised_key).await.map_err(|_| {
-        wallet_node_api::JsonRpcError::internal_with_reason("relayer_compromise_meta_read_failed")
-    })? {
+    if let Some(reason) = recorded_compromise_status(state, account).await? {
         return Ok(Some(reason));
     }
+
+    let compromised_key = compromise_meta_key(state.config.network.chain_id, &account.address);
 
     let last_key = last_balance_meta_key(state.config.network.chain_id, &account.address);
     let previous = state
@@ -316,6 +408,19 @@ pub(crate) async fn compromise_status(
     Ok(None)
 }
 
+/// Returns a previously recorded compromise without requiring a live chain read.
+/// Once compromise is persisted it remains the highest-priority safety signal,
+/// including while the balance RPC is unavailable.
+pub(crate) async fn recorded_compromise_status(
+    state: &DaemonState,
+    account: &BundlerAccount,
+) -> Result<Option<String>, wallet_node_api::JsonRpcError> {
+    let compromised_key = compromise_meta_key(state.config.network.chain_id, &account.address);
+    state.store.meta_get(&compromised_key).await.map_err(|_| {
+        wallet_node_api::JsonRpcError::internal_with_reason("relayer_compromise_meta_read_failed")
+    })
+}
+
 fn last_balance_meta_key(chain_id: u64, address: &str) -> String {
     format!(
         "bundler_eoa_last_balance:{chain_id}:{}",
@@ -335,4 +440,159 @@ fn now_unix_seconds() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use wallet_chain::{BlockTag, MockChainAdapter};
+
+    use super::*;
+
+    async fn state_with_funded_pending() -> (DaemonState, Arc<MockChainAdapter>, String) {
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let active_address = "0x1111111111111111111111111111111111111111";
+        let pending_address = "0x2222222222222222222222222222222222222222";
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                active_address,
+                "bundler-eoa:default:1:1",
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                pending_address,
+                "bundler-eoa:default:1:2",
+                BundlerLifecycle::PendingFunding,
+            )
+            .await
+            .unwrap();
+        chain.set_balance(
+            pending_address.parse().unwrap(),
+            BlockTag::Latest,
+            bundler_threshold().unwrap(),
+        );
+        (state, chain, pending_address.to_string())
+    }
+
+    #[tokio::test]
+    async fn status_triggered_pending_activation_waits_for_lifecycle_lock() {
+        let (state, _chain, pending_address) = state_with_funded_pending().await;
+        let lifecycle_guard = state
+            .relayer_lifecycle_locks
+            .acquire(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await;
+        let task_state = state.clone();
+        let activation =
+            tokio::spawn(async move { maybe_activate_pending_funding(&task_state).await });
+
+        tokio::task::yield_now().await;
+        assert!(!activation.is_finished());
+        let active_before = state
+            .store
+            .bundler_account_active_for_owner(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(active_before.address, pending_address);
+        drop(lifecycle_guard);
+
+        tokio::time::timeout(Duration::from_secs(1), activation)
+            .await
+            .expect("activation should finish after the lifecycle lock is released")
+            .expect("activation task should not panic")
+            .unwrap();
+        let active_after = state
+            .store
+            .bundler_account_active_for_owner(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(active_after.address, pending_address);
+    }
+
+    #[tokio::test]
+    async fn locked_active_resolution_does_not_reacquire_lifecycle_lock() {
+        let (state, _chain, pending_address) = state_with_funded_pending().await;
+        let _lifecycle_guard = state
+            .relayer_lifecycle_locks
+            .acquire(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await;
+
+        let active = tokio::time::timeout(
+            Duration::from_secs(1),
+            ensure_active_bundler_account_locked(&state),
+        )
+        .await
+        .expect("locked resolver must not recursively acquire the lifecycle lock")
+        .unwrap();
+
+        assert_eq!(active.address, pending_address);
+    }
+
+    #[tokio::test]
+    async fn rotation_rejects_noncanonical_history_without_creating_candidate() {
+        let state = DaemonState::for_tests(Arc::new(MockChainAdapter::new()));
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                "0x1111111111111111111111111111111111111111",
+                "bundler-eoa:default:1:1",
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                "0x2222222222222222222222222222222222222222",
+                "bundler-eoa:default:1:01",
+                BundlerLifecycle::Retired,
+            )
+            .await
+            .unwrap();
+        let before = state
+            .store
+            .bundler_account_list_for_owner(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|account| (account.key_ref, account.address, account.lifecycle))
+            .collect::<Vec<_>>();
+        let _lifecycle_guard = state
+            .relayer_lifecycle_locks
+            .acquire(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await;
+
+        let error = rotate_bundler_account(&state).await.unwrap_err();
+
+        assert_eq!(error.data.unwrap()["reason"], "bundler_eoa_key_invalid");
+        let after = state
+            .store
+            .bundler_account_list_for_owner(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|account| (account.key_ref, account.address, account.lifecycle))
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        assert!(state
+            .bundler_keys
+            .address_for_key("bundler-eoa:default:1:2")
+            .is_err());
+    }
 }

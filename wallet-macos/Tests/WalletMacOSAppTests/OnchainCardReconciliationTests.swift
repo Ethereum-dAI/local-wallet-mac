@@ -102,6 +102,93 @@ private func freshChatStore() -> (ChatSQLiteStore, URL) {
     #expect(OnchainTransactionSummary.Status(historyStatus: .dropped) == .reverted)
 }
 
+@Test func submittedResponseStartsPendingAndHistoryBecomesCanonical() throws {
+    let original = try #require(ChatIntentExecutionStatus.fromToolResponse(
+        #"{"status":"submitted","user_op_hash":"0xAbC"}"#
+    ))
+    #expect(original == .onchain(
+        userOpHash: "0xAbC",
+        transactionHash: nil,
+        status: .pending
+    ))
+
+    let reconciled = original.reconciled(with: [
+        historyRecord(userOpHash: "0xaBc", status: .included, txHash: "0xTX")
+    ])
+    #expect(reconciled == .onchain(
+        userOpHash: "0xAbC",
+        transactionHash: "0xTX",
+        status: .included
+    ))
+}
+
+@Test func submittedResponseUsesReceiptOutcomeWhenAlreadyKnown() throws {
+    let included = try #require(ChatIntentExecutionStatus.fromToolResponse(
+        #"{"status":"submitted","user_op_hash":"0xABC","transaction_hash":"0xTX","success":true}"#
+    ))
+    #expect(included == .onchain(
+        userOpHash: "0xABC",
+        transactionHash: "0xTX",
+        status: .included
+    ))
+
+    let reverted = try #require(ChatIntentExecutionStatus.fromToolResponse(
+        #"{"status":"submitted","user_op_hash":"0xABC","transaction_hash":"0xTX","success":false}"#
+    ))
+    #expect(reverted == .onchain(
+        userOpHash: "0xABC",
+        transactionHash: "0xTX",
+        status: .reverted
+    ))
+}
+
+@Test func stalePendingHistoryCannotRegressTerminalStatus() {
+    let terminalCases: [OnchainTransactionSummary.Status] = [
+        .included,
+        .reverted,
+        .cancelled,
+    ]
+
+    for terminalStatus in terminalCases {
+        let current = ChatIntentExecutionStatus.onchain(
+            userOpHash: "0xAAA",
+            transactionHash: "0xTX",
+            status: terminalStatus
+        )
+        #expect(current.reconciled(with: [
+            historyRecord(userOpHash: "0xaaa", status: .pending, txHash: nil)
+        ]) == current)
+    }
+}
+
+@Test func everyHistoryLifecycleIsPreservedByIntentStatus() {
+    let original = ChatIntentExecutionStatus.onchain(
+        userOpHash: "0xABC",
+        transactionHash: nil,
+        status: .pending
+    )
+    let cases: [(WalletTransactionStatus, OnchainTransactionSummary.Status)] = [
+        (.pending, .pending),
+        (.included, .included),
+        (.reverted, .reverted),
+        (.cancelled, .cancelled),
+    ]
+
+    for (historyStatus, expectedStatus) in cases {
+        #expect(original.reconciled(with: [
+            historyRecord(
+                userOpHash: "0xabc",
+                status: historyStatus,
+                txHash: "0xTX"
+            )
+        ]) == .onchain(
+            userOpHash: "0xABC",
+            transactionHash: "0xTX",
+            status: expectedStatus
+        ))
+    }
+}
+
 @Test func decodeRoundTripsOnchainTransactionMessage() throws {
     let summary = submittedSummary(userOpHash: "0xAAA")
     let message = ChatMessage.onchainTransaction(summary)

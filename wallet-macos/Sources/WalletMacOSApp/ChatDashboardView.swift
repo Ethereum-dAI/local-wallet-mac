@@ -1,6 +1,33 @@
 import AppKit
 import Combine
+import LocalAuthentication
 import SwiftUI
+
+private final class WorkspaceObserverTokenBag: @unchecked Sendable {
+    private let center: NotificationCenter
+    private let lock = NSLock()
+    private var tokens: [NSObjectProtocol] = []
+
+    init(center: NotificationCenter) {
+        self.center = center
+    }
+
+    func append(_ token: NSObjectProtocol) {
+        lock.lock()
+        tokens.append(token)
+        lock.unlock()
+    }
+
+    deinit {
+        lock.lock()
+        let ownedTokens = tokens
+        tokens.removeAll()
+        lock.unlock()
+        for token in ownedTokens {
+            center.removeObserver(token)
+        }
+    }
+}
 import UniformTypeIdentifiers
 import WalletToolLayer
 
@@ -77,10 +104,67 @@ enum ChainIDFormatting {
     static func text(_ chainID: UInt64) -> String { String(chainID) }
 }
 
+/// Reconciles live app-owned relayer authority with the dashboard's cached display snapshot.
+/// A cached verified identity is never sufficient after AppModel clears or replaces authority.
+enum DashboardBundlerAuthorityPolicy {
+    static func authority(
+        migrationCandidate: LegacyRelayerMigrationCandidate?,
+        liveVerifiedIdentity: VerifiedRelayerIdentity?,
+        cachedVerifiedIdentity: VerifiedRelayerIdentity?,
+        fundingState: BundlerFundingState
+    ) -> BundlerAccountAuthorityState {
+        if let migrationCandidate {
+            return .legacyVerification(migrationCandidate)
+        }
+        guard let liveVerifiedIdentity,
+              cachedVerifiedIdentity == liveVerifiedIdentity else {
+            return .unavailable
+        }
+        return .verified(fundingState)
+    }
+}
+
+struct BundlerAccountCardPresentation: Equatable {
+    let address: String
+    let balance: String
+    let state: String
+    let showsDestinationActions: Bool
+
+    static func resolve(
+        authority: BundlerAccountAuthorityState,
+        address: String,
+        balance: String,
+        state: String
+    ) -> BundlerAccountCardPresentation {
+        switch authority {
+        case .verified:
+            return .init(
+                address: address,
+                balance: balance,
+                state: state,
+                showsDestinationActions: true
+            )
+        case .legacyVerification:
+            return .init(
+                address: "Not available",
+                balance: "Balance unavailable",
+                state: "Verification required",
+                showsDestinationActions: false
+            )
+        case .unavailable:
+            return .init(
+                address: "Not available",
+                balance: "Balance unavailable",
+                state: state,
+                showsDestinationActions: false
+            )
+        }
+    }
+}
+
 private struct ChatAccountIdentity: Equatable {
     let chainName: String
     let chainID: UInt64
-    let isTestnet: Bool
     let kernelAddress: String
     let kernelBalance: String
     let kernelState: String
@@ -93,22 +177,20 @@ private struct ChatAccountIdentity: Equatable {
 
     static func placeholder(
         chain: ChainConfiguration,
-        kernelAddress: String,
-        bundlerAddress: String
+        kernelAddress: String
     ) -> ChatAccountIdentity {
         ChatAccountIdentity(
             chainName: chain.name,
             chainID: chain.id,
-            isTestnet: chain.isTestnet,
             kernelAddress: kernelAddress,
             kernelBalance: "Balance unavailable",
             kernelState: "Not inspected",
-            bundlerAddress: bundlerAddress,
+            bundlerAddress: "Not available",
             bundlerBalance: "Balance unavailable",
             bundlerState: "Not checked",
             bundlerGas: BundlerGasStatus.from(
                 relayer: nil,
-                fallbackAddress: bundlerAddress,
+                verifiedIdentity: nil,
                 chain: chain
             )
         )
@@ -323,6 +405,15 @@ private enum ReplacementActionState: Equatable {
 }
 
 extension OnchainTransactionSummary.Status {
+    var isTerminal: Bool {
+        switch self {
+        case .included, .reverted, .cancelled:
+            return true
+        case .submitted, .pending:
+            return false
+        }
+    }
+
     init(historyStatus: WalletTransactionStatus) {
         switch historyStatus {
         case .included:
@@ -355,7 +446,7 @@ extension OnchainTransactionSummary {
         }
         let newStatus = OnchainTransactionSummary.Status(historyStatus: record.status)
         let recordSigningMode = signingModeFromDetailsJSON(record.detailsJSON)
-        if isTerminalStatus(status), !isTerminalStatus(newStatus) {
+        if status.isTerminal, !newStatus.isTerminal {
             return with(
                 status: status,
                 transactionHash: record.transactionHash ?? transactionHash,
@@ -391,10 +482,6 @@ extension OnchainTransactionSummary {
             status: status,
             createdAt: createdAt
         )
-    }
-
-    private func isTerminalStatus(_ status: Status) -> Bool {
-        status == .included || status == .reverted || status == .cancelled
     }
 }
 
@@ -440,7 +527,11 @@ func reconcileMessages(
 enum ChatIntentExecutionStatus: Equatable {
     case idle
     case running(String)
-    case submitted(userOpHash: String, transactionHash: String?, success: Bool?)
+    case onchain(
+        userOpHash: String,
+        transactionHash: String?,
+        status: OnchainTransactionSummary.Status
+    )
     case failed(String)
     /// Estimation could not run. Distinct from `.failed` because it is
     /// recoverable: the daemon told us what limit would work if the user
@@ -461,10 +552,20 @@ enum ChatIntentExecutionStatus: Equatable {
 
         switch status {
         case "submitted":
-            return .submitted(
+            let transactionHash = object["transaction_hash"] as? String
+            let lifecycleStatus: OnchainTransactionSummary.Status
+            switch object["success"] as? Bool {
+            case .some(true):
+                lifecycleStatus = .included
+            case .some(false):
+                lifecycleStatus = .reverted
+            case .none:
+                lifecycleStatus = transactionHash == nil ? .pending : .submitted
+            }
+            return .onchain(
                 userOpHash: object["user_op_hash"] as? String ?? "",
-                transactionHash: object["transaction_hash"] as? String,
-                success: object["success"] as? Bool
+                transactionHash: transactionHash,
+                status: lifecycleStatus
             )
         case "failed":
             return .failed(object["error"] as? String ?? "Transaction failed")
@@ -525,6 +626,27 @@ enum ChatIntentExecutionStatus: Equatable {
             return nil
         }
         return .prefundShortfall(report)
+    }
+
+    func reconciled(with records: [WalletTransactionRecord]) -> Self {
+        guard case let .onchain(userOpHash, transactionHash, currentStatus) = self,
+              !userOpHash.isEmpty,
+              let record = records.first(where: {
+                  $0.userOpHash.caseInsensitiveCompare(userOpHash) == .orderedSame
+              })
+        else {
+            return self
+        }
+
+        let historyStatus = OnchainTransactionSummary.Status(historyStatus: record.status)
+        let resolvedStatus = currentStatus.isTerminal && !historyStatus.isTerminal
+            ? currentStatus
+            : historyStatus
+        return .onchain(
+            userOpHash: userOpHash,
+            transactionHash: record.transactionHash ?? transactionHash,
+            status: resolvedStatus
+        )
     }
 }
 
@@ -603,6 +725,8 @@ private enum ChatIntentExecutionError: LocalizedError {
     case unsupportedSwapToken
     case unsupportedSwapAmount
     case sameSwapToken
+    case invalidBundlerTopUpAmount
+    case bundlerAddressUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -624,6 +748,10 @@ private enum ChatIntentExecutionError: LocalizedError {
             return "Only explicit decimal input amounts are executable for swaps right now."
         case .sameSwapToken:
             return "Choose two different tokens for a swap."
+        case .invalidBundlerTopUpAmount:
+            return "Enter a positive ETH amount."
+        case .bundlerAddressUnavailable:
+            return "The local bundler address is unavailable."
         }
     }
 }
@@ -709,13 +837,11 @@ private final class ChatDashboardModel: ObservableObject {
     @Published var walletHistoryMessage: String? = nil
     @Published var selectedHistoryUserOpHash: String? = nil
     @Published private(set) var kernelTokenBalances: [ChatTokenBalance] = []
-    @Published private(set) var bundlerTokenBalances: [ChatTokenBalance] = []
     @Published private(set) var isRefreshingTokenBalances = false
-    // Which helper EOA is mid gas-funding, so its card shows a spinner and disables its Send
-    // button; nil when idle. Plus the last funding error.
-    @Published private(set) var fundingHelperAddress: String?
-    @Published private(set) var helperFundError: String?
-    @Published private(set) var helperFundErrorAddress: String?
+    /// Set only when the exact live relay-cost preflight proves that a Kernel-funded top-up
+    /// cannot be relayed. The card then exposes only the external recovery actions.
+    @Published private(set) var bundlerExternalFundingRequirement:
+        BundlerExternalFundingRequirement?
     @Published private(set) var tokenBalanceMessage: String? = nil
     @Published private var transferPreflightStatuses: [UUID: ChatTransferPreflightStatus] = [:]
     @Published private var swapPreflightStatuses: [UUID: ChatSwapPreflightStatus] = [:]
@@ -728,6 +854,9 @@ private final class ChatDashboardModel: ObservableObject {
     private var gasWarmupTask: Task<Void, Never>?
     private var sessionActivityEventMonitor: Any?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
+    private let workspaceSecurityObservers = WorkspaceObserverTokenBag(
+        center: NSWorkspace.shared.notificationCenter
+    )
     private let inferenceService: EmbeddedLlamaInferenceService
     private let chatStore: ChatSQLiteStore
     private let walletHistoryStore: WalletTransactionHistoryStore
@@ -735,6 +864,9 @@ private final class ChatDashboardModel: ObservableObject {
     private let onboardingSettingsStore: OnboardingSettingsStore
     private let walletModel: AppModel
     private var executingIntentIDs: Set<UUID> = []
+    /// Immutable app-owned recipient reviewed for each bundler top-up. Retries reuse this exact
+    /// identity rather than whichever relayer happens to be current later.
+    @Published private var reviewedBundlerIdentities: [UUID: VerifiedRelayerIdentity] = [:]
     private var lastTokenBalanceKey: String?
     private var lastTokenBalanceAttemptKey: String?
     private var lastTokenBalanceAttemptAt: Date?
@@ -790,8 +922,7 @@ private final class ChatDashboardModel: ObservableObject {
         let kernelAddress = (try? metadataStore.load())?.kernelAccountAddress ?? "Not available"
         self.accountIdentity = ChatAccountIdentity.placeholder(
             chain: self.walletModel.activeChain,
-            kernelAddress: kernelAddress,
-            bundlerAddress: settingsStore.bundlerAddress(chainId: self.walletModel.activeChain.id) ?? "Not available"
+            kernelAddress: kernelAddress
         )
         preferencesStore.activeConversationID = self.activeConversationID
         walletModelCancellable = self.walletModel.objectWillChange.sink { [weak self] _ in
@@ -803,8 +934,24 @@ private final class ChatDashboardModel: ObservableObject {
                 self?.refreshTokenBalancesIfNeeded()
             }
         }
+        let workspaceNotifications = NSWorkspace.shared.notificationCenter
+        for name in [
+            NSWorkspace.sessionDidResignActiveNotification,
+            NSWorkspace.screensDidSleepNotification,
+        ] {
+            workspaceSecurityObservers.append(
+                workspaceNotifications.addObserver(
+                    forName: name,
+                    object: nil,
+                    queue: OperationQueue.main
+                ) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        await self?.walletModel.lockSecretRuntimesForSystemSession()
+                    }
+                }
+            )
+        }
         refreshAccountIdentity()
-        self.walletModel.bootstrap()
         // One warm-up, not a poll. The header pill would otherwise read "— gwei"
         // until first tapped; after this it is refreshed by the things that precede
         // looking at or acting on gas (tapping the pill, returning to the app).
@@ -844,7 +991,7 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     var gasPillText: String {
-        guard let price = walletModel.liveGasPrice else { return "— gwei" }
+        guard let price = walletModel.liveGasPrice else { return "Gas unavailable" }
         let headWei = walletModel.liveBaseFeeWei ?? price.standard.maxFeePerGas
         let head = GasPricing.gweiText(fromWei: headWei)
         let priority = GasPricing.gweiText(fromWei: price.standard.maxPriorityFeePerGas)
@@ -861,8 +1008,8 @@ private final class ChatDashboardModel: ObservableObject {
             GasTierRow(
                 id: id,
                 name: name,
-                maxFee: tier.map { GasPricing.gweiText(fromWei: $0.maxFeePerGas) } ?? "—",
-                priority: tier.map { GasPricing.gweiText(fromWei: $0.maxPriorityFeePerGas) } ?? "—"
+                maxFee: tier.map { GasPricing.gweiText(fromWei: $0.maxFeePerGas) } ?? "Unavailable",
+                priority: tier.map { GasPricing.gweiText(fromWei: $0.maxPriorityFeePerGas) } ?? "Unavailable"
             )
         }
         let baseFee = walletModel.liveBaseFeeWei.map { GasPricing.gweiText(fromWei: $0) }
@@ -896,8 +1043,8 @@ private final class ChatDashboardModel: ObservableObject {
                 row("fast", "Fast", price?.fast),
             ],
             policyTitle: "Applied userOp fee",
-            policyMaxFee: appliedFee.map { GasPricing.gweiText(fromWei: $0.maxFeePerGas) } ?? "—",
-            policyPriority: appliedFee.map { GasPricing.gweiText(fromWei: $0.maxPriorityFeePerGas) } ?? "—",
+            policyMaxFee: appliedFee.map { GasPricing.gweiText(fromWei: $0.maxFeePerGas) } ?? "Unavailable",
+            policyPriority: appliedFee.map { GasPricing.gweiText(fromWei: $0.maxPriorityFeePerGas) } ?? "Unavailable",
             modeText: mode,
             updatedText: updated
         )
@@ -939,7 +1086,7 @@ private final class ChatDashboardModel: ObservableObject {
             appDidBecomeActiveObserver = NotificationCenter.default.addObserver(
                 forName: NSApplication.didBecomeActiveNotification,
                 object: nil,
-                queue: .main
+                queue: OperationQueue.main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     self?.walletModel.handleAppBecameActive()
@@ -1071,9 +1218,8 @@ private final class ChatDashboardModel: ObservableObject {
             walletNodeLogPath: WalletNodeClient.Configuration.fromEnvironment() == nil
                 ? LocalWalletSettingsSnapshot.walletNodeLogPath()
                 : "External wallet-node; inspect that daemon's configured logs directory.",
-            unlockRelayerOnLaunch: walletModel.unlockRelayerOnLaunch,
-            walletKeyPolicy: "Secure Enclave P-256 key; local user presence required for signing.",
-            relayerKeyPolicy: "Keychain generic password protected by current biometric set.",
+            walletKeyPolicy: "Secure Enclave P-256 key; approve only when a wallet signature is required. In-policy session-key sends remain prompt-free.",
+            relayerKeyPolicy: "Keychain item protected by Touch ID or your Mac login password; locked until a transaction or relayer action needs it.",
             session: LocalWalletSessionSettingsSnapshot(
                 isEnabled: walletModel.sessionKeysEnabled,
                 configuredPolicy: walletModel.sessionPolicy,
@@ -1280,19 +1426,16 @@ private final class ChatDashboardModel: ObservableObject {
         }
         let chain = walletModel.activeChain
         let kernelAddress = walletModel.walletRecord?.kernelAccountAddress ?? accountIdentity.kernelAddress
-        let bundlerAddress = walletModel.localRelayerStatus?.eoa ?? accountIdentity.bundlerAddress
-        guard kernelAddress.hasPrefix("0x"), bundlerAddress.hasPrefix("0x") else {
+        guard kernelAddress.hasPrefix("0x") else {
             return
         }
         if !force,
-           accountIdentity.kernelBalance == "Balance unavailable"
-            || accountIdentity.bundlerBalance == "Balance unavailable" {
+           accountIdentity.kernelBalance == "Balance unavailable" {
             return
         }
 
-        let key = "\(chain.id):\(kernelAddress.lowercased()):\(bundlerAddress.lowercased())"
+        let key = "\(chain.id):\(kernelAddress.lowercased())"
         let hasIncompleteBalances = Self.hasIncompleteTokenBalances(kernelTokenBalances)
-            || Self.hasIncompleteTokenBalances(bundlerTokenBalances)
         if !force,
            let attemptKey = lastTokenBalanceAttemptKey,
            attemptKey == key,
@@ -1311,12 +1454,9 @@ private final class ChatDashboardModel: ObservableObject {
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            async let kernel = self.loadTokenBalances(address: kernelAddress, chain: chain)
-            async let bundler = self.loadTokenBalances(address: bundlerAddress, chain: chain)
-            let loaded = await (kernel, bundler)
-            self.kernelTokenBalances = loaded.0
-            self.bundlerTokenBalances = loaded.1
-            if Self.hasIncompleteTokenBalances(loaded.0) || Self.hasIncompleteTokenBalances(loaded.1) {
+            let loaded = await self.loadTokenBalances(address: kernelAddress, chain: chain)
+            self.kernelTokenBalances = loaded
+            if Self.hasIncompleteTokenBalances(loaded) {
                 self.lastTokenBalanceKey = nil
                 self.tokenBalanceMessage = "Some token balances are unavailable."
             } else {
@@ -1473,11 +1613,24 @@ private final class ChatDashboardModel: ObservableObject {
     }
 
     var executionStatusText: String {
-        hasExecutingIntent ? walletModel.bridgeStatus : runtimeStatus
+        walletModel.bridgeStatus
     }
 
     var isRefreshingAccountIdentity: Bool {
         walletModel.isRefreshingBalance || walletModel.isRefreshingLocalRelayer
+    }
+
+    var bundlerAccountAuthority: BundlerAccountAuthorityState {
+        DashboardBundlerAuthorityPolicy.authority(
+            migrationCandidate: walletModel.legacyRelayerMigrationCandidate,
+            liveVerifiedIdentity: walletModel.verifiedLocalRelayerIdentity,
+            cachedVerifiedIdentity: accountIdentity.bundlerGas.verifiedIdentity,
+            fundingState: accountIdentity.bundlerGas.fundingState
+        )
+    }
+
+    var isVerifyingLegacyRelayer: Bool {
+        walletModel.isVerifyingLegacyRelayer
     }
 
     func toggleThinking() {
@@ -1495,6 +1648,24 @@ private final class ChatDashboardModel: ObservableObject {
     func refreshOnchainAccountStatus() {
         walletModel.refreshOnchainAccountStatus()
         refreshTokenBalances(force: true)
+    }
+
+    func retryBundlerFundingStatus() {
+        refreshOnchainAccountStatus()
+    }
+
+    func verifyLegacyRelayer(
+        _ candidate: LegacyRelayerMigrationCandidate
+    ) async {
+        await walletModel.verifyLegacyRelayer(candidate)
+    }
+
+    func prepareBundlerTopUpDraft() {
+        inputText = BundlerTopUpUI.draft(existing: inputText)
+        NotificationCenter.default.post(
+            name: .chatComposerFocusRequested,
+            object: nil
+        )
     }
 
     func createNewChat() {
@@ -1588,6 +1759,14 @@ private final class ChatDashboardModel: ObservableObject {
             }
         }
 
+        if let intent = BundlerTopUpIntentParser.parse(prompt) {
+            appendMessage(
+                ChatMessage(kind: .toolIntent, role: .assistant, toolIntent: intent),
+                to: conversationID
+            )
+            return
+        }
+
         isGenerating = true
         streamingText = ""
         streamingMessageID = UUID()
@@ -1618,16 +1797,30 @@ private final class ChatDashboardModel: ObservableObject {
                         )
                         if let firstToolCall = response.toolCalls.first,
                            let tool = ToolIntent.Tool(rawValue: firstToolCall.name) {
-                            let intent = ToolIntent(
-                                tool: tool,
-                                args: firstToolCall.arguments,
-                                rawDSL: nil,
-                                source: .model
-                            )
-                            self.appendMessage(
-                                ChatMessage(kind: .toolIntent, role: .assistant, stats: stats, toolIntent: intent),
-                                to: conversationID
-                            )
+                            if tool == .topUpBundler,
+                               BundlerTopUpIntentValidator.validatedAmount(
+                                   from: firstToolCall.arguments
+                               ) == nil {
+                                self.appendMessage(
+                                    ChatMessage(
+                                        kind: .assistantError,
+                                        role: .assistant,
+                                        text: "The model returned an invalid bundler top-up. Enter a positive ETH amount and try again."
+                                    ),
+                                    to: conversationID
+                                )
+                            } else {
+                                let intent = ToolIntent(
+                                    tool: tool,
+                                    args: firstToolCall.arguments,
+                                    rawDSL: nil,
+                                    source: .model
+                                )
+                                self.appendMessage(
+                                    ChatMessage(kind: .toolIntent, role: .assistant, stats: stats, toolIntent: intent),
+                                    to: conversationID
+                                )
+                            }
                         } else if let firstToolCall = response.toolCalls.first {
                             let warning = "[warn] unknown tool: \(firstToolCall.name)\n\n\(response.response)"
                             self.appendMessage(.assistantText(warning, thinking: response.thinking, stats: stats), to: conversationID)
@@ -1766,11 +1959,25 @@ private final class ChatDashboardModel: ObservableObject {
                 break
             }
         }
+        let reviewedBundlerIdentity: VerifiedRelayerIdentity?
+        if let pendingIntent = message.toolIntent,
+           pendingIntent.tool == .topUpBundler {
+            guard let identity = reviewedBundlerIdentities[pendingIntent.id] else {
+                return
+            }
+            reviewedBundlerIdentity = identity
+        } else {
+            reviewedBundlerIdentity = nil
+        }
         if let intent = updateIntent(message, disposition: .confirmed, args: nil) {
+            if let reviewedBundlerIdentity {
+                reviewedBundlerIdentities[intent.id] = reviewedBundlerIdentity
+            }
             executeIfSupported(
                 intent,
                 transferPreflightStatus: transferPreflightStatus,
-                swapPreview: swapPreview
+                swapPreview: swapPreview,
+                expectedBundlerIdentity: reviewedBundlerIdentity
             )
         }
     }
@@ -1789,10 +1996,19 @@ private final class ChatDashboardModel: ObservableObject {
     /// (e.g. smaller-batch) attempt can only be raised, never trusted as-is.
     /// Do not "optimize" this into passing stale cached preflight state.
     func retryIntentWithGasHeadroom(_ intent: ToolIntent, callGasLimit: UInt64) {
-        Task { await executeIfSupported(intent, acknowledgedCallGasLimit: callGasLimit) }
+        Task {
+            executeIfSupported(
+                intent,
+                acknowledgedCallGasLimit: callGasLimit,
+                expectedBundlerIdentity: reviewedBundlerIdentities[intent.id]
+            )
+        }
     }
 
     func rejectIntent(_ message: ChatMessage) {
+        if let intentID = message.toolIntent?.id {
+            reviewedBundlerIdentities[intentID] = nil
+        }
         _ = updateIntent(message, disposition: .rejected, args: nil)
     }
 
@@ -1801,8 +2017,24 @@ private final class ChatDashboardModel: ObservableObject {
         if let intent = message.toolIntent, bundlerGasStatus(for: intent) != nil {
             return
         }
+        let reviewedBundlerIdentity: VerifiedRelayerIdentity?
+        if let pendingIntent = message.toolIntent,
+           pendingIntent.tool == .topUpBundler {
+            guard let identity = reviewedBundlerIdentities[pendingIntent.id] else {
+                return
+            }
+            reviewedBundlerIdentity = identity
+        } else {
+            reviewedBundlerIdentity = nil
+        }
         if let intent = updateIntent(message, disposition: .edited, args: args) {
-            executeIfSupported(intent)
+            if let reviewedBundlerIdentity {
+                reviewedBundlerIdentities[intent.id] = reviewedBundlerIdentity
+            }
+            executeIfSupported(
+                intent,
+                expectedBundlerIdentity: reviewedBundlerIdentity
+            )
         }
     }
 
@@ -1857,7 +2089,7 @@ private final class ChatDashboardModel: ObservableObject {
             else {
                 continue
             }
-            return status
+            return status.reconciled(with: walletHistoryRecords)
         }
 
         return .idle
@@ -1875,11 +2107,26 @@ private final class ChatDashboardModel: ObservableObject {
     /// stale cache falls through to the daemon's own refusal, translated by
     /// `BundlerGasStatus.friendlyMessage(for:status:)`.
     func bundlerGasStatus(for intent: ToolIntent) -> BundlerGasStatus? {
-        BundlerGasPolicy.block(
+        let status: BundlerGasStatus
+        if intent.tool == .topUpBundler {
+            status = BundlerGasStatus.from(
+                relayer: walletModel.localRelayerStatus,
+                verifiedIdentity: reviewedBundlerIdentities[intent.id],
+                chain: walletModel.activeChain
+            )
+        } else {
+            status = accountIdentity.bundlerGas
+        }
+        return BundlerGasPolicy.block(
             tool: intent.tool,
             disposition: intent.disposition,
-            status: accountIdentity.bundlerGas
+            status: status
         )
+    }
+
+    func reviewedBundlerAddress(for intent: ToolIntent) -> String? {
+        guard intent.tool == .topUpBundler else { return nil }
+        return reviewedBundlerIdentities[intent.id]?.address
     }
 
     func swapPreflightStatus(for intent: ToolIntent) -> ChatSwapPreflightStatus? {
@@ -1925,6 +2172,12 @@ private final class ChatDashboardModel: ObservableObject {
                 return nil
             }
             return chatSigningPreview(for: walletModel.sessionSigningPreview(for: transactionIntent))
+        case .topUpBundler:
+            return ChatSigningPreview(
+                mode: .passkey,
+                title: "Passkey required",
+                detail: "Bundler top-ups always require explicit owner approval."
+            )
         }
     }
 
@@ -1942,6 +2195,12 @@ private final class ChatDashboardModel: ObservableObject {
         // quote/resolve would surface a stale failure (e.g. "Swap quote failed"
         // or a Helios "Internal error") on a transaction that already executed.
         guard intent.disposition == .pending else {
+            return
+        }
+        if intent.tool == .topUpBundler {
+            if reviewedBundlerIdentities[intent.id] == nil {
+                reviewedBundlerIdentities[intent.id] = accountIdentity.bundlerGas.verifiedIdentity
+            }
             return
         }
         if intent.tool == .swap {
@@ -2584,18 +2843,10 @@ private final class ChatDashboardModel: ObservableObject {
         try await walletModel.exportLocalRelayerKey()
     }
 
-    func deleteLocalRelayerKeyFromSettings(unsafe: Bool) async throws -> String {
-        try await walletModel.deleteLocalRelayerKey(unsafeReset: unsafe)
+    func resetWalletFromSettings() async throws -> String {
+        try await walletModel.resetDemoWalletAuthorized()
         refreshAccountIdentity()
-        return unsafe
-            ? "Relayer key reset. Submissions stay blocked until a funded relayer exists."
-            : "Relayer key deleted. Submissions stay blocked until a funded relayer exists."
-    }
-
-    func resetWalletFromSettings() throws -> String {
-        walletModel.resetDemoWallet()
-        refreshAccountIdentity()
-        return "Wallet reset requested. Local wallet, relayer, and session keys were deleted; the app will create fresh key material."
+        return "Wallet reset complete. Local wallet, relayer, and session keys were deleted; fresh key material was created."
     }
 
     func debugSessionReportFromSettings() async -> String {
@@ -2604,11 +2855,6 @@ private final class ChatDashboardModel: ObservableObject {
 
     func clearDebugLogFromSettings() {
         walletModel.clearDebugLog()
-    }
-
-    func setUnlockRelayerOnLaunch(_ isEnabled: Bool) {
-        walletModel.setUnlockRelayerOnLaunch(isEnabled)
-        refreshAccountIdentity()
     }
 
     func setSwapSlippageBps(_ bps: UInt64) {
@@ -2644,33 +2890,38 @@ private final class ChatDashboardModel: ObservableObject {
     private func refreshAccountIdentity() {
         let chain = walletModel.activeChain
         let kernelAddress = walletModel.walletRecord?.kernelAccountAddress
-            ?? accountIdentity.kernelAddress
+            ?? "Not available"
         let kernelBalance = walletModel.accountInspection?.balanceDisplay ?? "Balance unavailable"
         let kernelState = walletModel.accountInspection?.stateTitle ?? "Not inspected"
-        let bundlerAddress = walletModel.localRelayerStatus?.eoa
-            ?? onboardingSettingsStore.bundlerAddress(chainId: chain.id)
-            ?? "Not available"
-        let bundlerBalance = Self.displayETHBalance(walletModel.localRelayerStatus?.balance)
+        let relayerStatus = walletModel.localRelayerStatus
         let bundlerGas = BundlerGasStatus.from(
-            relayer: walletModel.localRelayerStatus,
-            fallbackAddress: bundlerAddress,
+            relayer: relayerStatus,
+            verifiedIdentity: walletModel.verifiedLocalRelayerIdentity,
             chain: chain
         )
+        let bundlerAddress = bundlerGas.address ?? "Not available"
+        let bundlerBalance = bundlerGas.balance ?? "Balance unavailable"
         let bundlerState: String
-        if let status = walletModel.localRelayerStatus {
-            // "Out of gas — can't send" over "Needs top-up": under the threshold every send is
-            // refused, and the badge is the only place that says so before the user tries.
-            bundlerState = status.ready
-                ? "Ready"
-                : bundlerGas.needsGas ? bundlerGas.badgeText : status.lifecycle.capitalized
-        } else {
-            bundlerState = walletModel.localRelayerMessage
+        switch bundlerGas.fundingState {
+        case .checking:
+            bundlerState = "Checking"
+        case .unavailable:
+            bundlerState = "Identity unavailable"
+        case .externalRequired:
+            bundlerState = bundlerGas.badgeText
+        case .kernelTopUpCandidate, .healthy:
+            bundlerState = relayerStatus?.ready == true ? "Ready" : "Locked until needed"
         }
+
+        bindPendingBundlerTopUpsIfNeeded(to: bundlerGas.verifiedIdentity)
+        clearExternalFundingRequirementIfSatisfied(
+            verifiedIdentity: bundlerGas.verifiedIdentity,
+            observedBalanceWeiHex: relayerStatus?.balance
+        )
 
         accountIdentity = ChatAccountIdentity(
             chainName: chain.name,
             chainID: chain.id,
-            isTestnet: chain.isTestnet,
             kernelAddress: kernelAddress,
             kernelBalance: kernelBalance,
             kernelState: kernelState,
@@ -2679,6 +2930,41 @@ private final class ChatDashboardModel: ObservableObject {
             bundlerState: bundlerState,
             bundlerGas: bundlerGas
         )
+    }
+
+    /// A pending card created before the first verified relayer refresh has no
+    /// destination yet. Bind it exactly once after identity verification. Never
+    /// replace a non-nil reviewed identity, even if the daemon later rotates.
+    private func bindPendingBundlerTopUpsIfNeeded(
+        to identity: VerifiedRelayerIdentity?
+    ) {
+        guard let identity else { return }
+        for conversation in conversations {
+            for message in conversation.messages {
+                guard let intent = message.toolIntent,
+                      intent.tool == .topUpBundler,
+                      intent.disposition == .pending,
+                      reviewedBundlerIdentities[intent.id] == nil else {
+                    continue
+                }
+                reviewedBundlerIdentities[intent.id] = identity
+            }
+        }
+    }
+
+    private func clearExternalFundingRequirementIfSatisfied(
+        verifiedIdentity: VerifiedRelayerIdentity?,
+        observedBalanceWeiHex: String?
+    ) {
+        guard let requirement = bundlerExternalFundingRequirement,
+              BundlerExternalFundingRequirementPolicy.shouldClear(
+                  requirement,
+                  verifiedIdentity: verifiedIdentity,
+                  observedBalanceWeiHex: observedBalanceWeiHex
+              ) else {
+            return
+        }
+        bundlerExternalFundingRequirement = nil
     }
 
     private static func displayETHBalance(_ rawBalance: String?) -> String {
@@ -2810,140 +3096,24 @@ private final class ChatDashboardModel: ObservableObject {
         return intent
     }
 
-    /// Top up the bundler EOA with native ETH so it can pay gas. The ETH comes from the Kernel
-    /// account as a passkey-signed UserOp — the same primitive as a chat transfer. This only
-    /// works once the bundler already has enough gas to relay one op; when it's empty, its
-    /// card's copy-address button is the external fallback.
-    func fundHelper(address: String, amountETH: String, label: String) {
-        guard fundingHelperAddress == nil else { return }
-        let amount = amountETH.trimmingCharacters(in: .whitespaces)
-        guard address.hasPrefix("0x"), address.count == 42 else {
-            setHelperFundError("\(label) has no address to fund yet.", address: address)
-            return
-        }
-        guard let value = Double(amount), value > 0 else {
-            setHelperFundError("Enter an amount greater than 0 to fund \(label).", address: address)
-            return
-        }
-        // Every helper top-up is a UserOp the bundler has to relay — including one aimed at
-        // the bundler itself — so an out-of-gas bundler refuses all of them. Decline here
-        // rather than after a Secure Enclave prompt the daemon will reject anyway.
-        let gas = accountIdentity.bundlerGas
-        if gas.needsGas {
-            setHelperFundError("\(BundlerGasStatus.warningTitle). \(gas.declineDetail)", address: address)
-            return
-        }
-        fundingHelperAddress = address
-        helperFundError = nil
-        helperFundErrorAddress = nil
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.fundingHelperAddress = nil }
-            do {
-                let result = try await self.walletModel.executeNativeTransfer(
-                    recipient: address,
-                    amountETH: amount,
-                    logContext: "fund-helper",
-                    signingReason: "Authorize \(amount) ETH to the \(label) for gas on \(self.walletModel.activeChain.name)"
-                )
-                // Hold the funding lock until this op is actually mined. Two reasons:
-                // (1) balances only reflect it once it lands; (2) the shared lock stops a
-                // second helper-funding op building on a nonce this one hasn't consumed yet —
-                // that op would otherwise fail estimation with AA25 (invalid account nonce).
-                let receipt = await self.walletModel.awaitUserOperationInclusion(
-                    userOpHash: result.userOpHash,
-                    logContext: "fund-helper"
-                )
-                self.appendHelperFundingResult(result, receipt: receipt, amount: amount, address: address, label: label)
-                // Reflect the new gas balance on the card. refreshOnchainAccountStatus re-reads
-                // chain state (kernel + bundler balances, relayer status) — a plain
-                // refreshAccountIdentity only re-maps the stale cache.
-                self.refreshOnchainAccountStatus()
-            } catch {
-                // An empty bundler cannot relay its own top-up, so name the real blocker
-                // instead of the RPC reason string.
-                self.setHelperFundError(
-                    self.fundingFailureMessage(error, label: label),
-                    address: address
-                )
-                self.appendFundingError(error, label: label)
-            }
-        }
-    }
-
-    private func fundingFailureMessage(_ error: Error, label: String) -> String {
-        BundlerGasStatus.friendlyMessage(for: error, status: accountIdentity.bundlerGas)
-            ?? "Funding the \(label) failed: \(error.localizedDescription)"
-    }
-
-    private func setHelperFundError(_ message: String, address: String) {
-        helperFundError = message
-        helperFundErrorAddress = address
-    }
-
-    private func appendHelperFundingResult(
-        _ result: AppModel.UserOperationSendResult,
-        receipt: WalletNodeClient.UserOperationReceipt?,
-        amount: String,
-        address: String,
-        label: String
-    ) {
-        guard let conversationID = activeConversationIDIfPresent else { return }
-        let status: OnchainTransactionSummary.Status
-        if let receipt {
-            status = receipt.success ? .included : .reverted
-        } else if result.transactionHash != nil {
-            status = .submitted
-        } else {
-            status = .pending
-        }
-        let summary = OnchainTransactionSummary(
-            chainName: walletModel.activeChain.name,
-            chainID: walletModel.activeChain.id,
-            amount: amount,
-            token: "ETH",
-            recipient: address,
-            recipientName: "\(label) (gas)",
-            resolvedRecipient: nil,
-            resolutionChainName: nil,
-            resolutionChainID: nil,
-            ccipReadUsed: nil,
-            operation: .transfer,
-            signingMode: result.signedBySession ? "session" : "passkey",
-            amountOut: nil,
-            minimumReceived: nil,
-            route: nil,
-            userOpHash: result.userOpHash,
-            transactionHash: receipt?.txHash ?? result.transactionHash,
-            status: status,
-            createdAt: Date()
-        )
-        appendMessage(.onchainTransaction(summary), to: conversationID)
-        reloadWalletHistory()
-    }
-
-    private func appendFundingError(_ error: Error, label: String) {
-        guard let conversationID = activeConversationIDIfPresent else { return }
-        appendMessage(
-            ChatMessage(
-                kind: .assistantError,
-                role: .assistant,
-                text: fundingFailureMessage(error, label: label)
-            ),
-            to: conversationID
-        )
-    }
-
     private func executeIfSupported(
         _ intent: ToolIntent,
         transferPreflightStatus: ChatTransferPreflightStatus? = nil,
         swapPreview: ChatSwapPreview? = nil,
-        acknowledgedCallGasLimit: UInt64? = nil
+        acknowledgedCallGasLimit: UInt64? = nil,
+        expectedBundlerIdentity: VerifiedRelayerIdentity? = nil
     ) {
-        guard intent.tool == .transfer || intent.tool == .swap else {
+        guard intent.tool == .transfer || intent.tool == .swap
+            || intent.tool == .topUpBundler else {
             return
         }
+        guard !walletModel.isResettingWallet else { return }
         guard !executingIntentIDs.contains(intent.id) else {
+            return
+        }
+        guard let originatingConversationID = conversations.first(where: { conversation in
+            conversation.messages.contains { $0.toolIntent?.id == intent.id }
+        })?.id else {
             return
         }
         executingIntentIDs.insert(intent.id)
@@ -2984,7 +3154,12 @@ private final class ChatDashboardModel: ObservableObject {
                             acknowledgedCallGasLimit: acknowledgedCallGasLimit
                         )
                     }
-                    self.appendExecutionResult(result, for: intent, request: request)
+                    self.appendExecutionResult(
+                        result,
+                        for: intent,
+                        request: request,
+                        in: originatingConversationID
+                    )
                 case .swap:
                     let request = try await self.swapRequest(
                         from: intent,
@@ -3002,12 +3177,74 @@ private final class ChatDashboardModel: ObservableObject {
                         signingReason: "\(signingAction) on \(self.walletModel.activeChain.name)",
                         acknowledgedCallGasLimit: acknowledgedCallGasLimit
                     )
-                    self.appendSwapExecutionResult(result, for: intent, request: request)
+                    self.appendSwapExecutionResult(
+                        result,
+                        for: intent,
+                        request: request,
+                        in: originatingConversationID
+                    )
+                case .topUpBundler:
+                    let amount = try Self.requiredPositiveBundlerTopUpAmount(
+                        intent
+                    )
+                    guard let expectedBundlerIdentity else {
+                        throw ChatIntentExecutionError.bundlerAddressUnavailable
+                    }
+                    let result = try await self.walletModel.executeCurrentBundlerTopUp(
+                        expectedIdentity: expectedBundlerIdentity,
+                        amountETH: amount,
+                        logContext: "chat-bundler-top-up",
+                        signingReason: "Authorize \(amount) ETH to bundler \(expectedBundlerIdentity.address) on \(self.walletModel.activeChain.name)"
+                    )
+                    self.appendBundlerTopUpExecutionResult(
+                        intent: intent,
+                        recipient: result.recipient,
+                        result: result.sendResult,
+                        in: originatingConversationID
+                    )
                 }
             } catch {
-                self.appendExecutionError(error, for: intent)
+                if intent.tool == .topUpBundler {
+                    if let expectedBundlerIdentity {
+                        if case let AppError.bundlerRelayShortfall(report) = error {
+                            self.bundlerExternalFundingRequirement =
+                                BundlerExternalFundingRequirement(
+                                    identity: expectedBundlerIdentity,
+                                    requiredBalanceWeiHex: report.requiredBalanceWeiHex,
+                                    balanceAtFailureWeiHex: report.balanceWeiHex
+                                )
+                        } else if BundlerGasStatus.isNeedsTopupError(error) {
+                            let reportedThreshold = self.walletModel.localRelayerStatus?.thresholdLow
+                            let threshold = reportedThreshold.flatMap {
+                                BundlerFundingPolicy.quantity($0) == nil ? nil : $0
+                            } ?? BundlerFundingPolicy.minimumBalanceWeiHex
+                            self.bundlerExternalFundingRequirement =
+                                BundlerExternalFundingRequirement(
+                                    identity: expectedBundlerIdentity,
+                                    requiredBalanceWeiHex: threshold,
+                                    balanceAtFailureWeiHex:
+                                        self.walletModel.localRelayerStatus?.balance
+                                )
+                        }
+                    }
+                }
+                self.appendExecutionError(
+                    error,
+                    for: intent,
+                    in: originatingConversationID
+                )
             }
         }
+    }
+
+    private static func requiredPositiveBundlerTopUpAmount(
+        _ intent: ToolIntent
+    ) throws -> String {
+        guard let raw = BundlerTopUpIntentValidator.validatedAmount(from: intent),
+              (try? EtherAmountParser.units(fromDecimalString: raw, decimals: 18)) != nil else {
+            throw ChatIntentExecutionError.invalidBundlerTopUpAmount
+        }
+        return raw
     }
 
     private func transferRequest(
@@ -3149,12 +3386,9 @@ private final class ChatDashboardModel: ObservableObject {
     private func appendExecutionResult(
         _ result: AppModel.UserOperationSendResult,
         for intent: ToolIntent,
-        request: ChatTransferRequest
+        request: ChatTransferRequest,
+        in conversationID: UUID
     ) {
-        guard let conversationID = activeConversationIDIfPresent else {
-            return
-        }
-
         var responsePayload: [String: Any] = [
             "status": "submitted",
             "intent_id": intent.id.uuidString,
@@ -3195,7 +3429,7 @@ private final class ChatDashboardModel: ObservableObject {
         let summary = OnchainTransactionSummary(
             chainName: walletModel.activeChain.name,
             chainID: walletModel.activeChain.id,
-            amount: intent.args["amount"] ?? "—",
+            amount: intent.args["amount"] ?? "Not provided",
             token: resolvedTokenSymbol(for: intent),
             recipient: request.recipient,
             recipientName: request.recipientName,
@@ -3217,15 +3451,76 @@ private final class ChatDashboardModel: ObservableObject {
         reloadWalletHistory()
     }
 
+    private func appendBundlerTopUpExecutionResult(
+        intent: ToolIntent,
+        recipient: String,
+        result: AppModel.UserOperationSendResult,
+        in conversationID: UUID
+    ) {
+        var responsePayload: [String: Any] = [
+            "status": "submitted",
+            "intent_id": intent.id.uuidString,
+            "user_op_hash": result.userOpHash,
+            "signed_by": "passkey",
+            "recipient": recipient,
+        ]
+        if let transactionHash = result.transactionHash {
+            responsePayload["transaction_hash"] = transactionHash
+        }
+        if let success = result.success {
+            responsePayload["success"] = success
+        }
+        appendMessage(
+            ChatMessage(
+                kind: .toolResponse,
+                role: .tool,
+                text: jsonString(responsePayload),
+                toolCallId: intent.id.uuidString
+            ),
+            to: conversationID
+        )
+
+        let status: OnchainTransactionSummary.Status
+        if result.success == true {
+            status = .included
+        } else if result.success == false {
+            status = .reverted
+        } else if result.transactionHash != nil {
+            status = .submitted
+        } else {
+            status = .pending
+        }
+        let summary = OnchainTransactionSummary(
+            chainName: walletModel.activeChain.name,
+            chainID: walletModel.activeChain.id,
+            amount: intent.args["amount"] ?? "Not provided",
+            token: "ETH",
+            recipient: recipient,
+            recipientName: "Bundler (gas)",
+            resolvedRecipient: nil,
+            resolutionChainName: nil,
+            resolutionChainID: nil,
+            ccipReadUsed: nil,
+            operation: .transfer,
+            signingMode: "passkey",
+            amountOut: nil,
+            minimumReceived: nil,
+            route: nil,
+            userOpHash: result.userOpHash,
+            transactionHash: result.transactionHash,
+            status: status,
+            createdAt: Date()
+        )
+        appendMessage(.onchainTransaction(summary), to: conversationID)
+        reloadWalletHistory()
+    }
+
     private func appendSwapExecutionResult(
         _ result: AppModel.UserOperationSendResult,
         for intent: ToolIntent,
-        request: ChatSwapRequest
+        request: ChatSwapRequest,
+        in conversationID: UUID
     ) {
-        guard let conversationID = activeConversationIDIfPresent else {
-            return
-        }
-
         var responsePayload: [String: Any] = [
             "status": "submitted",
             "intent_id": intent.id.uuidString,
@@ -3321,8 +3616,17 @@ private final class ChatDashboardModel: ObservableObject {
         )?.symbol ?? intent.args["token"] ?? "ETH"
     }
 
-    private func appendExecutionError(_ error: Error, for intent: ToolIntent) {
-        guard let conversationID = activeConversationIDIfPresent else {
+    /// Append an execution failure to the conversation that originated the intent.
+    ///
+    /// The explicit conversation ID matters because an async wallet operation can finish after
+    /// the user switches chats. Falling back remains useful for synchronous callers that cannot
+    /// outlive the active conversation.
+    private func appendExecutionError(
+        _ error: Error,
+        for intent: ToolIntent,
+        in conversationID: UUID? = nil
+    ) {
+        guard let conversationID = conversationID ?? activeConversationIDIfPresent else {
             return
         }
 
@@ -3580,9 +3884,8 @@ private enum WalletHistoryFilter: String, CaseIterable, Identifiable {
 }
 
 struct LocalWalletChatDashboardView: View {
-    @StateObject private var model = ChatDashboardModel()
+    @StateObject private var model: ChatDashboardModel
     @State private var conversationPendingDeletion: ChatConversation?
-    @State private var isToolsPopoverPresented = false
     @State private var isGasPopoverPresented = false
     @State private var isSessionPopoverPresented = false
     @State private var isSessionActionInProgress = false
@@ -3594,6 +3897,10 @@ struct LocalWalletChatDashboardView: View {
     @State private var selectedSection: DashboardSection = .chat
     @State private var settingsInitialTab: LocalWalletSettingsTab = .info
     @State private var historyFilter: WalletHistoryFilter = .all
+
+    init(walletModel: AppModel) {
+        _model = StateObject(wrappedValue: ChatDashboardModel(walletModel: walletModel))
+    }
 
     private var filteredHistoryRecords: [WalletTransactionRecord] {
         model.walletHistoryRecords.filter(historyFilter.includes)
@@ -3932,11 +4239,8 @@ struct LocalWalletChatDashboardView: View {
             onExportRelayerKey: {
                 try await model.exportLocalRelayerKeyFromSettings()
             },
-            onDeleteRelayerKey: { unsafe in
-                try await model.deleteLocalRelayerKeyFromSettings(unsafe: unsafe)
-            },
             onResetWallet: {
-                try model.resetWalletFromSettings()
+                try await model.resetWalletFromSettings()
             },
             onEnableSessionKeys: {
                 try await model.enableSessionKeysFromSettings()
@@ -3952,9 +4256,6 @@ struct LocalWalletChatDashboardView: View {
             },
             onClearDebugLog: {
                 model.clearDebugLogFromSettings()
-            },
-            onSetUnlockRelayerOnLaunch: { isEnabled in
-                model.setUnlockRelayerOnLaunch(isEnabled)
             },
             onSetSwapSlippageBps: { bps in
                 model.setSwapSlippageBps(bps)
@@ -4018,7 +4319,7 @@ struct LocalWalletChatDashboardView: View {
                 HStack(alignment: .top, spacing: 12) {
                     // The Kernel account is where funds are received, so its address stays
                     // front and centre.
-                    AddressPill(
+                    KernelAccountCard(
                         icon: "lock.shield.fill",
                         title: "Kernel smart account",
                         address: model.accountIdentity.kernelAddress,
@@ -4030,28 +4331,21 @@ struct LocalWalletChatDashboardView: View {
                         explorerURL: explorerAddressURL(model.accountIdentity.kernelAddress)
                     )
                     .frame(maxWidth: .infinity, alignment: .topLeading)
-                    // The bundler is the wallet's one gas-paying helper EOA: lead with a Fund
-                    // action, not the address.
-                    FundableAccountCard(
+                    BundlerAccountCard(
                         icon: "key.fill",
                         title: "Bundler",
-                        subtitle: "Relays your account's transactions",
                         address: model.accountIdentity.bundlerAddress,
                         balance: model.accountIdentity.bundlerBalance,
                         state: model.accountIdentity.bundlerState,
-                        isFunding: model.fundingHelperAddress == model.accountIdentity.bundlerAddress,
-                        fundError: model.helperFundErrorAddress == model.accountIdentity.bundlerAddress ? model.helperFundError : nil,
-                        tokenBalances: model.bundlerTokenBalances,
-                        isRefreshingTokenBalances: model.isRefreshingTokenBalances,
-                        onRefreshTokenBalances: { model.refreshTokenBalances(force: true) },
                         explorerURL: explorerAddressURL(model.accountIdentity.bundlerAddress),
-                        gasWarning: model.accountIdentity.bundlerGas,
-                        onFund: { amount in
-                            model.fundHelper(
-                                address: model.accountIdentity.bundlerAddress,
-                                amountETH: amount,
-                                label: "bundler"
-                            )
+                        authority: model.bundlerAccountAuthority,
+                        forceExternalFunding: model.bundlerExternalFundingRequirement?.identity.address
+                            .caseInsensitiveCompare(model.accountIdentity.bundlerAddress) == .orderedSame,
+                        isVerifyingLegacyRelayer: model.isVerifyingLegacyRelayer,
+                        onRetry: { model.retryBundlerFundingStatus() },
+                        onPrefillTopUp: { model.prepareBundlerTopUpDraft() },
+                        onVerifyLegacyRelayer: { candidate in
+                            await model.verifyLegacyRelayer(candidate)
                         }
                     )
                     .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -4072,10 +4366,7 @@ struct LocalWalletChatDashboardView: View {
     }
 
     private var explorerBaseURL: URL {
-        if model.accountIdentity.chainID == 11_155_111 {
-            return URL(string: "https://sepolia.etherscan.io")!
-        }
-        return URL(string: "https://etherscan.io")!
+        URL(string: "https://sepolia.etherscan.io")!
     }
 
     @ViewBuilder
@@ -4119,6 +4410,9 @@ struct LocalWalletChatDashboardView: View {
                                             transferPreflightStatus: transferPreflightStatus,
                                             swapPreflightStatus: swapPreflightStatus,
                                             bundlerGasStatus: model.bundlerGasStatus(for: intent),
+                                            resolvedBundlerAddress: model.reviewedBundlerAddress(
+                                                for: intent
+                                            ),
                                             signingPreview: model.signingPreview(
                                                 for: intent,
                                                 transferPreflightStatus: transferPreflightStatus,
@@ -4134,7 +4428,8 @@ struct LocalWalletChatDashboardView: View {
                                             },
                                             onSubmitWithGasHeadroom: { suggested in
                                                 model.retryIntentWithGasHeadroom(intent, callGasLimit: suggested)
-                                            }
+                                            },
+                                            onRetryBundlerStatus: { model.retryBundlerFundingStatus() }
                                         )
                                         Spacer(minLength: 0)
                                     }
@@ -4413,14 +4708,6 @@ struct LocalWalletChatDashboardView: View {
     private var emptyState: some View {
         VStack(spacing: 18) {
             Spacer()
-            ZStack {
-                Circle()
-                    .fill(ChatPalette.avatar)
-                    .frame(width: 132, height: 132)
-                Image(systemName: "person.fill")
-                    .font(.system(size: 56, weight: .semibold))
-                    .foregroundStyle(ChatPalette.secondaryText)
-            }
             VStack(spacing: 6) {
                 Text(greeting)
                     .font(.system(size: 32, weight: .heavy))
@@ -4545,11 +4832,13 @@ struct LocalWalletChatDashboardView: View {
                 StatusPill(icon: model.thinkingEnabled ? "brain" : "brain.head.profile", text: model.thinkingEnabled ? "Thinking on" : "Thinking off")
             }
             .buttonStyle(.plain)
-            StatusPill(
-                icon: model.hasExecutingIntent ? "arrow.triangle.2.circlepath" : "slider.horizontal.3",
-                text: model.executionStatusText,
-                tint: model.hasExecutingIntent ? ChatPalette.accent : ChatPalette.secondaryText
-            )
+            if model.hasExecutingIntent {
+                StatusPill(
+                    icon: "arrow.triangle.2.circlepath",
+                    text: model.executionStatusText,
+                    tint: ChatPalette.accent
+                )
+            }
             Button {
                 isSessionPopoverPresented.toggle()
                 sessionPopoverMessage = nil
@@ -4595,30 +4884,6 @@ struct LocalWalletChatDashboardView: View {
                 GasBreakdownPopover(display: model.gasBreakdown)
             }
             .help("Current network gas price")
-            Button {
-                isToolsPopoverPresented.toggle()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "slash.circle.fill")
-                        .font(.system(size: 11, weight: .black))
-                        .foregroundStyle(ChatPalette.accent)
-                    Text("Tools")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(ChatPalette.secondaryText)
-                }
-                .padding(.horizontal, 11)
-                .frame(height: 32)
-                .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 0.8)))
-            }
-            .buttonStyle(.plain)
-            .popover(isPresented: $isToolsPopoverPresented, arrowEdge: .top) {
-                SlashCommandPalette { command in
-                    model.insertSlashCommand(command)
-                    isToolsPopoverPresented = false
-                }
-                .frame(width: 420)
-            }
-            .help("Browse slash commands")
             Spacer()
             Text(model.contextStatsText)
                 .font(.system(size: 12, weight: .bold))
@@ -4652,7 +4917,7 @@ struct LocalWalletChatDashboardView: View {
                 .disabled(model.isGenerating)
                     .frame(minHeight: 78, maxHeight: 96)
                 if model.inputText.isEmpty {
-                    Text("Message \(model.activeModelName) — describe what you want, or type / for tools")
+                    Text("Message \(model.activeModelName). Describe what you want, or type / for tools")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(ChatPalette.mutedText)
                         .padding(.horizontal, 17)
@@ -4945,21 +5210,21 @@ private struct ChainStatusStrip: View {
     var body: some View {
         Button(action: onToggle) {
             HStack(spacing: 10) {
-                Image(systemName: identity.isTestnet ? "testtube.2" : "network")
+                Image(systemName: "testtube.2")
                     .font(.system(size: 13, weight: .black))
-                    .foregroundStyle(identity.isTestnet ? ChatPalette.warning : ChatPalette.success)
+                    .foregroundStyle(ChatPalette.warning)
                 Text(identity.chainName)
                     .font(.system(size: 13, weight: .heavy))
                     .foregroundStyle(ChatPalette.primaryText)
                 Text("Chain \(ChainIDFormatting.text(identity.chainID))")
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .foregroundStyle(ChatPalette.secondaryText)
-                Text(identity.isTestnet ? "Testnet" : "Mainnet")
+                Text("Testnet")
                     .font(.system(size: 11, weight: .black))
-                    .foregroundStyle(identity.isTestnet ? ChatPalette.warning : ChatPalette.success)
+                    .foregroundStyle(ChatPalette.warning)
                     .padding(.horizontal, 8)
                     .frame(height: 22)
-                    .background(Capsule().fill((identity.isTestnet ? ChatPalette.warning : ChatPalette.success).opacity(0.12)))
+                    .background(Capsule().fill(ChatPalette.warning.opacity(0.12)))
 
                 Spacer(minLength: 0)
 
@@ -4989,24 +5254,41 @@ private struct ChainStatusStrip: View {
 
 }
 
-private struct AddressPill: View {
+private struct AccountSummaryCard<TrailingActions: View>: View {
     let icon: String
+    let iconTint: Color
     let title: String
     let address: String
     let balance: String
-    let state: String
-    let tokenBalances: [ChatTokenBalance]
-    let isRefreshingTokenBalances: Bool
-    let onRefreshTokenBalances: () -> Void
-    let explorerURL: URL?
-    @State private var copied = false
-    @State private var isTokenListPresented = false
+    let state: String?
+    let stateTint: Color
+    private let trailingActions: () -> TrailingActions
+
+    init(
+        icon: String,
+        iconTint: Color = ChatPalette.accent,
+        title: String,
+        address: String,
+        balance: String,
+        state: String?,
+        stateTint: Color,
+        @ViewBuilder trailingActions: @escaping () -> TrailingActions
+    ) {
+        self.icon = icon
+        self.iconTint = iconTint
+        self.title = title
+        self.address = address
+        self.balance = balance
+        self.state = state
+        self.stateTint = stateTint
+        self.trailingActions = trailingActions
+    }
 
     var body: some View {
         HStack(spacing: 11) {
             Image(systemName: icon)
                 .font(.system(size: 14, weight: .black))
-                .foregroundStyle(ChatPalette.accent)
+                .foregroundStyle(iconTint)
                 .frame(width: 34, height: 34)
                 .background(Circle().fill(ChatPalette.buttonCircle))
 
@@ -5015,7 +5297,7 @@ private struct AddressPill: View {
                     .font(.system(size: 10, weight: .black))
                     .foregroundStyle(ChatPalette.mutedText)
                     .textCase(.uppercase)
-                Text(shortAddress(address))
+                Text(accountShortAddress(address))
                     .font(.system(size: 14, weight: .heavy, design: .monospaced))
                     .foregroundStyle(ChatPalette.primaryText)
                     .lineLimit(1)
@@ -5025,75 +5307,21 @@ private struct AddressPill: View {
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(ChatPalette.secondaryText)
                         .lineLimit(1)
-                    Text(state)
-                        .font(.system(size: 10, weight: .black))
-                        .foregroundStyle(state.lowercased().contains("ready") || state.lowercased().contains("deployed") ? ChatPalette.success : ChatPalette.mutedText)
-                        .padding(.horizontal, 6)
-                        .frame(height: 18)
-                        .background(Capsule().fill(ChatPalette.buttonCircle.opacity(0.75)))
-                        .lineLimit(1)
+                    if let state {
+                        Text(state)
+                            .font(.system(size: 10, weight: .black))
+                            .foregroundStyle(stateTint)
+                            .padding(.horizontal, 6)
+                            .frame(height: 18)
+                            .background(Capsule().fill(ChatPalette.buttonCircle.opacity(0.75)))
+                            .lineLimit(1)
+                    }
                 }
             }
 
             Spacer(minLength: 0)
-
             HStack(spacing: 6) {
-                Button {
-                    if tokenBalances.isEmpty {
-                        onRefreshTokenBalances()
-                    }
-                    isTokenListPresented.toggle()
-                } label: {
-                    Group {
-                        if isRefreshingTokenBalances {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Image(systemName: "list.bullet.rectangle.portrait")
-                                .font(.system(size: 12, weight: .black))
-                                .foregroundStyle(ChatPalette.secondaryText)
-                        }
-                    }
-                    .frame(width: 28, height: 28)
-                    .background(Circle().fill(ChatPalette.buttonCircle))
-                }
-                .buttonStyle(.plain)
-                .disabled(!address.hasPrefix("0x"))
-                .help("Show token balances")
-                .popover(isPresented: $isTokenListPresented, arrowEdge: .bottom) {
-                    TokenBalancePopover(
-                        title: title,
-                        address: address,
-                        balances: tokenBalances,
-                        isRefreshing: isRefreshingTokenBalances,
-                        onRefresh: onRefreshTokenBalances
-                    )
-                }
-
-                Button {
-                    copy(address)
-                } label: {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 12, weight: .black))
-                        .foregroundStyle(copied ? ChatPalette.success : ChatPalette.secondaryText)
-                        .frame(width: 28, height: 28)
-                        .background(Circle().fill(ChatPalette.buttonCircle))
-                }
-                .buttonStyle(.plain)
-                .disabled(!address.hasPrefix("0x"))
-                .help(copied ? "Copied" : "Copy address")
-
-                if let explorerURL {
-                    Link(destination: explorerURL) {
-                        Image(systemName: "safari")
-                            .font(.system(size: 12, weight: .black))
-                            .foregroundStyle(ChatPalette.secondaryText)
-                            .frame(width: 28, height: 28)
-                            .background(Circle().fill(ChatPalette.buttonCircle))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Open in explorer")
-                }
+                trailingActions()
             }
         }
         .padding(.horizontal, 12)
@@ -5101,354 +5329,367 @@ private struct AddressPill: View {
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(ChatPalette.panel)
-                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(ChatPalette.border, lineWidth: 1))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(ChatPalette.border, lineWidth: 1)
+                )
         )
-    }
-
-    private func shortAddress(_ value: String) -> String {
-        guard value.hasPrefix("0x"), value.count > 18 else {
-            return value
-        }
-
-        let prefix = value.prefix(10)
-        let suffix = value.suffix(8)
-        return "\(prefix)...\(suffix)"
-    }
-
-    private func copy(_ value: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
-        withAnimation(.easeInOut(duration: 0.12)) {
-            copied = true
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
-            copied = false
-        }
     }
 }
 
-/// Account card for a gas-paying helper EOA — in practice the bundler, the only one the wallet
-/// has. Unlike `AddressPill`, it leads with the gas balance and a **Fund** action — the raw
-/// address is demoted to a copy button (the external-funding fallback the bundler needs when
-/// empty). "Send" moves ETH from the Kernel account as a passkey UserOp; see `fundHelper`.
-///
-/// When `gasWarning` says the bundler is under the daemon's threshold, the Fund control is
-/// replaced by the only route that can work — its address, a Copy button and (on testnets) a
-/// faucet link — because the empty bundler would have to relay its own top-up. `gasWarning`
-/// stays optional so a future helper without that self-funding trap can reuse the card.
-private struct FundableAccountCard: View {
+private struct KernelAccountCard: View {
     let icon: String
     let title: String
-    let subtitle: String
     let address: String
     let balance: String
     let state: String
-    let isFunding: Bool
-    let fundError: String?
     let tokenBalances: [ChatTokenBalance]
     let isRefreshingTokenBalances: Bool
     let onRefreshTokenBalances: () -> Void
     let explorerURL: URL?
-    var gasWarning: BundlerGasStatus?
-    let onFund: (String) -> Void
 
-    @State private var fundAmount = "0.02"
     @State private var copied = false
     @State private var isTokenListPresented = false
 
-    private var hasAddress: Bool { address.hasPrefix("0x") && address.count == 42 }
-    /// Out of gas by the daemon's own threshold — the in-app Fund control cannot work.
-    private var isOutOfGas: Bool { gasWarning?.needsGas == true }
-    private var needsFunding: Bool {
-        if isOutOfGas {
+    var body: some View {
+        AccountSummaryCard(
+            icon: icon,
+            title: title,
+            address: address,
+            balance: balance,
+            state: state,
+            stateTint: accountStateTint(state)
+        ) {
+            Button {
+                if tokenBalances.isEmpty {
+                    onRefreshTokenBalances()
+                }
+                isTokenListPresented.toggle()
+            } label: {
+                Group {
+                    if isRefreshingTokenBalances {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "list.bullet.rectangle.portrait")
+                            .font(.system(size: 12, weight: .black))
+                            .foregroundStyle(ChatPalette.secondaryText)
+                    }
+                }
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(ChatPalette.buttonCircle))
+            }
+            .buttonStyle(.plain)
+            .disabled(!hasAccountAddress(address))
+            .help("Show token balances")
+            .popover(isPresented: $isTokenListPresented, arrowEdge: .bottom) {
+                TokenBalancePopover(
+                    title: title,
+                    address: address,
+                    balances: tokenBalances,
+                    isRefreshing: isRefreshingTokenBalances,
+                    onRefresh: onRefreshTokenBalances
+                )
+            }
+
+            accountCopyButton(address: address, copied: $copied)
+
+            if let explorerURL {
+                accountExplorerLink(explorerURL)
+            }
+        }
+    }
+}
+
+private struct BundlerAccountCard: View {
+    let icon: String
+    let title: String
+    let address: String
+    let balance: String
+    let state: String
+    let explorerURL: URL?
+    let authority: BundlerAccountAuthorityState
+    let forceExternalFunding: Bool
+    let isVerifyingLegacyRelayer: Bool
+    let onRetry: () -> Void
+    let onPrefillTopUp: () -> Void
+    let onVerifyLegacyRelayer: (LegacyRelayerMigrationCandidate) async -> Void
+
+    @State private var copied = false
+    @State private var isRecoveryPresented = false
+
+    private var route: BundlerAccountActionRoute {
+        BundlerAccountActionPolicy.route(
+            authority: authority,
+            forceExternalFunding: forceExternalFunding
+        )
+    }
+
+    private var warningStyle: Bool {
+        route != .prefillTopUp
+    }
+
+    private var isLegacyVerificationRoute: Bool {
+        if case .verifyLegacyRelayer = route {
             return true
         }
-        let s = state.lowercased()
-        return s.contains("need") || s.contains("top")
+        return false
+    }
+
+    private var presentation: BundlerAccountCardPresentation {
+        BundlerAccountCardPresentation.resolve(
+            authority: authority,
+            address: address,
+            balance: balance,
+            state: state
+        )
+    }
+
+    private var showsVerificationProgress: Bool {
+        isLegacyVerificationRoute && isVerifyingLegacyRelayer
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 9) {
-                Image(systemName: icon)
-                    .font(.system(size: 13, weight: .black))
-                    .foregroundStyle(isOutOfGas ? ChatPalette.warning : ChatPalette.accent)
-                    .frame(width: 30, height: 30)
-                    .background(Circle().fill(ChatPalette.buttonCircle))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 10, weight: .black))
-                        .foregroundStyle(ChatPalette.mutedText)
-                        .textCase(.uppercase)
-                        .lineLimit(1)
-                    Text(balance)
-                        .font(.system(size: 18, weight: .heavy, design: .rounded))
-                        .foregroundStyle(isOutOfGas ? ChatPalette.warning : ChatPalette.primaryText)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.5)
-                }
-
-                Spacer(minLength: 4)
-
-                trailingIcons
-            }
-
-            stateBadge
-
-            if let gasWarning, isOutOfGas {
-                externalFundingControl(gasWarning)
-            } else {
-                fundControl
-            }
-
-            if let fundError {
-                Text(fundError)
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(ChatPalette.warning)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if isOutOfGas == false {
-                Text("Send from your Kernel account (passkey), or copy the address to fund externally.")
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(ChatPalette.mutedText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(ChatPalette.panel)
-                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(ChatPalette.border, lineWidth: 1))
-        )
-    }
-
-    private var trailingIcons: some View {
-        HStack(spacing: 5) {
-            // Out of gas, the external-funding block below carries a full Copy button; a
-            // second copy icon up here would just be the same action twice.
-            if isOutOfGas == false {
-                iconButton(systemName: copied ? "checkmark" : "doc.on.doc",
-                           tint: copied ? ChatPalette.success : ChatPalette.secondaryText,
-                           help: copied ? "Copied" : "Copy address to fund externally",
-                           disabled: !hasAddress) {
-                    copy(address)
-                }
-            }
-            if tokenBalances.isEmpty == false || isRefreshingTokenBalances {
-                tokenListButton
-            }
-            if let explorerURL {
-                Link(destination: explorerURL) {
-                    iconLabel(systemName: "safari", tint: ChatPalette.secondaryText)
-                }
-                .buttonStyle(.plain)
-                .help("Open in explorer")
-            }
-        }
-    }
-
-    private var stateBadge: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(needsFunding ? ChatPalette.warning : ChatPalette.success)
-                .frame(width: 6, height: 6)
-            Text(state)
-                .font(.system(size: 10, weight: .black))
-                .foregroundStyle(needsFunding ? ChatPalette.warning : ChatPalette.success)
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 9)
-        .frame(height: 20)
-        .background(
-            Capsule().fill((needsFunding ? ChatPalette.warning : ChatPalette.success).opacity(0.14))
-        )
-        .overlay(
-            Capsule().stroke((needsFunding ? ChatPalette.warning : ChatPalette.success).opacity(0.35), lineWidth: 1)
-        )
-    }
-
-    /// Shown instead of `fundControl` while the bundler is under the daemon's threshold: the
-    /// reason it can't be funded from inside the app, then the address and a faucet link.
-    private func externalFundingControl(_ gas: BundlerGasStatus) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 11, weight: .black))
-                    .foregroundStyle(ChatPalette.warning)
-                Text(gas.cardDetail)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(ChatPalette.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(ChatPalette.warning.opacity(0.10))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(ChatPalette.warning.opacity(0.30), lineWidth: 1)
-                    )
-            )
-
-            HStack(spacing: 8) {
-                Text(hasAddress ? address : "Address not available yet")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(ChatPalette.secondaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-                Spacer(minLength: 4)
-                Button {
-                    copy(address)
-                } label: {
-                    Text(copied ? "Copied" : "Copy")
-                        .font(.system(size: 11, weight: .heavy))
-                        .foregroundStyle(hasAddress ? Color.black.opacity(0.85) : ChatPalette.mutedText)
-                        .padding(.horizontal, 9)
-                        .frame(height: 24)
-                        .background(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(hasAddress ? ChatPalette.warning : ChatPalette.buttonCircle)
-                        )
-                }
-                .buttonStyle(.plain)
-                .disabled(!hasAddress)
-                .help("Copy the bundler address to fund it from another wallet")
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 34)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(ChatPalette.input)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .stroke(ChatPalette.border, style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
-                    )
-            )
-
-            if let faucetURL = gas.faucetURL {
-                Link(destination: faucetURL) {
-                    Text("Open \(gas.networkLabel) faucet")
-                        .font(.system(size: 10.5, weight: .heavy))
-                        .foregroundStyle(ChatPalette.accent)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
-
-    private var fundControl: some View {
-        HStack(spacing: 6) {
-            HStack(spacing: 4) {
-                Text("Fund")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(ChatPalette.mutedText)
-                TextField("0.02", text: $fundAmount)
-                    .textFieldStyle(.plain)
-                    .multilineTextAlignment(.trailing)
-                    .font(.system(size: 13, weight: .heavy, design: .monospaced))
-                    .foregroundStyle(ChatPalette.primaryText)
-                    .frame(maxWidth: .infinity)
-                    .disabled(isFunding)
-                Text("ETH")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(ChatPalette.mutedText)
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 32)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(ChatPalette.input)
-                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(ChatPalette.border, lineWidth: 1))
-            )
-
+        AccountSummaryCard(
+            icon: icon,
+            iconTint: warningStyle ? ChatPalette.warning : ChatPalette.accent,
+            title: title,
+            address: presentation.address,
+            balance: presentation.balance,
+            state: presentation.state,
+            stateTint: warningStyle ? ChatPalette.warning : accountStateTint(presentation.state)
+        ) {
             Button {
-                onFund(fundAmount)
+                switch route {
+                case .verifyLegacyRelayer(let candidate):
+                    Task { @MainActor in
+                        await onVerifyLegacyRelayer(candidate)
+                    }
+                case .prefillTopUp:
+                    onPrefillTopUp()
+                case .externalFunding, .retryStatus:
+                    isRecoveryPresented = true
+                }
             } label: {
                 HStack(spacing: 5) {
-                    if isFunding {
-                        ProgressView().controlSize(.small)
+                    if showsVerificationProgress {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white)
+                    } else {
+                        Image(systemName: primaryActionIcon)
                     }
-                    Text(isFunding ? "Sending" : "Send")
-                        .font(.system(size: 12, weight: .heavy))
-                    if !isFunding {
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 10, weight: .black))
-                    }
+                    Text(showsVerificationProgress ? "Verifying" : primaryActionTitle)
                 }
-                .foregroundStyle(hasAddress ? Color.white : ChatPalette.mutedText)
-                .padding(.horizontal, 11)
-                .frame(height: 32)
-                .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(hasAddress ? ChatPalette.accent : ChatPalette.buttonCircle)
-                )
+                    .font(.system(size: 11, weight: .heavy))
+                    .foregroundStyle(isLegacyVerificationRoute ? Color.white : ChatPalette.accent)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(
+                        Capsule()
+                            .fill(isLegacyVerificationRoute ? ChatPalette.accent : ChatPalette.buttonCircle)
+                            .overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1))
+                    )
             }
             .buttonStyle(.plain)
-            .fixedSize()
-            .disabled(!hasAddress || isFunding)
-            .help(hasAddress ? "Send ETH from your Kernel account for gas" : "Address not available yet")
-        }
-    }
+            .disabled(showsVerificationProgress)
+            .help(primaryActionHelp)
+            .accessibilityLabel(primaryActionAccessibilityLabel)
+            .accessibilityHint(primaryActionAccessibilityHint)
+            .popover(isPresented: $isRecoveryPresented, arrowEdge: .bottom) {
+                recoveryPopover
+            }
 
-    private var tokenListButton: some View {
-        Button {
-            if tokenBalances.isEmpty { onRefreshTokenBalances() }
-            isTokenListPresented.toggle()
-        } label: {
-            if isRefreshingTokenBalances {
-                ProgressView().controlSize(.small).frame(width: 26, height: 26)
-                    .background(Circle().fill(ChatPalette.buttonCircle))
-            } else {
-                iconLabel(systemName: "list.bullet.rectangle.portrait", tint: ChatPalette.secondaryText)
+            if presentation.showsDestinationActions {
+                accountCopyButton(address: presentation.address, copied: $copied)
+
+                if let explorerURL {
+                    accountExplorerLink(explorerURL)
+                }
             }
         }
-        .buttonStyle(.plain)
-        .disabled(!hasAddress)
-        .help("Show token balances")
-        .popover(isPresented: $isTokenListPresented, arrowEdge: .bottom) {
-            TokenBalancePopover(
-                title: title,
-                address: address,
-                balances: tokenBalances,
-                isRefreshing: isRefreshingTokenBalances,
-                onRefresh: onRefreshTokenBalances
+    }
+
+    private var primaryActionTitle: String {
+        switch route {
+        case .verifyLegacyRelayer:
+            return "Verify bundler"
+        case .prefillTopUp, .externalFunding:
+            return "Top up"
+        case .retryStatus:
+            return "Retry"
+        }
+    }
+
+    private var primaryActionIcon: String {
+        switch route {
+        case .verifyLegacyRelayer:
+            return "checkmark.shield.fill"
+        case .prefillTopUp, .externalFunding:
+            return "plus.circle.fill"
+        case .retryStatus:
+            return "arrow.clockwise"
+        }
+    }
+
+    private var primaryActionHelp: String {
+        switch route {
+        case .verifyLegacyRelayer:
+            return "Verify the existing local bundler key once."
+        case .prefillTopUp:
+            return "Prepare a reviewed bundler top-up"
+        case .externalFunding, .retryStatus:
+            return "Show bundler funding options"
+        }
+    }
+
+    private var primaryActionAccessibilityLabel: String {
+        switch route {
+        case .verifyLegacyRelayer:
+            return "Verify bundler"
+        case .prefillTopUp, .externalFunding:
+            return "Top up bundler"
+        case .retryStatus:
+            return "Retry bundler status"
+        }
+    }
+
+    private var primaryActionAccessibilityHint: String {
+        switch route {
+        case .verifyLegacyRelayer:
+            return "Verify the existing local bundler key once."
+        case .prefillTopUp:
+            return "Prefills a message for review"
+        case .externalFunding:
+            return "Shows external funding options"
+        case .retryStatus:
+            return "Checks whether the bundler identity and balance are available"
+        }
+    }
+
+    private var recoveryPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(recoveryTitle)
+                .font(.system(size: 13, weight: .heavy))
+                .foregroundStyle(ChatPalette.primaryText)
+            Text(recoveryDetail)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(ChatPalette.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if route == .retryStatus {
+                Button("Retry balance check", action: onRetry)
+                    .buttonStyle(.bordered)
+            }
+
+            if route == .externalFunding, hasAccountAddress(presentation.address) {
+                BundlerExternalFundingActions(
+                    address: presentation.address,
+                    faucetURL: BundlerFundingPolicy.sepoliaFaucetURL,
+                    accent: ChatPalette.accent,
+                    secondaryText: ChatPalette.secondaryText,
+                    inputBackground: ChatPalette.input,
+                    border: ChatPalette.border,
+                    compact: true
+                )
+            }
+        }
+        .padding(14)
+        .frame(width: 390, alignment: .leading)
+        .background(ChatPalette.panel)
+    }
+
+    private var recoveryTitle: String {
+        switch route {
+        case .verifyLegacyRelayer:
+            return "Bundler verification required"
+        case .prefillTopUp:
+            return "Bundler ready"
+        case .externalFunding:
+            return "Fund the bundler externally"
+        case .retryStatus:
+            return "Bundler balance unavailable"
+        }
+    }
+
+    private var recoveryDetail: String {
+        switch route {
+        case .verifyLegacyRelayer:
+            return "Verify the existing local bundler key once."
+        case .prefillTopUp:
+            return "The bundler can relay a reviewed Kernel-funded top-up."
+        case .externalFunding:
+            return "Use another wallet or the Sepolia faucet before retrying."
+        case .retryStatus:
+            return "Retry the status check. Funding actions stay hidden until the app verifies the bundler identity."
+        }
+    }
+}
+
+@MainActor
+@ViewBuilder
+private func accountCopyButton(
+    address: String,
+    copied: Binding<Bool>
+) -> some View {
+    Button {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(address, forType: .string)
+        withAnimation(.easeInOut(duration: 0.12)) {
+            copied.wrappedValue = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
+            copied.wrappedValue = false
+        }
+    } label: {
+        Image(systemName: copied.wrappedValue ? "checkmark" : "doc.on.doc")
+            .font(.system(size: 12, weight: .black))
+            .foregroundStyle(
+                copied.wrappedValue ? ChatPalette.success : ChatPalette.secondaryText
             )
-        }
-    }
-
-    private func iconButton(
-        systemName: String,
-        tint: Color,
-        help: String,
-        disabled: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            iconLabel(systemName: systemName, tint: tint)
-        }
-        .buttonStyle(.plain)
-        .disabled(disabled)
-        .help(help)
-    }
-
-    private func iconLabel(systemName: String, tint: Color) -> some View {
-        Image(systemName: systemName)
-            .font(.system(size: 11, weight: .black))
-            .foregroundStyle(tint)
-            .frame(width: 26, height: 26)
+            .frame(width: 28, height: 28)
             .background(Circle().fill(ChatPalette.buttonCircle))
     }
+    .buttonStyle(.plain)
+    .disabled(!hasAccountAddress(address))
+    .help(copied.wrappedValue ? "Copied" : "Copy address")
+}
 
-    private func copy(_ value: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
-        withAnimation(.easeInOut(duration: 0.12)) { copied = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { copied = false }
+@MainActor
+@ViewBuilder
+private func accountExplorerLink(_ url: URL) -> some View {
+    Link(destination: url) {
+        Image(systemName: "safari")
+            .font(.system(size: 12, weight: .black))
+            .foregroundStyle(ChatPalette.secondaryText)
+            .frame(width: 28, height: 28)
+            .background(Circle().fill(ChatPalette.buttonCircle))
     }
+    .buttonStyle(.plain)
+    .help("Open in explorer")
+}
+
+private func accountStateTint(_ state: String) -> Color {
+    let normalized = state.lowercased()
+    return normalized.contains("ready") || normalized.contains("deployed")
+        ? ChatPalette.success
+        : ChatPalette.mutedText
+}
+
+private func hasAccountAddress(_ value: String) -> Bool {
+    guard value.hasPrefix("0x"), value.count == 42 else {
+        return false
+    }
+    return value.dropFirst(2).unicodeScalars.allSatisfy { scalar in
+        (48...57).contains(scalar.value) || (65...70).contains(scalar.value)
+            || (97...102).contains(scalar.value)
+    }
+}
+
+private func accountShortAddress(_ value: String) -> String {
+    guard value.hasPrefix("0x"), value.count > 18 else {
+        return value
+    }
+    return "\(value.prefix(10))...\(value.suffix(8))"
 }
 
 private struct TokenBalancePopover: View {
@@ -6115,11 +6356,13 @@ private extension WalletTransactionRecord {
     }
 
     var transactionExplorerURL: URL? {
-        guard let transactionHash, transactionHash.hasPrefix("0x") else {
+        guard chainID == 11_155_111,
+              let transactionHash,
+              transactionHash.hasPrefix("0x")
+        else {
             return nil
         }
-        let host = chainID == 11_155_111 ? "https://sepolia.etherscan.io" : "https://etherscan.io"
-        return URL(string: "\(host)/tx/\(transactionHash)")
+        return URL(string: "https://sepolia.etherscan.io/tx/\(transactionHash)")
     }
 }
 
@@ -6462,11 +6705,10 @@ private struct OnchainTransactionCard: View {
     }
 
     private func explorerTransactionURL(_ hash: String) -> URL? {
-        guard hash.hasPrefix("0x") else {
+        guard summary.chainID == 11_155_111, hash.hasPrefix("0x") else {
             return nil
         }
-        let host = summary.chainID == 11_155_111 ? "https://sepolia.etherscan.io" : "https://etherscan.io"
-        return URL(string: "\(host)/tx/\(hash)")
+        return URL(string: "https://sepolia.etherscan.io/tx/\(hash)")
     }
 }
 
@@ -6826,7 +7068,7 @@ private struct ChatBubble: View {
         var pieces: [String] = [message.text ?? ""]
         if let stats = message.stats {
             pieces.append("")
-            pieces.append("— \(stats.formattedSummary)")
+            pieces.append("- \(stats.formattedSummary)")
         }
         ChatClipboard.copy(pieces.joined(separator: "\n"))
         flashCopied()
@@ -6952,74 +7194,6 @@ private struct SlashSuggestionRowStyle: ButtonStyle {
                     ? ChatPalette.selectedPanel.opacity(0.8)
                     : Color.clear
             )
-    }
-}
-
-private struct SlashCommandPalette: View {
-    let onSelect: (SlashCommand) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "slash.circle.fill")
-                    .font(.system(size: 13, weight: .black))
-                    .foregroundStyle(ChatPalette.accent)
-                Text("Slash commands")
-                    .font(.system(size: 13, weight: .heavy))
-                    .foregroundStyle(ChatPalette.primaryText)
-                Spacer()
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 12)
-            .padding(.bottom, 6)
-
-            Text("Click a command to insert a ready-to-edit scaffold into the composer. Replace the placeholders (in <angle brackets>) with your values.")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(ChatPalette.mutedText)
-                .padding(.horizontal, 14)
-                .padding(.bottom, 8)
-
-            Rectangle()
-                .fill(ChatPalette.border.opacity(0.4))
-                .frame(height: 0.5)
-
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(SlashCatalog.all.enumerated()), id: \.element.id) { index, command in
-                    Button {
-                        onSelect(command)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 8) {
-                                Text(command.displayName)
-                                    .font(.system(size: 13, weight: .heavy, design: .monospaced))
-                                    .foregroundStyle(ChatPalette.accent)
-                                Text(command.signature)
-                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                    .foregroundStyle(ChatPalette.mutedText)
-                                Spacer(minLength: 0)
-                            }
-                            Text(command.summary)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(ChatPalette.secondaryText)
-                                .multilineTextAlignment(.leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(SlashSuggestionRowStyle())
-
-                    if index < SlashCatalog.all.count - 1 {
-                        Rectangle()
-                            .fill(ChatPalette.border.opacity(0.4))
-                            .frame(height: 0.5)
-                    }
-                }
-            }
-        }
-        .padding(.bottom, 6)
     }
 }
 
@@ -7369,7 +7543,7 @@ private struct ContextUsageBanner: View {
         case .warning:
             return "Used \(used) of \(total) tokens (\(percent)%). A fresh chat keeps responses crisp."
         case .critical:
-            return "Used \(used) of \(total) tokens (\(percent)%). \(modelName) may start truncating earlier turns — start a new chat."
+            return "Used \(used) of \(total) tokens (\(percent)%). \(modelName) may start truncating earlier turns. Start a new chat."
         }
     }
 

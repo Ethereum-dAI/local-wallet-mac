@@ -8,12 +8,6 @@ buildDraft`. Everything else is excluded and counted:
   - 0 expected_calls: refusal / ablation cases (gold is "no call")
   - 1 expected_call, tool == "executeTx": aave-*/safe-* categories (the app
     registers no tool for these at all, so gold falls back to executeTx)
-  - 1 expected_call, tool in {shield, unshield}: railgun-* cases. NOTE: six of
-    these (ids railgun-shield-mt-0001/0002, railgun-unshield-mt-0003..0006)
-    are mislabeled under category "multiturn-amount"/"multiturn-to" in the
-    source YAML, not "railgun-*" — filtering on category alone would have
-    silently let them through. This script filters on the gold tool name in
-    expected_calls, not on category, specifically to avoid that trap.
   - anything else (0 or >1 calls with an unrecognized shape): reported as
     "unclassified" rather than silently dropped or force-counted.
 
@@ -71,8 +65,6 @@ def classify(case: dict) -> str:
         return "abstain"
     if len(calls) == 1 and calls[0]["tool"] == "executeTx":
         return "excluded-executeTx"
-    if len(calls) == 1 and calls[0]["tool"] in ("shield", "unshield"):
-        return "excluded-railgun"
     return "unclassified"
 
 
@@ -107,7 +99,7 @@ def main() -> None:
           f"({len(eligible)} call, {len(abstain)} abstain)")
     print()
     print("breakdown:")
-    for reason in ("eligible", "abstain", "excluded-executeTx", "excluded-railgun", "unclassified"):
+    for reason in ("eligible", "abstain", "excluded-executeTx", "unclassified"):
         cases = buckets.get(reason, [])
         if not cases:
             continue

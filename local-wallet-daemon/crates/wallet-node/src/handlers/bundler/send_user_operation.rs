@@ -1,13 +1,22 @@
 use alloy_primitives::{Address, U256};
+use serde::Deserialize;
 use serde_json::Value;
 use wallet_bundler::{PolicyMode, UserOperation};
 use wallet_chain::BlockTag;
 use wallet_node_store::{
-    NonceStatus, SubmittedTransaction, SubmittedTxStatus, UserOpInsertOutcome, UserOpStatus,
+    SubmittedTransaction, SubmittedTxStatus, UserOpInsertOutcome, UserOpStatus,
     UserOperation as StoredUserOperation,
 };
 
 use crate::state::DaemonState;
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExpectedRelayerIdentity {
+    chain_id: u64,
+    key_ref: String,
+    address: String,
+}
 
 pub async fn handle(
     state: &DaemonState,
@@ -22,6 +31,7 @@ pub async fn handle(
     )
     .map_err(super::map_bundler_error)?;
     let entry_point = super::parse_entry_point(&params)?;
+    let expected_relayer = parse_expected_relayer_identity(&params, state.config.network.chain_id)?;
     let policy = super::policy_from_state(state)?;
     wallet_bundler::validate_user_operation(
         &policy,
@@ -31,12 +41,21 @@ pub async fn handle(
         PolicyMode::Submit,
     )
     .map_err(super::map_policy_error)?;
+    wallet_bundler::validate_finalized_user_operation_gas(&policy, &op)
+        .map_err(super::map_policy_error)?;
 
     let hash = super::hex_hash(
         op.user_op_hash(entry_point, state.config.network.chain_id)
             .map_err(super::map_bundler_error)?,
     );
 
+    let active_bundler =
+        crate::handlers::wallet::bundler_account::resolve_active_bundler_account(state).await?;
+    let active_bundler_address = active_bundler
+        .address
+        .parse()
+        .map_err(|_| internal("relayer_address_invalid"))?;
+    ensure_expected_active_relayer(&expected_relayer, &active_bundler, active_bundler_address)?;
     if let Some(existing) = state
         .store
         .user_op_get(&hash)
@@ -44,17 +63,11 @@ pub async fn handle(
         .map_err(|_| internal("user_operation_lookup_failed"))?
     {
         if existing.status != UserOpStatus::Failed {
+            ensure_existing_submission_bound_to_expected(state, &hash, &expected_relayer).await?;
             return Ok(Value::String(hash));
         }
     }
-
     enforce_per_sender_quota(state, &op)?;
-    let active_bundler =
-        crate::handlers::wallet::bundler_account::ensure_active_bundler_account(state).await?;
-    let active_bundler_address = active_bundler
-        .address
-        .parse()
-        .map_err(|_| internal("relayer_address_invalid"))?;
 
     if !state.chain.is_synced().await {
         return Err(super::map_bundler_error(
@@ -108,11 +121,11 @@ pub async fn handle(
     persist_sign_and_submit(
         state,
         &active_bundler,
-        active_bundler_address,
         entry_point,
         &op,
         &hash,
         head.number,
+        &expected_relayer,
     )
     .await?;
 
@@ -122,12 +135,16 @@ pub async fn handle(
 async fn persist_sign_and_submit(
     state: &DaemonState,
     active_bundler: &wallet_node_store::BundlerAccount,
-    active_bundler_address: Address,
     entry_point: Address,
     op: &UserOperation,
     user_op_hash: &str,
     submitted_at_block: u64,
+    expected_relayer: &ExpectedRelayerIdentity,
 ) -> Result<(), wallet_node_api::JsonRpcError> {
+    let active_bundler_address = active_bundler
+        .address
+        .parse()
+        .map_err(|_| internal("relayer_address_invalid"))?;
     let confirmed_nonce = state
         .chain
         .eth_get_transaction_count(active_bundler_address, BlockTag::Latest)
@@ -148,12 +165,20 @@ async fn persist_sign_and_submit(
         .map_err(|_| internal("user_operation_lookup_failed"))?
     {
         if existing.status != UserOpStatus::Failed {
+            ensure_existing_submission_bound_to_expected(state, user_op_hash, expected_relayer)
+                .await?;
             drop(relayer_lifecycle_guard);
             return Ok(());
         }
     }
     let current_active =
-        crate::handlers::wallet::bundler_account::ensure_active_bundler_account(state).await?;
+        crate::handlers::wallet::bundler_account::resolve_active_bundler_account_locked(state)
+            .await?;
+    let current_active_address = current_active
+        .address
+        .parse()
+        .map_err(|_| internal("relayer_address_invalid"))?;
+    ensure_expected_active_relayer(expected_relayer, &current_active, current_active_address)?;
     if current_active.address != active_bundler.address
         || current_active.key_ref != active_bundler.key_ref
     {
@@ -162,43 +187,61 @@ async fn persist_sign_and_submit(
     }
     let bundler_nonce = state
         .store
-        .reserve_next_nonce(
+        .reserve_next_nonce_for_user_op(
             state.config.network.chain_id,
             &active_bundler.address,
             confirmed_nonce,
+            user_op_hash,
         )
         .await
         .map_err(|error| internal_detail("nonce_reservation_failed", error))?;
-    let gas_limit = handle_ops_gas_limit(op)?;
-    let tx = wallet_bundler::build_handle_ops_tx_request(
-        state.config.network.chain_id,
-        bundler_nonce,
-        entry_point,
-        active_bundler_address,
-        op,
-        gas_limit,
-        op.max_fee_per_gas,
-        op.max_priority_fee_per_gas,
-    )
-    .map_err(super::map_bundler_error)?;
-    let signature = crate::relayer_signer::sign_validated_handle_ops_transaction(
-        state.bundler_keys.as_ref(),
-        &active_bundler.key_ref,
-        &tx,
-        state.config.network.chain_id,
-        active_bundler_address,
-        op,
-    )
-    .map_err(crate::handlers::wallet::bundler_account::map_key_error)?;
-    let raw_tx = wallet_bundler::encode_signed_eip1559_tx(&tx, &signature)
+    let prepared = (|| {
+        let gas_limit = handle_ops_gas_limit(op)?;
+        let tx = wallet_bundler::build_handle_ops_tx_request(
+            state.config.network.chain_id,
+            bundler_nonce,
+            entry_point,
+            active_bundler_address,
+            op,
+            gas_limit,
+            op.max_fee_per_gas,
+            op.max_priority_fee_per_gas,
+        )
         .map_err(super::map_bundler_error)?;
-    let tx_hash = wallet_bundler::signed_eip1559_tx_hash(&tx, &signature)
-        .map_err(super::map_bundler_error)?;
+        let signature = crate::relayer_signer::sign_validated_handle_ops_transaction(
+            state.bundler_keys.as_ref(),
+            &active_bundler.key_ref,
+            &tx,
+            state.config.network.chain_id,
+            active_bundler_address,
+            op,
+        )
+        .map_err(crate::handlers::wallet::bundler_account::map_key_error)?;
+        let raw_tx = wallet_bundler::encode_signed_eip1559_tx(&tx, &signature)
+            .map_err(super::map_bundler_error)?;
+        let tx_hash = wallet_bundler::signed_eip1559_tx_hash(&tx, &signature)
+            .map_err(super::map_bundler_error)?;
+        Ok::<_, wallet_node_api::JsonRpcError>((raw_tx, tx_hash))
+    })();
+    let (raw_tx, tx_hash) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            release_prebundle_reservation(
+                state,
+                &active_bundler.address,
+                bundler_nonce,
+                user_op_hash,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
     let now = now_unix_seconds();
 
-    match state
+    let tx_hash_hex = format!("{tx_hash:#x}");
+    let persisted = state
         .store
-        .user_op_insert_abandon_nonce_on_exists(
+        .persist_submission_bundle(
             StoredUserOperation {
                 user_op_hash: user_op_hash.to_string(),
                 chain_id: state.config.network.chain_id,
@@ -210,13 +253,43 @@ async fn persist_sign_and_submit(
                 created_at: now,
                 updated_at: now,
             },
+            SubmittedTransaction {
+                tx_hash: tx_hash_hex.clone(),
+                user_op_hash: user_op_hash.to_string(),
+                chain_id: state.config.network.chain_id,
+                bundler_address: active_bundler.address.clone(),
+                nonce: bundler_nonce,
+                raw_tx: format!("{raw_tx:#x}"),
+                max_fee_per_gas: wallet_bundler::gas::u256_hex(op.max_fee_per_gas),
+                max_priority_fee_per_gas: wallet_bundler::gas::u256_hex(
+                    op.max_priority_fee_per_gas,
+                ),
+                status: SubmittedTxStatus::Submitting,
+                replacement_of: None,
+                submitted_at_block: Some(submitted_at_block),
+                recovery_attempts: 0,
+                created_at: now,
+                updated_at: now,
+            },
             state.config.network.chain_id,
             &active_bundler.address,
             bundler_nonce,
         )
-        .await
-        .map_err(|_| internal("user_operation_insert_failed"))?
-    {
+        .await;
+    let persisted = match persisted {
+        Ok(persisted) => persisted,
+        Err(error) => {
+            release_prebundle_reservation(
+                state,
+                &active_bundler.address,
+                bundler_nonce,
+                user_op_hash,
+            )
+            .await?;
+            return Err(internal_detail("submission_bundle_persist_failed", error));
+        }
+    };
+    match persisted {
         UserOpInsertOutcome::Inserted => {}
         UserOpInsertOutcome::AlreadyExists(_) => return Ok(()),
     }
@@ -230,48 +303,6 @@ async fn persist_sign_and_submit(
         .await
         .map_err(|_| internal("relayer_mark_used_failed"))?;
 
-    let tx_hash_hex = format!("{tx_hash:#x}");
-    state
-        .store
-        .submitted_tx_insert(SubmittedTransaction {
-            tx_hash: tx_hash_hex.clone(),
-            user_op_hash: user_op_hash.to_string(),
-            chain_id: state.config.network.chain_id,
-            bundler_address: active_bundler.address.clone(),
-            nonce: bundler_nonce,
-            raw_tx: format!("{raw_tx:#x}"),
-            max_fee_per_gas: wallet_bundler::gas::u256_hex(op.max_fee_per_gas),
-            max_priority_fee_per_gas: wallet_bundler::gas::u256_hex(op.max_priority_fee_per_gas),
-            status: SubmittedTxStatus::Submitting,
-            replacement_of: None,
-            submitted_at_block: Some(submitted_at_block),
-            recovery_attempts: 0,
-            created_at: now,
-            updated_at: now,
-        })
-        .await
-        .map_err(|_| internal("submitted_transaction_insert_failed"))?;
-    state
-        .store
-        .nonce_attach_tx_hash(
-            state.config.network.chain_id,
-            &active_bundler.address,
-            bundler_nonce,
-            &tx_hash_hex,
-        )
-        .await
-        .map_err(|_| internal("nonce_tx_hash_attach_failed"))?;
-    state
-        .store
-        .nonce_set_status(
-            state.config.network.chain_id,
-            &active_bundler.address,
-            bundler_nonce,
-            NonceStatus::Submitted,
-        )
-        .await
-        .map_err(|_| internal("nonce_status_update_failed"))?;
-
     drop(relayer_lifecycle_guard);
 
     let submit_outcome = state
@@ -280,6 +311,126 @@ async fn persist_sign_and_submit(
         .await;
     record_submit_outcome(&state.store, submit_outcome, &tx_hash_hex, user_op_hash).await?;
 
+    Ok(())
+}
+
+async fn release_prebundle_reservation(
+    state: &DaemonState,
+    bundler_address: &str,
+    nonce: u64,
+    user_op_hash: &str,
+) -> Result<(), wallet_node_api::JsonRpcError> {
+    let released = state
+        .store
+        .release_prebundle_nonce(
+            state.config.network.chain_id,
+            bundler_address,
+            nonce,
+            user_op_hash,
+        )
+        .await
+        .map_err(|error| internal_detail("nonce_reservation_cleanup_failed", error))?;
+    if !released {
+        return Err(internal("nonce_reservation_cleanup_incomplete"));
+    }
+    Ok(())
+}
+
+async fn ensure_existing_submission_bound_to_expected(
+    state: &DaemonState,
+    user_op_hash: &str,
+    expected: &ExpectedRelayerIdentity,
+) -> Result<(), wallet_node_api::JsonRpcError> {
+    let submissions = state
+        .store
+        .submitted_txs_list_all()
+        .await
+        .map_err(|_| internal("submitted_transaction_lookup_failed"))?;
+    let mut found_for_user_op = false;
+    for submission in submissions
+        .iter()
+        .filter(|submission| submission.user_op_hash == user_op_hash)
+    {
+        found_for_user_op = true;
+        if submission.chain_id == expected.chain_id
+            && submission
+                .bundler_address
+                .eq_ignore_ascii_case(&expected.address)
+        {
+            return Ok(());
+        }
+    }
+    if found_for_user_op {
+        Err(super::not_ready("user_operation_relayer_binding_mismatch"))
+    } else {
+        Err(super::not_ready("user_operation_submission_incomplete"))
+    }
+}
+
+fn parse_expected_relayer_identity(
+    params: &[Value],
+    configured_chain_id: u64,
+) -> Result<ExpectedRelayerIdentity, wallet_node_api::JsonRpcError> {
+    if params.len() != 3 {
+        return Err(super::invalid_params(
+            "localwallet_sendUserOperation requires exactly three parameters",
+        ));
+    }
+    let value = &params[2];
+    let expected: ExpectedRelayerIdentity =
+        serde_json::from_value(value.clone()).map_err(|_| {
+            super::invalid_params(
+                "expectedRelayer must contain exactly chainId, keyRef, and address",
+            )
+        })?;
+    if expected.chain_id == 0 || expected.chain_id != configured_chain_id {
+        return Err(super::invalid_params(
+            "expectedRelayer.chainId must match the configured chain",
+        ));
+    }
+    validate_expected_relayer_key_ref(&expected.key_ref, expected.chain_id)?;
+    let address = expected
+        .address
+        .parse::<Address>()
+        .map_err(|_| super::invalid_params("expectedRelayer.address must be an address"))?;
+    if format!("{address:#x}") != expected.address {
+        return Err(super::invalid_params(
+            "expectedRelayer.address must be canonical lowercase hex",
+        ));
+    }
+    Ok(expected)
+}
+
+fn validate_expected_relayer_key_ref(
+    key_ref: &str,
+    chain_id: u64,
+) -> Result<(), wallet_node_api::JsonRpcError> {
+    let parsed = crate::bundler_keys::parse_canonical_key_ref(key_ref);
+    if !parsed.is_ok_and(|parsed| {
+        parsed.owner_scope == wallet_node_store::DEFAULT_OWNER_SCOPE && parsed.chain_id == chain_id
+    }) {
+        return Err(super::invalid_params(
+            "expectedRelayer.keyRef must be the canonical key reference for the configured chain",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_expected_active_relayer(
+    expected: &ExpectedRelayerIdentity,
+    active: &wallet_node_store::BundlerAccount,
+    active_address: Address,
+) -> Result<(), wallet_node_api::JsonRpcError> {
+    let expected_address = expected
+        .address
+        .parse::<Address>()
+        .map_err(|_| internal("expected_relayer_address_invalid"))?;
+    if expected.chain_id != active.chain_id
+        || expected.key_ref != active.key_ref
+        || expected_address != active_address
+    {
+        return Err(super::not_ready("relayer_authority_changed_before_submit"));
+    }
     Ok(())
 }
 
@@ -346,9 +497,21 @@ pub(crate) async fn record_submit_outcome(
 }
 
 fn handle_ops_gas_limit(op: &UserOperation) -> Result<u64, wallet_node_api::JsonRpcError> {
-    let limit = op.call_gas_limit + op.verification_gas_limit + op.pre_verification_gas;
+    let limit = op
+        .call_gas_limit
+        .checked_add(op.verification_gas_limit)
+        .and_then(|value| value.checked_add(op.pre_verification_gas))
+        .ok_or_else(|| {
+            super::map_bundler_error(wallet_bundler::BundlerError::InvalidUserOperation(
+                "arithmetic overflow while computing bundler transaction gas limit".to_string(),
+            ))
+        })?;
     let overhead = U256::from(150_000_u64);
-    let total = limit + overhead;
+    let total = limit.checked_add(overhead).ok_or_else(|| {
+        super::map_bundler_error(wallet_bundler::BundlerError::InvalidUserOperation(
+            "arithmetic overflow while computing bundler transaction gas limit".to_string(),
+        ))
+    })?;
     if total > U256::from(u64::MAX) {
         return Err(super::map_bundler_error(
             wallet_bundler::BundlerError::PolicyCapExceeded {
@@ -364,7 +527,13 @@ fn ensure_bundler_eoa_gas_funded(
     bundler_balance: U256,
 ) -> Result<(), wallet_node_api::JsonRpcError> {
     let gas_limit = handle_ops_gas_limit(op)?;
-    let required_max_cost = U256::from(gas_limit) * op.max_fee_per_gas;
+    let required_max_cost = U256::from(gas_limit)
+        .checked_mul(op.max_fee_per_gas)
+        .ok_or_else(|| {
+            super::map_bundler_error(wallet_bundler::BundlerError::InvalidUserOperation(
+                "arithmetic overflow while computing bundler transaction maximum cost".to_string(),
+            ))
+        })?;
     if bundler_balance >= required_max_cost {
         return Ok(());
     }
@@ -399,10 +568,11 @@ fn enforce_per_sender_quota(
         16,
     )
     .map_err(|_| internal("sender_quota_config_invalid"))?;
+    let required_prefund = op.required_prefund().map_err(super::map_bundler_error)?;
     let decision = state.per_sender_rate_limiter.check(
         state.config.network.chain_id,
         op.sender,
-        op.required_prefund(),
+        required_prefund,
         crate::rate_limit::SenderQuotaConfig {
             max_user_ops_per_minute: state.config.policy.max_user_ops_per_sender_per_minute,
             max_gas_wei_per_hour,
@@ -440,7 +610,7 @@ fn internal_detail(reason: &'static str, detail: impl ToString) -> wallet_node_a
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use serde_json::json;
     use wallet_chain::MockChainAdapter;
@@ -461,6 +631,148 @@ mod tests {
             "signature": "0xab"
         }))
         .unwrap()
+    }
+
+    fn expected_relayer(key_ref: &str, address: &str) -> ExpectedRelayerIdentity {
+        ExpectedRelayerIdentity {
+            chain_id: 1,
+            key_ref: key_ref.to_string(),
+            address: address.to_string(),
+        }
+    }
+
+    #[test]
+    fn expected_relayer_parameter_is_required() {
+        let error =
+            parse_expected_relayer_identity(&[json!({}), json!("0xentrypoint")], 1).unwrap_err();
+        assert_eq!(error.code, wallet_node_api::INVALID_REQUEST);
+    }
+
+    #[test]
+    fn expected_relayer_parameter_requires_exact_canonical_identity() {
+        let address = "0x1111111111111111111111111111111111111111";
+        let expected = parse_expected_relayer_identity(
+            &[
+                json!({}),
+                json!("0xentrypoint"),
+                json!({
+                    "chainId": 1,
+                    "keyRef": "bundler-eoa:default:1:7",
+                    "address": address,
+                }),
+            ],
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            expected,
+            expected_relayer("bundler-eoa:default:1:7", address)
+        );
+    }
+
+    #[test]
+    fn expected_relayer_parameter_rejects_ambiguous_or_unscoped_values() {
+        let valid = json!({
+            "chainId": 1,
+            "keyRef": "bundler-eoa:default:1:7",
+            "address": "0x1111111111111111111111111111111111111111",
+        });
+        let invalid = [
+            json!(null),
+            json!({
+                "chainId": 1,
+                "keyRef": "bundler-eoa:default:1:7",
+                "address": "0x1111111111111111111111111111111111111111",
+                "extra": true,
+            }),
+            json!({
+                "chainId": "1",
+                "keyRef": "bundler-eoa:default:1:7",
+                "address": "0x1111111111111111111111111111111111111111",
+            }),
+            json!({
+                "chainId": 2,
+                "keyRef": "bundler-eoa:default:2:7",
+                "address": "0x1111111111111111111111111111111111111111",
+            }),
+            json!({
+                "chainId": 1,
+                "keyRef": "bundler-eoa:1",
+                "address": "0x1111111111111111111111111111111111111111",
+            }),
+            json!({
+                "chainId": 1,
+                "keyRef": "bundler-eoa:default:01:7",
+                "address": "0x1111111111111111111111111111111111111111",
+            }),
+            json!({
+                "chainId": 1,
+                "keyRef": "bundler-eoa:default:1:0",
+                "address": "0x1111111111111111111111111111111111111111",
+            }),
+            json!({
+                "chainId": 1,
+                "keyRef": "bundler-eoa:default:1:7",
+                "address": "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            }),
+        ];
+
+        for value in invalid {
+            let error =
+                parse_expected_relayer_identity(&[json!({}), json!("0xentrypoint"), value], 1)
+                    .unwrap_err();
+            assert_eq!(error.code, wallet_node_api::INVALID_REQUEST);
+        }
+
+        let error = parse_expected_relayer_identity(
+            &[json!({}), json!("0xentrypoint"), valid, json!("extra")],
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, wallet_node_api::INVALID_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn expected_relayer_guard_rejects_initial_key_or_address_mismatch() {
+        let state = DaemonState::for_tests(Arc::new(MockChainAdapter::new()));
+        let active_address = "0x1111111111111111111111111111111111111111";
+        let active_key_ref = "bundler-eoa:default:1:1";
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                active_address,
+                active_key_ref,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        let active =
+            crate::handlers::wallet::bundler_account::ensure_active_bundler_account(&state)
+                .await
+                .unwrap();
+        let parsed_address = active_address.parse().unwrap();
+
+        ensure_expected_active_relayer(
+            &expected_relayer(active_key_ref, active_address),
+            &active,
+            parsed_address,
+        )
+        .unwrap();
+        for expected in [
+            expected_relayer("bundler-eoa:default:1:2", active_address),
+            expected_relayer(active_key_ref, "0x2222222222222222222222222222222222222222"),
+        ] {
+            let error =
+                ensure_expected_active_relayer(&expected, &active, parsed_address).unwrap_err();
+            assert_eq!(error.code, wallet_node_api::NOT_READY);
+            assert_eq!(
+                error.data.unwrap()["reason"],
+                "relayer_authority_changed_before_submit"
+            );
+        }
     }
 
     #[test]
@@ -597,11 +909,11 @@ mod tests {
         let err = persist_sign_and_submit(
             &state,
             &stale_active,
-            stale_active.address.parse().unwrap(),
             wallet_bundler::ENTRY_POINT_V07,
             &op,
             "0x1234",
             1,
+            &expected_relayer("bundler-eoa:2", current_address),
         )
         .await
         .unwrap_err();
@@ -616,6 +928,179 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(state.store.user_op_get("0x1234").await.unwrap().is_none());
+        assert!(state
+            .store
+            .submitted_txs_list_all()
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn signing_failure_releases_evidence_free_prebundle_reservation() {
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain);
+        let address = "0x1111111111111111111111111111111111111112";
+        let key_ref = "bundler-eoa:default:1:1";
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                address,
+                key_ref,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        let active =
+            crate::handlers::wallet::bundler_account::resolve_active_bundler_account(&state)
+                .await
+                .unwrap();
+        let user_op_hash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+        let error = persist_sign_and_submit(
+            &state,
+            &active,
+            wallet_bundler::ENTRY_POINT_V07,
+            &sample_user_op(),
+            user_op_hash,
+            1,
+            &expected_relayer(key_ref, address),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code, wallet_node_api::NOT_READY);
+        assert!(state
+            .store
+            .nonces_list_pending(1, address)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .store
+            .user_op_get(user_op_hash)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(state
+            .store
+            .submitted_txs_list_all()
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn prebundle_cleanup_fails_closed_when_reservation_is_not_released() {
+        let state = DaemonState::for_tests(Arc::new(MockChainAdapter::new()));
+
+        let error = release_prebundle_reservation(
+            &state,
+            "0x1111111111111111111111111111111111111112",
+            7,
+            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code, wallet_node_api::INTERNAL_ERROR);
+        assert_eq!(
+            error.data.unwrap()["reason"],
+            "nonce_reservation_cleanup_incomplete"
+        );
+    }
+
+    #[tokio::test]
+    async fn expected_relayer_guard_rejects_rotation_while_submission_waits_for_lock() {
+        let chain = Arc::new(MockChainAdapter::new());
+        let state = DaemonState::for_tests(chain.clone());
+        let stale_address = "0x1111111111111111111111111111111111111112";
+        let current_address = "0x2222222222222222222222222222222222222222";
+        let stale_key_ref = "bundler-eoa:default:1:1";
+        let current_key_ref = "bundler-eoa:default:1:2";
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                stale_address,
+                stale_key_ref,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        let stale_active =
+            crate::handlers::wallet::bundler_account::ensure_active_bundler_account(&state)
+                .await
+                .unwrap();
+        let lifecycle_guard = state
+            .relayer_lifecycle_locks
+            .acquire(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await;
+
+        let task_state = state.clone();
+        let submission = tokio::spawn(async move {
+            let op = sample_user_op();
+            persist_sign_and_submit(
+                &task_state,
+                &stale_active,
+                wallet_bundler::ENTRY_POINT_V07,
+                &op,
+                "0x5678",
+                1,
+                &expected_relayer(stale_key_ref, stale_address),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while chain.transaction_count_call_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("submission should reach the lifecycle lock");
+
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                current_address,
+                current_key_ref,
+                BundlerLifecycle::PendingFunding,
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .bundler_account_activate_pending_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                current_address,
+            )
+            .await
+            .unwrap();
+        drop(lifecycle_guard);
+
+        let error = tokio::time::timeout(Duration::from_secs(1), submission)
+            .await
+            .expect("submission should finish after the lifecycle lock is released")
+            .expect("submission task should not panic")
+            .unwrap_err();
+        assert_eq!(error.code, wallet_node_api::NOT_READY);
+        assert_eq!(
+            error.data.unwrap()["reason"],
+            "relayer_authority_changed_before_submit"
+        );
+        assert!(state
+            .store
+            .nonces_list_pending(1, stale_address)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state.store.user_op_get("0x5678").await.unwrap().is_none());
         assert!(state
             .store
             .submitted_txs_list_all()

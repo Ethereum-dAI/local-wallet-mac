@@ -75,7 +75,7 @@ let package = Package(
         ),
         .testTarget(
             name: "WalletMacOSAppTests",
-            dependencies: ["WalletMacOSApp", "WalletToolLayer"],
+            dependencies: ["WalletMacOSApp", "WalletToolLayer", "SpawnHelper"],
             path: "Tests/WalletMacOSAppTests"
         ),
     ]

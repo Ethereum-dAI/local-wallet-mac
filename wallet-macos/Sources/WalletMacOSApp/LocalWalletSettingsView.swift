@@ -222,7 +222,6 @@ struct LocalWalletSettingsSnapshot: Equatable {
     let walletNodeMode: String
     let walletNodeConfigPath: String
     let walletNodeLogPath: String
-    let unlockRelayerOnLaunch: Bool
     let walletKeyPolicy: String
     let relayerKeyPolicy: String
     let session: LocalWalletSessionSettingsSnapshot
@@ -293,14 +292,12 @@ struct LocalWalletSettingsView: View {
     let onRefreshRelayer: () -> Void
     let onRotateRelayer: () async throws -> String
     let onExportRelayerKey: () async throws -> String
-    let onDeleteRelayerKey: (Bool) async throws -> String
-    let onResetWallet: () throws -> String
+    let onResetWallet: () async throws -> String
     let onEnableSessionKeys: () async throws -> String
     let onRevokeSessionKeys: () async throws -> String
     let onUpdateSessionPolicy: (SessionPolicyConfig) throws -> String
     let onCopyDebugReport: () async -> String
     let onClearDebugLog: () -> Void
-    let onSetUnlockRelayerOnLaunch: (Bool) -> Void
     let onSetSwapSlippageBps: (UInt64) -> Void
     let onSetContextWindowTokens: (Int) -> Void
     let onClose: () -> Void
@@ -324,7 +321,6 @@ struct LocalWalletSettingsView: View {
     @State private var securityMessage: SettingsMessage?
     @State private var sessionMessage: SettingsMessage?
     @State private var advancedMessage: SettingsMessage?
-    @State private var unlockRelayerOnLaunch: Bool
     @State private var sessionPolicyDraft: SessionPolicyDraft
     @State private var slippageBpsDraft: UInt64
     @State private var slippagePercentField: String
@@ -334,7 +330,7 @@ struct LocalWalletSettingsView: View {
     @State private var isRunningDiagnostics = false
     @State private var isRotatingRelayer = false
     @State private var isExportingRelayer = false
-    @State private var isDeletingRelayer = false
+    @State private var isResettingWallet = false
     @State private var isEnablingSessionKeys = false
     @State private var isRevokingSessionKeys = false
     @State private var showingSessionTokenLimits = false
@@ -365,14 +361,12 @@ struct LocalWalletSettingsView: View {
         onRefreshRelayer: @escaping () -> Void,
         onRotateRelayer: @escaping () async throws -> String,
         onExportRelayerKey: @escaping () async throws -> String,
-        onDeleteRelayerKey: @escaping (Bool) async throws -> String,
-        onResetWallet: @escaping () throws -> String,
+        onResetWallet: @escaping () async throws -> String,
         onEnableSessionKeys: @escaping () async throws -> String,
         onRevokeSessionKeys: @escaping () async throws -> String,
         onUpdateSessionPolicy: @escaping (SessionPolicyConfig) throws -> String,
         onCopyDebugReport: @escaping () async -> String,
         onClearDebugLog: @escaping () -> Void,
-        onSetUnlockRelayerOnLaunch: @escaping (Bool) -> Void,
         onSetSwapSlippageBps: @escaping (UInt64) -> Void,
         onSetContextWindowTokens: @escaping (Int) -> Void,
         onClose: @escaping () -> Void
@@ -401,19 +395,16 @@ struct LocalWalletSettingsView: View {
         self.onRefreshRelayer = onRefreshRelayer
         self.onRotateRelayer = onRotateRelayer
         self.onExportRelayerKey = onExportRelayerKey
-        self.onDeleteRelayerKey = onDeleteRelayerKey
         self.onResetWallet = onResetWallet
         self.onEnableSessionKeys = onEnableSessionKeys
         self.onRevokeSessionKeys = onRevokeSessionKeys
         self.onUpdateSessionPolicy = onUpdateSessionPolicy
         self.onCopyDebugReport = onCopyDebugReport
         self.onClearDebugLog = onClearDebugLog
-        self.onSetUnlockRelayerOnLaunch = onSetUnlockRelayerOnLaunch
         self.onSetSwapSlippageBps = onSetSwapSlippageBps
         self.onSetContextWindowTokens = onSetContextWindowTokens
         self.onClose = onClose
         self._networkDraft = State(initialValue: snapshot.networkSettings)
-        self._unlockRelayerOnLaunch = State(initialValue: snapshot.unlockRelayerOnLaunch)
         self._sessionPolicyDraft = State(initialValue: SessionPolicyDraft(
             policy: snapshot.session.configuredPolicy,
             chainID: Self.chainID(from: snapshot.chainID)
@@ -440,9 +431,6 @@ struct LocalWalletSettingsView: View {
                 return
             }
             hardwareProfile = await LocalHardwareInspector().inspect()
-        }
-        .onChange(of: snapshot.unlockRelayerOnLaunch) { _, newValue in
-            unlockRelayerOnLaunch = newValue
         }
         .onChange(of: snapshot.session.configuredPolicy) { _, newValue in
             sessionPolicyDraft = SessionPolicyDraft(
@@ -896,7 +884,7 @@ struct LocalWalletSettingsView: View {
                 }
                 .pickerStyle(.menu)
                 .frame(width: 200)
-                Text("Active: \(snapshot.contextWindow). Larger windows use more memory — the verdicts above are computed at this size. Sizes this Mac cannot hold are not listed.")
+                Text("Active: \(snapshot.contextWindow). Larger windows use more memory. The verdicts above are computed at this size. Sizes this Mac cannot hold are not listed.")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(SettingsPalette.secondaryText)
                 Divider().overlay(SettingsPalette.border).padding(.vertical, 4)
@@ -1011,9 +999,9 @@ struct LocalWalletSettingsView: View {
     @ViewBuilder
     private func installProgressLabel(_ phase: ModelInstallPhase) -> some View {
         switch phase {
-        case .downloading(let value):
-            ProgressView(value: value).frame(width: 120)
-            Text("\(Int(value * 100))%")
+        case .downloading(let progress):
+            ProgressView(value: progress.fractionCompleted).frame(width: 120)
+            Text(progress.statusText)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(SettingsPalette.secondaryText)
         case .testing:
@@ -1038,34 +1026,26 @@ struct LocalWalletSettingsView: View {
         VStack(alignment: .leading, spacing: 18) {
             SettingsSection(title: "Active Network") {
                 VStack(alignment: .leading, spacing: 14) {
-                    Picker("Network", selection: $networkDraft.isTestnetModeEnabled) {
-                        Text("Sepolia").tag(true)
-                        Text("Mainnet").tag(false)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: 280)
+                    SettingsKeyValueRows(rows: [
+                        SettingsKeyValue(title: "Network", value: "Sepolia"),
+                    ])
 
                     SettingsEditableField(
                         title: "Execution RPC",
-                        placeholder: networkDraft.isTestnetModeEnabled
-                            ? DemoNetworkSettings.defaults.sepoliaRPCURL
-                            : DemoNetworkSettings.defaults.mainnetRPCURL,
-                        text: activeExecutionRPCBinding
+                        placeholder: DemoNetworkSettings.defaults.sepoliaRPCURL,
+                        text: $networkDraft.sepoliaRPCURL
                     )
                     SettingsEditableField(
                         title: "Archive node",
                         placeholder: "Optional",
                         detail: "Optional Helios endpoint for historical state reads. Helios is the light-client layer wallet-node uses to verify Ethereum reads without trusting a plain RPC response blindly.",
-                        text: activeArchiveRPCBinding
+                        text: $networkDraft.sepoliaArchiveNodeURL
                     )
                     SettingsEditableField(
                         title: "Consensus RPC",
-                        placeholder: networkDraft.isTestnetModeEnabled
-                            ? ChainConfiguration.ethereumSepolia.consensusRPCURL?.absoluteString ?? ""
-                            : ChainConfiguration.ethereum.consensusRPCURL?.absoluteString ?? "",
+                        placeholder: ChainConfiguration.ethereumSepolia.consensusRPCURL?.absoluteString ?? "",
                         detail: "Optional for Helios verification. Leave blank to use execution RPC reads.",
-                        text: activeConsensusRPCBinding
+                        text: $networkDraft.sepoliaConsensusRPCURL
                     )
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle(isOn: $networkDraft.heliosVerificationEnabled) {
@@ -1085,7 +1065,7 @@ struct LocalWalletSettingsView: View {
                             Text("Automatic gas pricing")
                                 .font(.system(size: 13, weight: .bold))
                         }
-                        Text("Applies to all networks. When on, the wallet follows live network gas at the selected tier and the caps below are ignored.")
+                        Text("When on, the wallet follows live Sepolia gas at the selected tier and the caps below are ignored.")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                         if networkDraft.autoGasModeEnabled {
@@ -1102,19 +1082,15 @@ struct LocalWalletSettingsView: View {
                     HStack(alignment: .top, spacing: 12) {
                         SettingsEditableField(
                             title: "Max fee cap (gwei)",
-                            placeholder: networkDraft.isTestnetModeEnabled
-                                ? DemoNetworkSettings.defaults.sepoliaMaxFeePerGasGwei
-                                : DemoNetworkSettings.defaults.mainnetMaxFeePerGasGwei,
+                            placeholder: DemoNetworkSettings.defaults.sepoliaMaxFeePerGasGwei,
                             detail: "Upper bound wallet-node accepts for chain gas price. Sepolia default is 50 gwei.",
-                            text: activeMaxFeeCapBinding
+                            text: $networkDraft.sepoliaMaxFeePerGasGwei
                         )
                         SettingsEditableField(
                             title: "Priority fee cap (gwei)",
-                            placeholder: networkDraft.isTestnetModeEnabled
-                                ? DemoNetworkSettings.defaults.sepoliaMaxPriorityFeePerGasGwei
-                                : DemoNetworkSettings.defaults.mainnetMaxPriorityFeePerGasGwei,
+                            placeholder: DemoNetworkSettings.defaults.sepoliaMaxPriorityFeePerGasGwei,
                             detail: "Tip cap for submitted raw transactions. Must be less than or equal to max fee cap.",
-                            text: activePriorityFeeCapBinding
+                            text: $networkDraft.sepoliaMaxPriorityFeePerGasGwei
                         )
                     }
                     .disabled(networkDraft.autoGasModeEnabled)
@@ -1193,85 +1169,6 @@ struct LocalWalletSettingsView: View {
                 ])
             }
         }
-    }
-
-    private var activeExecutionRPCBinding: Binding<String> {
-        Binding(
-            get: {
-                networkDraft.isTestnetModeEnabled ? networkDraft.sepoliaRPCURL : networkDraft.mainnetRPCURL
-            },
-            set: { value in
-                if networkDraft.isTestnetModeEnabled {
-                    networkDraft.sepoliaRPCURL = value
-                } else {
-                    networkDraft.mainnetRPCURL = value
-                }
-            }
-        )
-    }
-
-    private var activeArchiveRPCBinding: Binding<String> {
-        Binding(
-            get: {
-                networkDraft.isTestnetModeEnabled ? networkDraft.sepoliaArchiveNodeURL : networkDraft.mainnetArchiveNodeURL
-            },
-            set: { value in
-                if networkDraft.isTestnetModeEnabled {
-                    networkDraft.sepoliaArchiveNodeURL = value
-                } else {
-                    networkDraft.mainnetArchiveNodeURL = value
-                }
-            }
-        )
-    }
-
-    private var activeConsensusRPCBinding: Binding<String> {
-        Binding(
-            get: {
-                networkDraft.isTestnetModeEnabled ? networkDraft.sepoliaConsensusRPCURL : networkDraft.mainnetConsensusRPCURL
-            },
-            set: { value in
-                if networkDraft.isTestnetModeEnabled {
-                    networkDraft.sepoliaConsensusRPCURL = value
-                } else {
-                    networkDraft.mainnetConsensusRPCURL = value
-                }
-            }
-        )
-    }
-
-    private var activeMaxFeeCapBinding: Binding<String> {
-        Binding(
-            get: {
-                networkDraft.isTestnetModeEnabled
-                    ? networkDraft.sepoliaMaxFeePerGasGwei
-                    : networkDraft.mainnetMaxFeePerGasGwei
-            },
-            set: { value in
-                if networkDraft.isTestnetModeEnabled {
-                    networkDraft.sepoliaMaxFeePerGasGwei = value
-                } else {
-                    networkDraft.mainnetMaxFeePerGasGwei = value
-                }
-            }
-        )
-    }
-
-    private var activePriorityFeeCapBinding: Binding<String> {
-        Binding(
-            get: {
-                networkDraft.isTestnetModeEnabled
-                    ? networkDraft.sepoliaMaxPriorityFeePerGasGwei
-                    : networkDraft.mainnetMaxPriorityFeePerGasGwei
-            },
-            set: { value in
-                if networkDraft.isTestnetModeEnabled {
-                    networkDraft.sepoliaMaxPriorityFeePerGasGwei = value
-                } else {
-                    networkDraft.mainnetMaxPriorityFeePerGasGwei = value
-                }
-            }
-        )
     }
 
     private func saveNetworkDraft() {
@@ -1977,26 +1874,9 @@ struct LocalWalletSettingsView: View {
         VStack(alignment: .leading, spacing: 18) {
             SettingsSection(title: "Authentication") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Toggle("Unlock local relayer on app launch", isOn: Binding(
-                        get: { unlockRelayerOnLaunch },
-                        set: { value in
-                            unlockRelayerOnLaunch = value
-                            onSetUnlockRelayerOnLaunch(value)
-                            securityMessage = SettingsMessage(
-                                kind: .success,
-                                text: value
-                                    ? "The app will unlock wallet-node on launch so relayer balance is available immediately."
-                                    : "The app will defer relayer unlock until refresh or transaction submission."
-                            )
-                        }
-                    ))
-                    .toggleStyle(.switch)
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(SettingsPalette.primaryText)
                     SettingsKeyValueRows(rows: [
                         SettingsKeyValue(title: "Wallet key", value: snapshot.walletKeyPolicy),
                         SettingsKeyValue(title: "Relayer key", value: snapshot.relayerKeyPolicy),
-                        SettingsKeyValue(title: "Startup mode", value: unlockRelayerOnLaunch ? "Unlock relayer during launch" : "Defer relayer unlock"),
                     ])
                     if let securityMessage {
                         SettingsMessageBanner(message: securityMessage)
@@ -2041,30 +1921,13 @@ struct LocalWalletSettingsView: View {
                         .foregroundStyle(SettingsPalette.secondaryText)
                     HStack(spacing: 12) {
                         Button {
-                            pendingConfirmation = .deleteRelayerKey(unsafe: false)
-                        } label: {
-                            Label("Safe delete relayer", systemImage: "trash")
-                                .font(.system(size: 13, weight: .bold))
-                        }
-                        .buttonStyle(SettingsDestructiveButtonStyle())
-                        .disabled(isDeletingRelayer)
-
-                        Button {
-                            pendingConfirmation = .deleteRelayerKey(unsafe: true)
-                        } label: {
-                            Label("Unsafe reset relayer", systemImage: "exclamationmark.triangle.fill")
-                                .font(.system(size: 13, weight: .bold))
-                        }
-                        .buttonStyle(SettingsDestructiveButtonStyle())
-                        .disabled(isDeletingRelayer)
-
-                        Button {
                             pendingConfirmation = .resetWallet
                         } label: {
-                            Label("Reset wallet", systemImage: "xmark.octagon.fill")
+                            Label(isResettingWallet ? "Resetting..." : "Reset wallet", systemImage: "xmark.octagon.fill")
                                 .font(.system(size: 13, weight: .bold))
                         }
                         .buttonStyle(SettingsDestructiveButtonStyle())
+                        .disabled(isResettingWallet)
                         Spacer()
                     }
                 }
@@ -2456,23 +2319,24 @@ struct LocalWalletSettingsView: View {
         }
     }
 
-    private func deleteRelayerKey(unsafe: Bool) {
-        guard !isDeletingRelayer else {
-            return
-        }
-        isDeletingRelayer = true
-        securityMessage = SettingsMessage(kind: .info, text: "Requesting local authorization to delete the relayer key...")
+    private func resetWallet() {
+        guard !isResettingWallet else { return }
+        isResettingWallet = true
+        securityMessage = SettingsMessage(
+            kind: .info,
+            text: "Requesting local authorization to reset the wallet..."
+        )
         Task {
             do {
-                let message = try await onDeleteRelayerKey(unsafe)
+                let message = try await onResetWallet()
                 await MainActor.run {
                     securityMessage = SettingsMessage(kind: .success, text: message)
-                    isDeletingRelayer = false
+                    isResettingWallet = false
                 }
             } catch {
                 await MainActor.run {
                     securityMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
-                    isDeletingRelayer = false
+                    isResettingWallet = false
                 }
             }
         }
@@ -2485,12 +2349,10 @@ struct LocalWalletSettingsView: View {
                 dataMessage = SettingsMessage(kind: .success, text: try onClearRankings())
             case .clearChatHistory:
                 dataMessage = SettingsMessage(kind: .success, text: try onClearChatHistory())
-            case .deleteRelayerKey(let unsafe):
-                deleteRelayerKey(unsafe: unsafe)
             case .revokeSessionKeys:
                 revokeSessionKeys()
             case .resetWallet:
-                securityMessage = SettingsMessage(kind: .success, text: try onResetWallet())
+                resetWallet()
             }
         } catch {
             let message = SettingsMessage(kind: .error, text: error.localizedDescription)
@@ -2499,7 +2361,7 @@ struct LocalWalletSettingsView: View {
                 dataMessage = message
             case .revokeSessionKeys:
                 sessionMessage = message
-            case .deleteRelayerKey, .resetWallet:
+            case .resetWallet:
                 securityMessage = message
             }
         }
@@ -2534,7 +2396,6 @@ struct LocalWalletSettingsView: View {
 private enum SettingsConfirmation: Identifiable, Equatable {
     case clearRankings
     case clearChatHistory
-    case deleteRelayerKey(unsafe: Bool)
     case revokeSessionKeys
     case resetWallet
 
@@ -2544,8 +2405,6 @@ private enum SettingsConfirmation: Identifiable, Equatable {
             return "clear-rankings"
         case .clearChatHistory:
             return "clear-chat-history"
-        case .deleteRelayerKey(let unsafe):
-            return unsafe ? "unsafe-reset-relayer" : "delete-relayer"
         case .revokeSessionKeys:
             return "revoke-session-keys"
         case .resetWallet:
@@ -2559,8 +2418,6 @@ private enum SettingsConfirmation: Identifiable, Equatable {
             return "Clear rankings?"
         case .clearChatHistory:
             return "Clear chat history?"
-        case .deleteRelayerKey(let unsafe):
-            return unsafe ? "Unsafe reset relayer key?" : "Safe delete relayer key?"
         case .revokeSessionKeys:
             return "Disable session keys?"
         case .resetWallet:
@@ -2574,14 +2431,10 @@ private enum SettingsConfirmation: Identifiable, Equatable {
             return "This removes all local tool-feedback records used for ranking and evaluation."
         case .clearChatHistory:
             return "This removes local conversations and messages, then creates a new empty chat."
-        case .deleteRelayerKey(let unsafe):
-            return unsafe
-                ? "This deletes relayer key material even if wallet-node has pending relay state."
-                : "This asks wallet-node to delete the relayer key only when it is safe."
         case .revokeSessionKeys:
             return "This starts a passkey-authorized onchain revoke transaction. Stay on the Session Keys settings screen until the transaction finishes and the local session key state is cleared."
         case .resetWallet:
-            return "This deletes the Secure Enclave wallet key reference, local relayer keys, local session keys, and wallet metadata. If session keys are enabled, disable them first — an onchain session permission stays valid until it expires. A new account will be created."
+            return "This deletes the Secure Enclave wallet key reference, local relayer keys, local session keys, and wallet metadata. If session keys are enabled, disable them first. An onchain session permission stays valid until it expires. A new account will be created."
         }
     }
 
@@ -2591,8 +2444,6 @@ private enum SettingsConfirmation: Identifiable, Equatable {
             return "Clear Rankings"
         case .clearChatHistory:
             return "Clear History"
-        case .deleteRelayerKey(let unsafe):
-            return unsafe ? "Unsafe Reset" : "Safe Delete"
         case .revokeSessionKeys:
             return "Disable"
         case .resetWallet:
@@ -3187,17 +3038,7 @@ private struct SessionTokenLimitTableRow: View {
     }
 
     private var chainCoverageText: String {
-        let count = [1, 11_155_111].filter { chainID in
-            WalletTokenRegistry.token(matching: limit.token.symbol, on: UInt64(chainID))?.contractAddress != nil
-        }.count
-        switch count {
-        case 0:
-            return "\(limit.token.decimals) decimals"
-        case 1:
-            return "\(limit.token.decimals) decimals · 1 supported chain"
-        default:
-            return "\(limit.token.decimals) decimals · \(count) supported chains"
-        }
+        "\(limit.token.decimals) decimals · Sepolia"
     }
 }
 
@@ -3532,7 +3373,7 @@ private struct AddHuggingFaceModelForm: View {
             if let install {
                 installLine(install)
             } else if let blockedByInstallOf {
-                Text("Waiting on \(blockedByInstallOf) — one download at a time.")
+                Text("Waiting on \(blockedByInstallOf): one download at a time.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -3541,7 +3382,7 @@ private struct AddHuggingFaceModelForm: View {
                 SettingsMessageBanner(message: message)
             }
 
-            Text("Public GGUF repositories only. Unverified models can get tool calls wrong — review every transaction.")
+            Text("Public GGUF repositories only. Unverified models can get tool calls wrong. Review every transaction.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
@@ -3569,13 +3410,13 @@ private struct AddHuggingFaceModelForm: View {
     private func installLine(_ install: ModelInstallProgress) -> some View {
         HStack {
             switch install.phase {
-            case .downloading(let value):
-                ProgressView(value: value).frame(width: 180)
-                Text("\(Int(value * 100))% · \(install.displayName)")
+            case .downloading(let progress):
+                ProgressView(value: progress.fractionCompleted).frame(width: 180)
+                Text("\(install.displayName): \(progress.statusText)")
                     .font(.system(size: 11, design: .monospaced))
             case .testing:
                 ProgressView().controlSize(.small)
-                Text("Loading \(install.displayName) for real and checking it can make a tool call — this can take a minute.")
+                Text("Loading \(install.displayName) for real and checking it can make a tool call. This can take a minute.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }

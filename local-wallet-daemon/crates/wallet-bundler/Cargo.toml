@@ -11,6 +11,7 @@ async-trait = { workspace = true }
 ed25519-dalek = "2"
 wallet-signature = { workspace = true }
 wallet-kernel = { workspace = true }
+wallet-userop-policy = { workspace = true }
 wallet-chain = { path = "../wallet-chain" }
 wallet-node-store = { path = "../wallet-node-store" }
 wallet-addresses = { workspace = true }

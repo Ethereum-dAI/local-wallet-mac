@@ -3,7 +3,7 @@ import Foundation
 // Bounded retry for chain *reads* only (balances shown in the dashboard).
 //
 // A balance refresh issues one read per registry token per address — 14 calls on Sepolia, 20
-// on mainnet — back to back. Against a keyless public endpoint some of those come back 429 or
+// back to back. Against a keyless public endpoint some of those come back 429 or
 // simply time out, and with no retry anywhere in WalletNodeClient a single such blip left that
 // row reading "Unavailable" until the next refresh.
 //
@@ -69,7 +69,7 @@ enum BalanceReadRetryPolicy {
 // owns the model it touches, instead of being sent across isolation domains.
 //
 // `sleep` is injectable so tests exercise the attempt/backoff sequence without real delays.
-func withBalanceReadRetry<T>(
+func withBalanceReadRetry<T: Sendable>(
     isolation: isolated (any Actor)? = #isolation,
     sleep: (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) },
     operation: () async throws -> T

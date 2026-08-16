@@ -1,15 +1,37 @@
 import AppKit
 import Foundation
+import LocalAuthentication
+import Security
 import Testing
 @testable import WalletMacOSApp
+
+private final class ResetSecurityItemClient: SecurityItemClient, @unchecked Sendable {
+    private(set) var deletions: [[String: Any]] = []
+    var deleteStatus: OSStatus = errSecSuccess
+
+    func add(_ attributes: [String: Any]) -> (status: OSStatus, result: Any?) {
+        (errSecSuccess, nil)
+    }
+
+    func copyMatching(_ query: [String: Any]) -> (status: OSStatus, result: Any?) {
+        (errSecItemNotFound, nil)
+    }
+
+    func delete(_ query: [String: Any]) -> OSStatus {
+        deletions.append(query)
+        return deleteStatus
+    }
+}
 
 // MARK: - Wallet reset deletes every key class (S-1)
 
 @Test func walletResetCleanupRunsAllStepsIncludingSessionKeys() throws {
     var steps: [String] = []
     let cleanup = WalletResetCleanup(
-        deleteRootKey: { steps.append("root") },
+        deleteRelayerSelectionJournal: { steps.append("journal") },
+        deletePublicRelayerIdentities: { steps.append("public") },
         deleteBundlerKeys: { steps.append("bundler") },
+        deleteRootKey: { steps.append("root") },
         deleteSessionKeys: { steps.append("session") },
         clearRelayerAddressCache: { steps.append("relayer-cache") },
         clearMetadata: { steps.append("metadata") },
@@ -19,8 +41,17 @@ import Testing
     var completed: [String] = []
     try cleanup.run { completed.append($0) }
 
-    #expect(steps == ["root", "bundler", "session", "relayer-cache", "metadata", "biometric"])
-    #expect(completed == ["secure-enclave-key", "relayer-keys", "session-keys", "relayer-address-cache", "metadata", "biometric-contexts"])
+    #expect(steps == ["journal", "public", "bundler", "root", "session", "relayer-cache", "metadata", "biometric"])
+    #expect(completed == [
+        "relayer-selection-journal",
+        "relayer-public-identities",
+        "relayer-keys",
+        "secure-enclave-key",
+        "session-keys",
+        "relayer-address-cache",
+        "metadata",
+        "biometric-contexts",
+    ])
 }
 
 // The biometric reuse window has to close even when an earlier step fails: a step that
@@ -30,8 +61,10 @@ import Testing
     struct Boom: Error {}
     var invalidated = false
     let cleanup = WalletResetCleanup(
-        deleteRootKey: {},
+        deleteRelayerSelectionJournal: {},
+        deletePublicRelayerIdentities: {},
         deleteBundlerKeys: {},
+        deleteRootKey: {},
         deleteSessionKeys: {},
         clearRelayerAddressCache: {},
         clearMetadata: { throw Boom() },
@@ -46,8 +79,10 @@ import Testing
     struct Boom: Error {}
     var steps: [String] = []
     let cleanup = WalletResetCleanup(
-        deleteRootKey: { throw Boom() },
+        deleteRelayerSelectionJournal: { steps.append("journal") },
+        deletePublicRelayerIdentities: { steps.append("public") },
         deleteBundlerKeys: { steps.append("bundler") },
+        deleteRootKey: { throw Boom() },
         deleteSessionKeys: { steps.append("session") },
         clearRelayerAddressCache: { steps.append("relayer-cache") },
         clearMetadata: { steps.append("metadata") },
@@ -61,9 +96,110 @@ import Testing
         aggregated = error
     } catch {}
 
-    #expect(steps == ["bundler", "session", "relayer-cache", "metadata", "biometric"])
+    #expect(steps == ["journal", "public", "bundler", "session", "relayer-cache", "metadata", "biometric"])
     #expect(aggregated?.failures.count == 1)
     #expect(aggregated?.failures.first?.step == "secure-enclave-key")
+}
+
+@Test func walletResetStopsRelayerAuthorityCleanupWhenJournalDeletionFails() {
+    struct Boom: Error {}
+    var steps: [String] = []
+    let cleanup = WalletResetCleanup(
+        deleteRelayerSelectionJournal: {
+            steps.append("journal")
+            throw Boom()
+        },
+        deletePublicRelayerIdentities: { steps.append("public") },
+        deleteBundlerKeys: { steps.append("protected") },
+        deleteRootKey: { steps.append("root") },
+        deleteSessionKeys: { steps.append("session") },
+        clearRelayerAddressCache: { steps.append("relayer-cache") },
+        clearMetadata: { steps.append("metadata") },
+        invalidateBiometricContexts: { steps.append("biometric") }
+    )
+
+    var aggregated: WalletResetCleanupError?
+    do {
+        try cleanup.run()
+    } catch let error as WalletResetCleanupError {
+        aggregated = error
+    } catch {}
+
+    #expect(!steps.contains("public"))
+    #expect(!steps.contains("protected"))
+    #expect(steps == ["journal", "root", "session", "relayer-cache", "metadata", "biometric"])
+    #expect(aggregated?.failures.map(\.step) == ["relayer-selection-journal"])
+}
+
+@Test func walletResetSkipsProtectedRelayerDeletionWhenPublicIdentityDeletionFails() {
+    struct Boom: Error {}
+    var steps: [String] = []
+    let cleanup = WalletResetCleanup(
+        deleteRelayerSelectionJournal: { steps.append("journal") },
+        deletePublicRelayerIdentities: {
+            steps.append("public")
+            throw Boom()
+        },
+        deleteBundlerKeys: { steps.append("protected") },
+        deleteRootKey: { steps.append("root") },
+        deleteSessionKeys: { steps.append("session") },
+        clearRelayerAddressCache: { steps.append("relayer-cache") },
+        clearMetadata: { steps.append("metadata") },
+        invalidateBiometricContexts: { steps.append("biometric") }
+    )
+
+    var aggregated: WalletResetCleanupError?
+    do {
+        try cleanup.run()
+    } catch let error as WalletResetCleanupError {
+        aggregated = error
+    } catch {}
+
+    #expect(!steps.contains("protected"))
+    #expect(steps == ["journal", "public", "root", "session", "relayer-cache", "metadata", "biometric"])
+    #expect(aggregated?.failures.map(\.step) == ["relayer-public-identities"])
+}
+
+@Test func protectedRelayerResetUsesTheAlreadyAuthorizedContext() throws {
+    let client = ResetSecurityItemClient()
+    let store = BundlerKeyStore(
+        client: client,
+        publicIdentityStore: RelayerPublicIdentityStore(client: client)
+    )
+    let context = LAContext()
+
+    try store.deleteAll(authenticationContext: context)
+
+    let query = try #require(client.deletions.first)
+    let suppliedContext = try #require(
+        query[kSecUseAuthenticationContext as String] as? LAContext
+    )
+    #expect(suppliedContext === context)
+}
+
+@Test func demoFactoryResetClearsOnlyWalletNodeSQLiteState() throws {
+    let fileManager = FileManager.default
+    let support = fileManager.temporaryDirectory
+        .appendingPathComponent("wallet-node-reset-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fileManager.removeItem(at: support) }
+    let daemonDirectory = support
+        .appendingPathComponent("Local Wallet", isDirectory: true)
+        .appendingPathComponent("wallet-node", isDirectory: true)
+    try fileManager.createDirectory(at: daemonDirectory, withIntermediateDirectories: true)
+
+    for fileName in WalletNodeManagedStoreCleanup.databaseFileNames + ["config.toml"] {
+        try Data(fileName.utf8).write(to: daemonDirectory.appendingPathComponent(fileName))
+    }
+
+    try WalletNodeManagedStoreCleanup.clear(
+        fileManager: fileManager,
+        applicationSupportDirectory: support
+    )
+
+    for fileName in WalletNodeManagedStoreCleanup.databaseFileNames {
+        #expect(!fileManager.fileExists(atPath: daemonDirectory.appendingPathComponent(fileName).path))
+    }
+    #expect(fileManager.fileExists(atPath: daemonDirectory.appendingPathComponent("config.toml").path))
 }
 
 @Test func resetWarnsWhenUnexpiredOnchainSessionPermissionExists() {
@@ -107,35 +243,24 @@ import Testing
     #expect(SessionResetPolicy.unexpiredSessionWarning(records: [neverInstalled], now: now) == nil)
 }
 
-// MARK: - Daemon launch installs every stored relayer key for the chain (B-1)
-
-@Test func launchKeyRefsFilterToChainAndSortByIndex() {
-    let available = [
-        "bundler-eoa:default:11155111:2",
-        "bundler-eoa:default:1:1",
-        "bundler-eoa:default:11155111:1",
-        "bundler-eoa:default:11155111:10",
-        "session-key:11155111:0xabc",
-        "bundler-eoa:default:11155111",
-        "bundler-eoa:default:11155111:x",
-    ]
-
-    #expect(BundlerLaunchKeyPolicy.launchKeyRefs(chainId: 11_155_111, available: available) == [
-        "bundler-eoa:default:11155111:1",
-        "bundler-eoa:default:11155111:2",
-        "bundler-eoa:default:11155111:10",
-    ])
-    #expect(BundlerLaunchKeyPolicy.launchKeyRefs(chainId: 1, available: available) == [
-        "bundler-eoa:default:1:1",
-    ])
-    #expect(BundlerLaunchKeyPolicy.launchKeyRefs(chainId: 5, available: available).isEmpty)
-}
-
 @Test func chainIdParsesOnlyFromWellFormedBundlerKeyRefs() {
     #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "bundler-eoa:default:11155111:3") == 11_155_111)
     #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "session-key:11155111:0xabc") == nil)
     #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "bundler-eoa:default:notachain:1") == nil)
     #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "bundler-eoa:default:11155111") == nil)
+    #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "bundler-eoa:default:011155111:1") == nil)
+    #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "bundler-eoa:default:11155111:01") == nil)
+    #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "bundler-eoa:default:0:1") == nil)
+    #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "bundler-eoa:default:11155111:0") == nil)
+    #expect(BundlerLaunchKeyPolicy.chainId(
+        ofKeyRef: "bundler-eoa:default:18446744073709551615:18446744073709551615"
+    ) == UInt64.max)
+    #expect(BundlerLaunchKeyPolicy.chainId(
+        ofKeyRef: "bundler-eoa:default:18446744073709551616:1"
+    ) == nil)
+    #expect(BundlerLaunchKeyPolicy.chainId(
+        ofKeyRef: "bundler-eoa:default:11155111:18446744073709551616"
+    ) == nil)
 }
 
 @Test func secretPayloadEncodesAllRecordsInOrder() throws {
@@ -153,33 +278,6 @@ import Testing
     #expect(keys?[0]["secret"] == "0x" + String(repeating: "ab", count: 32))
     #expect(keys?[1]["keyRef"] == "bundler-eoa:default:11155111:2")
     #expect(keys?[1]["secret"] == "0x" + String(repeating: "01", count: 32))
-}
-
-@Test func bundlerKeyStoreListsStoredKeyRefs() throws {
-    let store = BundlerKeyStore.shared
-    let chainId: UInt64 = 999_000_000_000 + UInt64.random(in: 0..<1_000_000)
-    let first = "bundler-eoa:default:\(chainId):1"
-    let second = "bundler-eoa:default:\(chainId):2"
-    defer {
-        try? store.delete(keyRef: first)
-        try? store.delete(keyRef: second)
-    }
-
-    do {
-        try store.add(keyRef: first, secret: Data(repeating: 0x11, count: 32))
-        try store.add(keyRef: second, secret: Data(repeating: 0x22, count: 32))
-    } catch AppError.missingEntitlement {
-        // Biometric-gated items need the data-protection keychain, which an
-        // unsigned `swift test` runner cannot write to. The listing query and
-        // ordering logic stay covered by the pure policy tests above; run this
-        // test from a signed Xcode build for the end-to-end check.
-        return
-    }
-
-    let listed = try store.listKeyRefs()
-    #expect(listed.contains(first))
-    #expect(listed.contains(second))
-    #expect(BundlerLaunchKeyPolicy.launchKeyRefs(chainId: chainId, available: listed) == [first, second])
 }
 
 // MARK: - Relayer identity cache is chain-scoped (B-2)
@@ -200,8 +298,8 @@ private func withTestDefaults(_ body: (UserDefaults) throws -> Void) rethrows {
 
         #expect(store.bundlerKeyRef(chainId: 11_155_111) == "bundler-eoa:default:11155111:1")
         #expect(store.bundlerAddress(chainId: 11_155_111) == "0x1111111111111111111111111111111111111111")
-        #expect(store.bundlerKeyRef(chainId: 1) == nil)
-        #expect(store.bundlerAddress(chainId: 1) == nil)
+        #expect(store.bundlerKeyRef(chainId: 31_337) == nil)
+        #expect(store.bundlerAddress(chainId: 31_337) == nil)
     }
 }
 
@@ -211,8 +309,8 @@ private func withTestDefaults(_ body: (UserDefaults) throws -> Void) rethrows {
         defaults.set("0xabcabcabcabcabcabcabcabcabcabcabcabcabca", forKey: "com.localwallet.demo.onboarding.bundler-address")
         let store = OnboardingSettingsStore(defaults: defaults)
 
-        #expect(store.bundlerKeyRef(chainId: 1) == nil)
-        #expect(store.bundlerAddress(chainId: 1) == nil)
+        #expect(store.bundlerKeyRef(chainId: 31_337) == nil)
+        #expect(store.bundlerAddress(chainId: 31_337) == nil)
 
         #expect(store.bundlerKeyRef(chainId: 11_155_111) == "bundler-eoa:default:11155111:1")
         #expect(store.bundlerAddress(chainId: 11_155_111) == "0xabcabcabcabcabcabcabcabcabcabcabcabcabca")
@@ -222,18 +320,42 @@ private func withTestDefaults(_ body: (UserDefaults) throws -> Void) rethrows {
     }
 }
 
+@Test func malformedLegacyBundlerCacheNeverMigratesIntoCanonicalChainSlot() {
+    for malformedKeyRef in [
+        "bundler-eoa:default:011155111:1",
+        "bundler-eoa:default:11155111:01",
+        "bundler-eoa:default:0:1",
+        "bundler-eoa:default:11155111:0",
+    ] {
+        withTestDefaults { defaults in
+            defaults.set(
+                malformedKeyRef,
+                forKey: "com.localwallet.demo.onboarding.bundler-key-ref"
+            )
+            defaults.set(
+                "0xabcabcabcabcabcabcabcabcabcabcabcabcabca",
+                forKey: "com.localwallet.demo.onboarding.bundler-address"
+            )
+            let store = OnboardingSettingsStore(defaults: defaults)
+
+            #expect(store.bundlerKeyRef(chainId: 11_155_111) == nil)
+            #expect(store.bundlerAddress(chainId: 11_155_111) == nil)
+        }
+    }
+}
+
 @Test func clearBundlerCacheRemovesPerChainAndLegacyEntries() {
     withTestDefaults { defaults in
         let store = OnboardingSettingsStore(defaults: defaults)
-        store.setBundlerKeyRef("bundler-eoa:default:1:1", chainId: 1)
-        store.setBundlerAddress("0x1111111111111111111111111111111111111111", chainId: 1)
+        store.setBundlerKeyRef("bundler-eoa:default:31337:1", chainId: 31_337)
+        store.setBundlerAddress("0x1111111111111111111111111111111111111111", chainId: 31_337)
         defaults.set("bundler-eoa:default:11155111:1", forKey: "com.localwallet.demo.onboarding.bundler-key-ref")
         defaults.set("0xabcabcabcabcabcabcabcabcabcabcabcabcabca", forKey: "com.localwallet.demo.onboarding.bundler-address")
 
-        store.clearBundlerCache(chainIds: [1, 11_155_111])
+        store.clearBundlerCache(chainIds: [31_337, 11_155_111])
 
-        #expect(store.bundlerKeyRef(chainId: 1) == nil)
-        #expect(store.bundlerAddress(chainId: 1) == nil)
+        #expect(store.bundlerKeyRef(chainId: 31_337) == nil)
+        #expect(store.bundlerAddress(chainId: 31_337) == nil)
         #expect(store.bundlerKeyRef(chainId: 11_155_111) == nil)
         #expect(store.bundlerAddress(chainId: 11_155_111) == nil)
         #expect(defaults.string(forKey: "com.localwallet.demo.onboarding.bundler-key-ref") == nil)

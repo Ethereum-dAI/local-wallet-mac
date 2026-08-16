@@ -7,9 +7,10 @@ import SwiftUI
 // and UserOperation flows rather than the final wallet product interface.
 @main
 enum WalletMacOSApp {
-    static func main() {
+    @MainActor
+    static func main() async {
         if CommandLine.arguments.contains("--reset-demo-wallet") {
-            resetDemoWalletAndExit()
+            await resetDemoWalletAndExit()
         }
 
         let app = NSApplication.shared
@@ -21,10 +22,24 @@ enum WalletMacOSApp {
         app.run()
     }
 
-    private static func resetDemoWalletAndExit() -> Never {
+    @MainActor
+    private static func resetDemoWalletAndExit() async -> Never {
         do {
-            try WalletResetCleanup.standard().run()
-            print("Deleted Local Wallet demo key, local relayer keys, local session keys, and metadata.")
+            // Reject external sidecars before Touch ID: this process cannot prove that they
+            // dropped the old secrets, so a successful-looking reset would be dishonest.
+            try WalletResetPreflight.ensureNoOtherLocalWalletInstance()
+            try WalletResetPreflight.ensureNoExternalSecretRuntimes()
+            let authentication = DeviceOwnerAuthenticationSession(
+                reason: "Reset this wallet and delete its local keys"
+            )
+            defer { authentication.invalidate() }
+            try await authentication.authorize()
+            try WalletNodeManagedStoreCleanup.clear()
+            try WalletResetCleanup.standard(
+                authenticationContext: authentication.context
+            ).run()
+            OnboardingSettingsStore().markIncomplete()
+            print("Deleted Local Wallet demo keys, wallet-node state, and wallet metadata.")
             exit(0)
         } catch {
             fputs("Failed to reset Local Wallet demo wallet: \(error.localizedDescription)\n", stderr)
@@ -83,9 +98,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         // mode (otherwise intent-card text + balances become unreadable).
         NSApp.appearance = NSAppearance(named: .darkAqua)
 
-        let model = AppModel()
-        self.model = model
-
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 740),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -106,6 +118,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showOnboarding() {
+        model = nil
         window?.contentViewController = NSHostingController(
             rootView: LocalWalletOnboardingView { [weak self] in
                 self?.showDashboard()
@@ -114,7 +127,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showDashboard() {
-        window?.contentViewController = NSHostingController(rootView: LocalWalletChatDashboardView())
+        // Build the one shared model only after onboarding has committed its network settings.
+        // The app-menu reset and the visible dashboard must own this exact same instance.
+        let model = AppModel()
+        self.model = model
+        model.bootstrap()
+        window?.contentViewController = NSHostingController(
+            rootView: WalletLaunchGateView(walletModel: model) { [weak self] in
+                self?.showOnboarding()
+            }
+        )
     }
 
     private func showLegacyDashboard() {
@@ -133,7 +155,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let alert = NSAlert()
         alert.messageText = "Reset demo wallet?"
-        alert.informativeText = "This deletes the local Secure Enclave key reference and wallet metadata for the demo app. The next reload creates a new key and a new precomputed account address."
+        alert.informativeText = "This is a destructive Sepolia demo reset. It deletes local wallet, relayer, session, and privacy keys plus wallet-node operation state. Any testnet funds or active onchain session permission can be stranded. The app then creates fresh local key material."
         alert.addButton(withTitle: "Reset")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
@@ -213,7 +235,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
     private let titleLabel = NSTextField(labelWithString: "Local Wallet")
     private let subtitleLabel = NSTextField(labelWithString: "A native macOS demo for Secure Enclave signing, Kernel smart-account precompute, and Sepolia transaction composition.")
     private let statusHeadlineLabel = NSTextField(labelWithString: "Bootstrapping local signer…")
-    private let addressLabel = NSTextField(labelWithString: "0x—")
+    private let addressLabel = NSTextField(labelWithString: "Unavailable")
     private let networkLabel = WalletViewController.makeBadge()
     private let stateLabel = WalletViewController.makeBadge()
     private let rpcLabel = NSTextField(labelWithString: "")
@@ -225,12 +247,10 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
 
     private let reloadButton = NSButton(title: "Reload", target: nil, action: nil)
     private let howItWorksButton = NSButton(title: "How it works", target: nil, action: nil)
-    private let testnetButton = NSButton(checkboxWithTitle: "Testnet Mode (Sepolia)", target: nil, action: nil)
-
     private let accountTitleLabel = NSTextField(labelWithString: "Smart Account")
     private let accountDetailLabel = NSTextField(labelWithString: "The app inspects deployment and balance automatically after bootstrap.")
     private let deploymentValueLabel = NSTextField(labelWithString: "Unknown")
-    private let balanceValueLabel = NSTextField(labelWithString: "—")
+    private let balanceValueLabel = NSTextField(labelWithString: "Unavailable")
     private let refreshBalanceButton = NSButton(title: "Refresh", target: nil, action: nil)
     private let qrImageView = NSImageView()
     private let fundingHintLabel = NSTextField(labelWithString: "")
@@ -249,15 +269,15 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
     private let submissionStatusLabel = NSTextField(labelWithString: "")
     private let relayerTitleLabel = NSTextField(labelWithString: "Local Relayer Key")
     private let relayerDetailLabel = NSTextField(labelWithString: "Local daemon not connected")
-    private let relayerAddressLabel = NSTextField(labelWithString: "—")
-    private let relayerBalanceLabel = NSTextField(labelWithString: "—")
+    private let relayerAddressLabel = NSTextField(labelWithString: "Unavailable")
+    private let relayerBalanceLabel = NSTextField(labelWithString: "Unavailable")
     private let relayerLifecycleLabel = WalletViewController.makeBadge()
     private let relayerAuditLabel = NSTextField(labelWithString: "")
     private let relayerHistoryPopup = NSPopUpButton()
     private let refreshRelayerButton = NSButton(title: "Refresh", target: nil, action: nil)
     private let rotateRelayerButton = NSButton(title: "Rotate", target: nil, action: nil)
     private let exportRelayerButton = NSButton(title: "Export", target: nil, action: nil)
-    private let deleteRelayerButton = NSButton(title: "Delete / Reset", target: nil, action: nil)
+    private let deleteRelayerButton = NSButton(title: "Delete Retired Key", target: nil, action: nil)
     private let logsTitleLabel = NSTextField(labelWithString: "Debug Activity")
     private let logsDetailLabel = NSTextField(labelWithString: "Timestamps for bootstrap, inspection, gas estimation, Secure Enclave signing, bundler submission, and receipt polling.")
     private let clearLogsButton = NSButton(title: "Clear Logs", target: nil, action: nil)
@@ -377,12 +397,6 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         clearLogsButton.action = #selector(clearDebugLog)
         relayerHistoryPopup.target = self
         relayerHistoryPopup.action = #selector(selectRelayerHistoryEntry)
-
-        testnetButton.target = self
-        testnetButton.action = #selector(toggleTestnetMode)
-        testnetButton.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        testnetButton.contentTintColor = .white
-        testnetButton.isHidden = true
 
         accountTitleLabel.font = NSFont.systemFont(ofSize: 22, weight: .bold)
         accountTitleLabel.textColor = Palette.text
@@ -943,13 +957,10 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         refreshBalanceButton.isEnabled = canRefreshBalance
         refreshBalanceButton.title = model.isRefreshingBalance ? "Refreshing…" : "Refresh"
         styleButton(refreshBalanceButton, role: canRefreshBalance ? .quiet : .disabled)
-        testnetButton.isEnabled = !model.isBootstrapping && !model.isRunningDemo && !model.isRefreshingBalance && !model.isBuildingUserOperation && !model.isSendingUserOperation
-        testnetButton.state = model.configuration.isTestnetModeEnabled ? .on : .off
-
         networkLabel.stringValue = model.activeChain.name.uppercased()
         stateLabel.stringValue = badgeStateTitle()
         tintBadge(stateLabel, color: badgeStateColor())
-        tintBadge(networkLabel, color: model.activeChain.isTestnet ? Palette.orange : Palette.blue)
+        tintBadge(networkLabel, color: Palette.orange)
 
         statusHeadlineLabel.stringValue = model.bridgeStatus
         rpcLabel.stringValue = "RPC  \(model.activeChain.rpcURL.absoluteString)"
@@ -970,7 +981,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         guard let record = model.walletRecord, let address = record.kernelAccountAddress else {
             accountDetailLabel.stringValue = "Wallet bootstrap has not finished yet."
             deploymentValueLabel.stringValue = "Loading"
-            balanceValueLabel.stringValue = "—"
+            balanceValueLabel.stringValue = "Unavailable"
             fundingHintLabel.stringValue = ""
             fundingAddressLabel.stringValue = ""
             qrImageView.image = nil
@@ -1056,8 +1067,8 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
             relayerHistoryPopup.removeAllItems()
             relayerHistoryPopup.addItem(withTitle: "No relayer history")
             relayerHistoryPopup.isEnabled = false
-            relayerAddressLabel.stringValue = "—"
-            relayerBalanceLabel.stringValue = "—"
+            relayerAddressLabel.stringValue = "Unavailable"
+            relayerBalanceLabel.stringValue = "Unavailable"
             relayerLifecycleLabel.stringValue = model.hasLocalRelayerClient ? "UNKNOWN" : "OFFLINE"
             tintBadge(relayerLifecycleLabel, color: Palette.faintText)
             relayerAuditLabel.stringValue = ""
@@ -1085,7 +1096,11 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         styleButton(exportRelayerButton, role: canExportSelectedKey ? .secondary : .disabled)
 
         deleteRelayerButton.isEnabled = canDeleteSelectedKey
-        deleteRelayerButton.title = model.isDeletingLocalRelayer ? "Deleting…" : "Delete / Reset"
+        deleteRelayerButton.title = model.isDeletingLocalRelayer
+            ? "Deleting…"
+            : selectedTarget?.lifecycle == "deleted"
+                ? "Finish Cleanup"
+                : "Delete Retired Key"
         styleButton(deleteRelayerButton, role: canDeleteSelectedKey ? .quiet : .disabled)
     }
 
@@ -1111,7 +1126,8 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
             let prefix = entry.keyRef == status.keyRef ? "Current" : "History"
             relayerHistoryPopup.addItem(withTitle: "\(prefix): \(entry.displayTitle)")
             relayerHistoryPopup.lastItem?.representedObject = entry.keyRef
-            relayerHistoryPopup.lastItem?.isEnabled = entry.canExport || entry.canDelete
+            relayerHistoryPopup.lastItem?.isEnabled = entry.canExport
+                || model.canDeleteLocalRelayerKey(keyRef: entry.keyRef)
         }
 
         let fallbackSelection = status.keyRef ?? entries.first?.keyRef
@@ -1127,7 +1143,13 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         relayerHistoryPopup.isEnabled = entries.count > 1
     }
 
-    private func selectedRelayerAdminTarget() -> (keyRef: String, label: String, canExport: Bool, canDelete: Bool)? {
+    private func selectedRelayerAdminTarget() -> (
+        keyRef: String,
+        label: String,
+        lifecycle: String,
+        canExport: Bool,
+        canDelete: Bool
+    )? {
         guard let status = model.localRelayerStatus else {
             return nil
         }
@@ -1139,15 +1161,26 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
             return (
                 keyRef: entry.keyRef,
                 label: entry.eoa.shortAddress,
+                lifecycle: entry.lifecycle,
                 canExport: entry.canExport,
-                canDelete: entry.canDelete
+                canDelete: model.canDeleteLocalRelayerKey(keyRef: entry.keyRef)
             )
         }
+        let fallback = WalletNodeClient.RelayerStatus.KeyHistoryEntry(
+            eoa: status.eoa,
+            keyRef: keyRef,
+            lifecycle: status.lifecycle,
+            createdAt: nil,
+            retiredAt: nil,
+            deletedAt: nil,
+            lastExportedAt: nil
+        )
         return (
             keyRef: keyRef,
             label: status.eoa.shortAddress,
-            canExport: true,
-            canDelete: true
+            lifecycle: fallback.lifecycle,
+            canExport: fallback.canExport,
+            canDelete: model.canDeleteLocalRelayerKey(keyRef: fallback.keyRef)
         )
     }
 
@@ -1210,11 +1243,6 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
     @objc
     private func refreshBalance() {
         model.refreshBalance()
-    }
-
-    @objc
-    private func toggleTestnetMode() {
-        model.setTestnetModeEnabled(testnetButton.state == .on)
     }
 
     @objc
@@ -1306,24 +1334,26 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
             return
         }
         let alert = NSAlert()
-        alert.messageText = "Delete or reset local relayer key?"
-        alert.informativeText = "This targets \(target.label). Safe delete is blocked when pending relayer transactions exist. Unsafe reset deletes key material anyway and can orphan pending relay state."
-        alert.addButton(withTitle: "Safe Delete")
-        alert.addButton(withTitle: "Unsafe Reset")
+        alert.messageText = target.lifecycle == "deleted"
+            ? "Finish relayer key cleanup?"
+            : "Delete retired relayer key?"
+        alert.informativeText = target.lifecycle == "deleted"
+            ? "This removes the remaining local records for \(target.label)."
+            : "This permanently removes the retired key for \(target.label). Active, pending, and retiring keys cannot be deleted here."
+        alert.addButton(withTitle: target.lifecycle == "deleted" ? "Finish Cleanup" : "Delete Retired Key")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .critical
 
-        let runDelete: (Bool) -> Void = { [weak self] unsafeReset in
+        let runDelete: () -> Void = { [weak self] in
             guard let self else { return }
             Task {
                 do {
                     try await self.model.deleteLocalRelayerKey(
                         keyRef: target.keyRef,
-                        label: target.label,
-                        unsafeReset: unsafeReset
+                        label: target.label
                     )
                 } catch {
-                    self.showError(unsafeReset ? "Unsafe reset failed" : "Delete failed", error)
+                    self.showError("Delete failed", error)
                 }
             }
         }
@@ -1331,17 +1361,13 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         if let window = view.window {
             alert.beginSheetModal(for: window) { response in
                 if response == .alertFirstButtonReturn {
-                    runDelete(false)
-                } else if response == .alertSecondButtonReturn {
-                    runDelete(true)
+                    runDelete()
                 }
             }
         } else {
             let response = alert.runModal()
             if response == .alertFirstButtonReturn {
-                runDelete(false)
-            } else if response == .alertSecondButtonReturn {
-                runDelete(true)
+                runDelete()
             }
         }
     }

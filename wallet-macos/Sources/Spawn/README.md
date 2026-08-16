@@ -23,8 +23,9 @@ pipes, so the app launches the daemon through `posix_spawn`.
 
 The test resolves `../local-wallet-daemon/target/debug/wallet-node` relative to
 `wallet-macos/Package.swift` (i.e. `local-wallet-daemon/` at the repo root, one
-level up from `wallet-macos/`). Set `WALLET_NODE_BIN=/absolute/path/to/wallet-node`
-to test a non-default binary path.
+level up from `wallet-macos/`). In a Debug build, set
+`WALLET_NODE_BIN=/absolute/path/to/wallet-node` to test a non-default binary
+path. Release builds ignore executable overrides and source-tree paths.
 
 ## Design
 
@@ -38,7 +39,8 @@ ends into the child:
 - **fd `5` — secret** (app→daemon): the secret pipe read end. The app writes the
   bundler-EOA secret payload here at startup.
 
-The daemon is always launched as:
+The daemon is launched suspended, authenticated against its expected code
+identity, and only then receives fd `5` and resumes. Its argument contract is:
 
 ```text
 wallet-node --ready-fd 3 --alive-fd 4 --secret-fd 5

@@ -22,11 +22,19 @@ public func spawnHelper(
     execPath: String,
     readyWrite: Int32,
     aliveRead: Int32,
-    secretRead: Int32
+    secretRead: Int32,
+    startSuspended: Bool = false
 ) throws -> pid_t {
     var pid = pid_t()
     let result = execPath.withCString { execPathPointer in
-        wallet_node_spawn_helper(execPathPointer, readyWrite, aliveRead, secretRead, &pid)
+        wallet_node_spawn_helper(
+            execPathPointer,
+            readyWrite,
+            aliveRead,
+            secretRead,
+            startSuspended ? 1 : 0,
+            &pid
+        )
     }
 
     if result != 0 {
@@ -34,4 +42,14 @@ public func spawnHelper(
     }
 
     return pid
+}
+
+public func resumeHelper(pid: pid_t) throws {
+    guard pid > 0 else {
+        throw SpawnError(errno: EINVAL)
+    }
+
+    if kill(pid, SIGCONT) == -1 {
+        throw SpawnError(errno: errno)
+    }
 }

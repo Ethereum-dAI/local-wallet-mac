@@ -79,7 +79,7 @@ final class OnboardingSettingsStore {
     }
 
     // The relayer identity cache is chain-scoped: a single shared slot let a
-    // mainnet<->sepolia switch display the other chain's relayer address.
+    // stale configuration cannot display an unrelated relayer address.
     func bundlerKeyRef(chainId: UInt64) -> String? {
         migrateLegacyBundlerCacheIfNeeded(chainId: chainId)
         return defaults.string(forKey: Self.bundlerKeyRefKey(chainId: chainId))
@@ -154,6 +154,10 @@ final class OnboardingSettingsStore {
 
     func markCompleted() {
         defaults.set(true, forKey: Keys.completed)
+    }
+
+    func markIncomplete() {
+        defaults.removeObject(forKey: Keys.completed)
     }
 }
 

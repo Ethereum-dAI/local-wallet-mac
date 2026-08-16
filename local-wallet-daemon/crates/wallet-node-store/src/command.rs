@@ -56,6 +56,15 @@ pub enum StoreCommand {
         new_key_ref: String,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    BundlerAccountRollbackReplacement {
+        owner_scope: String,
+        chain_id: u64,
+        transient_address: String,
+        transient_key_ref: String,
+        restored_address: String,
+        restored_key_ref: String,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     BundlerAccountSetLifecycle {
         owner_scope: String,
         chain_id: u64,
@@ -90,6 +99,23 @@ pub enum StoreCommand {
         confirmed_nonce: u64,
         reply: oneshot::Sender<Result<u64, StoreError>>,
     },
+    NonceReserveNextForUserOp {
+        chain_id: u64,
+        bundler_address: String,
+        confirmed_nonce: u64,
+        user_op_hash: String,
+        reply: oneshot::Sender<Result<u64, StoreError>>,
+    },
+    NonceReleasePrebundle {
+        chain_id: u64,
+        bundler_address: String,
+        nonce: u64,
+        user_op_hash: String,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
+    },
+    NoncesReleaseOrphanedPrebundle {
+        reply: oneshot::Sender<Result<usize, StoreError>>,
+    },
     NonceAttachTxHash {
         chain_id: u64,
         bundler_address: String,
@@ -115,6 +141,14 @@ pub enum StoreCommand {
     },
     UserOpInsertAbandonNonceOnExists {
         op: UserOperation,
+        nonce_chain_id: u64,
+        nonce_bundler_address: String,
+        nonce: u64,
+        reply: oneshot::Sender<Result<UserOpInsertOutcome, StoreError>>,
+    },
+    PersistSubmissionBundle {
+        op: UserOperation,
+        tx: SubmittedTransaction,
         nonce_chain_id: u64,
         nonce_bundler_address: String,
         nonce: u64,

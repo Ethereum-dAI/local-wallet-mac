@@ -10,8 +10,6 @@ const MAX_BLOCK_DRIFT_SECS: u64 = 90;
 const DAIMO_VERIFICATION_GAS_FLOOR: u64 = 1_000_000;
 const PERMISSION_ENABLE_VERIFICATION_GAS_FLOOR: u64 = 5_000_000;
 const ACCOUNT_CALL_GAS_FLOOR: u64 = 50_000;
-const PRE_VERIFICATION_FIXED_OVERHEAD: u64 = 35_000;
-const PRE_VERIFICATION_PER_USER_OP_OVERHEAD: u64 = 18_300;
 const GAS_ESTIMATE_SAFETY_BPS: u64 = 12_000;
 const GAS_ESTIMATE_BPS_DENOMINATOR: u64 = 10_000;
 
@@ -130,21 +128,28 @@ pub async fn handle(
                     &estimated,
                     estimated
                         .required_prefund()
+                        .map_err(super::map_bundler_error)?
                         .max(simulation.validation.prefund),
                 ),
             )
         }
         None => {
+            let estimation_op = op.with_signature(wallet_bundler::estimation_signature(
+                op.nonce,
+                &op.signature,
+                state.effective_use_precompiled(),
+            ));
             let estimated = derive_estimated_op(
                 state,
                 entry_point,
-                &op,
+                &estimation_op,
                 block,
                 &policy,
                 acknowledged_call_gas_limit,
             )
             .await?;
-            Ok(wallet_bundler::estimate_user_operation_gas(&estimated))
+            wallet_bundler::estimate_user_operation_gas(&estimated)
+                .map_err(super::map_bundler_error)
         }
     }
 }
@@ -204,7 +209,7 @@ async fn simulate_estimate_validation(
                         "simulateValidation succeeded for gas estimate"
                     );
                     return Ok(Some(EstimateSimulation {
-                        op: simulation_base,
+                        op: simulation_op,
                         validation,
                     }));
                 }
@@ -281,7 +286,6 @@ async fn derive_estimated_op(
     policy: &wallet_bundler::BundlerPolicy,
     acknowledged_call_gas_limit: Option<U256>,
 ) -> Result<UserOperation, wallet_node_api::JsonRpcError> {
-    let pre_verification_gas = estimate_pre_verification_gas(op)?;
     let verification_gas_limit = op.verification_gas_limit.max(verification_gas_floor(op));
     let call_gas_limit = estimate_account_call_gas(
         state,
@@ -293,28 +297,31 @@ async fn derive_estimated_op(
     )
     .await?;
 
-    Ok(op.with_gas_limits(
+    finalize_estimated_op(
+        policy,
+        op,
         op.call_gas_limit.max(call_gas_limit),
         verification_gas_limit,
-        op.pre_verification_gas.max(pre_verification_gas),
-    ))
+    )
 }
 
-fn estimate_pre_verification_gas(
+fn finalize_estimated_op(
+    policy: &wallet_bundler::BundlerPolicy,
     op: &UserOperation,
-) -> Result<U256, wallet_node_api::JsonRpcError> {
-    let calldata = wallet_bundler::encode_handle_ops(op, alloy_primitives::Address::ZERO)
-        .map_err(super::map_bundler_error)?;
-    let calldata_gas: u64 = calldata
-        .iter()
-        .map(|byte| if *byte == 0 { 4_u64 } else { 16_u64 })
-        .sum();
-    let word_overhead = calldata.len().div_ceil(32) as u64 * 4;
-    let raw = U256::from(PRE_VERIFICATION_FIXED_OVERHEAD)
-        + U256::from(PRE_VERIFICATION_PER_USER_OP_OVERHEAD)
-        + U256::from(word_overhead)
-        + U256::from(calldata_gas);
-    Ok(with_safety_margin(raw))
+    call_gas_limit: U256,
+    verification_gas_limit: U256,
+) -> Result<UserOperation, wallet_node_api::JsonRpcError> {
+    let provisional = op.with_gas_limits(call_gas_limit, verification_gas_limit, U256::ZERO);
+    let plan = wallet_bundler::authorize_user_operation_gas(policy, &provisional)
+        .map_err(super::map_policy_error)?;
+    let estimated = provisional.with_gas_limits(
+        call_gas_limit,
+        verification_gas_limit,
+        plan.pre_verification_gas,
+    );
+    wallet_bundler::validate_finalized_user_operation_gas(policy, &estimated)
+        .map_err(super::map_policy_error)?;
+    Ok(estimated)
 }
 
 async fn estimate_account_call_gas(
@@ -764,6 +771,36 @@ mod tests {
         assert_eq!(
             attempts[0].verification_gas_limit,
             U256::from(2_000_000_u64)
+        );
+    }
+
+    #[test]
+    fn finalized_estimate_uses_shared_canonical_pre_verification_gas() {
+        let mut op = sub_floor_user_operation();
+        op.signature = wallet_bundler::dummy_webauthn_signature(false);
+        op.pre_verification_gas = U256::from(999_999_u64);
+
+        let estimated = super::finalize_estimated_op(
+            &test_policy(),
+            &op,
+            U256::from(100_000_u64),
+            U256::from(super::DAIMO_VERIFICATION_GAS_FLOOR),
+        )
+        .unwrap();
+        assert_eq!(estimated.pre_verification_gas, U256::from(77_880_u64));
+        wallet_bundler::validate_finalized_user_operation_gas(&test_policy(), &estimated).unwrap();
+
+        op.pre_verification_gas = U256::ZERO;
+        let repeated = super::finalize_estimated_op(
+            &test_policy(),
+            &op,
+            U256::from(100_000_u64),
+            U256::from(super::DAIMO_VERIFICATION_GAS_FLOOR),
+        )
+        .unwrap();
+        assert_eq!(
+            repeated.pre_verification_gas,
+            estimated.pre_verification_gas
         );
     }
 

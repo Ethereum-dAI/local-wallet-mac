@@ -16,7 +16,6 @@ struct ChainConfiguration: Equatable {
     let id: UInt64
     let name: String
     let shortName: String
-    let isTestnet: Bool
     let rpcURL: URL
     let archiveRPCURL: URL?
     let consensusRPCURL: URL?
@@ -28,33 +27,10 @@ struct ChainConfiguration: Equatable {
     private static let bundlerURLEnvironmentKey = "LOCAL_WALLET_SEPOLIA_BUNDLER_URL"
     private static let bundlerURLInfoPlistKey = "LocalWalletSepoliaBundlerURL"
 
-    static let ethereum = ChainConfiguration(
-        id: 1,
-        name: "Ethereum",
-        shortName: "mainnet",
-        isTestnet: false,
-        rpcURL: URL(string: "https://ethereum-rpc.publicnode.com")!,
-        archiveRPCURL: nil,
-        consensusRPCURL: URL(string: "https://lodestar-mainnet.chainsafe.io")!,
-        bundlerURL: nil,
-        entryPoint: "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
-        kernel: KernelContractAddresses(
-            factory: "0x2577507b78c2008Ff367261CB6285d44ba5eF2E9",
-            implementation: "0xd6CEDDe84be40893d153Be9d467CD6aD37875b28",
-            webAuthnValidator: "0x7ab16Ff354AcB328452F1D445b3Ddee9a91e9e69"
-        ),
-        abiResources: ABIResource.defaultSet
-    )
-
     static let ethereumSepolia = ChainConfiguration(
         id: 11_155_111,
         name: "Ethereum Sepolia",
         shortName: "sepolia",
-        isTestnet: true,
-        // dRPC moved Sepolia behind a paid plan and now answers `eth_chainId`
-        // with HTTP 400, which the daemon correctly treats as a fatal startup
-        // error. publicnode matches the mainnet default above: no key, no quota
-        // signup.
         rpcURL: URL(string: "https://ethereum-sepolia-rpc.publicnode.com")!,
         archiveRPCURL: nil,
         consensusRPCURL: URL(string: "http://unstable.sepolia.beacon-api.nimbus.team")!,
@@ -100,7 +76,6 @@ struct ChainConfiguration: Equatable {
             id: id,
             name: name,
             shortName: shortName,
-            isTestnet: isTestnet,
             rpcURL: rpcURL,
             archiveRPCURL: archiveRPCURL,
             consensusRPCURL: consensusRPCURL,
@@ -122,10 +97,6 @@ extension ABIResource {
 
 struct DemoAppConfiguration {
     let networkSettings: DemoNetworkSettings
-
-    var isTestnetModeEnabled: Bool {
-        networkSettings.isTestnetModeEnabled
-    }
 
     var activeChain: ChainConfiguration {
         networkSettings.activeChain

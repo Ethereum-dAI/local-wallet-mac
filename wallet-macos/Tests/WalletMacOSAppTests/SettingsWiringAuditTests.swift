@@ -16,8 +16,8 @@ struct SettingsWiringAuditTests {
     /// (`com.localwallet.demo.onboarding.rpc-url`) is read as a fallback inside
     /// `DemoSettingsStore.networkSettings`. It feeds the **Sepolia** execution RPC
     /// (via `defaultingSepoliaRPCURL`) and only when the primary
-    /// `com.localwallet.demo.sepolia-rpc-url` key is unset. Because testnet mode
-    /// defaults to ON, that value also surfaces as the *active* execution RPC.
+    /// `com.localwallet.demo.sepolia-rpc-url` key is unset. Sepolia is the only app
+    /// network, so that value also surfaces as the active execution RPC.
     @Test func legacyOnboardingRPCFallsBackIntoSepoliaNetworkSettings() {
         let defaults = suite()
         defaults.set("https://example.test/rpc", forKey: "com.localwallet.demo.onboarding.rpc-url")
@@ -26,11 +26,9 @@ struct SettingsWiringAuditTests {
 
         // The fallback feeds the Sepolia execution RPC...
         #expect(settings.sepoliaRPCURL == "https://example.test/rpc")
-        // ...and, since testnet mode defaults to ON, it is the active RPC.
-        #expect(settings.isTestnetModeEnabled == true)
+        // ...and Sepolia is always the active RPC.
         #expect(settings.activeRPCURL == "https://example.test/rpc")
-        // It must NOT leak into the mainnet RPC, which keeps its own default.
-        #expect(settings.mainnetRPCURL == DemoNetworkSettings.defaults.mainnetRPCURL)
+        #expect(settings.activeChain.id == 11_155_111)
     }
 
     /// The fallback is only consulted when the primary Sepolia key is absent. Once

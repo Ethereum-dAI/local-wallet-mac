@@ -209,16 +209,9 @@ func buildTransactionIntent(
         )
         return .exactInputSwap(request)
 
-    case "shield", "unshield":
-        // Registered by ToolDefinitions.phase1 (stage 3 passes) but shield/
-        // unshield never go through TransactionIntent/buildDraft in the app —
-        // they're a separate RAILGUN sidecar path. A model that answers a
-        // transfer/swap prompt with shield/unshield dies here, at stage 4.
-        throw IntentBuildError.toolNotTransactionIntent(toolName)
-
     default:
-        // Unreachable in practice: stage 3 already restricts to
-        // ToolDefinitions.phase1's four names, all handled above.
+        // Some registered tools are handled outside the ordinary transaction
+        // draft path. Fail closed instead of fabricating a transaction intent.
         throw IntentBuildError.toolNotTransactionIntent(toolName)
     }
 }

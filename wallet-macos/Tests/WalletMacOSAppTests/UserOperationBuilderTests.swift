@@ -192,7 +192,7 @@ private func makeSwapQuote(allowance: Data?, requiresApproval: Bool) throws -> S
     let tokenOut = "0x2222222222222222222222222222222222222222"
 
     return SwapQuote(
-        chainID: 1,
+        chainID: 11_155_111,
         factory: "0x4444444444444444444444444444444444444444",
         router: "0x5555555555555555555555555555555555555555",
         quoter: "0x6666666666666666666666666666666666666666",

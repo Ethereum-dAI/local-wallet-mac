@@ -2,7 +2,187 @@ import Darwin
 import Foundation
 import SpawnHelper
 
+/// Owns the two process-lifetime handles shared by managed sidecars.
+///
+/// `terminate()` serializes taking and invalidating the handles with their system calls. That
+/// makes explicit shutdown, concurrent shutdown, and `deinit` safely idempotent: no later caller
+/// can close a recycled descriptor or signal a recycled PID.
+final class ManagedDaemonLifetime: @unchecked Sendable {
+    typealias CloseFileDescriptor = @Sendable (Int32) -> Void
+    typealias SignalProcess = @Sendable (pid_t, Int32) -> Void
+    typealias WaitForExit = @Sendable (pid_t, TimeInterval) throws -> Void
+
+    enum TerminationError: LocalizedError {
+        case waitFailed(pid: pid_t, code: Int32)
+        case signalFailed(pid: pid_t, code: Int32)
+        case forceKillTimedOut(pid: pid_t)
+
+        var errorDescription: String? {
+            switch self {
+            case let .waitFailed(pid, code):
+                return "Waiting for managed daemon pid \(pid) failed with errno \(code)."
+            case let .signalFailed(pid, code):
+                return "Stopping managed daemon pid \(pid) failed with errno \(code)."
+            case let .forceKillTimedOut(pid):
+                return "Managed daemon pid \(pid) did not exit after SIGKILL."
+            }
+        }
+    }
+
+    private let lock = NSLock()
+    private let pid: pid_t
+    private var aliveWriteFD: Int32
+    private var didRequestTermination = false
+    private var waitTask: Task<Void, Error>?
+    private let closeFileDescriptor: CloseFileDescriptor
+    private let signalProcess: SignalProcess
+    private let waitForExit: WaitForExit
+
+    init(
+        pid: pid_t,
+        aliveWriteFD: Int32,
+        closeFileDescriptor: @escaping CloseFileDescriptor = { _ = Darwin.close($0) },
+        signalProcess: @escaping SignalProcess = { _ = Darwin.kill($0, $1) },
+        waitForExit: @escaping WaitForExit = ManagedDaemonLifetime.waitForExit
+    ) {
+        self.pid = pid
+        self.aliveWriteFD = aliveWriteFD
+        self.closeFileDescriptor = closeFileDescriptor
+        self.signalProcess = signalProcess
+        self.waitForExit = waitForExit
+    }
+
+    func terminate() {
+        lock.lock()
+        defer { lock.unlock() }
+        if aliveWriteFD >= 0 {
+            closeFileDescriptor(aliveWriteFD)
+            aliveWriteFD = -1
+        }
+        if !didRequestTermination, pid > 0 {
+            didRequestTermination = true
+            signalProcess(pid, SIGTERM)
+        }
+    }
+
+    /// Request graceful shutdown, then wait off the caller's actor for the child to be reaped.
+    /// After `timeout`, the waiter sends SIGKILL and allows one additional bounded reap window.
+    /// Concurrent callers share the same detached waiter.
+    func terminateAndWait(timeout: TimeInterval = 2) async throws {
+        terminate()
+        guard pid > 0 else { return }
+
+        try await coalescedWaitTask(timeout: timeout).value
+    }
+
+    /// `NSLock` is deliberately confined to a synchronous function. Swift 6 rejects locking
+    /// directly from an async context because suspension while holding the lock would deadlock.
+    private func coalescedWaitTask(timeout: TimeInterval) -> Task<Void, Error> {
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = waitTask {
+            return existing
+        }
+
+        let waitForExit = self.waitForExit
+        let pid = self.pid
+        let boundedTimeout = max(0, timeout)
+        let created = Task.detached(priority: .userInitiated) {
+            try waitForExit(pid, boundedTimeout)
+        }
+        waitTask = created
+        return created
+    }
+
+    private static func waitForExit(pid: pid_t, timeout: TimeInterval) throws {
+        let gracefulDeadline = ProcessInfo.processInfo.systemUptime + timeout
+        if try pollUntilExited(pid: pid, deadline: gracefulDeadline) {
+            return
+        }
+
+        if Darwin.kill(pid, SIGKILL) != 0 {
+            let code = errno
+            if code == ESRCH {
+                return
+            }
+            throw TerminationError.signalFailed(pid: pid, code: code)
+        }
+
+        // SIGKILL should resolve immediately, but keep this bounded as well so a pathological
+        // child cannot hang a destructive reset. If it somehow outlives the window, leave a
+        // background waiter behind to reap it when the kernel finally reports the exit.
+        let forceKillDeadline = ProcessInfo.processInfo.systemUptime + 1
+        if try pollUntilExited(pid: pid, deadline: forceKillDeadline) {
+            return
+        }
+        reapEventually(pid: pid)
+        throw TerminationError.forceKillTimedOut(pid: pid)
+    }
+
+    private static func pollUntilExited(pid: pid_t, deadline: TimeInterval) throws -> Bool {
+        while true {
+            var status: Int32 = 0
+            let result = Darwin.waitpid(pid, &status, WNOHANG)
+            if result == pid {
+                return true
+            }
+            if result == -1 {
+                let code = errno
+                switch code {
+                case ECHILD, ESRCH:
+                    return true
+                case EINTR:
+                    continue
+                default:
+                    throw TerminationError.waitFailed(pid: pid, code: code)
+                }
+            }
+            if ProcessInfo.processInfo.systemUptime >= deadline {
+                return false
+            }
+            usleep(20_000)
+        }
+    }
+
+    private static func reapEventually(pid: pid_t) {
+        DispatchQueue.global(qos: .utility).async {
+            var status: Int32 = 0
+            while Darwin.waitpid(pid, &status, 0) == -1, errno == EINTR {}
+        }
+    }
+
+    deinit {
+        terminate()
+    }
+}
+
 final class WalletNodeDaemon: @unchecked Sendable {
+    enum ReadyPipeFailure: LocalizedError {
+        case timedOut
+        case pollFailed(code: Int32)
+        case readFailed(code: Int32)
+        case closed
+
+        var errorDescription: String? {
+            switch self {
+            case .timedOut:
+                return "timed out waiting for wallet-node ready event"
+            case .pollFailed(let code):
+                return "wallet-node ready pipe poll failed: errno \(code)"
+            case .readFailed(let code):
+                return "wallet-node ready pipe read failed: errno \(code)"
+            case .closed:
+                return "wallet-node ready pipe closed before ready event"
+            }
+        }
+    }
+
+    private enum ChildExitPollResult {
+        case exited(Int32)
+        case running
+        case unavailable
+    }
+
     enum GasPolicyError: LocalizedError {
         case invalidGwei(field: String, value: String)
         case priorityAboveMax(maxField: String, priorityField: String)
@@ -23,12 +203,6 @@ final class WalletNodeDaemon: @unchecked Sendable {
         let maxFeePerGasGwei: String
         let maxPriorityFeePerGasGwei: String
 
-        static let mainnet = GasPolicy(
-            maxFeePerGas: "0x2540be400",      // 10 gwei
-            maxPriorityFeePerGas: "0x3b9aca00", // 1 gwei
-            maxFeePerGasGwei: "10",
-            maxPriorityFeePerGasGwei: "1"
-        )
         static let sepolia = GasPolicy(
             maxFeePerGas: "0xba43b7400",       // 50 gwei
             maxPriorityFeePerGas: "0x12a05f200", // 5 gwei
@@ -36,14 +210,10 @@ final class WalletNodeDaemon: @unchecked Sendable {
             maxPriorityFeePerGasGwei: "5"
         )
 
-        /// Generous ceiling used when automatic gas pricing is on, so the live
-        /// fee is never rejected by the daemon `[policy]` caps. Auto mode follows
-        /// the network; this is a safety bound, not a user-facing cap.
-        // The `?? mainnet` fallback is never reached (100 <= 1500 and both are valid
-        // gwei integers, so `custom` cannot throw). Do NOT change it to a low value
-        // without thought: mainnet's 10 gwei cap would reject live gas under auto mode.
-        static let autoCeiling: GasPolicy =
-            (try? custom(maxFeePerGasGwei: "1500", maxPriorityFeePerGasGwei: "100")) ?? mainnet
+        /// Defense-in-depth ceiling used when automatic gas pricing is on. The
+        /// app-side authorization policy independently enforces the same 50/5
+        /// gwei caps; wallet-node must never be launched with a looser ceiling.
+        static let autoCeiling: GasPolicy = sepolia
 
         static func custom(
             maxFeePerGasGwei: String,
@@ -119,12 +289,10 @@ final class WalletNodeDaemon: @unchecked Sendable {
 
     let client: WalletNodeClient
 
-    private let pid: pid_t
-    private var aliveWriteFD: Int32
+    private let lifetime: ManagedDaemonLifetime
 
     private init(pid: pid_t, aliveWriteFD: Int32, ready: ReadyEvent) {
-        self.pid = pid
-        self.aliveWriteFD = aliveWriteFD
+        self.lifetime = ManagedDaemonLifetime(pid: pid, aliveWriteFD: aliveWriteFD)
         self.client = WalletNodeClient(
             configuration: WalletNodeClient.Configuration(
                 transport: .unixSocket(ready.socketPath),
@@ -134,7 +302,18 @@ final class WalletNodeDaemon: @unchecked Sendable {
     }
 
     deinit {
-        closeAlivePipe()
+        terminate()
+    }
+
+    /// Stop the managed child now instead of waiting for this owner to deallocate.
+    /// Safe to call repeatedly or concurrently with deinitialization.
+    func terminate() {
+        lifetime.terminate()
+    }
+
+    /// Stop and reap the managed wallet-node child without blocking the caller's actor.
+    func terminateAndWait(timeout: TimeInterval = 2) async throws {
+        try await lifetime.terminateAndWait(timeout: timeout)
     }
 
     static func launch(
@@ -162,10 +341,15 @@ final class WalletNodeDaemon: @unchecked Sendable {
         heliosVerificationEnabled: Bool,
         environment: [String: String]
     ) throws -> WalletNodeDaemon {
-        guard !bundlerSecrets.isEmpty else {
-            throw AppError.localRelayerKeyMissing
+        let executable: TrustedHelperExecutable
+        do {
+            executable = try TrustedHelperExecutableResolver.resolve(
+                .walletNode,
+                environment: environment
+            )
+        } catch {
+            throw AppError.localDaemonLaunchFailed(error.localizedDescription)
         }
-        let execPath = try resolveExecutablePath(environment: environment)
         try writeDaemonConfig(
             chain: chain,
             gasPolicy: gasPolicy,
@@ -175,6 +359,8 @@ final class WalletNodeDaemon: @unchecked Sendable {
         var readyPipe: [Int32] = [-1, -1]
         var alivePipe: [Int32] = [-1, -1]
         var secretPipe: [Int32] = [-1, -1]
+        var spawnedPID: pid_t = -1
+        let startupLogOffset = managedLogFileSize()
         guard pipe(&readyPipe) == 0 else {
             throw AppError.localDaemonLaunchFailed("failed to create wallet-node ready pipe: errno \(errno)")
         }
@@ -199,29 +385,40 @@ final class WalletNodeDaemon: @unchecked Sendable {
             try setCloseOnExec(secretPipe[0])
             try setCloseOnExec(secretPipe[1])
 
-            let launchedAt = Date()
-            let pid = try withWalletNodeLoggingEnvironment(environment) {
+            spawnedPID = try withWalletNodeLoggingEnvironment(environment) {
                 try spawnHelper(
-                    execPath: execPath,
+                    execPath: executable.path,
                     readyWrite: readyPipe[1],
                     aliveRead: alivePipe[0],
-                    secretRead: secretPipe[0]
+                    secretRead: secretPipe[0],
+                    startSuspended: true
                 )
             }
             closeIfOpen(&readyPipe[1])
             closeIfOpen(&alivePipe[0])
             closeIfOpen(&secretPipe[0])
-            try writeSecretPayload(bundlerSecrets, to: secretPipe[1])
-            closeIfOpen(&secretPipe[1])
+            do {
+                try TrustedHelperLaunchGate.authenticateDeliverAndResume(
+                    pid: spawnedPID,
+                    executable: executable
+                ) {
+                    defer { closeIfOpen(&secretPipe[1]) }
+                    try writeSecretPayload(bundlerSecrets, to: secretPipe[1])
+                }
+            } catch {
+                // The gate owns and reaps a rejected suspended process. Prevent the outer
+                // cleanup path from ever signalling a PID that the kernel could later reuse.
+                spawnedPID = -1
+                throw AppError.localDaemonLaunchFailed(error.localizedDescription)
+            }
 
             let readyData = try readLineWithTimeout(
                 fd: readyPipe[0],
-                timeout: 8,
-                launchedAt: launchedAt
+                timeout: 8
             )
             closeIfOpen(&readyPipe[0])
             let ready = try parseReadyEvent(readyData)
-            return WalletNodeDaemon(pid: pid, aliveWriteFD: alivePipe[1], ready: ready)
+            return WalletNodeDaemon(pid: spawnedPID, aliveWriteFD: alivePipe[1], ready: ready)
         } catch {
             closeIfOpen(&readyPipe[0])
             closeIfOpen(&readyPipe[1])
@@ -229,45 +426,21 @@ final class WalletNodeDaemon: @unchecked Sendable {
             closeIfOpen(&alivePipe[1])
             closeIfOpen(&secretPipe[0])
             closeIfOpen(&secretPipe[1])
+            let waitStatus = spawnedPID > 0 ? terminateAndReapFailedLaunch(pid: spawnedPID) : nil
+            if let pipeFailure = error as? ReadyPipeFailure {
+                throw AppError.localDaemonLaunchFailed(
+                    startupFailureDescription(
+                        pipeFailure: pipeFailure.localizedDescription,
+                        waitStatus: waitStatus,
+                        logTail: managedLogTail(
+                            startingAt: startupLogOffset,
+                            maxBytes: 32 * 1024
+                        )
+                    )
+                )
+            }
             throw error
         }
-    }
-
-    private static func resolveExecutablePath(environment: [String: String]) throws -> String {
-        var candidates: [String] = []
-        if let path = environment["LOCAL_WALLET_NODE_BIN"] {
-            candidates.append(path)
-        }
-        if let path = environment["WALLET_NODE_BIN"] {
-            candidates.append(path)
-        }
-        if let path = Bundle.main.url(forResource: "wallet-node", withExtension: nil, subdirectory: "bin")?.path {
-            candidates.append(path)
-        }
-        if let path = Bundle.main.url(forResource: "wallet-node", withExtension: nil)?.path {
-            candidates.append(path)
-        }
-        candidates.append(sourceRootWalletNodePath(profile: "release"))
-        candidates.append(sourceRootWalletNodePath(profile: "debug"))
-
-        for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
-            return candidate
-        }
-
-        throw AppError.localDaemonLaunchFailed("wallet-node binary was not found. Set WALLET_NODE_BIN (or LOCAL_WALLET_NODE_BIN) to an absolute path, or build wallet-node in the in-repo local-wallet-daemon workspace.")
-    }
-
-    private static func sourceRootWalletNodePath(profile: String) -> String {
-        // #filePath = <repo-root>/wallet-macos/Sources/WalletMacOSApp/WalletNodeDaemon.swift
-        // Walk up 4 levels to reach the repo root, then descend into the
-        // in-repo daemon directory's build output.
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()  // .../WalletMacOSApp
-            .deletingLastPathComponent()  // .../Sources
-            .deletingLastPathComponent()  // .../wallet-macos
-            .deletingLastPathComponent()  // <repo-root>
-            .appendingPathComponent("local-wallet-daemon/target/\(profile)/wallet-node")
-            .path
     }
 
     private static func writeDaemonConfig(
@@ -300,6 +473,24 @@ final class WalletNodeDaemon: @unchecked Sendable {
     }
 
     static func managedLogTail(maxBytes: Int = 96 * 1024, fileManager: FileManager = .default) -> String {
+        managedLogTail(startingAt: nil, maxBytes: maxBytes, fileManager: fileManager)
+    }
+
+    private static func managedLogFileSize(fileManager: FileManager = .default) -> UInt64? {
+        guard let logURL = managedLogFileURL(fileManager: fileManager),
+              let attributes = try? fileManager.attributesOfItem(atPath: logURL.path),
+              let size = attributes[.size] as? NSNumber
+        else {
+            return nil
+        }
+        return size.uint64Value
+    }
+
+    private static func managedLogTail(
+        startingAt requestedOffset: UInt64?,
+        maxBytes: Int,
+        fileManager: FileManager = .default
+    ) -> String {
         guard let logURL = managedLogFileURL(fileManager: fileManager) else {
             return "wallet-node log path unavailable"
         }
@@ -312,12 +503,17 @@ final class WalletNodeDaemon: @unchecked Sendable {
                 try? handle.close()
             }
             let size = try handle.seekToEnd()
-            let offset = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+            let boundedStart = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+            let requestedStart = requestedOffset.flatMap { $0 <= size ? $0 : nil } ?? 0
+            let offset = max(boundedStart, requestedStart)
             try handle.seek(toOffset: offset)
             let data = try handle.readToEnd() ?? Data()
             let text = String(data: data, encoding: .utf8) ?? "<wallet-node log is not valid UTF-8>"
             if offset == 0 {
                 return text.isEmpty ? "<wallet-node log is empty>" : text
+            }
+            if requestedOffset != nil, offset == requestedStart {
+                return text
             }
             return "<tail truncated to last \(maxBytes) bytes>\n\(text)"
         } catch {
@@ -325,8 +521,8 @@ final class WalletNodeDaemon: @unchecked Sendable {
         }
     }
 
-    static func gasPolicy(for chain: ChainConfiguration) -> GasPolicy {
-        chain.isTestnet ? .sepolia : .mainnet
+    static func gasPolicy(for _: ChainConfiguration) -> GasPolicy {
+        .sepolia
     }
 
     static func daemonConfigTOML(chain: ChainConfiguration) -> String {
@@ -488,38 +684,132 @@ final class WalletNodeDaemon: @unchecked Sendable {
         return nil
     }
 
-    /// `launchedAt` bounds the log scan in `launchFailure`; it must be captured
-    /// before the spawn, since the daemon can log and die before we get here.
-    private static func readLineWithTimeout(
-        fd: Int32,
-        timeout: TimeInterval,
-        launchedAt: Date
-    ) throws -> Data {
+    static func startupFailureDescription(
+        pipeFailure: String,
+        waitStatus: Int32?,
+        logTail: String
+    ) -> String {
+        let processDescription = waitStatus.map(processExitDescription)
+        if let daemonFailure = latestStructuredLogFailure(in: logTail) {
+            if let processDescription {
+                return "wallet-node \(processDescription): \(daemonFailure)"
+            }
+            return "wallet-node failed before ready: \(daemonFailure)"
+        }
+        if let processDescription {
+            return "\(pipeFailure) (wallet-node \(processDescription))"
+        }
+        return pipeFailure
+    }
+
+    static func latestStructuredLogFailure(in logTail: String) -> String? {
+        var fallback: String?
+        for line in logTail.split(whereSeparator: \.isNewline).reversed() {
+            guard let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let fields = object["fields"] as? [String: Any],
+                  let message = fields["message"] as? String,
+                  message.isEmpty == false
+            else {
+                continue
+            }
+            let detail = fields["error"] as? String
+            let diagnostic = detail.flatMap { $0.isEmpty ? nil : "\(message): \($0)" } ?? message
+            if (object["level"] as? String)?.uppercased() == "ERROR" {
+                return diagnostic
+            }
+            if fallback == nil, detail != nil {
+                fallback = diagnostic
+            }
+        }
+        return fallback
+    }
+
+    private static func processExitDescription(status: Int32) -> String {
+        let signal = status & 0x7f
+        if signal == 0 {
+            return "exited with status \((status >> 8) & 0xff)"
+        }
+        if signal == 0x7f {
+            return "stopped with status \((status >> 8) & 0xff)"
+        }
+        return "terminated by signal \(signal)"
+    }
+
+    private static func terminateAndReapFailedLaunch(pid: pid_t) -> Int32? {
+        switch pollForChildExit(pid: pid, timeout: 0.25) {
+        case .exited(let status):
+            return status
+        case .unavailable:
+            return nil
+        case .running:
+            break
+        }
+        if Darwin.kill(pid, SIGTERM) != 0, errno != ESRCH {
+            return nil
+        }
+        switch pollForChildExit(pid: pid, timeout: 0.25) {
+        case .exited(let status):
+            return status
+        case .unavailable:
+            return nil
+        case .running:
+            break
+        }
+        if Darwin.kill(pid, SIGKILL) != 0, errno != ESRCH {
+            return nil
+        }
+
+        var status: Int32 = 0
+        while true {
+            let result = Darwin.waitpid(pid, &status, 0)
+            if result == pid {
+                return status
+            }
+            if result == -1, errno == EINTR {
+                continue
+            }
+            return nil
+        }
+    }
+
+    private static func pollForChildExit(pid: pid_t, timeout: TimeInterval) -> ChildExitPollResult {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while true {
+            var status: Int32 = 0
+            let result = Darwin.waitpid(pid, &status, WNOHANG)
+            if result == pid {
+                return .exited(status)
+            }
+            if result == -1 {
+                if errno == EINTR {
+                    continue
+                }
+                return .unavailable
+            }
+            if ProcessInfo.processInfo.systemUptime >= deadline {
+                return .running
+            }
+            usleep(10_000)
+        }
+    }
+
+    private static func readLineWithTimeout(fd: Int32, timeout: TimeInterval) throws -> Data {
         let deadline = Date().addingTimeInterval(timeout)
         var data = Data()
-
-        // Attach the daemon's own last error when we have nothing better. Both
-        // bare messages below are true and useless on their own — they say the
-        // pipe went quiet, not why.
-        func launchFailure(_ summary: String) -> AppError {
-            guard let logged = lastLoggedDaemonError(since: launchedAt) else {
-                return AppError.localDaemonLaunchFailed(summary)
-            }
-            return AppError.localDaemonLaunchFailed("\(summary) — last daemon error: \(logged)")
-        }
 
         while Date() < deadline {
             var pollFd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
             let remainingMilliseconds = max(1, Int32(deadline.timeIntervalSinceNow * 1_000))
             let pollResult = poll(&pollFd, 1, remainingMilliseconds)
             if pollResult == 0 {
-                throw launchFailure("timed out waiting for wallet-node ready event")
+                throw ReadyPipeFailure.timedOut
             }
             if pollResult < 0 {
                 if errno == EINTR {
                     continue
                 }
-                throw AppError.localDaemonLaunchFailed("wallet-node ready pipe poll failed: errno \(errno)")
+                throw ReadyPipeFailure.pollFailed(code: errno)
             }
 
             while true {
@@ -531,10 +821,10 @@ final class WalletNodeDaemon: @unchecked Sendable {
                     if errno == EINTR {
                         continue
                     }
-                    throw AppError.localDaemonLaunchFailed("wallet-node ready pipe read failed: errno \(errno)")
+                    throw ReadyPipeFailure.readFailed(code: errno)
                 }
                 if readCount == 0 {
-                    throw launchFailure("wallet-node exited before it was ready")
+                    throw ReadyPipeFailure.closed
                 }
                 if byte == UInt8(ascii: "\n") {
                     return data
@@ -543,7 +833,7 @@ final class WalletNodeDaemon: @unchecked Sendable {
             }
         }
 
-        throw launchFailure("timed out waiting for wallet-node ready event")
+        throw ReadyPipeFailure.timedOut
     }
 
     private static func setCloseOnExec(_ fd: Int32) throws {
@@ -602,10 +892,139 @@ final class WalletNodeDaemon: @unchecked Sendable {
         }
     }
 
-    private func closeAlivePipe() {
-        if aliveWriteFD >= 0 {
-            close(aliveWriteFD)
-            aliveWriteFD = -1
+}
+
+/// Exact state checks for the two halves of first-time relayer registration.
+///
+/// The first daemon must prove that wallet-node derived and loaded the expected
+/// identity from the supplied secret. The second daemon must prove that only the
+/// public mapping survived the restart. Keeping this separate from the process
+/// orchestration makes every fail-closed branch deterministic to test.
+enum RelayerBootstrapRegistrationPolicy {
+    enum Failure: LocalizedError, Equatable {
+        case unexpectedLoadedState(expected: Bool, actual: Bool)
+
+        var errorDescription: String? {
+            switch self {
+            case let .unexpectedLoadedState(expected, actual):
+                return expected
+                    ? "wallet-node did not load the relayer secret during registration (keyLoaded=\(actual))."
+                    : "wallet-node retained the relayer secret after the read-only restart (keyLoaded=\(actual))."
+            }
+        }
+    }
+
+    static func verify(
+        status: WalletNodeClient.RelayerStatus,
+        identity: VerifiedRelayerIdentity,
+        expectedKeyLoaded: Bool,
+        expectedOwnerScope: String,
+        expectedNetworkProfile: String
+    ) throws {
+        guard status.keyLoaded == expectedKeyLoaded else {
+            throw Failure.unexpectedLoadedState(
+                expected: expectedKeyLoaded,
+                actual: status.keyLoaded
+            )
+        }
+        try RelayerIdentityBindingPolicy.verify(
+            status: status,
+            against: identity,
+            expectedOwnerScope: expectedOwnerScope,
+            expectedNetworkProfile: expectedNetworkProfile
+        )
+    }
+}
+
+/// Registers a freshly provisioned relayer from the secret, then proves that a
+/// clean restart keeps only its public database row.
+///
+/// This service is used only by explicit setup/reset actions. Ordinary launches
+/// continue to pass an empty key list and never touch protected Keychain data.
+@MainActor
+struct RelayerBootstrapRegistrationService {
+    typealias Probe = @MainActor (
+        [BundlerSecretRecord],
+        ChainConfiguration,
+        WalletNodeDaemon.GasPolicy
+    ) async throws -> WalletNodeClient.RelayerStatus
+
+    private let probe: Probe
+
+    init() {
+        probe = Self.runProbe
+    }
+
+    init(probe: @escaping Probe) {
+        self.probe = probe
+    }
+
+    func register(
+        record: BundlerSecretRecord,
+        chain: ChainConfiguration,
+        gasPolicy: WalletNodeDaemon.GasPolicy
+    ) async throws -> VerifiedRelayerIdentity {
+        let identity = try VerifiedRelayerIdentity.derive(
+            keyRef: record.keyRef,
+            secret: record.secret
+        )
+        guard identity.chainID == chain.id else {
+            throw VerifiedRelayerIdentity.ValidationError.keyRefChainMismatch(
+                expected: chain.id,
+                actual: identity.chainID
+            )
+        }
+
+        try Task.checkCancellation()
+        let registeredStatus = try await probe([record], chain, gasPolicy)
+        try Task.checkCancellation()
+        try RelayerBootstrapRegistrationPolicy.verify(
+            status: registeredStatus,
+            identity: identity,
+            expectedKeyLoaded: true,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: chain.shortName
+        )
+
+        try Task.checkCancellation()
+        let lockedStatus = try await probe([], chain, gasPolicy)
+        try Task.checkCancellation()
+        try RelayerBootstrapRegistrationPolicy.verify(
+            status: lockedStatus,
+            identity: identity,
+            expectedKeyLoaded: false,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: chain.shortName
+        )
+        return identity
+    }
+
+    /// Helios is deliberately disabled for these short-lived registration
+    /// probes. The durable relayer mapping does not depend on consensus sync,
+    /// and the next normal launch restores the user's configured read mode.
+    private static func runProbe(
+        bundlerSecrets: [BundlerSecretRecord],
+        chain: ChainConfiguration,
+        gasPolicy: WalletNodeDaemon.GasPolicy
+    ) async throws -> WalletNodeClient.RelayerStatus {
+        let daemon = try await WalletNodeDaemon.launch(
+            bundlerSecrets: bundlerSecrets,
+            chain: chain,
+            gasPolicy: gasPolicy,
+            heliosVerificationEnabled: false
+        )
+        do {
+            let status = try await daemon.client.bundlerStatus()
+            try await daemon.terminateAndWait()
+            return status
+        } catch {
+            let originalError = error
+            daemon.terminate()
+            // Cleanup is load-bearing when this was the secret-bearing probe.
+            // Preserve the operation failure, but do not return until the child
+            // has had the bounded termination/reap sequence applied.
+            try? await daemon.terminateAndWait()
+            throw originalError
         }
     }
 }

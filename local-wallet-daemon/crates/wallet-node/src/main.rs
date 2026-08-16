@@ -1,6 +1,7 @@
 mod admin;
 mod admin_challenge;
 pub mod auth;
+mod bundler_account_reconciliation;
 mod bundler_keys;
 mod cli;
 mod config;
@@ -26,12 +27,13 @@ use std::time::Duration;
 
 use clap::Parser;
 use serde::Deserialize;
-use wallet_node_store::{BundlerAccount, BundlerLifecycle, StoreError, SubmittedTxStatus};
+use wallet_node_store::BundlerLifecycle;
 
+use crate::bundler_account_reconciliation::SuppliedBundlerKey;
 use crate::bundler_keys::{BundlerKeyStore, InMemoryBundlerKeyStore};
 use cli::{Cli, CliCommand};
 use handlers::offline_chain::OfflineChainAdapter;
-use lifecycle::LifecycleHandles;
+use lifecycle::{LifecycleHandles, ShutdownOnDrop, StartupStageResult};
 use ready::ReadyEvent;
 use state::{DaemonState, TransportInfo};
 use transport::handler::Handler;
@@ -76,6 +78,34 @@ async fn main() -> ExitCode {
     if let Err(err) = cli.validate() {
         fail_before_ready!(cli, "{err}");
     }
+
+    // Arm every parent-death path before reading fd 5. In particular, the
+    // alive-pipe watcher must already be live while secret material is loaded
+    // and while the slower reconciliation and chain-startup stages run.
+    let LifecycleHandles {
+        shutdown_tx,
+        mut shutdown_rx,
+    } = LifecycleHandles::new();
+    let _shutdown_on_drop = ShutdownOnDrop::new(shutdown_tx.clone());
+    let _signal_handlers = lifecycle::install_signal_handlers(shutdown_tx.clone());
+    let _alive_pipe_watcher = match cli.alive_fd {
+        Some(alive_fd) => {
+            match lifecycle::install_alive_pipe_watcher(
+                alive_fd as RawFd,
+                shutdown_tx.clone(),
+                shutdown_rx.clone(),
+            ) {
+                Ok(watcher) => Some(watcher),
+                Err(err) => {
+                    fail_before_ready!(cli, "failed to install alive pipe watcher: {err}");
+                }
+            }
+        }
+        None => None,
+    };
+    let _ppid_backstop = cli
+        .alive_fd
+        .map(|_| lifecycle::install_ppid_backstop(shutdown_tx.clone(), Duration::from_secs(5)));
 
     let http_addr = match cli.http.as_deref() {
         Some(addr) => {
@@ -130,9 +160,23 @@ async fn main() -> ExitCode {
         fail_before_ready!(cli, "failed to migrate wallet-node store: {err}");
     }
     let store = wallet_node_store::StoreActor::start(conn);
+    if *shutdown_rx.borrow() {
+        return exit_after_startup_shutdown(&store).await;
+    }
+    if let Err(err) = store.release_orphaned_prebundle_nonces().await {
+        fail_before_ready!(
+            cli,
+            "failed to recover pre-submission nonce reservations: {err}"
+        );
+    }
     let bundler_key_store = Arc::new(InMemoryBundlerKeyStore::new());
     let installed_bundler_keys = match cli.secret_fd {
-        Some(fd) => match load_secrets_from_fd(fd, &bundler_key_store) {
+        Some(fd) => match load_secrets_from_fd(
+            fd,
+            &bundler_key_store,
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            config.network.chain_id,
+        ) {
             Ok(keys) => keys,
             Err(err) => {
                 fail_before_ready!(cli, "failed to load bundler secrets from fd {fd}: {err}");
@@ -141,12 +185,32 @@ async fn main() -> ExitCode {
         None => Vec::new(),
     };
     for key in &installed_bundler_keys {
-        if let Err(err) = ensure_bundler_account_for_installed_key(&store, key).await {
-            fail_before_ready!(
-                cli,
-                "failed to register supplied bundler key {}: {err}",
-                key.key_ref
-            );
+        let reconciliation = lifecycle::run_startup_stage(
+            &mut shutdown_rx,
+            bundler_account_reconciliation::reconcile(
+                &store,
+                SuppliedBundlerKey {
+                    owner_scope: &key.owner_scope,
+                    chain_id: key.chain_id,
+                    key_ref: &key.key_ref,
+                    address: &key.address,
+                },
+                BundlerLifecycle::Active,
+            ),
+        )
+        .await;
+        match reconciliation {
+            StartupStageResult::Completed(Ok(_)) => {}
+            StartupStageResult::Completed(Err(err)) => {
+                fail_before_ready!(
+                    cli,
+                    "failed to register supplied bundler key {}: {err}",
+                    key.key_ref
+                );
+            }
+            StartupStageResult::ShutdownRequested => {
+                return exit_after_startup_shutdown(&store).await;
+            }
         }
     }
 
@@ -159,9 +223,17 @@ async fn main() -> ExitCode {
                 data_dir: paths.helios_dir.clone(),
                 max_helios_lag_blocks: 8,
             };
-            match HeliosChainAdapter::start(chain_config).await {
-                Ok((adapter, _handle)) => Arc::new(adapter),
-                Err(ChainError::CheckpointTooOld { reason }) => {
+            let startup = lifecycle::run_startup_stage(
+                &mut shutdown_rx,
+                HeliosChainAdapter::start(chain_config),
+            )
+            .await;
+            match startup {
+                StartupStageResult::ShutdownRequested => {
+                    return exit_after_startup_shutdown(&store).await;
+                }
+                StartupStageResult::Completed(Ok((adapter, _handle))) => Arc::new(adapter),
+                StartupStageResult::Completed(Err(ChainError::CheckpointTooOld { reason })) => {
                     // T-P3-7 option b: keep the daemon serving authenticated control APIs while
                     // verified chain reads are soft-degraded until a fresh checkpoint ships.
                     tracing::warn!(
@@ -170,7 +242,7 @@ async fn main() -> ExitCode {
                     );
                     Arc::new(OfflineChainAdapter::new())
                 }
-                Err(err) => {
+                StartupStageResult::Completed(Err(err)) => {
                     tracing::error!(error = %err, "failed to start helios chain adapter");
                     fail_before_ready!(cli, "failed to start helios chain adapter: {err}");
                 }
@@ -183,33 +255,35 @@ async fn main() -> ExitCode {
             );
             let adapter =
                 ExecutionRpcChainAdapter::new(config.execution_rpc_for_helios().to_owned());
-            if let Err(err) = adapter
-                .validate_chain_id(config.chain_id_for_helios())
-                .await
-            {
-                tracing::error!(
-                    error = %err,
-                    expected_chain_id = config.chain_id_for_helios(),
-                    "execution RPC chain id validation failed"
-                );
-                fail_before_ready!(
-                    cli,
-                    "execution RPC {} rejected chain id {}: {err}",
-                    redact::redact_url(config.execution_rpc_for_helios()),
-                    config.chain_id_for_helios()
-                );
+            let validation = lifecycle::run_startup_stage(
+                &mut shutdown_rx,
+                adapter.validate_chain_id(config.chain_id_for_helios()),
+            )
+            .await;
+            match validation {
+                StartupStageResult::Completed(Ok(())) => {}
+                StartupStageResult::Completed(Err(err)) => {
+                    tracing::error!(
+                        error = %err,
+                        expected_chain_id = config.chain_id_for_helios(),
+                        "execution RPC chain id validation failed"
+                    );
+                    fail_before_ready!(
+                        cli,
+                        "execution RPC {} rejected chain id {}: {err}",
+                        redact::redact_url(config.execution_rpc_for_helios()),
+                        config.chain_id_for_helios()
+                    );
+                }
+                StartupStageResult::ShutdownRequested => {
+                    return exit_after_startup_shutdown(&store).await;
+                }
             }
             Arc::new(adapter)
         }
     };
 
     let token = Arc::new(auth::Token::generate());
-    let lifecycle = LifecycleHandles::new();
-    let LifecycleHandles {
-        shutdown_tx,
-        mut shutdown_rx,
-    } = lifecycle;
-    let _signal_handlers = lifecycle::install_signal_handlers(shutdown_tx.clone());
     let transport_info = if cli.http.is_some() {
         TransportInfo::http()
     } else {
@@ -287,16 +361,7 @@ async fn main() -> ExitCode {
         }
 
         task
-    } else if let (Some(ready_fd), Some(alive_fd)) = (cli.ready_fd, cli.alive_fd) {
-        if let Err(err) = lifecycle::install_alive_pipe_watcher(
-            alive_fd as RawFd,
-            shutdown_tx.clone(),
-            shutdown_rx.clone(),
-        ) {
-            fail_before_ready!(cli, "failed to install alive pipe watcher: {err}");
-        }
-        let _ppid_backstop =
-            lifecycle::install_ppid_backstop(shutdown_tx.clone(), Duration::from_secs(5));
+    } else if let (Some(ready_fd), Some(_alive_fd)) = (cli.ready_fd, cli.alive_fd) {
         let transport_shutdown_rx = shutdown_rx.clone();
         let socket_path = paths.socket_path.clone();
         let task = tokio::spawn(transport::unix::serve(
@@ -384,6 +449,20 @@ async fn main() -> ExitCode {
     exit_code
 }
 
+async fn exit_after_startup_shutdown(store: &wallet_node_store::StoreHandle) -> ExitCode {
+    tracing::info!("shutdown requested before wallet-node became ready");
+    match tokio::time::timeout(Duration::from_secs(1), store.shutdown_and_wait()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, "store shutdown failed during startup cancellation");
+        }
+        Err(_) => {
+            tracing::warn!("store did not stop within 1 second during startup cancellation");
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 #[derive(Debug)]
 struct InstalledBundlerKey {
     key_ref: String,
@@ -395,8 +474,7 @@ struct InstalledBundlerKey {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SecretFdPayload {
-    #[serde(default)]
-    keys: Vec<SecretFdEntry>,
+    keys: Option<Vec<SecretFdEntry>>,
     key_ref: Option<String>,
     secret: Option<String>,
 }
@@ -411,7 +489,10 @@ struct SecretFdEntry {
 fn load_secrets_from_fd(
     fd: u32,
     store: &InMemoryBundlerKeyStore,
+    expected_owner_scope: &str,
+    expected_chain_id: u64,
 ) -> Result<Vec<InstalledBundlerKey>, String> {
+    use std::collections::HashSet;
     use std::io::Read;
 
     let mut file = unsafe { std::fs::File::from_raw_fd(fd as RawFd) };
@@ -422,21 +503,32 @@ fn load_secrets_from_fd(
 
     let payload: SecretFdPayload =
         serde_json::from_str(&body).map_err(|err| format!("invalid json: {err}"))?;
-    let entries = if payload.keys.is_empty() {
-        match (payload.key_ref, payload.secret) {
+    let explicit_key_list = payload.keys.is_some();
+    let entries = match payload.keys {
+        Some(keys) => keys,
+        None => match (payload.key_ref, payload.secret) {
             (Some(key_ref), Some(secret)) => vec![SecretFdEntry { key_ref, secret }],
             _ => Vec::new(),
-        }
-    } else {
-        payload.keys
+        },
     };
-    if entries.is_empty() {
+    if entries.is_empty() && !explicit_key_list {
         return Err("payload contains no keys".to_string());
     }
 
-    let mut installed = Vec::new();
+    let mut validated = Vec::with_capacity(entries.len());
+    let mut seen_key_refs = HashSet::with_capacity(entries.len());
+    let mut seen_addresses = HashSet::with_capacity(entries.len());
     for entry in entries {
-        let (owner_scope, chain_id) = parse_bundler_key_ref(&entry.key_ref)?;
+        let parsed = bundler_keys::parse_canonical_key_ref(&entry.key_ref)
+            .map_err(|err| format!("invalid keyRef {}: {err}", entry.key_ref))?;
+        if parsed.owner_scope != expected_owner_scope || parsed.chain_id != expected_chain_id {
+            return Err(format!(
+                "keyRef {} does not match configured owner {} and chain {}",
+                entry.key_ref, expected_owner_scope, expected_chain_id
+            ));
+        }
+        let owner_scope = parsed.owner_scope.to_string();
+        let chain_id = parsed.chain_id;
         let bytes = hex::decode(entry.secret.trim_start_matches("0x"))
             .map_err(|err| format!("invalid secret hex for {}: {err}", entry.key_ref))?;
         if bytes.len() != 32 {
@@ -448,11 +540,26 @@ fn load_secrets_from_fd(
         }
         let mut secret = [0u8; 32];
         secret.copy_from_slice(&bytes);
+        let address = bundler_keys::address_for_secret(&entry.key_ref, &secret)
+            .map_err(|err| format!("invalid secret for {}: {err}", entry.key_ref))?;
+        if !seen_key_refs.insert(entry.key_ref.clone()) {
+            return Err(format!("duplicate keyRef {}", entry.key_ref));
+        }
+        if !seen_addresses.insert(address) {
+            return Err(format!(
+                "duplicate bundler address {address:#x} in secret payload"
+            ));
+        }
+        validated.push((entry.key_ref, owner_scope, chain_id, secret));
+    }
+
+    let mut installed = Vec::with_capacity(validated.len());
+    for (key_ref, owner_scope, chain_id, secret) in validated {
         let address = store
-            .install_key(&entry.key_ref, secret)
-            .map_err(|err| format!("install failed for {}: {err}", entry.key_ref))?;
+            .install_key(&key_ref, secret)
+            .map_err(|err| format!("install failed for {key_ref}: {err}"))?;
         installed.push(InstalledBundlerKey {
-            key_ref: entry.key_ref,
+            key_ref,
             owner_scope,
             chain_id,
             address: format!("{address:#x}"),
@@ -461,323 +568,158 @@ fn load_secrets_from_fd(
     Ok(installed)
 }
 
-fn parse_bundler_key_ref(key_ref: &str) -> Result<(String, u64), String> {
-    let parts = key_ref.split(':').collect::<Vec<_>>();
-    if parts.len() != 4 || parts[0] != "bundler-eoa" {
-        return Err(format!(
-            "invalid keyRef {key_ref}; expected bundler-eoa:<ownerScope>:<chainId>:<index>"
-        ));
-    }
-    let chain_id = parts[2]
-        .parse::<u64>()
-        .map_err(|err| format!("invalid chain id in keyRef {key_ref}: {err}"))?;
-    Ok((parts[1].to_string(), chain_id))
-}
-
-async fn ensure_bundler_account_for_installed_key(
-    store: &wallet_node_store::StoreHandle,
-    key: &InstalledBundlerKey,
-) -> Result<(), StoreError> {
-    let accounts = store
-        .bundler_account_list_for_owner(&key.owner_scope, key.chain_id)
-        .await?;
-    if let Some(account) = accounts
-        .iter()
-        .find(|account| account.address.eq_ignore_ascii_case(&key.address))
-    {
-        if account.key_ref != key.key_ref {
-            return Err(StoreError::DataIntegrity {
-                table: "bundler_accounts",
-                reason: "supplied bundler address is registered under a different key_ref",
-            });
-        }
-        if account.lifecycle == BundlerLifecycle::Active {
-            return Ok(());
-        }
-
-        if let Some(active) = accounts
-            .iter()
-            .find(|account| account.lifecycle == BundlerLifecycle::Active)
-        {
-            if active.key_ref == key.key_ref
-                && !bundler_account_has_live_local_work(store, active).await?
-            {
-                tracing::warn!(
-                    owner_scope = %key.owner_scope,
-                    chain_id = key.chain_id,
-                    key_ref = %key.key_ref,
-                    old_address = %active.address,
-                    new_address = %key.address,
-                    "retiring stale active bundler account metadata and adopting supplied key"
-                );
-                return store
-                    .bundler_account_replace_active_for_owner(
-                        &key.owner_scope,
-                        key.chain_id,
-                        &active.address,
-                        &key.address,
-                        &key.key_ref,
-                    )
-                    .await;
-            }
-            return Err(StoreError::DataIntegrity {
-                table: "bundler_accounts",
-                reason: "supplied bundler address is not active",
-            });
-        }
-
-        return store
-            .bundler_account_set_lifecycle_for_owner(
-                &key.owner_scope,
-                key.chain_id,
-                &key.address,
-                BundlerLifecycle::Active,
-            )
-            .await;
-    }
-
-    if let Some(active) = accounts
-        .iter()
-        .find(|account| account.lifecycle == BundlerLifecycle::Active)
-    {
-        if active.key_ref == key.key_ref {
-            if bundler_account_has_live_local_work(store, active).await? {
-                return Err(StoreError::DataIntegrity {
-                    table: "bundler_accounts",
-                    reason:
-                        "supplied bundler key_ref resolves to a different address with live local submissions",
-                });
-            }
-            tracing::warn!(
-                owner_scope = %key.owner_scope,
-                chain_id = key.chain_id,
-                key_ref = %key.key_ref,
-                old_address = %active.address,
-                new_address = %key.address,
-                "retiring stale active bundler account metadata and adopting supplied key"
-            );
-            return store
-                .bundler_account_replace_active_for_owner(
-                    &key.owner_scope,
-                    key.chain_id,
-                    &active.address,
-                    &key.address,
-                    &key.key_ref,
-                )
-                .await;
-        }
-
-        return Err(StoreError::DataIntegrity {
-            table: "bundler_accounts",
-            reason: "active bundler account differs from supplied key",
-        });
-    }
-
-    store
-        .bundler_account_insert_for_owner(
-            &key.owner_scope,
-            key.chain_id,
-            &key.address,
-            &key.key_ref,
-            BundlerLifecycle::Active,
-        )
-        .await
-}
-
-async fn bundler_account_has_live_local_work(
-    store: &wallet_node_store::StoreHandle,
-    account: &BundlerAccount,
-) -> Result<bool, StoreError> {
-    let pending_nonces = store
-        .nonces_list_pending(account.chain_id, &account.address)
-        .await?;
-    if !pending_nonces.is_empty() {
-        return Ok(true);
-    }
-
-    let live_txs = store.submitted_txs_list_for_watcher().await?;
-    Ok(live_txs.iter().any(|tx| {
-        tx.chain_id == account.chain_id
-            && tx.bundler_address.eq_ignore_ascii_case(&account.address)
-            && matches!(
-                tx.status,
-                SubmittedTxStatus::Submitting | SubmittedTxStatus::Submitted
-            )
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wallet_node_store::{db, migrations, StoreActor, StoreError};
+    use std::io::Write;
+    use std::os::fd::IntoRawFd;
 
-    fn migrated_store() -> wallet_node_store::StoreHandle {
-        let mut conn = db::open_in_memory().expect("in-memory store should open");
-        migrations::apply(&mut conn).expect("migrations should apply");
-        StoreActor::start(conn)
+    #[test]
+    fn explicit_empty_secret_list_starts_read_only() {
+        let (read_fd, write_fd) = nix::unistd::pipe().expect("secret pipe should open");
+        let mut writer = std::fs::File::from(write_fd);
+        writer
+            .write_all(br#"{"keys":[]}"#)
+            .expect("read-only secret payload should write");
+        drop(writer);
+
+        let store = InMemoryBundlerKeyStore::new();
+        let installed = load_secrets_from_fd(
+            read_fd.into_raw_fd() as u32,
+            &store,
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            1,
+        )
+        .expect("an explicit empty key list should be a valid read-only launch");
+
+        assert!(installed.is_empty());
     }
 
-    #[tokio::test]
-    async fn supplied_bundler_key_registration_is_idempotent() {
-        let store = migrated_store();
-        let key = InstalledBundlerKey {
-            key_ref: "bundler-eoa:default:11155111:1".to_owned(),
-            owner_scope: "default".to_owned(),
-            chain_id: 11_155_111,
-            address: "0xa09d9ce68cb323ee2b2ba939084b13a8eeaa5bcc".to_owned(),
-        };
-        store
-            .bundler_account_insert_for_owner(
-                &key.owner_scope,
-                key.chain_id,
-                &key.address,
-                &key.key_ref,
-                BundlerLifecycle::Active,
-            )
-            .await
-            .expect("pre-existing relayer account should insert");
+    #[test]
+    fn missing_secret_fields_remains_invalid() {
+        let (read_fd, write_fd) = nix::unistd::pipe().expect("secret pipe should open");
+        let mut writer = std::fs::File::from(write_fd);
+        writer
+            .write_all(br#"{}"#)
+            .expect("invalid secret payload should write");
+        drop(writer);
 
-        ensure_bundler_account_for_installed_key(&store, &key)
-            .await
-            .expect("same supplied key should be accepted on restart");
+        let store = InMemoryBundlerKeyStore::new();
+        let error = load_secrets_from_fd(
+            read_fd.into_raw_fd() as u32,
+            &store,
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            1,
+        )
+        .expect_err("an omitted key list must not silently become read-only");
 
-        let accounts = store
-            .bundler_account_list_for_owner(&key.owner_scope, key.chain_id)
-            .await
-            .expect("accounts should list");
-        assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0].key_ref, key.key_ref);
-        assert!(accounts[0].address.eq_ignore_ascii_case(&key.address));
-
-        store.shutdown_and_wait().await.expect("store should stop");
+        assert_eq!(error, "payload contains no keys");
     }
 
-    #[tokio::test]
-    async fn supplied_bundler_key_registration_rejects_key_ref_address_mismatch() {
-        let store = migrated_store();
-        let existing_address = "0xa09d9ce68cb323ee2b2ba939084b13a8eeaa5bcc";
-        store
-            .bundler_account_insert_for_owner(
-                "default",
-                11_155_111,
-                existing_address,
-                "bundler-eoa:default:11155111:1",
-                BundlerLifecycle::Active,
-            )
-            .await
-            .expect("pre-existing relayer account should insert");
+    #[test]
+    fn secret_fd_rejects_noncanonical_or_out_of_scope_key_refs_without_installing() {
+        for key_ref in [
+            "bundler-eoa:default:01:1",
+            "bundler-eoa:default:1:01",
+            "bundler-eoa:default:1:0",
+            "bundler-eoa:other:1:1",
+            "bundler-eoa:default:2:1",
+        ] {
+            let (read_fd, write_fd) = nix::unistd::pipe().expect("secret pipe should open");
+            let mut writer = std::fs::File::from(write_fd);
+            let payload = serde_json::json!({
+                "keys": [{
+                    "keyRef": key_ref,
+                    "secret": format!("0x{}", "01".repeat(32)),
+                }]
+            });
+            writer
+                .write_all(payload.to_string().as_bytes())
+                .expect("invalid secret payload should write");
+            drop(writer);
 
-        let mismatched = InstalledBundlerKey {
-            key_ref: "bundler-eoa:default:11155111:2".to_owned(),
-            owner_scope: "default".to_owned(),
-            chain_id: 11_155_111,
-            address: existing_address.to_owned(),
-        };
-        let err = ensure_bundler_account_for_installed_key(&store, &mismatched)
-            .await
-            .expect_err("same address under a different key_ref should fail clearly");
-        assert!(matches!(
-            err,
-            StoreError::DataIntegrity {
-                table: "bundler_accounts",
-                reason: "supplied bundler address is registered under a different key_ref"
-            }
-        ));
+            let store = InMemoryBundlerKeyStore::new();
+            let result = load_secrets_from_fd(
+                read_fd.into_raw_fd() as u32,
+                &store,
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+            );
 
-        store.shutdown_and_wait().await.expect("store should stop");
+            assert!(result.is_err(), "{key_ref}");
+            assert!(!store.is_key_loaded(key_ref).unwrap(), "{key_ref}");
+        }
     }
 
-    #[tokio::test]
-    async fn supplied_bundler_key_registration_adopts_idle_key_ref_address_mismatch() {
-        let store = migrated_store();
-        let key_ref = "bundler-eoa:default:11155111:1";
-        let old_address = "0xa09d9ce68cb323ee2b2ba939084b13a8eeaa5bcc";
-        let new_address = "0x122cbfd6b318e468625fa9f2264dc77d887b8393";
-        store
-            .bundler_account_insert_for_owner(
-                "default",
-                11_155_111,
-                old_address,
-                key_ref,
-                BundlerLifecycle::Active,
-            )
-            .await
-            .expect("pre-existing relayer account should insert");
+    #[test]
+    fn secret_fd_validates_every_entry_before_installing_any_key() {
+        let valid_key_ref = "bundler-eoa:default:1:1";
+        let invalid_key_ref = "bundler-eoa:default:1:02";
+        let (read_fd, write_fd) = nix::unistd::pipe().expect("secret pipe should open");
+        let mut writer = std::fs::File::from(write_fd);
+        let payload = serde_json::json!({
+            "keys": [
+                {
+                    "keyRef": valid_key_ref,
+                    "secret": format!("0x{}", "01".repeat(32)),
+                },
+                {
+                    "keyRef": invalid_key_ref,
+                    "secret": format!("0x{}", "02".repeat(32)),
+                }
+            ]
+        });
+        writer
+            .write_all(payload.to_string().as_bytes())
+            .expect("mixed secret payload should write");
+        drop(writer);
 
-        let supplied = InstalledBundlerKey {
-            key_ref: key_ref.to_owned(),
-            owner_scope: "default".to_owned(),
-            chain_id: 11_155_111,
-            address: new_address.to_owned(),
-        };
-        ensure_bundler_account_for_installed_key(&store, &supplied)
-            .await
-            .expect("idle stale metadata should be retired");
+        let store = InMemoryBundlerKeyStore::new();
+        let result = load_secrets_from_fd(
+            read_fd.into_raw_fd() as u32,
+            &store,
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            1,
+        );
 
-        let active = store
-            .bundler_account_active_for_owner("default", 11_155_111)
-            .await
-            .expect("active account should load")
-            .expect("replacement should be active");
-        assert_eq!(active.key_ref, key_ref);
-        assert!(active.address.eq_ignore_ascii_case(new_address));
-        let accounts = store
-            .bundler_account_list_for_owner("default", 11_155_111)
-            .await
-            .expect("accounts should list");
-        assert!(accounts.iter().any(|account| {
-            account.address.eq_ignore_ascii_case(old_address)
-                && account.lifecycle == BundlerLifecycle::Retired
-        }));
-
-        store.shutdown_and_wait().await.expect("store should stop");
+        assert!(result.is_err());
+        assert!(!store.is_key_loaded(valid_key_ref).unwrap());
+        assert!(!store.is_key_loaded(invalid_key_ref).unwrap());
     }
 
-    #[tokio::test]
-    async fn supplied_bundler_key_registration_rejects_live_key_ref_address_mismatch() {
-        let store = migrated_store();
-        let key_ref = "bundler-eoa:default:11155111:1";
-        let old_address = "0xa09d9ce68cb323ee2b2ba939084b13a8eeaa5bcc";
-        store
-            .bundler_account_insert_for_owner(
-                "default",
-                11_155_111,
-                old_address,
-                key_ref,
-                BundlerLifecycle::Active,
-            )
-            .await
-            .expect("pre-existing relayer account should insert");
-        store
-            .reserve_next_nonce(11_155_111, old_address, 0)
-            .await
-            .expect("live local nonce should reserve");
+    #[test]
+    fn secret_fd_rejects_invalid_later_secret_without_partial_install() {
+        let valid_key_ref = "bundler-eoa:default:1:1";
+        let invalid_key_ref = "bundler-eoa:default:1:2";
+        let (read_fd, write_fd) = nix::unistd::pipe().expect("secret pipe should open");
+        let mut writer = std::fs::File::from(write_fd);
+        let payload = serde_json::json!({
+            "keys": [
+                {
+                    "keyRef": valid_key_ref,
+                    "secret": format!("0x{}", "01".repeat(32)),
+                },
+                {
+                    "keyRef": invalid_key_ref,
+                    "secret": format!("0x{}", "00".repeat(32)),
+                }
+            ]
+        });
+        writer
+            .write_all(payload.to_string().as_bytes())
+            .expect("mixed secret payload should write");
+        drop(writer);
 
-        let supplied = InstalledBundlerKey {
-            key_ref: key_ref.to_owned(),
-            owner_scope: "default".to_owned(),
-            chain_id: 11_155_111,
-            address: "0x122cbfd6b318e468625fa9f2264dc77d887b8393".to_owned(),
-        };
-        let err = ensure_bundler_account_for_installed_key(&store, &supplied)
-            .await
-            .expect_err("live stale metadata should not be auto-retired");
-        assert!(matches!(
-            err,
-            StoreError::DataIntegrity {
-                table: "bundler_accounts",
-                reason:
-                    "supplied bundler key_ref resolves to a different address with live local submissions"
-            }
-        ));
+        let store = InMemoryBundlerKeyStore::new();
+        let result = load_secrets_from_fd(
+            read_fd.into_raw_fd() as u32,
+            &store,
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            1,
+        );
 
-        let active = store
-            .bundler_account_active_for_owner("default", 11_155_111)
-            .await
-            .expect("active account should load")
-            .expect("old account should remain active");
-        assert!(active.address.eq_ignore_ascii_case(old_address));
-
-        store.shutdown_and_wait().await.expect("store should stop");
+        assert!(result.is_err());
+        assert!(!store.is_key_loaded(valid_key_ref).unwrap());
+        assert!(!store.is_key_loaded(invalid_key_ref).unwrap());
     }
 }

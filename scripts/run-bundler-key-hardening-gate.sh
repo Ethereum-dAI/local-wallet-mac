@@ -35,20 +35,24 @@ echo "=== Swift bridge tests ==="
   swift test
 )
 
+echo "=== Deterministic Swift authentication prompt-budget and relayer policy tests ==="
+(
+  cd "${ROOT_DIR}/wallet-macos"
+  swift test --filter '(OnDemandAuthentication(Audit|State)Tests|RelayerProvisioningPromptBudgetTests|RelayerBootstrapRegistration(Policy|Orchestration)Tests|PassiveRelayerIdentityResolverTests|RelayerChainStateJournalTests|RelayerRotationCoordinatorTests|RelayerSecretAuthorizationPolicyTests|RelayerTargetedDeletionPolicyTests)'
+)
+
 echo "=== macOS app package tests ==="
 (
   cd "${ROOT_DIR}/wallet-macos"
   swift test
 )
 
-echo "=== signed macOS app target build ==="
+echo "=== Xcode project integrity ==="
+"${ROOT_DIR}/scripts/verify-xcode-project.sh"
+
+echo "=== macOS app target build (build verification only) ==="
 (
   cd "${ROOT_DIR}"
-  if ! command -v xcodegen >/dev/null 2>&1; then
-    echo "xcodegen is required to verify the signed macOS app target" >&2
-    exit 1
-  fi
-  xcodegen generate
   xcodebuild -project LocalWallet.xcodeproj \
     -scheme LocalWalletApp \
     -configuration Debug \
@@ -63,3 +67,5 @@ echo "=== Diff whitespace check ==="
 )
 
 echo "=== Bundler key hardening automated gate passed ==="
+echo "Note: this deterministic gate does not automate Touch ID or claim signed runtime proof."
+echo "Use scripts/audit-local-wallet-auth-prompts.sh during a separate manual runtime exercise."

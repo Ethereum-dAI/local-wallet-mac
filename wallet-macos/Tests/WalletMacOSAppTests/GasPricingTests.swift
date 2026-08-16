@@ -2,89 +2,157 @@ import Foundation
 import Testing
 @testable import WalletMacOSApp
 
-private func tier(maxFeeGwei: UInt64, priorityGwei: UInt64) -> WalletNodeClient.UserOperationGasPriceTier {
-    WalletNodeClient.UserOperationGasPriceTier(
-        maxFeePerGas: Data.fromBigEndian(maxFeeGwei * 1_000_000_000).leftPadded(to: 32),
-        maxPriorityFeePerGas: Data.fromBigEndian(priorityGwei * 1_000_000_000).leftPadded(to: 32)
-    )
-}
-
-private func price(slow: (UInt64, UInt64), standard: (UInt64, UInt64), fast: (UInt64, UInt64))
-    -> WalletNodeClient.UserOperationGasPrice {
-    WalletNodeClient.UserOperationGasPrice(
-        slow: tier(maxFeeGwei: slow.0, priorityGwei: slow.1),
-        standard: tier(maxFeeGwei: standard.0, priorityGwei: standard.1),
-        fast: tier(maxFeeGwei: fast.0, priorityGwei: fast.1)
-    )
-}
-
 private func gwei(_ data: Data) -> String { GasPricing.gweiText(fromWei: data) }
 
-@Test func autoModeUsesTierTipWithBaseFeeHeadroom() throws {
-    // baseFee = standard.maxFee - standard.priority = 20 - 2 = 18; headroom maxFee = 2*18 + tip.
-    let p = price(slow: (10, 1), standard: (20, 2), fast: (40, 4))
+private func feeQuote(nextBaseFeeWei: UInt64, priorityWei: UInt64) throws -> ExecutionFeeQuote {
+    let nextBase = Data.fromBigEndian(nextBaseFeeWei).leftPadded(to: 32)
+    let priority = Data.fromBigEndian(priorityWei).leftPadded(to: 32)
+    let grown = try GasPricing.sixBlockBaseFeeCeiling(nextBlockBaseFeePerGas: nextBase)
+    let maxFee = try GasPricing.checkedAddWei(grown, priority)
+    return ExecutionFeeQuote(
+        chainID: 11_155_111,
+        blockNumber: 100,
+        issuedAt: Date(timeIntervalSince1970: 1_000),
+        nextBlockBaseFeePerGas: nextBase,
+        medianPriorityFeePerGas: priority,
+        sixBlockMaxFeePerGas: maxFee
+    )
+}
+
+@Test func autoModeUsesTierTipAndExactSixBlockBaseFeeGrowth() throws {
+    let quote = try feeQuote(nextBaseFeeWei: 18_000_000_000, priorityWei: 2_000_000_000)
     let cap = try WalletNodeDaemon.GasPolicy.custom(maxFeePerGasGwei: "5", maxPriorityFeePerGasGwei: "1")
 
-    let fast = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: true, autoTier: .fast, manualCap: cap)
-    #expect(gwei(fast.maxFeePerGas) == "40")          // 2*18 + 4
-    #expect(gwei(fast.maxPriorityFeePerGas) == "4")   // tip verbatim
+    let fast = try GasPricing.resolveUserOperationFees(
+        quote: quote, autoEnabled: true, autoTier: .fast, manualCap: cap
+    )
+    #expect(gwei(fast.maxFeePerGas) == "38.99")
+    #expect(gwei(fast.maxPriorityFeePerGas) == "2.5")
 
-    let slow = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: true, autoTier: .slow, manualCap: cap)
-    #expect(gwei(slow.maxFeePerGas) == "37")          // 2*18 + 1
-    #expect(gwei(slow.maxPriorityFeePerGas) == "1")
+    let slow = try GasPricing.resolveUserOperationFees(
+        quote: quote, autoEnabled: true, autoTier: .slow, manualCap: cap
+    )
+    #expect(gwei(slow.maxFeePerGas) == "38.19")
+    #expect(gwei(slow.maxPriorityFeePerGas) == "1.7")
 
-    let standard = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: true, autoTier: .standard, manualCap: cap)
-    #expect(gwei(standard.maxFeePerGas) == "38")      // 2*18 + 2
+    let standard = try GasPricing.resolveUserOperationFees(
+        quote: quote, autoEnabled: true, autoTier: .standard, manualCap: cap
+    )
+    #expect(gwei(standard.maxFeePerGas) == "38.49")
     #expect(gwei(standard.maxPriorityFeePerGas) == "2")
 }
 
-@Test func manualModeAddsMaxFeeHeadroomUnderCap() throws {
-    // baseFee 18; headroom maxFee = 2*18 + 2 = 38 (below the 100 cap); tip = standard tip.
-    let p = price(slow: (10, 1), standard: (20, 2), fast: (40, 4))
+@Test func manualModeUsesLiveFeesWhenTheyFitConfiguredAndImmutableCaps() throws {
+    let quote = try feeQuote(nextBaseFeeWei: 18_000_000_000, priorityWei: 2_000_000_000)
     let cap = try WalletNodeDaemon.GasPolicy.custom(maxFeePerGasGwei: "100", maxPriorityFeePerGasGwei: "10")
 
-    let r = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: false, autoTier: .standard, manualCap: cap)
-    #expect(gwei(r.maxFeePerGas) == "38")
+    let r = try GasPricing.resolveUserOperationFees(
+        quote: quote, autoEnabled: false, autoTier: .standard, manualCap: cap
+    )
+    #expect(gwei(r.maxFeePerGas) == "38.49")
     #expect(gwei(r.maxPriorityFeePerGas) == "2")
 }
 
-@Test func maxFeeGetsHeadroomSoRisingBaseFeeDoesNotStrand() throws {
-    // Reproduces the stranded-tx bug: spot gas ~10 gwei (baseFee 9 + 1 tip). Without
-    // headroom maxFee would be ~10 and a base-fee rise past it strands the tx; with
-    // headroom maxFee = 2*9 + 1 = 19, leaving room for the base fee to roughly double.
-    let p = price(slow: (8, 1), standard: (10, 1), fast: (12, 1))
-    let cap = try WalletNodeDaemon.GasPolicy.custom(maxFeePerGasGwei: "50", maxPriorityFeePerGasGwei: "5")
-
-    let r = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: true, autoTier: .standard, manualCap: cap)
-    #expect(gwei(r.maxFeePerGas) == "19")
-    #expect(gwei(r.maxPriorityFeePerGas) == "1")
-}
-
-@Test func manualModeClampsStandardToCaps() throws {
-    let p = price(slow: (10, 1), standard: (50, 8), fast: (80, 12))
+@Test func manualModeFailsClosedWhenCurrentViableFeeExceedsManualCap() throws {
+    let quote = try feeQuote(nextBaseFeeWei: 18_000_000_000, priorityWei: 2_000_000_000)
     let cap = try WalletNodeDaemon.GasPolicy.custom(maxFeePerGasGwei: "30", maxPriorityFeePerGasGwei: "3")
 
-    let r = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: false, autoTier: .standard, manualCap: cap)
-    #expect(gwei(r.maxFeePerGas) == "30")        // clamped to max cap
-    #expect(gwei(r.maxPriorityFeePerGas) == "3") // clamped to priority cap
+    #expect(throws: GasPricing.FeeError.self) {
+        _ = try GasPricing.resolveUserOperationFees(
+            quote: quote, autoEnabled: false, autoTier: .standard, manualCap: cap
+        )
+    }
 }
 
-@Test func manualClampKeepsPriorityNotAboveMaxFee() {
-    // standard priority below max cap but above the (low) max-fee cap
-    let p = price(slow: (1, 1), standard: (50, 9), fast: (80, 12))
-    // Use memberwise init directly: priority cap (20) intentionally exceeds max-fee cap (5)
-    // to test that GasPricing clamps priority down to the resolved max fee.
-    let cap = WalletNodeDaemon.GasPolicy(
-        maxFeePerGas: "0x" + String(5 * 1_000_000_000, radix: 16),
-        maxPriorityFeePerGas: "0x" + String(20 * 1_000_000_000, radix: 16),
-        maxFeePerGasGwei: "5",
-        maxPriorityFeePerGasGwei: "20"
+@Test func manualModeFailsClosedWhenPriorityExceedsManualCap() throws {
+    let quote = try feeQuote(nextBaseFeeWei: 1_000_000_000, priorityWei: 2_000_000_000)
+    let cap = try WalletNodeDaemon.GasPolicy.custom(maxFeePerGasGwei: "50", maxPriorityFeePerGasGwei: "1")
+
+    #expect(throws: GasPricing.FeeError.self) {
+        _ = try GasPricing.resolveUserOperationFees(
+            quote: quote, autoEnabled: false, autoTier: .standard, manualCap: cap
+        )
+    }
+}
+
+@Test func immutableAppCapsAllowExactValuesAndRejectCapPlusOne() throws {
+    let nextBase = Data.fromBigEndian(UInt64(22_500_000_000)).leftPadded(to: 32)
+    let grown = try GasPricing.sixBlockBaseFeeCeiling(nextBlockBaseFeePerGas: nextBase)
+    let maxCap = GasPricing.appMaxFeePerGas
+    let exactPriority = try GasPricing.checkedSubtractWei(maxCap, grown)
+    let exactQuote = ExecutionFeeQuote(
+        chainID: 11_155_111,
+        blockNumber: 100,
+        issuedAt: Date(),
+        nextBlockBaseFeePerGas: nextBase,
+        medianPriorityFeePerGas: exactPriority,
+        sixBlockMaxFeePerGas: maxCap
+    )
+    let cap = WalletNodeDaemon.GasPolicy.sepolia
+
+    _ = try GasPricing.resolveUserOperationFees(
+        quote: exactQuote, autoEnabled: true, autoTier: .standard, manualCap: cap
     )
 
-    let r = GasPricing.resolveUserOperationFees(gasPrice: p, autoEnabled: false, autoTier: .standard, manualCap: cap)
-    #expect(gwei(r.maxFeePerGas) == "5")
-    // priority must not exceed the resolved max fee (5), even though priority cap is 20
-    #expect(gwei(r.maxPriorityFeePerGas) == "5")
+    let oneWei = Data.fromBigEndian(UInt64(1)).leftPadded(to: 32)
+    let overPriority = try GasPricing.checkedAddWei(exactPriority, oneWei)
+    let overQuote = ExecutionFeeQuote(
+        chainID: exactQuote.chainID,
+        blockNumber: exactQuote.blockNumber,
+        issuedAt: exactQuote.issuedAt,
+        nextBlockBaseFeePerGas: nextBase,
+        medianPriorityFeePerGas: overPriority,
+        sixBlockMaxFeePerGas: try GasPricing.checkedAddWei(maxCap, oneWei)
+    )
+    #expect(throws: GasPricing.FeeError.self) {
+        _ = try GasPricing.resolveUserOperationFees(
+            quote: overQuote, autoEnabled: true, autoTier: .standard, manualCap: cap
+        )
+    }
+}
+
+@Test func immutablePriorityCapAllowsExactValueAndRejectsCapPlusOne() throws {
+    let cap = WalletNodeDaemon.GasPolicy.sepolia
+    let exact = try feeQuote(nextBaseFeeWei: 0, priorityWei: 5_000_000_000)
+    _ = try GasPricing.resolveUserOperationFees(
+        quote: exact, autoEnabled: true, autoTier: .standard, manualCap: cap
+    )
+
+    let over = try feeQuote(nextBaseFeeWei: 0, priorityWei: 5_000_000_001)
+    #expect(throws: GasPricing.FeeError.self) {
+        _ = try GasPricing.resolveUserOperationFees(
+            quote: over, autoEnabled: true, autoTier: .standard, manualCap: cap
+        )
+    }
+}
+
+@Test func oversizedWeiIsRejectedInsteadOfTakingItsLowSixtyFourBits() throws {
+    let oversized = Data([0x01]) + Data(repeating: 0, count: 32)
+    #expect(throws: GasPricing.FeeError.self) {
+        _ = try GasPricing.sixBlockBaseFeeCeiling(nextBlockBaseFeePerGas: oversized)
+    }
+}
+
+@Test func legacyDaemonDisplayPathFailsClosedOnOversizedFee() throws {
+    let oversized = Data([0x01]) + Data(repeating: 0, count: 32)
+    let tier = WalletNodeClient.UserOperationGasPriceTier(
+        maxFeePerGas: oversized,
+        maxPriorityFeePerGas: Data.fromBigEndian(UInt64(1)).leftPadded(to: 32)
+    )
+    let daemonQuote = WalletNodeClient.UserOperationGasPrice(
+        slow: tier,
+        standard: tier,
+        fast: tier
+    )
+    let resolved = GasPricing.resolveUserOperationFees(
+        gasPrice: daemonQuote,
+        autoEnabled: true,
+        autoTier: .standard,
+        manualCap: .sepolia
+    )
+
+    #expect(resolved.maxFeePerGas == Data(repeating: 0, count: 32))
+    #expect(resolved.maxPriorityFeePerGas == Data(repeating: 0, count: 32))
 }
 
 @Test func minWeiPicksSmaller() {
@@ -123,7 +191,7 @@ private func gwei(_ data: Data) -> String { GasPricing.gweiText(fromWei: data) }
 }
 
 @Test func gweiTextKeepsSmallSubCentiGweiValues() {
-    // Mainnet's low-congestion priority floor is 0.001 gwei (1_000_000 wei).
+    // Very small priority fees such as 0.001 gwei (1_000_000 wei) remain visible.
     // It must NOT round to "0".
     #expect(GasPricing.gweiText(fromWei: Data.fromBigEndian(UInt64(1_000_000)).leftPadded(to: 32)) == "0.001")
     // Sub-gwei values keep up to 3 decimals.

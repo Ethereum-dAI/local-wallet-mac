@@ -5,7 +5,7 @@ style = "both"
 cpp_compat = false
 
 [export]
-include = ["WalletResult"]
+include = ["WalletResult", "WalletGasAuthorizationResult", "WalletGasAuthorizationScope"]
 
 [enum]
 rename_variants = "ScreamingSnakeCase"

@@ -3,6 +3,7 @@ import Foundation
 public struct ToolIntent: Codable, Equatable, Identifiable, Sendable {
     public enum Tool: String, Codable, Sendable {
         case transfer, swap
+        case topUpBundler = "top_up_bundler"
     }
 
     public enum Source: String, Codable, Sendable {

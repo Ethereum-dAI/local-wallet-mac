@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::future::Future;
 #[cfg(target_os = "macos")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::io::RawFd;
@@ -28,6 +29,60 @@ impl LifecycleHandles {
         Self {
             shutdown_tx: tx,
             shutdown_rx: rx,
+        }
+    }
+}
+
+/// Ensures early returns cannot strand the blocking alive-pipe watcher. The
+/// guard lives for the daemon's full async entrypoint and broadcasts shutdown
+/// when that entrypoint unwinds for any reason.
+pub struct ShutdownOnDrop {
+    shutdown_tx: watch::Sender<bool>,
+}
+
+impl ShutdownOnDrop {
+    pub fn new(shutdown_tx: watch::Sender<bool>) -> Self {
+        Self { shutdown_tx }
+    }
+}
+
+impl Drop for ShutdownOnDrop {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum StartupStageResult<T> {
+    Completed(T),
+    ShutdownRequested,
+}
+
+/// Run an asynchronous startup stage only while the parent still owns the
+/// daemon lifecycle. A shutdown that was already requested wins without
+/// polling the stage, and a shutdown arriving later cancels the stage future.
+pub async fn run_startup_stage<T>(
+    shutdown_rx: &mut watch::Receiver<bool>,
+    stage: impl Future<Output = T>,
+) -> StartupStageResult<T> {
+    if *shutdown_rx.borrow() {
+        return StartupStageResult::ShutdownRequested;
+    }
+
+    tokio::select! {
+        biased;
+        _ = wait_for_shutdown(shutdown_rx) => StartupStageResult::ShutdownRequested,
+        result = stage => StartupStageResult::Completed(result),
+    }
+}
+
+async fn wait_for_shutdown(shutdown_rx: &mut watch::Receiver<bool>) {
+    loop {
+        if *shutdown_rx.borrow() {
+            return;
+        }
+        if shutdown_rx.changed().await.is_err() {
+            return;
         }
     }
 }
@@ -179,7 +234,10 @@ pub async fn deliver_ready_event_to_fd(
 
 #[cfg(test)]
 mod tests {
-    use super::{install_ppid_backstop, LifecycleHandles};
+    use super::{
+        install_ppid_backstop, run_startup_stage, LifecycleHandles, ShutdownOnDrop,
+        StartupStageResult,
+    };
     use std::time::Duration;
 
     #[test]
@@ -194,6 +252,19 @@ mod tests {
             .expect("send shutdown signal");
 
         assert!(*handles.shutdown_rx.borrow());
+    }
+
+    #[test]
+    fn shutdown_guard_requests_shutdown_when_startup_returns_early() {
+        let handles = LifecycleHandles::new();
+        let shutdown_rx = handles.shutdown_rx;
+
+        {
+            let _guard = ShutdownOnDrop::new(handles.shutdown_tx);
+            assert!(!(*shutdown_rx.borrow()));
+        }
+
+        assert!(*shutdown_rx.borrow());
     }
 
     #[cfg(target_os = "macos")]
@@ -261,5 +332,55 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         assert!(!(*shutdown_rx.borrow()));
+    }
+
+    #[tokio::test]
+    async fn startup_stage_completes_while_parent_is_alive() {
+        let handles = LifecycleHandles::new();
+        let mut shutdown_rx = handles.shutdown_rx;
+
+        let result = run_startup_stage(&mut shutdown_rx, async { 42 }).await;
+
+        assert_eq!(result, StartupStageResult::Completed(42));
+    }
+
+    #[tokio::test]
+    async fn startup_stage_cancels_promptly_when_shutdown_arrives() {
+        let handles = LifecycleHandles::new();
+        let shutdown_tx = handles.shutdown_tx;
+        let mut shutdown_rx = handles.shutdown_rx;
+        let trigger = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            shutdown_tx.send(true).expect("request startup shutdown");
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_startup_stage(&mut shutdown_rx, std::future::pending::<()>()),
+        )
+        .await
+        .expect("startup stage should observe shutdown promptly");
+
+        trigger.await.expect("shutdown trigger should join");
+        assert_eq!(result, StartupStageResult::ShutdownRequested);
+    }
+
+    #[tokio::test]
+    async fn startup_stage_does_not_begin_after_shutdown() {
+        let handles = LifecycleHandles::new();
+        handles
+            .shutdown_tx
+            .send(true)
+            .expect("request startup shutdown");
+        let mut shutdown_rx = handles.shutdown_rx;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_startup_stage(&mut shutdown_rx, std::future::pending::<()>()),
+        )
+        .await
+        .expect("already-requested shutdown should return immediately");
+
+        assert_eq!(result, StartupStageResult::ShutdownRequested);
     }
 }

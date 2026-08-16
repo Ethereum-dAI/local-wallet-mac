@@ -71,17 +71,17 @@ The Kernel/EntryPoint mainnet-fork check does not live here. It ships with the d
 
 ### `run-bundler-key-hardening-gate.sh`
 
-The automated gate for the bundler key hardening work. It runs the daemon-side Rust checks against the in-repo `local-wallet-daemon` directory (format, workspace tests, clippy with `-D warnings`, a `wallet-node` release build, and the fd / Unix-transport / HTTP `--include-ignored` integration suites), then the Swift bridge and macOS app `swift test` suites, generates the Xcode project with `xcodegen` and builds the signed `LocalWalletApp` target, and finishes with a `git diff --check` whitespace check.
+The automated gate for the bundler key hardening work. It runs the daemon-side Rust checks against the in-repo `local-wallet-daemon` directory (format, workspace tests, clippy with `-D warnings`, a `wallet-node` release build, and the fd / Unix-transport / HTTP `--include-ignored` integration suites), then the Swift bridge and macOS app `swift test` suites. Before building the signed `LocalWalletApp` target, it generates the Xcode project in a temporary repository-shaped mirror and requires that output to byte-match the checked-in project. It never regenerates the real project or overwrites local signing overrides. The gate finishes with a `git diff --check` whitespace check.
 
 ```bash
 ./scripts/run-bundler-key-hardening-gate.sh
 ```
 
-Override the daemon location with `LW_DAEMON_DIR=/path/to/local-wallet-daemon`. Requires `xcodegen` for the signed app-target build.
+Override the daemon location with `LW_DAEMON_DIR=/path/to/local-wallet-daemon`. The non-mutating project-integrity check requires `xcodegen` and the system Ruby/Psych YAML parser.
 
 ### `package-macos-demo.sh`
 
-Builds the Swift/Rust bridge, builds the `LocalWalletApp` Xcode scheme for Apple Silicon, embeds the `wallet-node` daemon, optionally embeds the recommended GGUF model, copies llama.cpp/ggml dynamic libraries into the app bundle, optionally injects the hosted Sepolia bundler URL, signs the copied app, verifies the application identifier entitlement needed by Secure Enclave, optionally notarizes and staples it, and produces a zip under `dist/`.
+Verifies that the checked-in Xcode project matches canonical `project.yml` without modifying it, builds the Swift/Rust bridge, rechecks project integrity immediately before `xcodebuild`, builds the `LocalWalletApp` Xcode scheme for Apple Silicon, embeds the `wallet-node` executable, optionally embeds the recommended GGUF model, copies llama.cpp/ggml dynamic libraries into the app bundle, optionally injects the hosted Sepolia bundler URL, signs the copied app, verifies the application identifier entitlement needed by Secure Enclave, optionally notarizes and staples it, and produces a zip under `dist/`.
 
 ```bash
 LOCAL_WALLET_SEPOLIA_BUNDLER_URL=https://your-bundler.example \
@@ -89,6 +89,8 @@ LOCAL_WALLET_SEPOLIA_BUNDLER_URL=https://your-bundler.example \
 ```
 
 By default the script builds `wallet-node` from the in-repo `local-wallet-daemon` directory, targets macOS 15.0, and does not embed the recommended model, so the v0.1 alpha zip stays smaller and onboarding installs the model during setup. Set `LOCAL_WALLET_EMBED_MODEL=1` to embed the model, downloading it if it is not already present in `~/Library/Application Support/LocalWallet/Models/`. Override with `LOCAL_WALLET_ZIP_NAME`, `LOCAL_WALLET_DAEMON_REPO`, `LOCAL_WALLET_NODE_BIN`, `LOCAL_MODEL_PATH`, `LOCAL_LLAMA_PREFIX`, `LOCAL_LLAMA_LIB_DIR`, `LOCAL_WALLET_DEPLOYMENT_TARGET`, or `LOCAL_WALLET_MODEL_CACHE_DIR` as needed.
+
+Packaging requires `xcodegen` and the system Ruby/Psych YAML parser for the project-integrity check.
 
 llama.cpp/ggml come from the pinned prefix at `.llama/current`, which `provision-llama.sh` assembles from the upstream release named in `local-llm/LLAMA_CPP_PIN`. Those dylibs are built `minos 13.3` and depend on nothing outside the prefix and the OS, so a **hand-built macOS 15 prefix is no longer needed** to get a packageable build. This used to be a required step, because Homebrew's bottles are built for whatever macOS the bottle targeted (`minos 26.0` on Tahoe) and tripped the deployment-target gate.
 
@@ -102,7 +104,9 @@ LOCAL_WALLET_DEPLOYMENT_TARGET=15.0 \
 ./scripts/package-macos-demo.sh
 ```
 
-The package step verifies every embedded Mach-O in `Contents/MacOS`, `Contents/Frameworks`, and `Contents/Resources/bin` has `minos <= LOCAL_WALLET_DEPLOYMENT_TARGET`. It also asserts that `libggml-base`, `libggml-cpu`, and `libggml-metal` actually landed in `Contents/Frameworks`, and that no embedded binary still references a llama/ggml/omp/ssl/crypto dylib outside the bundle. It also verifies that the final app signature includes an application identifier entitlement; without that entitlement the Secure Enclave key creation path returns `errSecMissingEntitlement` and onboarding cannot create a wallet.
+The package step verifies every embedded Mach-O in `Contents/MacOS`, `Contents/Frameworks`, and `Contents/Resources/bin` has `minos <= LOCAL_WALLET_DEPLOYMENT_TARGET`. It also asserts that `libggml-base`, `libggml-cpu`, and `libggml-metal` actually landed in `Contents/Frameworks`, and that no embedded binary still references a llama/ggml/omp/ssl/crypto dylib outside the bundle. wallet-node is signed with hardened runtime and a stable identifier (`ai.ethereum.localwallet.wallet-node`). Its path, identifier, Team ID, and CDHash are written to `Contents/Resources/trusted-helpers.json`; the outer app is signed last so its resource seal covers that manifest. Packaging then fails closed unless wallet-node matches the manifest and the outer app's Team ID. Ad-hoc signing is rejected because it cannot establish that trust chain.
+
+The final app signature must also include an application identifier entitlement; without that entitlement the Secure Enclave key creation path returns `errSecMissingEntitlement` and onboarding cannot create a wallet.
 
 For external alpha distribution, sign with a Developer ID Application certificate and notarize the build:
 
@@ -121,7 +125,7 @@ LOCAL_WALLET_SEPOLIA_BUNDLER_URL=https://your-bundler.example \
 
 When `LOCAL_WALLET_NOTARIZE=1` is set, the script requires a Developer ID Application identity, submits a temporary zip with `xcrun notarytool`, staples the ticket to the `.app`, runs `spctl --assess`, then creates the final zip. This is the build path to use for testers outside your own Macs; it avoids per-user ad-hoc re-signing and preserves the app's signing identity for Keychain continuity.
 
-If `LOCAL_WALLET_NOTARIZE` is omitted, the zip is for local/private testing only and may be blocked by Gatekeeper on other Macs. Testers can remove quarantine from a trusted copy, but they should not ad-hoc re-sign this app; ad-hoc signing changes the code identity and breaks the Secure Enclave/Keychain entitlement chain needed for wallet creation.
+If `LOCAL_WALLET_NOTARIZE` is omitted, the zip is for local/private testing only and may be blocked by Gatekeeper on other Macs. The Xcode-built app still needs an Apple Development signature, or you must set a real identity with `CODESIGN_IDENTITY`; packaging no longer falls back to ad-hoc signing. Testers can remove quarantine from a trusted copy, but they should not ad-hoc re-sign this app; ad-hoc signing changes the code identity, invalidates the helper trust manifest, and breaks the Secure Enclave/Keychain entitlement chain needed for wallet creation.
 
 ### `run-keychain-spike.sh`
 

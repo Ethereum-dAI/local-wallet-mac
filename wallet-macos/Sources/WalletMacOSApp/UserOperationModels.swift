@@ -89,17 +89,6 @@ enum WalletTokenRegistry {
     }
 
     private static let allTokens: [WalletToken] = [
-        WalletToken(chainID: 1, symbol: "ETH", name: "Ether", decimals: 18, kind: .native),
-        WalletToken(chainID: 1, symbol: "WETH", name: "Wrapped Ether", decimals: 18, kind: .erc20(address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")),
-        WalletToken(chainID: 1, symbol: "USDC", name: "USD Coin", decimals: 6, kind: .erc20(address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")),
-        WalletToken(chainID: 1, symbol: "USDT", name: "Tether USD", decimals: 6, kind: .erc20(address: "0xdAC17F958D2ee523a2206206994597C13D831ec7")),
-        WalletToken(chainID: 1, symbol: "DAI", name: "Dai Stablecoin", decimals: 18, kind: .erc20(address: "0x6B175474E89094C44Da98b954EedeAC495271d0F")),
-        WalletToken(chainID: 1, symbol: "WBTC", name: "Wrapped BTC", decimals: 8, kind: .erc20(address: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599")),
-        WalletToken(chainID: 1, symbol: "LINK", name: "ChainLink Token", decimals: 18, kind: .erc20(address: "0x514910771AF9Ca656af840dff83E8264EcF986CA")),
-        WalletToken(chainID: 1, symbol: "UNI", name: "Uniswap", decimals: 18, kind: .erc20(address: "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984")),
-        WalletToken(chainID: 1, symbol: "AAVE", name: "Aave", decimals: 18, kind: .erc20(address: "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9")),
-        WalletToken(chainID: 1, symbol: "LDO", name: "Lido DAO", decimals: 18, kind: .erc20(address: "0x5A98FcBEA516Cf06857215779Fd812CA3beF1B32")),
-
         WalletToken(chainID: 11_155_111, symbol: "ETH", name: "Sepolia Ether", decimals: 18, kind: .native),
         WalletToken(chainID: 11_155_111, symbol: "WETH", name: "Wrapped Ether", decimals: 18, kind: .erc20(address: "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14")),
         WalletToken(chainID: 11_155_111, symbol: "USDC", name: "USD Coin", decimals: 6, kind: .erc20(address: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238")),
@@ -179,17 +168,13 @@ struct UserOperationGasPlan: Equatable {
     )
 }
 
-/// A draft whose gas plan is complete, plus EntryPoint's prefund floor for it as
-/// the daemon computed it. Kept together because the number is only meaningful
-/// for the exact limits and fees in this draft.
+/// A UserOperation whose gas plan has crossed the local Rust policy boundary.
+/// The maximum liability and fee quote are meaningful only for this exact draft.
 struct EnrichedUserOperation: Equatable {
-    let draft: UserOperationDraft
-    let requiredPrefund: Data
-    /// The fee baked into `draft` is the configured policy ceiling rather than a
-    /// live spread (`GasPricing.isPolicyCeilingQuote`) — the live price is at or
-    /// above the cap. A prefund floor derived from it is cap-driven, so surfaces
-    /// should point at the cap before pointing at the balance.
-    let feeQuoteAtPolicyCeiling: Bool
+    let operation: AuthorizedUserOperation
+
+    var draft: UserOperationDraft { operation.draft }
+    var requiredPrefund: Data { operation.maxLiability }
 }
 
 struct UserOperationDraft: Equatable {
@@ -226,5 +211,207 @@ struct UserOperationDraft: Equatable {
             entryPoint: try Data(hexString: entryPoint),
             chainId: chainId
         )
+    }
+}
+
+enum UserOperationBoundaryError: LocalizedError, Equatable {
+    case invalidExpectedSignatureLength(Int)
+    case feeQuoteChainMismatch(expected: UInt64, actual: UInt64)
+    case signatureLengthMismatch(expected: Int, actual: Int)
+    case returnedHashMismatch(expected: String, actual: String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .invalidExpectedSignatureLength(length):
+            return "The authorized UserOperation signature length must be positive (got \(length))."
+        case let .feeQuoteChainMismatch(expected, actual):
+            return "The fee quote is for chain \(actual), but the UserOperation is for chain \(expected)."
+        case let .signatureLengthMismatch(expected, actual):
+            return "The final UserOperation signature length changed after authorization (expected \(expected) bytes, got \(actual))."
+        case let .returnedHashMismatch(expected, actual):
+            return "The RPC returned UserOperation hash \(actual), but the signed operation hash is \(expected)."
+        }
+    }
+}
+
+/// A fully finalized UserOperation that has crossed the app's local policy
+/// boundary. The expected signature length is part of that authorization
+/// because changing the encoded signature size changes pre-verification gas.
+struct AuthorizedUserOperation: Equatable {
+    let draft: UserOperationDraft
+    let expectedSignatureLength: Int
+    let maxLiability: Data
+    let gasPolicyVersion: UInt32
+    let feeQuote: ExecutionFeeQuote
+
+    fileprivate init(
+        draft: UserOperationDraft,
+        expectedSignatureLength: Int,
+        maxLiability: Data,
+        gasPolicyVersion: UInt32,
+        feeQuote: ExecutionFeeQuote
+    ) throws {
+        guard expectedSignatureLength > 0 else {
+            throw UserOperationBoundaryError.invalidExpectedSignatureLength(expectedSignatureLength)
+        }
+        guard maxLiability.count == 32 else {
+            throw WalletGasAuthorizationError.invalidInput
+        }
+        self.draft = draft
+        self.expectedSignatureLength = expectedSignatureLength
+        self.maxLiability = maxLiability
+        self.gasPolicyVersion = gasPolicyVersion
+        self.feeQuote = feeQuote
+    }
+}
+
+/// The only production constructor for `AuthorizedUserOperation`. Daemon gas
+/// values remain hints until this checked Rust boundary accepts and repacks them.
+enum UserOperationGasAuthorizer {
+    static func checkedPackedGasFees(
+        maxPriorityFeePerGas: Data,
+        maxFeePerGas: Data
+    ) throws -> Data {
+        try checkedPackedPair(
+            high: maxPriorityFeePerGas,
+            low: maxFeePerGas,
+            highField: "maxPriorityFeePerGas",
+            lowField: "maxFeePerGas"
+        )
+    }
+
+    static func authorize(
+        draft: UserOperationDraft,
+        callGasLimit: Data,
+        verificationGasLimit: Data,
+        maxPriorityFeePerGas: Data,
+        maxFeePerGas: Data,
+        expectedSignatureLength: Int,
+        authorizationScope: WalletSignature.GasAuthorizationScope,
+        feeQuote: ExecutionFeeQuote
+    ) throws -> AuthorizedUserOperation {
+        guard feeQuote.chainID == draft.chainId else {
+            throw UserOperationBoundaryError.feeQuoteChainMismatch(
+                expected: draft.chainId,
+                actual: feeQuote.chainID
+            )
+        }
+        let sender = try Data(hexString: draft.sender)
+        let entryPoint = try Data(hexString: draft.entryPoint)
+        guard sender.count == 20,
+              entryPoint.count == 20,
+              draft.nonce.count == 32,
+              callGasLimit.count == 32,
+              verificationGasLimit.count == 32,
+              maxPriorityFeePerGas.count == 32,
+              maxFeePerGas.count == 32
+        else {
+            throw WalletGasAuthorizationError.invalidInput
+        }
+        guard draft.gasPlan.paymasterAndData.isEmpty else {
+            throw WalletGasAuthorizationError.paymasterNotSupported
+        }
+
+        let plan = try WalletSignature.authorizeUserOperationGasV1(
+            sender: sender,
+            nonce: draft.nonce,
+            initCode: draft.initCode,
+            callData: draft.callData,
+            callGasLimit: callGasLimit,
+            verificationGasLimit: verificationGasLimit,
+            maxFeePerGas: maxFeePerGas,
+            maxPriorityFeePerGas: maxPriorityFeePerGas,
+            paymasterAndData: Data(),
+            signatureLength: expectedSignatureLength,
+            scope: authorizationScope
+        )
+        let authorizedDraft = draft.updatingGasPlan(
+            UserOperationGasPlan(
+                accountGasLimits: plan.accountGasLimits,
+                preVerificationGas: plan.preVerificationGas,
+                gasFees: plan.gasFees,
+                paymasterAndData: Data()
+            )
+        )
+        return try AuthorizedUserOperation(
+            draft: authorizedDraft,
+            expectedSignatureLength: plan.signatureLength,
+            maxLiability: plan.maxLiability,
+            gasPolicyVersion: plan.policyVersion,
+            feeQuote: feeQuote
+        )
+    }
+
+    private static func checkedPackedPair(
+        high: Data,
+        low: Data,
+        highField: String,
+        lowField: String
+    ) throws -> Data {
+        guard high.count == 32, low.count == 32 else {
+            throw WalletGasAuthorizationError.invalidInput
+        }
+        guard high.prefix(16).allSatisfy({ $0 == 0 }) else {
+            throw WalletGasAuthorizationError.entryPointWidth(field: highField)
+        }
+        guard low.prefix(16).allSatisfy({ $0 == 0 }) else {
+            throw WalletGasAuthorizationError.entryPointWidth(field: lowField)
+        }
+        return Data(high.suffix(16)) + Data(low.suffix(16))
+    }
+}
+
+/// A session-shaped operation may be discarded and rebuilt as an owner
+/// operation only when the aggregate liability exceeds the session budget.
+/// Field caps are identical for owner and session paths, so retrying those with
+/// the owner would merely turn a hard policy rejection into biometric churn.
+enum SessionGasAuthorizationFallback {
+    static func requiresFreshOwnerDraft(
+        after error: Error,
+        hadSessionPlan: Bool
+    ) -> Bool {
+        guard hadSessionPlan,
+              let gasError = error as? WalletGasAuthorizationError,
+              case let .capExceeded(field) = gasError
+        else {
+            return false
+        }
+        return field == "maximum gas liability"
+    }
+}
+
+enum FeeAuthorizationRefreshPolicy {
+    static func shouldRefresh(after error: Error) -> Bool {
+        guard let feeError = error as? ExecutionFeeOracleError else {
+            return false
+        }
+        switch feeError {
+        case .staleQuote, .headAdvancedTooFar:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+enum GasAuthorizationPresentation {
+    private static let maximumActionCharacters = 120
+
+    static func ownerSigningReason(
+        action: String,
+        maximumLiability: Data
+    ) -> String {
+        let amount = WeiFormatter.ethUpperBoundDisplayString(
+            fromHexWei: "0x" + maximumLiability.hexEncodedString
+        )
+        let normalizedAction = action
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        let boundedAction = String(normalizedAction.prefix(maximumActionCharacters))
+        let actionSuffix = boundedAction.isEmpty ? "" : " \(boundedAction)."
+        // Put the security-sensitive ceiling first. macOS may visually truncate a
+        // long authentication reason, so an untrusted recipient label must never
+        // be able to push the maximum fee out of view.
+        return "Maximum network fee: \(amount).\(actionSuffix)"
     }
 }

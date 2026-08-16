@@ -594,3 +594,321 @@ struct RelayerIdentityAuthority: Equatable, Sendable {
         return identity
     }
 }
+
+// MARK: - App-owned relayer rotation coordinator
+
+/// Stateless orchestration policy for relayer rotation.
+///
+/// This type deliberately owns no Keychain or daemon client. AppModel supplies those effects as
+/// closures, while the coordinator fixes their security-sensitive ordering: candidate creation,
+/// immutable public identity persistence, pending-journal append, then daemon installation.
+enum RelayerRotationCoordinator {
+    enum PlanMode: Equatable, Sendable {
+        case createCandidate
+        case reusePending
+    }
+
+    struct Plan: Equatable, Sendable {
+        let mode: PlanMode
+        let activeKeyRef: String
+        let candidateKeyRef: String
+        let pendingTransition: RelayerChainState?
+
+        fileprivate init(
+            mode: PlanMode,
+            activeKeyRef: String,
+            candidateKeyRef: String,
+            pendingTransition: RelayerChainState?
+        ) {
+            self.mode = mode
+            self.activeKeyRef = activeKeyRef
+            self.candidateKeyRef = candidateKeyRef
+            self.pendingTransition = pendingTransition
+        }
+    }
+
+    struct PreparedRotation: Equatable, Sendable {
+        let plan: Plan
+        let candidateIdentity: VerifiedRelayerIdentity
+        let journalHead: RelayerChainState
+    }
+
+    struct DaemonIdentityObservation: Equatable, Sendable {
+        let chainID: UInt64
+        let keyRef: String
+        let address: String
+        let lifecycle: String
+    }
+
+    enum Failure: Error, Equatable {
+        case missingActiveIdentity
+        case malformedActiveKeyRef(String)
+        case candidateIndexOverflow
+        case candidateWasPreviouslyUsed(String)
+        case stalePlan
+        case missingPendingTransition(String)
+        case unexpectedPendingTransition(String)
+        case candidateIdentityMismatch(expected: String, actual: String)
+        case candidateIdentityChainMismatch(expected: UInt64, actual: UInt64)
+        case candidatePublicIdentityMismatch(String)
+        case journalAppendMismatch(expectedEpoch: UInt64, actualEpoch: UInt64)
+        case daemonChainMismatch(expected: UInt64, actual: UInt64)
+        case daemonKeyRefMismatch(expected: String, actual: String)
+        case daemonAddressMismatch(expected: String, actual: String)
+        case invalidDaemonAddress(String)
+        case daemonLifecycleMismatch(expected: String, actual: String)
+        case priorActiveLifecycleNotRetiringOrRetired(String)
+    }
+
+    /// Plans from an already validated snapshot. A pending candidate is immutable and always
+    /// reused. Otherwise the next key reference is the monotonic successor of every historical
+    /// key in the active owner scope, so a retired key can never be revived.
+    static func plan(from snapshot: RelayerChainSnapshot) throws -> Plan {
+        let head = snapshot.head
+        guard let activeKeyRef = head.activeKeyRef else {
+            throw Failure.missingActiveIdentity
+        }
+        if let pendingKeyRef = head.pendingKeyRef {
+            return Plan(
+                mode: .reusePending,
+                activeKeyRef: activeKeyRef,
+                candidateKeyRef: pendingKeyRef,
+                pendingTransition: nil
+            )
+        }
+
+        guard let activeComponents = keyRefComponents(activeKeyRef) else {
+            throw Failure.malformedActiveKeyRef(activeKeyRef)
+        }
+        let usedIndices = snapshot.historicalKeyRefs.compactMap { keyRef -> UInt64? in
+            guard let components = keyRefComponents(keyRef),
+                  components.ownerScope == activeComponents.ownerScope else {
+                return nil
+            }
+            return components.index
+        }
+        guard let maximumIndex = usedIndices.max() else {
+            throw Failure.malformedActiveKeyRef(activeKeyRef)
+        }
+        let (candidateIndex, overflow) = maximumIndex.addingReportingOverflow(1)
+        guard !overflow else {
+            throw Failure.candidateIndexOverflow
+        }
+        let candidateKeyRef = "bundler-eoa:\(activeComponents.ownerScope):\(head.chainID):\(candidateIndex)"
+        guard !snapshot.historicalKeyRefs.contains(candidateKeyRef) else {
+            throw Failure.candidateWasPreviouslyUsed(candidateKeyRef)
+        }
+        let transition = try RelayerChainStateTransition.beginRotation(
+            from: snapshot,
+            candidateKeyRef: candidateKeyRef
+        )
+        return Plan(
+            mode: .createCandidate,
+            activeKeyRef: activeKeyRef,
+            candidateKeyRef: candidateKeyRef,
+            pendingTransition: transition
+        )
+    }
+
+    /// Executes preparation and installation in a fixed order. If daemon installation fails
+    /// after the append, the next call plans `.reusePending` and therefore retries the same key.
+    static func prepareAndInstall(
+        plan: Plan,
+        snapshot: RelayerChainSnapshot,
+        createCandidateIdentity: (String) throws -> VerifiedRelayerIdentity,
+        identityForKeyRef: (String) throws -> VerifiedRelayerIdentity?,
+        persistPublicIdentity: (VerifiedRelayerIdentity) throws -> Void,
+        appendJournal: (RelayerChainState) throws -> RelayerChainState,
+        installDaemon: (VerifiedRelayerIdentity) async throws -> Void
+    ) async throws -> PreparedRotation {
+        guard try Self.plan(from: snapshot) == plan else {
+            throw Failure.stalePlan
+        }
+
+        let candidateIdentity: VerifiedRelayerIdentity
+        let journalHead: RelayerChainState
+        switch plan.mode {
+        case .createCandidate:
+            guard snapshot.head.pendingKeyRef == nil else {
+                throw Failure.unexpectedPendingTransition(snapshot.head.pendingKeyRef!)
+            }
+            guard let pendingTransition = plan.pendingTransition else {
+                throw Failure.missingPendingTransition(plan.candidateKeyRef)
+            }
+            let createdIdentity = try createCandidateIdentity(plan.candidateKeyRef)
+            try requireCandidateIdentity(createdIdentity, plan: plan, chainID: snapshot.head.chainID)
+            try persistPublicIdentity(createdIdentity)
+
+            let appended = try appendJournal(pendingTransition)
+            guard appended == pendingTransition else {
+                throw Failure.journalAppendMismatch(
+                    expectedEpoch: pendingTransition.epoch,
+                    actualEpoch: appended.epoch
+                )
+            }
+            let authority = try RelayerIdentityAuthority.resolve(head: appended) {
+                try identityForKeyRef($0)
+            }
+            guard authority.pending == createdIdentity else {
+                throw Failure.candidatePublicIdentityMismatch(plan.candidateKeyRef)
+            }
+            candidateIdentity = createdIdentity
+            journalHead = appended
+
+        case .reusePending:
+            guard snapshot.head.pendingKeyRef == plan.candidateKeyRef,
+                  plan.pendingTransition == nil else {
+                throw Failure.unexpectedPendingTransition(
+                    snapshot.head.pendingKeyRef ?? "none"
+                )
+            }
+            let authority = try RelayerIdentityAuthority.resolve(head: snapshot.head) {
+                try identityForKeyRef($0)
+            }
+            guard let pendingIdentity = authority.pending else {
+                throw Failure.candidatePublicIdentityMismatch(plan.candidateKeyRef)
+            }
+            try requireCandidateIdentity(
+                pendingIdentity,
+                plan: plan,
+                chainID: snapshot.head.chainID
+            )
+            candidateIdentity = pendingIdentity
+            journalHead = snapshot.head
+        }
+
+        try await installDaemon(candidateIdentity)
+        return PreparedRotation(
+            plan: plan,
+            candidateIdentity: candidateIdentity,
+            journalHead: journalHead
+        )
+    }
+
+    /// Appends promotion only after the daemon proves that the exact pending public identity is
+    /// active and the exact prior active identity has entered a retiring or retired lifecycle.
+    /// A journal without a pending candidate needs no promotion and returns `nil` without reads.
+    static func promoteIfReady(
+        snapshot: RelayerChainSnapshot,
+        daemonActive: DaemonIdentityObservation,
+        priorActive: DaemonIdentityObservation,
+        identityForKeyRef: (String) throws -> VerifiedRelayerIdentity?,
+        appendJournal: (RelayerChainState) throws -> RelayerChainState
+    ) throws -> RelayerChainState? {
+        let head = snapshot.head
+        guard let pendingKeyRef = head.pendingKeyRef else { return nil }
+        guard let activeKeyRef = head.activeKeyRef else {
+            throw Failure.missingActiveIdentity
+        }
+        let authority = try RelayerIdentityAuthority.resolve(head: head) {
+            try identityForKeyRef($0)
+        }
+        guard let pendingIdentity = authority.pending,
+              let activeIdentity = authority.active else {
+            throw Failure.candidatePublicIdentityMismatch(pendingKeyRef)
+        }
+
+        try requireDaemonObservation(
+            daemonActive,
+            identity: pendingIdentity,
+            expectedLifecycle: "active"
+        )
+        guard priorActive.keyRef == activeKeyRef else {
+            throw Failure.daemonKeyRefMismatch(
+                expected: activeKeyRef,
+                actual: priorActive.keyRef
+            )
+        }
+        guard priorActive.lifecycle == "retiring" || priorActive.lifecycle == "retired" else {
+            throw Failure.priorActiveLifecycleNotRetiringOrRetired(priorActive.lifecycle)
+        }
+        try requireDaemonObservation(
+            priorActive,
+            identity: activeIdentity,
+            expectedLifecycle: priorActive.lifecycle
+        )
+
+        let proposed = try RelayerChainStateTransition.promotePending(
+            from: snapshot,
+            activatedKeyRef: pendingKeyRef
+        )
+        let appended = try appendJournal(proposed)
+        guard appended == proposed else {
+            throw Failure.journalAppendMismatch(
+                expectedEpoch: proposed.epoch,
+                actualEpoch: appended.epoch
+            )
+        }
+        return appended
+    }
+
+    private static func requireCandidateIdentity(
+        _ identity: VerifiedRelayerIdentity,
+        plan: Plan,
+        chainID: UInt64
+    ) throws {
+        guard identity.keyRef == plan.candidateKeyRef else {
+            throw Failure.candidateIdentityMismatch(
+                expected: plan.candidateKeyRef,
+                actual: identity.keyRef
+            )
+        }
+        guard identity.chainID == chainID else {
+            throw Failure.candidateIdentityChainMismatch(
+                expected: chainID,
+                actual: identity.chainID
+            )
+        }
+    }
+
+    private static func requireDaemonObservation(
+        _ observation: DaemonIdentityObservation,
+        identity: VerifiedRelayerIdentity,
+        expectedLifecycle: String
+    ) throws {
+        guard observation.chainID == identity.chainID else {
+            throw Failure.daemonChainMismatch(
+                expected: identity.chainID,
+                actual: observation.chainID
+            )
+        }
+        guard observation.keyRef == identity.keyRef else {
+            throw Failure.daemonKeyRefMismatch(
+                expected: identity.keyRef,
+                actual: observation.keyRef
+            )
+        }
+        let address: String
+        do {
+            address = try VerifiedRelayerIdentity.normalizedAddress(observation.address)
+        } catch {
+            throw Failure.invalidDaemonAddress(observation.address)
+        }
+        guard address == identity.address else {
+            throw Failure.daemonAddressMismatch(
+                expected: identity.address,
+                actual: address
+            )
+        }
+        guard observation.lifecycle == expectedLifecycle else {
+            throw Failure.daemonLifecycleMismatch(
+                expected: expectedLifecycle,
+                actual: observation.lifecycle
+            )
+        }
+    }
+
+    private static func keyRefComponents(
+        _ keyRef: String
+    ) -> (ownerScope: String, chainID: UInt64, index: UInt64)? {
+        let parts = keyRef.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 4,
+              parts[0] == "bundler-eoa",
+              !parts[1].isEmpty,
+              let chainID = UInt64(parts[2]),
+              let index = UInt64(parts[3]) else {
+            return nil
+        }
+        return (String(parts[1]), chainID, index)
+    }
+}

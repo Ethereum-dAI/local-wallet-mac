@@ -63,6 +63,202 @@ enum PassiveRelayerIdentityResolver {
     }
 }
 
+enum RelayerSecretAuthorizationRole: Equatable, Sendable {
+    case active
+    case retiring
+}
+
+/// One protected relayer secret the app may read for the current daemon state.
+///
+/// The daemon only supplies observations. Authorization comes from the validated
+/// app-owned journal and the immutable public identity record.
+struct RelayerSecretAuthorization: Equatable, Sendable {
+    let role: RelayerSecretAuthorizationRole
+    let identity: VerifiedRelayerIdentity
+}
+
+struct RelayerSecretAuthorizationPlan: Equatable, Sendable {
+    let journalHead: RelayerChainState
+    let active: RelayerSecretAuthorization
+    let retiring: [RelayerSecretAuthorization]
+
+    var ordered: [RelayerSecretAuthorization] {
+        [active] + retiring
+    }
+
+    func authorization(forKeyRef keyRef: String) -> RelayerSecretAuthorization? {
+        ordered.first { $0.identity.keyRef == keyRef }
+    }
+}
+
+/// Fail-closed authorization for every protected relayer read.
+///
+/// The active key must match the exact journal head, public identity record, and
+/// daemon status. A historical key is readable only while the daemon reports it
+/// as retiring and the validated journal proves it was previously selected.
+enum RelayerSecretAuthorizationPolicy {
+    enum Failure: Error, Equatable, LocalizedError {
+        case retiringCountMismatch(reported: Int, observed: Int)
+        case duplicateRetiringKeyRef(String)
+        case activeKeyListedAsRetiring(String)
+        case pendingKeyListedAsRetiring(String)
+        case unjournaledRetiringKeyRef(String)
+        case missingRetiringIdentity(String)
+        case retiringIdentityKeyRefMismatch(expected: String, actual: String)
+        case retiringIdentityChainMismatch(expected: UInt64, actual: UInt64, keyRef: String)
+        case invalidRetiringAddress(keyRef: String, address: String)
+        case wrongRetiringAddress(keyRef: String, expected: String, actual: String)
+        case unauthorizedKeyRef(String)
+        case authenticatedRecordKeyRefMismatch(expected: String, actual: String)
+        case authenticatedIdentityMismatch(
+            expected: VerifiedRelayerIdentity,
+            actual: VerifiedRelayerIdentity
+        )
+
+        var errorDescription: String? {
+            switch self {
+            case .retiringCountMismatch:
+                return "The daemon returned inconsistent retiring relayer state."
+            case .duplicateRetiringKeyRef:
+                return "The daemon returned a duplicate retiring relayer key."
+            case .activeKeyListedAsRetiring:
+                return "The active relayer was also reported as retiring."
+            case .pendingKeyListedAsRetiring:
+                return "The pending relayer was incorrectly reported as retiring."
+            case .unjournaledRetiringKeyRef:
+                return "The daemon selected a retiring relayer that the app never authorized."
+            case .missingRetiringIdentity:
+                return "A retiring relayer has no immutable public identity record."
+            case .retiringIdentityKeyRefMismatch,
+                 .retiringIdentityChainMismatch,
+                 .invalidRetiringAddress,
+                 .wrongRetiringAddress:
+                return "A retiring relayer does not match the app-owned identity record."
+            case .unauthorizedKeyRef:
+                return "The requested relayer key is not authorized for the current state."
+            case .authenticatedRecordKeyRefMismatch,
+                 .authenticatedIdentityMismatch:
+                return "The authenticated relayer secret does not match the authorized identity."
+            }
+        }
+    }
+
+    static func resolve(
+        status: WalletNodeClient.RelayerStatus,
+        expectedChainID: UInt64,
+        snapshot: RelayerChainSnapshot?,
+        identityForKeyRef: (String) throws -> VerifiedRelayerIdentity?
+    ) throws -> RelayerSecretAuthorizationPlan {
+        guard let snapshot else {
+            throw PassiveRelayerIdentityResolver.Failure.migrationRequired(
+                chainID: expectedChainID
+            )
+        }
+
+        let activeIdentity = try PassiveRelayerIdentityResolver.resolve(
+            status: status,
+            expectedChainID: expectedChainID,
+            snapshot: snapshot,
+            identityForKeyRef: identityForKeyRef
+        )
+        let active = RelayerSecretAuthorization(
+            role: .active,
+            identity: activeIdentity
+        )
+
+        let retiringEntries = status.keyHistory.filter { $0.lifecycle == "retiring" }
+        guard status.retiringCount == retiringEntries.count else {
+            throw Failure.retiringCountMismatch(
+                reported: status.retiringCount,
+                observed: retiringEntries.count
+            )
+        }
+
+        var seen = Set<String>()
+        var retiring: [RelayerSecretAuthorization] = []
+        retiring.reserveCapacity(retiringEntries.count)
+        for entry in retiringEntries {
+            guard seen.insert(entry.keyRef).inserted else {
+                throw Failure.duplicateRetiringKeyRef(entry.keyRef)
+            }
+            guard entry.keyRef != snapshot.head.activeKeyRef else {
+                throw Failure.activeKeyListedAsRetiring(entry.keyRef)
+            }
+            guard entry.keyRef != snapshot.head.pendingKeyRef else {
+                throw Failure.pendingKeyListedAsRetiring(entry.keyRef)
+            }
+            guard snapshot.previouslyActiveKeyRefs.contains(entry.keyRef) else {
+                throw Failure.unjournaledRetiringKeyRef(entry.keyRef)
+            }
+            guard let identity = try identityForKeyRef(entry.keyRef) else {
+                throw Failure.missingRetiringIdentity(entry.keyRef)
+            }
+            guard identity.keyRef == entry.keyRef else {
+                throw Failure.retiringIdentityKeyRefMismatch(
+                    expected: entry.keyRef,
+                    actual: identity.keyRef
+                )
+            }
+            guard identity.chainID == expectedChainID else {
+                throw Failure.retiringIdentityChainMismatch(
+                    expected: expectedChainID,
+                    actual: identity.chainID,
+                    keyRef: entry.keyRef
+                )
+            }
+
+            let daemonAddress: String
+            do {
+                daemonAddress = try VerifiedRelayerIdentity.normalizedAddress(entry.eoa)
+            } catch {
+                throw Failure.invalidRetiringAddress(
+                    keyRef: entry.keyRef,
+                    address: entry.eoa
+                )
+            }
+            guard daemonAddress == identity.address else {
+                throw Failure.wrongRetiringAddress(
+                    keyRef: entry.keyRef,
+                    expected: identity.address,
+                    actual: daemonAddress
+                )
+            }
+            retiring.append(.init(role: .retiring, identity: identity))
+        }
+
+        retiring.sort { $0.identity.keyRef < $1.identity.keyRef }
+        return RelayerSecretAuthorizationPlan(
+            journalHead: snapshot.head,
+            active: active,
+            retiring: retiring
+        )
+    }
+
+    @discardableResult
+    static func verifyAuthenticated(
+        record: BundlerSecretRecord,
+        authorization: RelayerSecretAuthorization
+    ) throws -> VerifiedRelayerIdentity {
+        guard record.keyRef == authorization.identity.keyRef else {
+            throw Failure.authenticatedRecordKeyRefMismatch(
+                expected: authorization.identity.keyRef,
+                actual: record.keyRef
+            )
+        }
+        let actual = try VerifiedRelayerIdentity.derive(
+            keyRef: record.keyRef,
+            secret: record.secret
+        )
+        guard actual == authorization.identity else {
+            throw Failure.authenticatedIdentityMismatch(
+                expected: authorization.identity,
+                actual: actual
+            )
+        }
+        return actual
+    }
+}
+
 enum PassiveRelayerIdentityIssue: Equatable, Sendable {
     case migrationRequired
     case unavailable

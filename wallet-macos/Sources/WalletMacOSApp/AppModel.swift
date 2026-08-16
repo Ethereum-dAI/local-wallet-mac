@@ -155,6 +155,7 @@ final class AppModel: ObservableObject {
     private let relayerBootstrapRegistrationService: RelayerBootstrapRegistrationService
     private let relayerChainStateJournalStore: RelayerChainStateJournalStore
     private let relayerPublicIdentityStore: RelayerPublicIdentityStore
+    private let bundlerKeyStore: BundlerKeyStore
     private var walletNodeClient: WalletNodeClient?
     private var walletNodeDaemon: WalletNodeDaemon?
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
@@ -162,6 +163,8 @@ final class AppModel: ObservableObject {
     private var walletNodeLaunchFailure: WalletNodeLaunchFailure?
     private var walletNodeGeneration: UInt64 = 0
     private var relayerInstallTask: Task<WalletNodeClient, Error>?
+    private var relayerInstallAuthorizationPlan: RelayerSecretAuthorizationPlan?
+    private var installedRelayerAuthorizationPlan: RelayerSecretAuthorizationPlan?
     private var relayerStatusRefreshToken = UUID()
     private var optimisticNextNonce: [String: UInt64] = [:]
     private var pendingSessionInstallByUserOpHash: [String: SessionRecord] = [:]
@@ -226,6 +229,7 @@ final class AppModel: ObservableObject {
         relayerBootstrapRegistrationService: RelayerBootstrapRegistrationService? = nil,
         relayerChainStateJournalStore: RelayerChainStateJournalStore = .shared,
         relayerPublicIdentityStore: RelayerPublicIdentityStore = .shared,
+        bundlerKeyStore: BundlerKeyStore = .shared,
         walletNodeClient: WalletNodeClient? = WalletNodeClient.Configuration.fromEnvironment().map {
             WalletNodeClient(configuration: $0)
         },
@@ -241,6 +245,7 @@ final class AppModel: ObservableObject {
         self.relayerBootstrapRegistrationService = relayerBootstrapRegistrationService ?? .init()
         self.relayerChainStateJournalStore = relayerChainStateJournalStore
         self.relayerPublicIdentityStore = relayerPublicIdentityStore
+        self.bundlerKeyStore = bundlerKeyStore
         self.walletNodeClient = walletNodeClient
         self.userOperationBuilder = userOperationBuilder
         self.walletHistoryStore = walletHistoryStore
@@ -418,6 +423,8 @@ final class AppModel: ObservableObject {
         walletNodeLaunchFailure = nil
         relayerInstallTask?.cancel()
         relayerInstallTask = nil
+        relayerInstallAuthorizationPlan = nil
+        installedRelayerAuthorizationPlan = nil
         relayerStatusRefreshToken = UUID()
         isRefreshingLocalRelayer = false
         let daemon = walletNodeDaemon
@@ -599,6 +606,8 @@ final class AppModel: ObservableObject {
         walletNodeLaunchID = nil
         relayerInstallTask?.cancel()
         relayerInstallTask = nil
+        relayerInstallAuthorizationPlan = nil
+        installedRelayerAuthorizationPlan = nil
         relayerStatusRefreshToken = UUID()
         isRefreshingLocalRelayer = false
         try await walletNodeDaemon?.terminateAndWait()
@@ -624,6 +633,8 @@ final class AppModel: ObservableObject {
         activeBundlerStatus = "Bundler not checked"
         relayerInstallTask?.cancel()
         relayerInstallTask = nil
+        relayerInstallAuthorizationPlan = nil
+        installedRelayerAuthorizationPlan = nil
         relayerStatusRefreshToken = UUID()
         isRefreshingLocalRelayer = false
         relayerAccessState = .locked
@@ -1047,6 +1058,8 @@ final class AppModel: ObservableObject {
         walletNodeGeneration &+= 1
         relayerInstallTask?.cancel()
         relayerInstallTask = nil
+        relayerInstallAuthorizationPlan = nil
+        installedRelayerAuthorizationPlan = nil
         relayerStatusRefreshToken = UUID()
         isRefreshingLocalRelayer = false
         relayerAccessState = .locked
@@ -1384,6 +1397,7 @@ final class AppModel: ObservableObject {
         if !status.keyLoaded, case .installing = relayerAccessState {
             // Do not let a racing passive poll overwrite an install already in progress.
         } else if !status.keyLoaded {
+            installedRelayerAuthorizationPlan = nil
             relayerAccessState = .locked
         }
 
@@ -1401,6 +1415,84 @@ final class AppModel: ObservableObject {
                 : "Local relayer needs funding or attention."
         }
         return true
+    }
+
+    /// Resolves protected-secret authority directly from the validated journal,
+    /// immutable public identities, and one fresh daemon observation. Neither
+    /// UserDefaults nor daemon-selected key references are authorization sources.
+    private func relayerSecretAuthorizationPlan(
+        for status: WalletNodeClient.RelayerStatus
+    ) throws -> RelayerSecretAuthorizationPlan {
+        try RelayerSecretAuthorizationPolicy.resolve(
+            status: status,
+            expectedChainID: activeChain.id,
+            snapshot: try relayerChainStateJournalStore.snapshot(
+                chainID: activeChain.id
+            ),
+            identityForKeyRef: { keyRef in
+                try relayerPublicIdentityStore.identity(forKeyRef: keyRef)
+            }
+        )
+    }
+
+    /// The sole protected relayer read used by unlock, export, and top-up.
+    ///
+    /// Authority is checked immediately before the Keychain query and again
+    /// after authentication. A daemon restart, journal transition, public-record
+    /// change, or relayer lifecycle change during the prompt invalidates the read.
+    private func readAuthorizedRelayerSecret(
+        authorization: RelayerSecretAuthorization,
+        expectedPlan: RelayerSecretAuthorizationPlan,
+        client: WalletNodeClient,
+        generation: UInt64,
+        authenticationSession: DeviceOwnerAuthenticationSession
+    ) async throws -> BundlerSecretRecord {
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        let beforeStatus = try await client.bundlerStatus()
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        let beforePlan = try relayerSecretAuthorizationPlan(for: beforeStatus)
+        guard beforePlan == expectedPlan,
+              beforePlan.authorization(forKeyRef: authorization.identity.keyRef) == authorization else {
+            throw RelayerSecretAuthorizationPolicy.Failure.unauthorizedKeyRef(
+                authorization.identity.keyRef
+            )
+        }
+
+        let record = try bundlerKeyStore.read(
+            keyRef: authorization.identity.keyRef,
+            reason: authenticationSession.reason,
+            authenticationContext: authenticationSession.context
+        )
+        _ = try RelayerSecretAuthorizationPolicy.verifyAuthenticated(
+            record: record,
+            authorization: authorization
+        )
+
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        let afterStatus = try await client.bundlerStatus()
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        let afterPlan = try relayerSecretAuthorizationPlan(for: afterStatus)
+        guard afterPlan == expectedPlan,
+              afterPlan.authorization(forKeyRef: authorization.identity.keyRef) == authorization else {
+            throw RelayerSecretAuthorizationPolicy.Failure.unauthorizedKeyRef(
+                authorization.identity.keyRef
+            )
+        }
+        return record
+    }
+
+    private func requireCurrentRelayerConnection(
+        client: WalletNodeClient,
+        generation: UInt64
+    ) throws {
+        guard RelayerGenerationGate.accepts(
+            resultGeneration: generation,
+            currentGeneration: walletNodeGeneration
+        ), walletNodeClient?.hasSameConnection(as: client) == true else {
+            throw AppError.localDaemonLaunchFailed(
+                "wallet-node restarted while relayer authority was being verified. Retry the action."
+            )
+        }
     }
 
     func rotateLocalRelayerKey() async throws {
@@ -1459,9 +1551,6 @@ final class AppModel: ObservableObject {
         guard !isResettingWallet else {
             throw AppError.walletOperationInProgress
         }
-        guard let status = localRelayerStatus, let keyRef = targetKeyRef ?? status.keyRef else {
-            throw AppError.localRelayerKeyMissing
-        }
         guard !isExportingLocalRelayer else {
             throw AppError.localRelayerKeyMissing
         }
@@ -1469,18 +1558,33 @@ final class AppModel: ObservableObject {
         isExportingLocalRelayer = true
         defer { isExportingLocalRelayer = false }
         appendSection("Export Local Relayer")
+
+        let (client, generation) = try await ensureWalletNodeClientWithGeneration()
+        let status = try await client.bundlerStatus()
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        let plan = try relayerSecretAuthorizationPlan(for: status)
+        let keyRef = targetKeyRef ?? plan.active.identity.keyRef
+        guard let authorization = plan.authorization(forKeyRef: keyRef) else {
+            throw RelayerSecretAuthorizationPolicy.Failure.unauthorizedKeyRef(keyRef)
+        }
+
         let authentication = DeviceOwnerAuthenticationSession(
             reason: "Reveal the local relayer private key"
         )
         defer { authentication.invalidate() }
-        let record = try BundlerKeyStore.shared.read(
-            keyRef: keyRef,
-            reason: authentication.reason,
-            authenticationContext: authentication.context
+        try await authentication.authorize()
+        let record = try await readAuthorizedRelayerSecret(
+            authorization: authorization,
+            expectedPlan: plan,
+            client: client,
+            generation: generation,
+            authenticationSession: authentication
         )
         let privateKey = "0x" + record.secret.lowercaseHexString
         localRelayerMessage = "Relayer key exported after local authentication."
-        appendLog("relayer: exported key for \(targetLabel ?? status.eoa.shortAddress)")
+        appendLog(
+            "relayer: exported key for \(targetLabel ?? authorization.identity.address.shortAddress)"
+        )
         refreshLocalRelayerStatus()
         return privateKey
     }
@@ -1523,6 +1627,8 @@ final class AppModel: ObservableObject {
         )
         relayerInstallTask?.cancel()
         relayerInstallTask = nil
+        relayerInstallAuthorizationPlan = nil
+        installedRelayerAuthorizationPlan = nil
         relayerAccessState = .locked
         localRelayerStatus = nil
         localRelayerMessage = unsafeReset
@@ -1738,6 +1844,8 @@ final class AppModel: ObservableObject {
         walletNodeGeneration &+= 1
         relayerInstallTask?.cancel()
         relayerInstallTask = nil
+        relayerInstallAuthorizationPlan = nil
+        installedRelayerAuthorizationPlan = nil
         relayerAccessState = .locked
         localRelayerMessage = "Local wallet-node connected; relayer locked until needed."
         appendLog("relayer: wallet-node daemon started read-only")
@@ -1757,51 +1865,49 @@ final class AppModel: ObservableObject {
             // An externally managed daemon owns its own relayer-key lifecycle.
             return client
         }
-        if relayerAccessState.isAvailable(for: walletNodeGeneration) {
+
+        let observedStatus = try await client.bundlerStatus()
+        try requireCurrentRelayerConnection(client: client, generation: generation)
+        let authorizationPlan = try relayerSecretAuthorizationPlan(for: observedStatus)
+        _ = publishLocalRelayerStatus(observedStatus, expectedGeneration: generation)
+
+        if relayerAccessState.isAvailable(for: walletNodeGeneration),
+           installedRelayerAuthorizationPlan == authorizationPlan {
             return client
         }
         if let relayerInstallTask {
+            guard relayerInstallAuthorizationPlan == authorizationPlan else {
+                throw AppError.localDaemonLaunchFailed(
+                    "Relayer authority changed while another key installation was in progress. Retry the action."
+                )
+            }
             return try await relayerInstallTask.value
         }
 
         relayerAccessState = .installing(generation: generation)
         localRelayerMessage = "Unlocking the local relayer for this action..."
         let task = Task { @MainActor [self] in
-            let observedStatus = try await client.bundlerStatus()
-            guard walletNodeGeneration == generation else {
-                throw AppError.localDaemonLaunchFailed(
-                    "wallet-node restarted while the relayer was being unlocked. Retry the action."
-                )
-            }
-            publishLocalRelayerStatus(observedStatus, expectedGeneration: generation)
-
-            let keyRefs = relevantRelayerKeyRefs(status: observedStatus)
-            guard !keyRefs.isEmpty else {
-                throw AppError.localRelayerKeyMissing
-            }
-
             var latestStatus = observedStatus
-            for keyRef in keyRefs {
+            for authorization in authorizationPlan.ordered {
                 try Task.checkCancellation()
-                guard walletNodeGeneration == generation else {
-                    throw AppError.localDaemonLaunchFailed(
-                        "wallet-node restarted while the relayer was being unlocked. Retry the action."
-                    )
-                }
+                try requireCurrentRelayerConnection(client: client, generation: generation)
+                let keyRef = authorization.identity.keyRef
                 let challenge = try await client.beginAdminAction(
                     action: "install_bundler_eoa",
                     chainId: Int(activeChain.id),
                     keyRef: keyRef
                 )
-                let record = try BundlerKeyStore.shared.read(
-                    keyRef: keyRef,
-                    reason: authenticationSession.reason,
-                    authenticationContext: authenticationSession.context
+                let record = try await readAuthorizedRelayerSecret(
+                    authorization: authorization,
+                    expectedPlan: authorizationPlan,
+                    client: client,
+                    generation: generation,
+                    authenticationSession: authenticationSession
                 )
-                // Only the first ref is the active identity. Retiring keys are loaded solely so
-                // pending replacements remain signable and must never overwrite the cached
+                // Only the active identity may update the compatibility cache. Retiring keys are
+                // loaded solely so pending replacements remain signable and must never overwrite the cached
                 // funding address shown before the next daemon has status metadata.
-                if keyRef == keyRefs.first {
+                if authorization.role == .active {
                     syncUnlockedRelayerAddress(keyRef: keyRef, secret: record.secret)
                 }
                 latestStatus = try await client.installBundlerEOA(
@@ -1814,25 +1920,33 @@ final class AppModel: ObservableObject {
                 )
             }
 
-            guard walletNodeGeneration == generation else {
+            try requireCurrentRelayerConnection(client: client, generation: generation)
+            guard try relayerSecretAuthorizationPlan(for: latestStatus) == authorizationPlan else {
                 throw AppError.localDaemonLaunchFailed(
-                    "wallet-node restarted while the relayer was being unlocked. Retry the action."
+                    "The relayer authority changed while keys were being installed. Retry the action."
                 )
             }
-            publishLocalRelayerStatus(latestStatus, expectedGeneration: generation)
+            _ = publishLocalRelayerStatus(latestStatus, expectedGeneration: generation)
+            installedRelayerAuthorizationPlan = authorizationPlan
             relayerAccessState = .available(generation: generation)
             localRelayerMessage = "Local relayer available for this wallet-node session."
-            appendLog("relayer: installed \(keyRefs.count) relevant key(s) for daemon generation \(generation)")
+            appendLog(
+                "relayer: installed \(authorizationPlan.ordered.count) journal-authorized key(s) for daemon generation \(generation)"
+            )
             return client
         }
         relayerInstallTask = task
+        relayerInstallAuthorizationPlan = authorizationPlan
 
         do {
             let installedClient = try await task.value
             relayerInstallTask = nil
+            relayerInstallAuthorizationPlan = nil
             return installedClient
         } catch {
             relayerInstallTask = nil
+            relayerInstallAuthorizationPlan = nil
+            installedRelayerAuthorizationPlan = nil
             if walletNodeGeneration == generation {
                 relayerAccessState = .failed(
                     generation: generation,
@@ -1842,24 +1956,6 @@ final class AppModel: ObservableObject {
             }
             throw error
         }
-    }
-
-    /// Active always comes first. A retiring key is still relevant while one of its submitted
-    /// transactions may need cancellation or replacement; pending-funding and retired keys are
-    /// intentionally left locked.
-    private func relevantRelayerKeyRefs(
-        status: WalletNodeClient.RelayerStatus?
-    ) -> [String] {
-        RelayerKeyInstallPolicy.relevantKeyRefs(
-            activeKeyRef: status?.keyRef,
-            fallbackKeyRef: onboardingSettingsStore.bundlerKeyRef(chainId: activeChain.id),
-            history: (status?.keyHistory ?? []).map {
-                RelayerKeyInstallPolicy.HistoryEntry(
-                    keyRef: $0.keyRef,
-                    lifecycle: $0.lifecycle
-                )
-            }
-        )
     }
 
     private func syncUnlockedRelayerAddress(keyRef: String, secret: Data) {
@@ -1941,6 +2037,8 @@ final class AppModel: ObservableObject {
             walletNodeGeneration &+= 1
             relayerInstallTask?.cancel()
             relayerInstallTask = nil
+            relayerInstallAuthorizationPlan = nil
+            installedRelayerAuthorizationPlan = nil
             relayerAccessState = .locked
 
             let relaunchedClient = try await ensureWalletNodeClient()
@@ -2571,14 +2669,6 @@ final class AppModel: ObservableObject {
         logContext: String,
         signingReason: String
     ) async throws -> BundlerTopUpSendResult {
-        guard expectedIdentity.chainID == activeChain.id,
-              try BundlerKeyStore.shared.verifiedIdentity(
-                  forKeyRef: expectedIdentity.keyRef
-              ) == expectedIdentity else {
-            throw AppError.bundlerRelayPreflightUnavailable(
-                "The reviewed relayer identity is no longer available in Keychain."
-            )
-        }
         let observation = try await fetchLocalRelayerStatusWithBalanceRetry()
         guard publishLocalRelayerStatus(
             observation.status,
@@ -2589,10 +2679,12 @@ final class AppModel: ObservableObject {
             )
         }
         do {
-            try RelayerIdentityBindingPolicy.verify(
-                status: observation.status,
-                against: expectedIdentity
-            )
+            let plan = try relayerSecretAuthorizationPlan(for: observation.status)
+            guard plan.active.identity == expectedIdentity else {
+                throw RelayerSecretAuthorizationPolicy.Failure.unauthorizedKeyRef(
+                    expectedIdentity.keyRef
+                )
+            }
         } catch {
             throw AppError.bundlerRelayPreflightUnavailable(
                 "The local relayer identity changed while preparing the top-up."
@@ -2621,24 +2713,6 @@ final class AppModel: ObservableObject {
         logContext: String,
         phase: String
     ) async throws -> BundlerRelayPrecheck.Decision {
-        do {
-            guard expectedIdentity.chainID == activeChain.id,
-                  try BundlerKeyStore.shared.verifiedIdentity(
-                      forKeyRef: expectedIdentity.keyRef
-                  ) == expectedIdentity else {
-                throw AppError.bundlerRelayPreflightUnavailable(
-                    "The reviewed relayer identity is no longer available in Keychain."
-                )
-            }
-        } catch let error as AppError {
-            throw error
-        } catch {
-            appendLog("\(logContext): \(phase) Keychain identity rejected: \(error.localizedDescription)")
-            throw AppError.bundlerRelayPreflightUnavailable(
-                "The app could not verify the reviewed relayer identity in Keychain."
-            )
-        }
-
         let observation: (status: WalletNodeClient.RelayerStatus, generation: UInt64)
         do {
             observation = try await fetchLocalRelayerStatusWithBalanceRetry()
@@ -2658,10 +2732,12 @@ final class AppModel: ObservableObject {
         }
 
         do {
-            try RelayerIdentityBindingPolicy.verify(
-                status: observation.status,
-                against: expectedIdentity
-            )
+            let plan = try relayerSecretAuthorizationPlan(for: observation.status)
+            guard plan.active.identity == expectedIdentity else {
+                throw RelayerSecretAuthorizationPolicy.Failure.unauthorizedKeyRef(
+                    expectedIdentity.keyRef
+                )
+            }
         } catch {
             appendLog("\(logContext): \(phase) relayer identity rejected: \(String(describing: error))")
             throw AppError.bundlerRelayPreflightUnavailable(
@@ -3166,25 +3242,34 @@ final class AppModel: ObservableObject {
         )
         let gasAwareSigningReason = actionAuthentication.reason
         defer { actionAuthentication.invalidate() }
-        _ = try await ensureRelayerUnlocked(using: actionAuthentication)
+        let authorizedRelayerClient = try await ensureRelayerUnlocked(
+            using: actionAuthentication
+        )
+        let authorizedRelayerGeneration = walletNodeGeneration
 
         if case let .bundlerTopUp(expectedIdentity) = purpose {
             // Re-derive the destination from the protected secret with this action's context.
             // This binds the owner signature below to secret material, not public metadata.
-            let record = try BundlerKeyStore.shared.read(
-                keyRef: expectedIdentity.keyRef,
-                reason: actionAuthentication.reason,
-                authenticationContext: actionAuthentication.context
+            try requireCurrentRelayerConnection(
+                client: authorizedRelayerClient,
+                generation: authorizedRelayerGeneration
             )
-            let authenticatedIdentity = try VerifiedRelayerIdentity.derive(
-                keyRef: record.keyRef,
-                secret: record.secret
+            let authenticatedStatus = try await authorizedRelayerClient.bundlerStatus()
+            let authenticatedPlan = try relayerSecretAuthorizationPlan(
+                for: authenticatedStatus
             )
-            guard authenticatedIdentity == expectedIdentity else {
+            guard authenticatedPlan.active.identity == expectedIdentity else {
                 throw AppError.bundlerRelayPreflightUnavailable(
-                    "The authenticated relayer secret does not match the reviewed destination."
+                    "The authenticated relayer is no longer the active destination."
                 )
             }
+            _ = try await readAuthorizedRelayerSecret(
+                authorization: authenticatedPlan.active,
+                expectedPlan: authenticatedPlan,
+                client: authorizedRelayerClient,
+                generation: authorizedRelayerGeneration,
+                authenticationSession: actionAuthentication
+            )
 
             switch try await verifiedBundlerRelayDecision(
                 expectedIdentity: expectedIdentity,

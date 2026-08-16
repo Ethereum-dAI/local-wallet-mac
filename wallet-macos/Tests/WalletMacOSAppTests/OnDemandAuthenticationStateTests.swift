@@ -40,28 +40,6 @@ import Testing
         }
     }
 
-    @Test func relayerInstallLoadsOnlyActiveAndStillRetiringKeys() {
-        let refs = RelayerKeyInstallPolicy.relevantKeyRefs(
-            activeKeyRef: "active",
-            fallbackKeyRef: "stale-cache",
-            history: [
-                .init(keyRef: "pending", lifecycle: "pending_funding"),
-                .init(keyRef: "retiring", lifecycle: "retiring"),
-                .init(keyRef: "retired", lifecycle: "retired"),
-                .init(keyRef: "active", lifecycle: "active"),
-            ]
-        )
-        #expect(refs == ["active", "retiring"])
-    }
-
-    @Test func relayerInstallUsesProvisionedFallbackBeforeFirstDaemonRecord() {
-        #expect(RelayerKeyInstallPolicy.relevantKeyRefs(
-            activeKeyRef: nil,
-            fallbackKeyRef: "provisioned",
-            history: []
-        ) == ["provisioned"])
-    }
-
     @Test func staleDaemonResultsNeverApplyToANewerGeneration() {
         #expect(RelayerGenerationGate.accepts(resultGeneration: 7, currentGeneration: 7))
         #expect(!RelayerGenerationGate.accepts(resultGeneration: 7, currentGeneration: 8))

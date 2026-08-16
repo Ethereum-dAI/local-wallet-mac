@@ -261,6 +261,15 @@ struct RelayerChainSnapshot: Equatable, Sendable {
         Set(states.flatMap { [$0.activeKeyRef, $0.pendingKeyRef].compactMap { $0 } })
     }
 
+    /// Keys that the journal actually selected as active at least once.
+    ///
+    /// This deliberately excludes candidates that were only pending and later
+    /// cleared. Such candidates never relayed work and must not be unlocked as
+    /// retiring keys merely because an untrusted daemon reports them that way.
+    var previouslyActiveKeyRefs: Set<String> {
+        Set(states.compactMap(\.activeKeyRef))
+    }
+
     static func validate(
         _ records: [RelayerChainState],
         expectedChainID: UInt64

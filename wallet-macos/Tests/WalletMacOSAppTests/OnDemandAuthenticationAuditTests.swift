@@ -82,7 +82,7 @@ import Testing
         let publish = try slice(
             appModel,
             from: "private func publishLocalRelayerStatus",
-            until: "func rotateLocalRelayerKey"
+            until: "private func relayerSecretAuthorizationPlan"
         )
         #expect(publish.contains("relayerChainStateJournalStore.snapshot"))
         #expect(publish.contains("relayerPublicIdentityStore.identity"))
@@ -151,18 +151,18 @@ import Testing
         let publish = try slice(
             source,
             from: "private func publishLocalRelayerStatus",
-            until: "func rotateLocalRelayerKey"
+            until: "private func relayerSecretAuthorizationPlan"
         )
         #expect(!publish.contains(".available(generation:"))
 
         let install = try slice(
             source,
             from: "private func ensureRelayerUnlocked",
-            until: "private func relevantRelayerKeyRefs"
+            until: "private func syncUnlockedRelayerAddress"
         )
         #expect(!install.contains("if observedStatus.keyLoaded"))
         #expect(install.contains("relayerAccessState = .available(generation: generation)"))
-        #expect(install.contains("walletNodeGeneration == generation"))
+        #expect(install.contains("requireCurrentRelayerConnection"))
     }
 
     @Test func onboardingRegistersRelayerBeforePublishingFundingAddress() throws {
@@ -395,8 +395,9 @@ import Testing
             until: "func executeERC20Transfer("
         )
         #expect(wrapper.contains("fetchLocalRelayerStatusWithBalanceRetry()"))
-        #expect(wrapper.contains("BundlerKeyStore.shared.verifiedIdentity("))
-        #expect(wrapper.contains("RelayerIdentityBindingPolicy.verify("))
+        #expect(wrapper.contains("relayerSecretAuthorizationPlan(for:"))
+        #expect(wrapper.contains("plan.active.identity == expectedIdentity"))
+        #expect(wrapper.contains("verifiedIdentity(forKeyRef:") == false)
         #expect(wrapper.contains("executeBundlerTopUp("))
         #expect(wrapper.contains("identity: expectedIdentity"))
         #expect(wrapper.contains("recipient: expectedIdentity.address"))
@@ -413,20 +414,146 @@ import Testing
         )
         let unlock = try #require(send.range(of: "ensureRelayerUnlocked"))
         let protectedSecretRead = try #require(
-            send.range(of: "let record = try BundlerKeyStore.shared.read")
+            send.range(of: "readAuthorizedRelayerSecret(")
         )
         let identityMatch = try #require(
-            send.range(of: "authenticatedIdentity == expectedIdentity")
+            send.range(of: "authenticatedPlan.active.identity == expectedIdentity")
         )
         let postAuthenticationCheck = try #require(send.range(of: "phase: \"post-auth\""))
         let signing = try #require(send.range(of: "UserOperationSigning.signForSend"))
 
         #expect(preAuthenticationCheck.lowerBound < authentication.lowerBound)
         #expect(authentication.lowerBound < unlock.lowerBound)
-        #expect(unlock.lowerBound < protectedSecretRead.lowerBound)
-        #expect(protectedSecretRead.lowerBound < identityMatch.lowerBound)
-        #expect(identityMatch.lowerBound < postAuthenticationCheck.lowerBound)
+        #expect(unlock.lowerBound < identityMatch.lowerBound)
+        #expect(identityMatch.lowerBound < protectedSecretRead.lowerBound)
+        #expect(protectedSecretRead.lowerBound < postAuthenticationCheck.lowerBound)
         #expect(postAuthenticationCheck.lowerBound < signing.lowerBound)
+    }
+
+    @Test func appModelHasOneJournalAuthorizedProtectedRelayerReadBoundary() throws {
+        let source = try appSource("AppModel.swift")
+        #expect(occurrences(of: "bundlerKeyStore.read(", in: source) == 1)
+        #expect(source.contains("BundlerKeyStore.shared.read(") == false)
+        #expect(source.contains("verifiedIdentity(forKeyRef:") == false)
+
+        let protectedRead = try slice(
+            source,
+            from: "private func readAuthorizedRelayerSecret(",
+            until: "private func requireCurrentRelayerConnection"
+        )
+        let beforeAuthority = try #require(
+            protectedRead.range(of: "let beforePlan = try relayerSecretAuthorizationPlan")
+        )
+        let keychainRead = try #require(
+            protectedRead.range(of: "let record = try bundlerKeyStore.read(")
+        )
+        let secretBinding = try #require(
+            protectedRead.range(of: "RelayerSecretAuthorizationPolicy.verifyAuthenticated")
+        )
+        let afterAuthority = try #require(
+            protectedRead.range(of: "let afterPlan = try relayerSecretAuthorizationPlan")
+        )
+
+        #expect(beforeAuthority.lowerBound < keychainRead.lowerBound)
+        #expect(keychainRead.lowerBound < secretBinding.lowerBound)
+        #expect(secretBinding.lowerBound < afterAuthority.lowerBound)
+        #expect(protectedRead.contains("authenticationContext: authenticationSession.context"))
+        #expect(protectedRead.contains("requireCurrentRelayerConnection"))
+    }
+
+    @Test func relayerUnlockRejectsCacheAndDaemonSelectedFallbacks() throws {
+        let source = try appSource("AppModel.swift")
+        let install = try slice(
+            source,
+            from: "private func ensureRelayerUnlocked",
+            until: "private func syncUnlockedRelayerAddress"
+        )
+
+        #expect(install.contains("relayerSecretAuthorizationPlan(for: observedStatus)"))
+        #expect(install.contains("authorizationPlan.ordered"))
+        #expect(install.contains("installedRelayerAuthorizationPlan == authorizationPlan"))
+        #expect(install.contains("guard relayerInstallAuthorizationPlan == authorizationPlan"))
+        #expect(install.contains("relayerInstallAuthorizationPlan = authorizationPlan"))
+        #expect(install.contains("readAuthorizedRelayerSecret("))
+        #expect(install.contains("authenticationSession: authenticationSession"))
+        #expect(install.contains("installedRelayerAuthorizationPlan = nil"))
+        #expect(install.contains("onboardingSettingsStore.bundlerKeyRef") == false)
+        #expect(install.contains("RelayerKeyInstallPolicy") == false)
+        #expect(install.contains("status?.keyRef") == false)
+    }
+
+    @Test func relayerAuthorityCacheIsClearedAtEveryConnectionInvalidationBoundary() throws {
+        let source = try appSource("AppModel.swift")
+        let invalidationSlices = try [
+            slice(
+                source,
+                from: "func lockSecretRuntimesForSystemSession() async",
+                until: "func resetDemoWalletAuthorized() async throws"
+            ),
+            slice(
+                source,
+                from: "private func quiesceManagedWalletNodeForSecretReset() async throws",
+                until: "private func clearInMemoryWalletStateAfterReset()"
+            ),
+            slice(
+                source,
+                from: "private func clearInMemoryWalletStateAfterReset()",
+                until: "func runDemo()"
+            ),
+            slice(
+                source,
+                from: "private func resetWalletNodeConnectionAfterNetworkChange()",
+                until: "func setTransactionKind("
+            ),
+            slice(
+                source,
+                from: "func deleteLocalRelayerKey(",
+                until: "func cancelPendingOperation("
+            ),
+            slice(
+                source,
+                from: "private func adoptManagedWalletNodeDaemon(",
+                until: "private func ensureRelayerUnlocked("
+            ),
+            slice(
+                source,
+                from: "private func withWalletNodeClient<T: Sendable>(",
+                until: "private func withPrivilegedWalletNodeClient<T: Sendable>("
+            ),
+        ]
+
+        for invalidation in invalidationSlices {
+            #expect(invalidation.contains("relayerInstallTask = nil"))
+            #expect(invalidation.contains("relayerInstallAuthorizationPlan = nil"))
+            #expect(invalidation.contains("installedRelayerAuthorizationPlan = nil"))
+            #expect(invalidation.contains("relayerAccessState = .locked"))
+        }
+
+        let passivePublication = try slice(
+            source,
+            from: "private func publishLocalRelayerStatus(",
+            until: "private func relayerSecretAuthorizationPlan("
+        )
+        #expect(passivePublication.contains("installedRelayerAuthorizationPlan = nil"))
+    }
+
+    @Test func relayerExportUsesFreshAuthorityAndOneCallerContext() throws {
+        let source = try appSource("AppModel.swift")
+        let export = try slice(
+            source,
+            from: "func exportLocalRelayerKey(",
+            until: "func deleteLocalRelayerKey("
+        )
+        let status = try #require(export.range(of: "let status = try await client.bundlerStatus()"))
+        let plan = try #require(export.range(of: "relayerSecretAuthorizationPlan(for: status)"))
+        let authorize = try #require(export.range(of: "try await authentication.authorize()"))
+        let read = try #require(export.range(of: "readAuthorizedRelayerSecret("))
+
+        #expect(status.lowerBound < plan.lowerBound)
+        #expect(plan.lowerBound < authorize.lowerBound)
+        #expect(authorize.lowerBound < read.lowerBound)
+        #expect(export.contains("authenticationSession: authentication"))
+        #expect(export.contains("localRelayerStatus") == false)
     }
 
     private func appSource(_ fileName: String) throws -> String {
@@ -449,5 +576,9 @@ import Testing
         let startRange = try #require(source.range(of: start))
         let endRange = try #require(source.range(of: end, range: startRange.upperBound..<source.endIndex))
         return String(source[startRange.lowerBound..<endRange.lowerBound])
+    }
+
+    private func occurrences(of needle: String, in source: String) -> Int {
+        source.components(separatedBy: needle).count - 1
     }
 }

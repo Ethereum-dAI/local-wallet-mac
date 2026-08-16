@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import LocalAuthentication
 
 /// A factory reset can securely wipe only sidecars owned by this app. Environment-configured
 /// sidecars may still hold the old relayer or privacy secret in RAM, so fail before asking for
@@ -125,13 +126,16 @@ enum WalletNodeManagedStoreCleanup {
 }
 
 // Wallet reset must clear every key class the app manages: the Secure Enclave
-// root key, relayer (bundler EOA) secrets, session-key secrets, the cached
-// relayer identity, and the wallet metadata file. Both reset entry points (the
+// root key, relayer (bundler EOA) selection journal, public identities and
+// secrets, session-key secrets, cached relayer address, and wallet metadata.
+// Both reset entry points (the
 // in-app reset and the --reset-demo-wallet CLI flag) run through this type so
 // a key class cannot silently drop out of one of them again.
 struct WalletResetCleanup {
-    var deleteRootKey: () throws -> Void
+    var deleteRelayerSelectionJournal: () throws -> Void
+    var deletePublicRelayerIdentities: () throws -> Void
     var deleteBundlerKeys: () throws -> Void
+    var deleteRootKey: () throws -> Void
     var deleteSessionKeys: () throws -> Void
     var clearRelayerAddressCache: () throws -> Void
     var clearMetadata: () throws -> Void
@@ -141,13 +145,25 @@ struct WalletResetCleanup {
     var deleteRailgunSecrets: () throws -> Void
 
     static func standard(
+        authenticationContext: LAContext,
         keyStore: KeyStore = KeyStore(),
         metadataStore: WalletMetadataStore = WalletMetadataStore(),
-        onboardingSettingsStore: OnboardingSettingsStore = OnboardingSettingsStore()
+        onboardingSettingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
+        bundlerKeyStore: BundlerKeyStore = .shared,
+        relayerPublicIdentityStore: RelayerPublicIdentityStore = .shared,
+        relayerChainStateJournalStore: RelayerChainStateJournalStore = .shared
     ) -> WalletResetCleanup {
         WalletResetCleanup(
+            deleteRelayerSelectionJournal: {
+                try relayerChainStateJournalStore.deleteAll()
+            },
+            deletePublicRelayerIdentities: {
+                try relayerPublicIdentityStore.deleteAll()
+            },
+            deleteBundlerKeys: {
+                try bundlerKeyStore.deleteAll(authenticationContext: authenticationContext)
+            },
             deleteRootKey: { try keyStore.deleteKey() },
-            deleteBundlerKeys: { try BundlerKeyStore.shared.deleteAll() },
             deleteSessionKeys: { try SessionKeyStore.shared.deleteAll() },
             clearRelayerAddressCache: {
                 onboardingSettingsStore.clearBundlerCache(chainIds: [
@@ -164,26 +180,47 @@ struct WalletResetCleanup {
         )
     }
 
-    // Best-effort: a failing step must not leave later key classes behind, so
-    // every step runs and the failures are aggregated at the end.
+    // Relayer authority cleanup is fail-fast and dependency-ordered. If journal deletion fails,
+    // preserve both the public identities and protected secrets. If public deletion fails after
+    // the journal is gone, preserve protected secrets. Unrelated key classes remain best-effort.
     func run(onStep: (String) -> Void = { _ in }) throws {
-        let steps: [(label: String, action: () throws -> Void)] = [
+        var failures: [WalletResetCleanupError.StepFailure] = []
+
+        @discardableResult
+        func runStep(_ label: String, _ action: () throws -> Void) -> Bool {
+            do {
+                try action()
+                onStep(label)
+                return true
+            } catch {
+                failures.append(WalletResetCleanupError.StepFailure(step: label, underlying: error))
+                return false
+            }
+        }
+
+        let journalDeleted = runStep(
+            "relayer-selection-journal",
+            deleteRelayerSelectionJournal
+        )
+        if journalDeleted {
+            let publicIdentitiesDeleted = runStep(
+                "relayer-public-identities",
+                deletePublicRelayerIdentities
+            )
+            if publicIdentitiesDeleted {
+                runStep("relayer-keys", deleteBundlerKeys)
+            }
+        }
+
+        let unrelatedSteps: [(label: String, action: () throws -> Void)] = [
             ("secure-enclave-key", deleteRootKey),
-            ("relayer-keys", deleteBundlerKeys),
             ("session-keys", deleteSessionKeys),
             ("relayer-address-cache", clearRelayerAddressCache),
             ("metadata", clearMetadata),
             ("railgun-secrets", deleteRailgunSecrets),
         ]
-
-        var failures: [WalletResetCleanupError.StepFailure] = []
-        for step in steps {
-            do {
-                try step.action()
-                onStep(step.label)
-            } catch {
-                failures.append(WalletResetCleanupError.StepFailure(step: step.label, underlying: error))
-            }
+        for step in unrelatedSteps {
+            runStep(step.label, step.action)
         }
 
         guard failures.isEmpty else {

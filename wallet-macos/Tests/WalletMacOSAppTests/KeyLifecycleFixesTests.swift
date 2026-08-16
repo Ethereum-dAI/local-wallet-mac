@@ -1,15 +1,37 @@
 import AppKit
 import Foundation
+import LocalAuthentication
+import Security
 import Testing
 @testable import WalletMacOSApp
+
+private final class ResetSecurityItemClient: SecurityItemClient, @unchecked Sendable {
+    private(set) var deletions: [[String: Any]] = []
+    var deleteStatus: OSStatus = errSecSuccess
+
+    func add(_ attributes: [String: Any]) -> (status: OSStatus, result: Any?) {
+        (errSecSuccess, nil)
+    }
+
+    func copyMatching(_ query: [String: Any]) -> (status: OSStatus, result: Any?) {
+        (errSecItemNotFound, nil)
+    }
+
+    func delete(_ query: [String: Any]) -> OSStatus {
+        deletions.append(query)
+        return deleteStatus
+    }
+}
 
 // MARK: - Wallet reset deletes every key class (S-1)
 
 @Test func walletResetCleanupRunsAllStepsIncludingSessionKeys() throws {
     var steps: [String] = []
     let cleanup = WalletResetCleanup(
-        deleteRootKey: { steps.append("root") },
+        deleteRelayerSelectionJournal: { steps.append("journal") },
+        deletePublicRelayerIdentities: { steps.append("public") },
         deleteBundlerKeys: { steps.append("bundler") },
+        deleteRootKey: { steps.append("root") },
         deleteSessionKeys: { steps.append("session") },
         clearRelayerAddressCache: { steps.append("relayer-cache") },
         clearMetadata: { steps.append("metadata") },
@@ -19,16 +41,27 @@ import Testing
     var completed: [String] = []
     try cleanup.run { completed.append($0) }
 
-    #expect(steps == ["root", "bundler", "session", "relayer-cache", "metadata", "railgun"])
-    #expect(completed == ["secure-enclave-key", "relayer-keys", "session-keys", "relayer-address-cache", "metadata", "railgun-secrets"])
+    #expect(steps == ["journal", "public", "bundler", "root", "session", "relayer-cache", "metadata", "railgun"])
+    #expect(completed == [
+        "relayer-selection-journal",
+        "relayer-public-identities",
+        "relayer-keys",
+        "secure-enclave-key",
+        "session-keys",
+        "relayer-address-cache",
+        "metadata",
+        "railgun-secrets",
+    ])
 }
 
 @Test func walletResetCleanupContinuesPastFailuresAndAggregates() {
     struct Boom: Error {}
     var steps: [String] = []
     let cleanup = WalletResetCleanup(
-        deleteRootKey: { throw Boom() },
+        deleteRelayerSelectionJournal: { steps.append("journal") },
+        deletePublicRelayerIdentities: { steps.append("public") },
         deleteBundlerKeys: { steps.append("bundler") },
+        deleteRootKey: { throw Boom() },
         deleteSessionKeys: { steps.append("session") },
         clearRelayerAddressCache: { steps.append("relayer-cache") },
         clearMetadata: { steps.append("metadata") },
@@ -42,9 +75,85 @@ import Testing
         aggregated = error
     } catch {}
 
-    #expect(steps == ["bundler", "session", "relayer-cache", "metadata", "railgun"])
+    #expect(steps == ["journal", "public", "bundler", "session", "relayer-cache", "metadata", "railgun"])
     #expect(aggregated?.failures.count == 1)
     #expect(aggregated?.failures.first?.step == "secure-enclave-key")
+}
+
+@Test func walletResetStopsRelayerAuthorityCleanupWhenJournalDeletionFails() {
+    struct Boom: Error {}
+    var steps: [String] = []
+    let cleanup = WalletResetCleanup(
+        deleteRelayerSelectionJournal: {
+            steps.append("journal")
+            throw Boom()
+        },
+        deletePublicRelayerIdentities: { steps.append("public") },
+        deleteBundlerKeys: { steps.append("protected") },
+        deleteRootKey: { steps.append("root") },
+        deleteSessionKeys: { steps.append("session") },
+        clearRelayerAddressCache: { steps.append("relayer-cache") },
+        clearMetadata: { steps.append("metadata") },
+        deleteRailgunSecrets: { steps.append("railgun") }
+    )
+
+    var aggregated: WalletResetCleanupError?
+    do {
+        try cleanup.run()
+    } catch let error as WalletResetCleanupError {
+        aggregated = error
+    } catch {}
+
+    #expect(!steps.contains("public"))
+    #expect(!steps.contains("protected"))
+    #expect(steps == ["journal", "root", "session", "relayer-cache", "metadata", "railgun"])
+    #expect(aggregated?.failures.map(\.step) == ["relayer-selection-journal"])
+}
+
+@Test func walletResetSkipsProtectedRelayerDeletionWhenPublicIdentityDeletionFails() {
+    struct Boom: Error {}
+    var steps: [String] = []
+    let cleanup = WalletResetCleanup(
+        deleteRelayerSelectionJournal: { steps.append("journal") },
+        deletePublicRelayerIdentities: {
+            steps.append("public")
+            throw Boom()
+        },
+        deleteBundlerKeys: { steps.append("protected") },
+        deleteRootKey: { steps.append("root") },
+        deleteSessionKeys: { steps.append("session") },
+        clearRelayerAddressCache: { steps.append("relayer-cache") },
+        clearMetadata: { steps.append("metadata") },
+        deleteRailgunSecrets: { steps.append("railgun") }
+    )
+
+    var aggregated: WalletResetCleanupError?
+    do {
+        try cleanup.run()
+    } catch let error as WalletResetCleanupError {
+        aggregated = error
+    } catch {}
+
+    #expect(!steps.contains("protected"))
+    #expect(steps == ["journal", "public", "root", "session", "relayer-cache", "metadata", "railgun"])
+    #expect(aggregated?.failures.map(\.step) == ["relayer-public-identities"])
+}
+
+@Test func protectedRelayerResetUsesTheAlreadyAuthorizedContext() throws {
+    let client = ResetSecurityItemClient()
+    let store = BundlerKeyStore(
+        client: client,
+        publicIdentityStore: RelayerPublicIdentityStore(client: client)
+    )
+    let context = LAContext()
+
+    try store.deleteAll(authenticationContext: context)
+
+    let query = try #require(client.deletions.first)
+    let suppliedContext = try #require(
+        query[kSecUseAuthenticationContext as String] as? LAContext
+    )
+    #expect(suppliedContext === context)
 }
 
 @Test func demoFactoryResetClearsOnlyWalletNodeSQLiteState() throws {

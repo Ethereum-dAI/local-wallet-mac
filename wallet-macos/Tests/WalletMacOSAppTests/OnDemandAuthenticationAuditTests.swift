@@ -176,7 +176,7 @@ import Testing
             provisioning.range(of: "try await relayerRegistrationService.register(")
         )
         let persistedIdentity = try #require(
-            provisioning.range(of: "verifyPersistedBundlerIdentity(")
+            provisioning.range(of: "finalizeRegisteredBundlerIdentity(")
         )
         let ready = try #require(provisioning.range(of: "keyState = .ready("))
         #expect(registration.lowerBound < ready.lowerBound)
@@ -212,14 +212,15 @@ import Testing
         let provisioningSource = try appSource("OnboardingProvisioningService.swift")
         let selection = try slice(
             provisioningSource,
-            from: "let generated = try WalletSignature.generateBundlerSecret()",
-            until: "\n    }\n\n}"
+            from: "let generatedSecret = try generateBundlerSecret()",
+            until: "\n    }\n\n    private func requireExactHead"
         )
         let existing = try slice(selection, from: "case .existing:", until: "case .inserted:")
         let inserted = String(selection[(try #require(selection.range(of: "case .inserted:"))).lowerBound...])
         #expect(selection.contains("addIfAbsent("))
-        #expect(existing.contains("BundlerKeyStore.shared.read("))
-        #expect(inserted.contains("BundlerKeyStore.shared.read(") == false)
+        #expect(selection.contains("verifiedIdentity(forKeyRef:") == false)
+        #expect(existing.contains("bundlerKeyStore.read("))
+        #expect(inserted.contains("bundlerKeyStore.read(") == false)
     }
 
     @Test func onboardingProvisioningTaskIsCancelledOnBackAndDeinit() throws {
@@ -270,6 +271,7 @@ import Testing
         let keyCleanup = try #require(reset.range(of: "WalletResetCleanup.standard"))
         #expect(quiescence.lowerBound < storeCleanup.lowerBound)
         #expect(storeCleanup.lowerBound < keyCleanup.lowerBound)
+        #expect(reset.contains("authenticationContext: authentication.context"))
 
         let dashboard = try appSource("ChatDashboardView.swift")
         #expect(dashboard.contains("registerSecretResetQuiescenceHandler"))
@@ -292,6 +294,9 @@ import Testing
         let registration = try #require(
             reset.range(of: "try await relayerBootstrapRegistrationService.register(")
         )
+        let authorityPersistence = try #require(
+            reset.range(of: "finalizeRegisteredBundlerIdentity(registeredIdentity)")
+        )
         let cacheSync = try #require(
             reset.range(of: "syncUnlockedRelayerAddress(")
         )
@@ -301,7 +306,8 @@ import Testing
 
         #expect(storeCleanup.lowerBound < replacement.lowerBound)
         #expect(replacement.lowerBound < registration.lowerBound)
-        #expect(registration.lowerBound < cacheSync.lowerBound)
+        #expect(registration.lowerBound < authorityPersistence.lowerBound)
+        #expect(authorityPersistence.lowerBound < cacheSync.lowerBound)
         #expect(cacheSync.lowerBound < stateClear.lowerBound)
     }
 
@@ -348,6 +354,7 @@ import Testing
         #expect(processPreflight.lowerBound < authorization.lowerBound)
         #expect(preflight.lowerBound < authorization.lowerBound)
         #expect(authorization.lowerBound < cleanup.lowerBound)
+        #expect(cliReset.contains("authenticationContext: authentication.context"))
     }
 
     @Test func bundlerTopUpChecksExactRelayCostBeforeAuthentication() throws {

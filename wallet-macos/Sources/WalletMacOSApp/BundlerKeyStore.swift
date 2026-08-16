@@ -557,10 +557,12 @@ struct BundlerKeyStore {
         }
     }
 
-    func deleteAll() throws {
+    func deleteAll(authenticationContext: LAContext) throws {
+        BiometricAuthenticationContexts.shared.invalidate(.relayerLaunch)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
+            kSecUseAuthenticationContext as String: authenticationContext,
         ]
         let status = client.delete(query)
         guard status == errSecSuccess || status == errSecItemNotFound else {

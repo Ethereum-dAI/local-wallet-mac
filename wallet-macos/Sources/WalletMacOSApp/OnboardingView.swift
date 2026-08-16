@@ -106,6 +106,11 @@ enum LocalAIModelInstallationResolver {
 
 @MainActor
 final class OnboardingState: ObservableObject {
+    struct ProvisionedKeyPreview: Equatable {
+        let kernelAddress: String
+        let bundlerAddress: String
+    }
+
     enum InstallState: Equatable {
         case idle
         case verifying
@@ -137,6 +142,7 @@ final class OnboardingState: ObservableObject {
     @Published var selectedModelID: String
     @Published var installState: InstallState = .idle
     @Published var keyState: KeyState = .idle
+    @Published private(set) var provisionedKeyPreview: ProvisionedKeyPreview?
     @Published var bundlerActivationState: OnboardingBundlerActivationState = .idle
     @Published var chainReadinessState: ChainReadinessState = .idle
     @Published var chainReadinessElapsed: TimeInterval = 0
@@ -467,6 +473,7 @@ final class OnboardingState: ObservableObject {
         cancelBundlerActivation(reset: true)
         cancelChainReadiness(reset: true)
         persistNetwork()
+        provisionedKeyPreview = nil
         keyState = .creating
 
         let runID = UUID()
@@ -492,6 +499,13 @@ final class OnboardingState: ObservableObject {
                     authenticationContext: authenticationContext
                 )
                 try Task.checkCancellation()
+                guard self?.provisioningRunID == runID else {
+                    return
+                }
+                self?.provisionedKeyPreview = ProvisionedKeyPreview(
+                    kernelAddress: result.kernelAccountAddress,
+                    bundlerAddress: result.bundlerIdentity.address
+                )
                 let registeredIdentity = try await relayerRegistrationService.register(
                     record: result.bundlerSecretRecord,
                     chain: networkSettings.activeChain,
@@ -501,7 +515,7 @@ final class OnboardingState: ObservableObject {
                     throw VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch
                 }
                 try Task.checkCancellation()
-                let persistedIdentity = try provisioningService.verifyPersistedBundlerIdentity(
+                let persistedIdentity = try provisioningService.finalizeRegisteredBundlerIdentity(
                     registeredIdentity
                 )
                 try Task.checkCancellation()
@@ -538,6 +552,9 @@ final class OnboardingState: ObservableObject {
         provisioningAuthenticationContext = nil
         if reset, keyState == .creating {
             keyState = .idle
+        }
+        if reset {
+            provisionedKeyPreview = nil
         }
     }
 
@@ -1353,7 +1370,11 @@ private struct KeysStep: View {
                 case .failed(let message):
                     VStack(alignment: .leading, spacing: 14) {
                         errorBanner(message)
-                        setupPreview
+                        if let preview = state.provisionedKeyPreview {
+                            createdPreview(preview)
+                        } else {
+                            setupPreview
+                        }
                     }
                 }
             }
@@ -1400,6 +1421,23 @@ private struct KeysStep: View {
                 Spacer()
             }
             .padding(18)
+        }
+    }
+
+    private func createdPreview(_ preview: OnboardingState.ProvisionedKeyPreview) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            AddressPreviewCard(
+                icon: "lock.shield.fill",
+                title: "Kernel smart account",
+                value: preview.kernelAddress,
+                badge: "CREATED"
+            )
+            AddressPreviewCard(
+                icon: "key.fill",
+                title: "Bundler address",
+                value: preview.bundlerAddress,
+                badge: "CREATED"
+            )
         }
     }
 

@@ -35,7 +35,9 @@ enum WalletMacOSApp {
             defer { authentication.invalidate() }
             try await authentication.authorize()
             try WalletNodeManagedStoreCleanup.clear()
-            try WalletResetCleanup.standard().run()
+            try WalletResetCleanup.standard(
+                authenticationContext: authentication.context
+            ).run()
             OnboardingSettingsStore().markIncomplete()
             print("Deleted Local Wallet demo keys, wallet-node state, and wallet metadata.")
             exit(0)

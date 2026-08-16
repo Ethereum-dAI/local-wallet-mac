@@ -493,9 +493,12 @@ final class AppModel: ObservableObject {
 
             localCleanupStarted = true
             try WalletResetCleanup.standard(
+                authenticationContext: authentication.context,
                 keyStore: keyStore,
                 metadataStore: metadataStore,
-                onboardingSettingsStore: onboardingSettingsStore
+                onboardingSettingsStore: onboardingSettingsStore,
+                relayerPublicIdentityStore: relayerPublicIdentityStore,
+                relayerChainStateJournalStore: relayerChainStateJournalStore
             ).run { step in
                 appendLog("reset: cleared \(step)")
             }
@@ -520,6 +523,20 @@ final class AppModel: ObservableObject {
                     gasPolicy: networkSettings.resolvedDaemonGasPolicy
                 )
                 guard registeredIdentity == expectedIdentity else {
+                    throw VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch
+                }
+                let persistedIdentity = try OnboardingProvisioningService(
+                    keyStore: keyStore,
+                    metadataStore: metadataStore,
+                    walletKeyValidator: walletKeyValidator,
+                    settingsStore: onboardingSettingsStore,
+                    addressPredictor: kernelAccountAddressPredictor,
+                    chain: activeChain,
+                    bundlerKeyStore: .shared,
+                    relayerPublicIdentityStore: relayerPublicIdentityStore,
+                    relayerChainStateJournalStore: relayerChainStateJournalStore
+                ).finalizeRegisteredBundlerIdentity(registeredIdentity)
+                guard persistedIdentity == expectedIdentity else {
                     throw VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch
                 }
                 syncUnlockedRelayerAddress(

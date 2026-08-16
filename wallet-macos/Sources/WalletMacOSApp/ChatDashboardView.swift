@@ -3134,12 +3134,9 @@ private final class ChatDashboardModel: ObservableObject {
         let kernelBalance = walletModel.accountInspection?.balanceDisplay ?? "Balance unavailable"
         let kernelState = walletModel.accountInspection?.stateTitle ?? "Not inspected"
         let relayerStatus = walletModel.localRelayerStatus
-        let verifiedRelayerIdentity = relayerStatus?.keyRef.flatMap {
-            try? BundlerKeyStore.shared.verifiedIdentity(forKeyRef: $0)
-        }
         let bundlerGas = BundlerGasStatus.from(
             relayer: relayerStatus,
-            verifiedIdentity: verifiedRelayerIdentity,
+            verifiedIdentity: walletModel.verifiedLocalRelayerIdentity,
             chain: chain
         )
         let bundlerAddress = bundlerGas.address ?? "Not available"

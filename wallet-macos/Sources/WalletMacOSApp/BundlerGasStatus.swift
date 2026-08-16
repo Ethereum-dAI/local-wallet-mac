@@ -1,6 +1,82 @@
 import Foundation
 import WalletToolLayer
 
+/// Result of the app's prompt-free, app-owned relayer selection check.
+///
+/// A daemon can report any public key reference. It is therefore only an observation, never
+/// the authority that chooses which Keychain identity the dashboard displays. The validated
+/// journal head makes that choice, the immutable public record supplies the expected address,
+/// and the daemon status must match both exactly.
+enum PassiveRelayerIdentityResolver {
+    enum Failure: Error, Equatable {
+        case migrationRequired(chainID: UInt64)
+        case invalidDaemonChainID(Int)
+        case wrongDaemonChain(expected: UInt64, actual: UInt64)
+        case wrongJournalChain(expected: UInt64, actual: UInt64)
+        case missingDaemonKeyRef
+        case inactiveJournalIdentity(String)
+    }
+
+    static func resolve(
+        status: WalletNodeClient.RelayerStatus,
+        expectedChainID: UInt64,
+        snapshot: RelayerChainSnapshot?,
+        identityForKeyRef: (String) throws -> VerifiedRelayerIdentity?
+    ) throws -> VerifiedRelayerIdentity {
+        guard let snapshot else {
+            throw Failure.migrationRequired(chainID: expectedChainID)
+        }
+        guard snapshot.head.chainID == expectedChainID else {
+            throw Failure.wrongJournalChain(
+                expected: expectedChainID,
+                actual: snapshot.head.chainID
+            )
+        }
+        guard let daemonChainID = UInt64(exactly: status.chainId) else {
+            throw Failure.invalidDaemonChainID(status.chainId)
+        }
+        guard daemonChainID == expectedChainID else {
+            throw Failure.wrongDaemonChain(expected: expectedChainID, actual: daemonChainID)
+        }
+        guard let keyRef = status.keyRef else {
+            throw Failure.missingDaemonKeyRef
+        }
+
+        let authority = try RelayerIdentityAuthority.resolve(
+            head: snapshot.head,
+            identityForKeyRef: identityForKeyRef
+        )
+        let authorization = try authority.authorize(.init(
+            chainID: daemonChainID,
+            keyRef: keyRef,
+            address: status.eoa,
+            lifecycle: status.lifecycle
+        ))
+        guard authorization.role == .active else {
+            throw Failure.inactiveJournalIdentity(keyRef)
+        }
+
+        return try RelayerIdentityBindingPolicy.verify(
+            status: status,
+            against: authorization.identity
+        )
+    }
+}
+
+enum PassiveRelayerIdentityIssue: Equatable, Sendable {
+    case migrationRequired
+    case unavailable
+
+    var message: String {
+        switch self {
+        case .migrationRequired:
+            return "Local relayer identity migration is required."
+        case .unavailable:
+            return "Local relayer identity could not be verified."
+        }
+    }
+}
+
 /// Whether the local bundler EOA can pay for the next transaction — and the copy the UI
 /// shows when it can't.
 ///

@@ -84,7 +84,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastSubmittedUserOperationHash: String?
     @Published private(set) var lastBundledTransactionHash: String?
     @Published private(set) var debugLogText = ""
-    @Published private(set) var localRelayerStatus: WalletNodeClient.RelayerStatus?
+    @Published private(set) var localRelayerStatus: WalletNodeClient.RelayerStatus? {
+        didSet {
+            guard localRelayerStatus == nil else { return }
+            verifiedLocalRelayerIdentity = nil
+            passiveRelayerIdentityIssue = nil
+        }
+    }
+    @Published private(set) var verifiedLocalRelayerIdentity: VerifiedRelayerIdentity?
+    @Published private(set) var passiveRelayerIdentityIssue: PassiveRelayerIdentityIssue?
     @Published private(set) var localRelayerMessage = "Local daemon not connected"
     @Published private(set) var relayerAccessState: RelayerAccessState = .locked
     @Published private(set) var isRefreshingLocalRelayer = false
@@ -145,6 +153,8 @@ final class AppModel: ObservableObject {
     private let onboardingSettingsStore: OnboardingSettingsStore
     private let kernelAccountAddressPredictor: KernelAccountAddressPredictor
     private let relayerBootstrapRegistrationService: RelayerBootstrapRegistrationService
+    private let relayerChainStateJournalStore: RelayerChainStateJournalStore
+    private let relayerPublicIdentityStore: RelayerPublicIdentityStore
     private var walletNodeClient: WalletNodeClient?
     private var walletNodeDaemon: WalletNodeDaemon?
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
@@ -214,6 +224,8 @@ final class AppModel: ObservableObject {
         walletKeyValidator: WalletKeyValidator? = nil,
         kernelAccountAddressPredictor: KernelAccountAddressPredictor = KernelAccountAddressPredictor(),
         relayerBootstrapRegistrationService: RelayerBootstrapRegistrationService? = nil,
+        relayerChainStateJournalStore: RelayerChainStateJournalStore = .shared,
+        relayerPublicIdentityStore: RelayerPublicIdentityStore = .shared,
         walletNodeClient: WalletNodeClient? = WalletNodeClient.Configuration.fromEnvironment().map {
             WalletNodeClient(configuration: $0)
         },
@@ -227,6 +239,8 @@ final class AppModel: ObservableObject {
         self.onboardingSettingsStore = onboardingSettingsStore
         self.kernelAccountAddressPredictor = kernelAccountAddressPredictor
         self.relayerBootstrapRegistrationService = relayerBootstrapRegistrationService ?? .init()
+        self.relayerChainStateJournalStore = relayerChainStateJournalStore
+        self.relayerPublicIdentityStore = relayerPublicIdentityStore
         self.walletNodeClient = walletNodeClient
         self.userOperationBuilder = userOperationBuilder
         self.walletHistoryStore = walletHistoryStore
@@ -1325,11 +1339,40 @@ final class AppModel: ObservableObject {
         ) else {
             return false
         }
+
+        do {
+            let snapshot = try relayerChainStateJournalStore.snapshot(
+                chainID: activeChain.id
+            )
+            verifiedLocalRelayerIdentity = try PassiveRelayerIdentityResolver.resolve(
+                status: status,
+                expectedChainID: activeChain.id,
+                snapshot: snapshot,
+                identityForKeyRef: { keyRef in
+                    try relayerPublicIdentityStore.identity(forKeyRef: keyRef)
+                }
+            )
+            passiveRelayerIdentityIssue = nil
+        } catch PassiveRelayerIdentityResolver.Failure.migrationRequired {
+            verifiedLocalRelayerIdentity = nil
+            passiveRelayerIdentityIssue = .migrationRequired
+            appendLog("relayer: app-owned identity journal is missing; migration required")
+        } catch {
+            verifiedLocalRelayerIdentity = nil
+            passiveRelayerIdentityIssue = .unavailable
+            appendLog("relayer: passive identity verification failed: \(String(describing: error))")
+        }
+
         localRelayerStatus = status
         if !status.keyLoaded, case .installing = relayerAccessState {
             // Do not let a racing passive poll overwrite an install already in progress.
         } else if !status.keyLoaded {
             relayerAccessState = .locked
+        }
+
+        if let passiveRelayerIdentityIssue {
+            localRelayerMessage = passiveRelayerIdentityIssue.message
+            return true
         }
 
         switch status.reason {

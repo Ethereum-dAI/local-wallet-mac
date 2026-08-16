@@ -77,6 +77,31 @@ import Testing
         #expect(resume.contains("authorize") == false)
     }
 
+    @Test func passiveRelayerPublicationUsesOnlyAppOwnedPublicAuthority() throws {
+        let appModel = try appSource("AppModel.swift")
+        let publish = try slice(
+            appModel,
+            from: "private func publishLocalRelayerStatus",
+            until: "func rotateLocalRelayerKey"
+        )
+        #expect(publish.contains("relayerChainStateJournalStore.snapshot"))
+        #expect(publish.contains("relayerPublicIdentityStore.identity"))
+        #expect(publish.contains("PassiveRelayerIdentityResolver.resolve"))
+        #expect(publish.contains("BundlerKeyStore") == false)
+        #expect(publish.contains("LAContext") == false)
+        #expect(publish.contains("authorize") == false)
+
+        let dashboard = try appSource("ChatDashboardView.swift")
+        let refresh = try slice(
+            dashboard,
+            from: "private func refreshAccountIdentity()",
+            until: "private func bindPendingBundlerTopUpsIfNeeded"
+        )
+        #expect(refresh.contains("walletModel.verifiedLocalRelayerIdentity"))
+        #expect(refresh.contains("BundlerKeyStore") == false)
+        #expect(refresh.contains("try?") == false)
+    }
+
     @Test func privacyBalanceHasAnExplicitUnlockAndNoViewLifecycleLoad() throws {
         let source = try appSource("ChatDashboardView.swift")
         let row = try slice(

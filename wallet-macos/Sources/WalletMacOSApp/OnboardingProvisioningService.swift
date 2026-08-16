@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import WalletSignature
 
 struct OnboardingProvisioningResult {
@@ -31,15 +32,36 @@ struct OnboardingProvisioningService {
         self.chain = chain
     }
 
-    func createOrLoadIdentity() throws -> OnboardingProvisioningResult {
+    func createOrLoadIdentity(
+        authenticationContext: LAContext? = nil
+    ) throws -> OnboardingProvisioningResult {
         let wallet = try createOrLoadWalletRecord()
-        let bundler = try createOrLoadBundlerIdentity()
+        let bundler = try createOrLoadBundlerIdentity(
+            authenticationContext: authenticationContext
+        )
 
         return OnboardingProvisioningResult(
             kernelAccountAddress: wallet.kernelAccountAddress ?? "Unavailable",
             bundlerIdentity: bundler.identity,
             bundlerSecretRecord: bundler.record
         )
+    }
+
+    /// Confirms that registration still names the exact immutable Keychain
+    /// item selected during provisioning. This reads public item attributes
+    /// only and therefore never triggers device-owner authentication.
+    func verifyPersistedBundlerIdentity(
+        _ expected: VerifiedRelayerIdentity
+    ) throws -> VerifiedRelayerIdentity {
+        guard let persisted = try BundlerKeyStore.shared.verifiedIdentity(
+            forKeyRef: expected.keyRef
+        ) else {
+            throw AppError.localRelayerKeyMissing
+        }
+        guard persisted == expected else {
+            throw VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch
+        }
+        return persisted
     }
 
     private func createOrLoadWalletRecord() throws -> WalletRecord {
@@ -106,29 +128,23 @@ struct OnboardingProvisioningService {
         return created
     }
 
-    private func createOrLoadBundlerIdentity() throws -> (
+    private func createOrLoadBundlerIdentity(
+        authenticationContext: LAContext?
+    ) throws -> (
         identity: VerifiedRelayerIdentity,
         record: BundlerSecretRecord
     ) {
         let keyRef = settingsStore.bundlerKeyRef(chainId: chain.id) ?? "bundler-eoa:default:\(chain.id):1"
         settingsStore.setBundlerKeyRef(keyRef, chainId: chain.id)
 
-        if let identity = try BundlerKeyStore.shared.verifiedIdentity(forKeyRef: keyRef) {
+        if try BundlerKeyStore.shared.verifiedIdentity(forKeyRef: keyRef) != nil {
             // This is reached only from the explicit Create Keys / Retry action.
             // Reading the protected value proves the stored public metadata still
             // matches the secret before wallet-node is allowed to register it.
             let record = try BundlerKeyStore.shared.read(
                 keyRef: keyRef,
-                reason: "Finish setting up the local relayer"
-            )
-            settingsStore.setBundlerAddress(identity.address, chainId: chain.id)
-            return (identity, record)
-        }
-
-        if try BundlerKeyStore.shared.hasKey(forKeyRef: keyRef) {
-            let record = try BundlerKeyStore.shared.read(
-                keyRef: keyRef,
-                reason: "Show the local bundler address"
+                reason: "Finish setting up the local relayer",
+                authenticationContext: authenticationContext
             )
             let identity = try VerifiedRelayerIdentity.derive(
                 keyRef: record.keyRef,
@@ -139,14 +155,36 @@ struct OnboardingProvisioningService {
         }
 
         let generated = try WalletSignature.generateBundlerSecret()
-        try BundlerKeyStore.shared.add(keyRef: keyRef, secret: generated.secret)
-        let record = BundlerSecretRecord(keyRef: keyRef, secret: generated.secret)
-        let identity = try VerifiedRelayerIdentity.derive(
+        switch try BundlerKeyStore.shared.addIfAbsent(
             keyRef: keyRef,
             secret: generated.secret
-        )
-        settingsStore.setBundlerAddress(identity.address, chainId: chain.id)
-        return (identity, record)
+        ) {
+        case .existing:
+            // Another app instance won the atomic Keychain insert, or this is
+            // a legacy item without public metadata. The explicit Create/Retry
+            // action may authenticate to read that canonical secret.
+            let record = try BundlerKeyStore.shared.read(
+                keyRef: keyRef,
+                reason: "Finish setting up the local relayer",
+                authenticationContext: authenticationContext
+            )
+            let identity = try VerifiedRelayerIdentity.derive(
+                keyRef: record.keyRef,
+                secret: record.secret
+            )
+            settingsStore.setBundlerAddress(identity.address, chainId: chain.id)
+            return (identity, record)
+        case .inserted:
+            // The winning process already knows the exact bytes atomically
+            // stored in Keychain. Avoid an unnecessary biometric prompt.
+            let record = BundlerSecretRecord(keyRef: keyRef, secret: generated.secret)
+            let identity = try VerifiedRelayerIdentity.derive(
+                keyRef: keyRef,
+                secret: generated.secret
+            )
+            settingsStore.setBundlerAddress(identity.address, chainId: chain.id)
+            return (identity, record)
+        }
     }
 
 }

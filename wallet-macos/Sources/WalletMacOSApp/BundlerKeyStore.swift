@@ -8,6 +8,11 @@ struct BundlerSecretRecord: Sendable {
     let secret: Data
 }
 
+enum BundlerSecretInsertionResult: Equatable {
+    case inserted
+    case existing
+}
+
 struct BundlerKeyStore {
     static let shared = BundlerKeyStore()
 
@@ -125,7 +130,7 @@ struct BundlerKeyStore {
             throw AppError.localRelayerKeyMissing
         }
         let generated = try WalletSignature.generateBundlerSecret()
-        try add(keyRef: keyRef, secret: generated.secret)
+        _ = try addIfAbsent(keyRef: keyRef, secret: generated.secret)
         return try read(
             keyRef: keyRef,
             reason: reason,
@@ -134,6 +139,21 @@ struct BundlerKeyStore {
     }
 
     func add(keyRef: String, secret: Data) throws {
+        guard try addIfAbsent(keyRef: keyRef, secret: secret) == .inserted else {
+            throw Self.describeSecurityStatus(errSecDuplicateItem)
+        }
+    }
+
+    /// Atomically installs a relayer secret without replacing an existing item.
+    ///
+    /// Keychain uniqueness on `(class, service, account)` is the cross-process
+    /// arbitration point. A concurrent provisioning attempt that loses the
+    /// `SecItemAdd` race must discard its generated secret and authenticate to
+    /// read the winning item before registering wallet-node.
+    func addIfAbsent(
+        keyRef: String,
+        secret: Data
+    ) throws -> BundlerSecretInsertionResult {
         guard secret.count == 32 else {
             throw AppError.invalidHexString
         }
@@ -142,8 +162,6 @@ struct BundlerKeyStore {
             keyRef: keyRef,
             secret: secret
         )
-
-        try delete(keyRef: keyRef)
 
         var accessError: Unmanaged<CFError>?
         guard let accessControl = SecAccessControlCreateWithFlags(
@@ -161,8 +179,17 @@ struct BundlerKeyStore {
         query[kSecAttrGeneric as String] = try identity.encodedMetadata()
 
         let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw mapSecurityStatus(status)
+        return try Self.insertionResult(for: status)
+    }
+
+    static func insertionResult(for status: OSStatus) throws -> BundlerSecretInsertionResult {
+        switch status {
+        case errSecSuccess:
+            return .inserted
+        case errSecDuplicateItem:
+            return .existing
+        default:
+            throw describeSecurityStatus(status)
         }
     }
 

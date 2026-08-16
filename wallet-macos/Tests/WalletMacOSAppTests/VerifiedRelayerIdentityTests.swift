@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import Testing
 @testable import WalletMacOSApp
 
@@ -114,6 +115,47 @@ import Testing
         let maybeStored = try store.verifiedIdentity(forKeyRef: keyRef)
         let stored = try #require(maybeStored)
         #expect(stored == (try VerifiedRelayerIdentity.derive(keyRef: keyRef, secret: secret)))
+    }
+
+    @Test func atomicInsertKeepsTheFirstSecretWhenEntitled() throws {
+        let store = BundlerKeyStore.shared
+        let uniqueChain = 901_000_000_000 + UInt64.random(in: 0..<1_000_000)
+        let keyRef = "bundler-eoa:atomic-test:\(uniqueChain):0"
+        let firstSecret = Data(repeating: 0x44, count: 32)
+        let losingSecret = Data(repeating: 0x55, count: 32)
+        defer { try? store.delete(keyRef: keyRef) }
+
+        do {
+            #expect(
+                try store.addIfAbsent(keyRef: keyRef, secret: firstSecret) == .inserted
+            )
+            #expect(
+                try store.addIfAbsent(keyRef: keyRef, secret: losingSecret) == .existing
+            )
+        } catch AppError.missingEntitlement {
+            return
+        }
+
+        let maybeStored = try store.verifiedIdentity(forKeyRef: keyRef)
+        let stored = try #require(maybeStored)
+        let winner = try VerifiedRelayerIdentity.derive(
+            keyRef: keyRef,
+            secret: firstSecret
+        )
+        let loser = try VerifiedRelayerIdentity.derive(
+            keyRef: keyRef,
+            secret: losingSecret
+        )
+        #expect(stored == winner)
+        #expect(stored != loser)
+    }
+
+    @Test func insertionStatusTreatsOnlyDuplicateAsAnExistingWinner() throws {
+        #expect(try BundlerKeyStore.insertionResult(for: errSecSuccess) == .inserted)
+        #expect(try BundlerKeyStore.insertionResult(for: errSecDuplicateItem) == .existing)
+        #expect(throws: (any Error).self) {
+            try BundlerKeyStore.insertionResult(for: errSecAuthFailed)
+        }
     }
 }
 

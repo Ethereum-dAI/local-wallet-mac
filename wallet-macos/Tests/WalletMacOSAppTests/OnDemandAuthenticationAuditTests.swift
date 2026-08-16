@@ -109,8 +109,13 @@ import Testing
         let registration = try #require(
             provisioning.range(of: "try await relayerRegistrationService.register(")
         )
+        let persistedIdentity = try #require(
+            provisioning.range(of: "verifyPersistedBundlerIdentity(")
+        )
         let ready = try #require(provisioning.range(of: "keyState = .ready("))
         #expect(registration.lowerBound < ready.lowerBound)
+        #expect(registration.lowerBound < persistedIdentity.lowerBound)
+        #expect(persistedIdentity.lowerBound < ready.lowerBound)
 
         let complete = try slice(
             source,
@@ -118,6 +123,57 @@ import Testing
             until: "private func cancelChainReadiness"
         )
         #expect(complete.contains("guard case .ready = keyState"))
+    }
+
+    @Test func onboardingProvisioningUsesAnImmutableAtomicKeychainWinner() throws {
+        let keyStoreSource = try appSource("BundlerKeyStore.swift")
+        let insertion = try slice(
+            keyStoreSource,
+            from: "func addIfAbsent(",
+            until: "static func insertionResult("
+        )
+        #expect(insertion.contains("SecItemAdd"))
+        #expect(insertion.contains("delete(keyRef:") == false)
+
+        let insertionStatus = try slice(
+            keyStoreSource,
+            from: "static func insertionResult(",
+            until: "func read("
+        )
+        #expect(insertionStatus.contains("case errSecDuplicateItem:"))
+        #expect(insertionStatus.contains("return .existing"))
+
+        let provisioningSource = try appSource("OnboardingProvisioningService.swift")
+        let selection = try slice(
+            provisioningSource,
+            from: "let generated = try WalletSignature.generateBundlerSecret()",
+            until: "\n    }\n\n}"
+        )
+        let existing = try slice(selection, from: "case .existing:", until: "case .inserted:")
+        let inserted = String(selection[(try #require(selection.range(of: "case .inserted:"))).lowerBound...])
+        #expect(selection.contains("addIfAbsent("))
+        #expect(existing.contains("BundlerKeyStore.shared.read("))
+        #expect(inserted.contains("BundlerKeyStore.shared.read(") == false)
+    }
+
+    @Test func onboardingProvisioningTaskIsCancelledOnBackAndDeinit() throws {
+        let source = try appSource("OnboardingView.swift")
+        let back = try slice(source, from: "func back()", until: "func advance()")
+        #expect(back.contains("if step == .keys"))
+        #expect(back.contains("cancelProvisioning(reset: true)"))
+
+        let deinitializer = try slice(source, from: "deinit {", until: "var selectedModel:")
+        #expect(deinitializer.contains("provisioningTask?.cancel()"))
+        #expect(deinitializer.contains("provisioningAuthenticationContext?.invalidate()"))
+
+        let provisioning = try slice(
+            source,
+            from: "func provisionKeys()",
+            until: "func startBundlerActivationIfNeeded"
+        )
+        #expect(provisioning.contains("provisioningTask = Task { @MainActor [weak self] in"))
+        #expect(provisioning.contains("try Task.checkCancellation()"))
+        #expect(provisioning.contains("provisioningRunID == runID"))
     }
 
     @Test func replacementActionsAuthorizeEvenWithAWarmRelayer() throws {

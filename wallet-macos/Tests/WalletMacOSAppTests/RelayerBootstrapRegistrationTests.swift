@@ -185,6 +185,35 @@ import Testing
         #expect(probeCount == 1)
     }
 
+    @Test @MainActor func cancellationAfterRegistrationPreventsReadOnlyRestartProbe() async throws {
+        let record = fixtureRecord()
+        let identity = try VerifiedRelayerIdentity.derive(
+            keyRef: record.keyRef,
+            secret: record.secret
+        )
+        var probeCount = 0
+        let service = RelayerBootstrapRegistrationService { _, _, _ in
+            probeCount += 1
+            withUnsafeCurrentTask { task in
+                task?.cancel()
+            }
+            return fixtureStatus(identity: identity, keyLoaded: true)
+        }
+
+        let registration = Task {
+            try await service.register(
+                record: record,
+                chain: .ethereumSepolia,
+                gasPolicy: .sepolia
+            )
+        }
+        await #expect(throws: CancellationError.self) {
+            try await registration.value
+        }
+
+        #expect(probeCount == 1)
+    }
+
     @Test @MainActor func failedRegistrationStatusPreventsReadOnlyRestartProbe() async throws {
         let record = fixtureRecord()
         let identity = try VerifiedRelayerIdentity.derive(

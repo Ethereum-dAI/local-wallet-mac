@@ -968,14 +968,18 @@ struct RelayerBootstrapRegistrationService {
             )
         }
 
+        try Task.checkCancellation()
         let registeredStatus = try await probe([record], chain, gasPolicy)
+        try Task.checkCancellation()
         try RelayerBootstrapRegistrationPolicy.verify(
             status: registeredStatus,
             identity: identity,
             expectedKeyLoaded: true
         )
 
+        try Task.checkCancellation()
         let lockedStatus = try await probe([], chain, gasPolicy)
+        try Task.checkCancellation()
         try RelayerBootstrapRegistrationPolicy.verify(
             status: lockedStatus,
             identity: identity,

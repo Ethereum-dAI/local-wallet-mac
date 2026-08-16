@@ -1,4 +1,5 @@
 import AppKit
+@preconcurrency import LocalAuthentication
 import SwiftUI
 
 enum OnboardingStep: Int, CaseIterable {
@@ -159,6 +160,9 @@ final class OnboardingState: ObservableObject {
     private var chainReadinessTimerTask: Task<Void, Never>?
     private var chainReadinessRunID: UUID?
     private var modelVerificationTask: Task<Void, Never>?
+    private var provisioningTask: Task<Void, Never>?
+    private var provisioningRunID: UUID?
+    private var provisioningAuthenticationContext: LAContext?
 
     init(
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
@@ -201,6 +205,8 @@ final class OnboardingState: ObservableObject {
     }
 
     deinit {
+        provisioningTask?.cancel()
+        provisioningAuthenticationContext?.invalidate()
         modelVerificationTask?.cancel()
         bundlerActivationTask?.cancel()
         chainReadinessTask?.cancel()
@@ -311,6 +317,9 @@ final class OnboardingState: ObservableObject {
     }
 
     func back() {
+        if step == .keys {
+            cancelProvisioning(reset: true)
+        }
         if step == .sync {
             cancelChainReadiness(reset: true)
         }
@@ -459,10 +468,30 @@ final class OnboardingState: ObservableObject {
         cancelChainReadiness(reset: true)
         persistNetwork()
         keyState = .creating
-        Task {
+
+        let runID = UUID()
+        let authenticationContext = LAContext()
+        authenticationContext.localizedReason = "Finish setting up the local relayer"
+        provisioningRunID = runID
+        provisioningAuthenticationContext = authenticationContext
+
+        let provisioningService = provisioningService
+        let relayerRegistrationService = relayerRegistrationService
+        let networkSettings = networkSettingsStore.networkSettings
+        provisioningTask = Task { @MainActor [weak self] in
+            defer {
+                authenticationContext.invalidate()
+                self?.finishProvisioning(
+                    runID: runID,
+                    authenticationContext: authenticationContext
+                )
+            }
             do {
-                let result = try provisioningService.createOrLoadIdentity()
-                let networkSettings = networkSettingsStore.networkSettings
+                try Task.checkCancellation()
+                let result = try provisioningService.createOrLoadIdentity(
+                    authenticationContext: authenticationContext
+                )
+                try Task.checkCancellation()
                 let registeredIdentity = try await relayerRegistrationService.register(
                     record: result.bundlerSecretRecord,
                     chain: networkSettings.activeChain,
@@ -471,13 +500,56 @@ final class OnboardingState: ObservableObject {
                 guard registeredIdentity == result.bundlerIdentity else {
                     throw VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch
                 }
-                keyState = .ready(
-                    kernelAddress: result.kernelAccountAddress,
-                    bundlerAddress: registeredIdentity.address
+                try Task.checkCancellation()
+                let persistedIdentity = try provisioningService.verifyPersistedBundlerIdentity(
+                    registeredIdentity
                 )
+                try Task.checkCancellation()
+                guard let self,
+                      self.provisioningRunID == runID else {
+                    return
+                }
+                self.keyState = .ready(
+                    kernelAddress: result.kernelAccountAddress,
+                    bundlerAddress: persistedIdentity.address
+                )
+            } catch is CancellationError {
+                guard let self,
+                      self.provisioningRunID == runID else {
+                    return
+                }
+                self.keyState = .idle
             } catch {
-                keyState = .failed(error.localizedDescription)
+                guard let self,
+                      self.provisioningRunID == runID,
+                      Task.isCancelled == false else {
+                    return
+                }
+                self.keyState = .failed(error.localizedDescription)
             }
+        }
+    }
+
+    private func cancelProvisioning(reset: Bool) {
+        provisioningRunID = nil
+        provisioningTask?.cancel()
+        provisioningTask = nil
+        provisioningAuthenticationContext?.invalidate()
+        provisioningAuthenticationContext = nil
+        if reset, keyState == .creating {
+            keyState = .idle
+        }
+    }
+
+    private func finishProvisioning(
+        runID: UUID,
+        authenticationContext: LAContext
+    ) {
+        guard provisioningRunID == runID else { return }
+        provisioningRunID = nil
+        provisioningTask = nil
+        if provisioningAuthenticationContext === authenticationContext {
+            provisioningAuthenticationContext = nil
         }
     }
 

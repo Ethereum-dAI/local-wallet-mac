@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import WalletToolLayer
 import WalletSignature
 
@@ -368,6 +369,184 @@ enum RelayerPromotionObservationPolicy {
     }
 }
 
+/// Executes the one explicit legacy-relayer migration action.
+///
+/// The prompt-free candidate shown by the UI is only an observation. This coordinator
+/// revalidates that observation before authentication, after authentication, and after the
+/// single protected Keychain read. Only the last fresh daemon observation may authorize the
+/// immutable public identity and journal genesis. A successfully committed candidate remains
+/// completed even if the final passive UI refresh fails, so a stale button cannot prompt again.
+@MainActor
+final class LegacyRelayerVerificationCoordinator {
+    struct StatusObservation {
+        let status: WalletNodeClient.RelayerStatus
+        let generation: UInt64
+    }
+
+    struct Dependencies {
+        let fetchStatus: @MainActor () async throws -> StatusObservation
+        let currentGeneration: @MainActor () -> UInt64
+        let candidateForStatus: @MainActor (
+            WalletNodeClient.RelayerStatus
+        ) throws -> LegacyRelayerMigrationCandidate?
+        let makeAuthenticationSession: @MainActor () -> DeviceOwnerAuthenticationSession
+        let readBoundSecret: @MainActor (
+            VerifiedRelayerIdentity,
+            DeviceOwnerAuthenticationSession
+        ) async throws -> BundlerSecretRecord
+        let finalizeIdentity: @MainActor (
+            VerifiedRelayerIdentity
+        ) throws -> VerifiedRelayerIdentity
+        let didCommit: @MainActor (LegacyRelayerMigrationCandidate) -> Void
+        let refreshPassively: @MainActor () async throws -> Void
+    }
+
+    enum Failure: Error, Equatable, LocalizedError {
+        case candidateUnavailable
+        case candidateChanged
+        case staleDaemonGeneration
+        case finalAuthorityMismatch(String)
+        case alreadyCommitted(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .candidateUnavailable:
+                return "The legacy relayer is no longer available for verification. Refresh and try again."
+            case .candidateChanged:
+                return "The local relayer changed during verification. Refresh and review it before trying again."
+            case .staleDaemonGeneration:
+                return "wallet-node restarted during relayer verification. Refresh and try again."
+            case .finalAuthorityMismatch(let keyRef):
+                return "The verified relayer authority could not be finalized for \(keyRef)."
+            case .alreadyCommitted(let keyRef):
+                return "The relayer identity for \(keyRef) has already been verified."
+            }
+        }
+    }
+
+    private struct InFlight {
+        let id: UUID
+        let candidate: LegacyRelayerMigrationCandidate
+        let task: Task<VerifiedRelayerIdentity, Error>
+    }
+
+    private var inFlight: InFlight?
+    private var committedCandidates: [LegacyRelayerMigrationCandidate] = []
+
+    func verify(
+        _ clickedCandidate: LegacyRelayerMigrationCandidate,
+        dependencies: Dependencies
+    ) async throws -> VerifiedRelayerIdentity {
+        if committedCandidates.contains(clickedCandidate) {
+            throw Failure.alreadyCommitted(clickedCandidate.identity.keyRef)
+        }
+        if let inFlight {
+            guard inFlight.candidate == clickedCandidate else {
+                throw Failure.candidateChanged
+            }
+            return try await inFlight.task.value
+        }
+
+        let id = UUID()
+        let task = Task { @MainActor [self] in
+            try await run(clickedCandidate, dependencies: dependencies)
+        }
+        inFlight = InFlight(id: id, candidate: clickedCandidate, task: task)
+        do {
+            let identity = try await task.value
+            if inFlight?.id == id {
+                inFlight = nil
+            }
+            return identity
+        } catch {
+            if inFlight?.id == id {
+                inFlight = nil
+            }
+            throw error
+        }
+    }
+
+    private func run(
+        _ clickedCandidate: LegacyRelayerMigrationCandidate,
+        dependencies: Dependencies
+    ) async throws -> VerifiedRelayerIdentity {
+        try await requireFreshCandidate(
+            clickedCandidate,
+            dependencies: dependencies
+        )
+
+        let authentication = dependencies.makeAuthenticationSession()
+        let authenticatedIdentity = try await authentication.withAuthorizedContext { _ in
+            try Task.checkCancellation()
+
+            // AppModel routes this through readBoundRelayerSecret, the sole protected
+            // BundlerKeyStore query boundary. That helper revalidates the exact legacy
+            // candidate immediately before and after the query using this same session.
+            _ = try await dependencies.readBoundSecret(
+                clickedCandidate.identity,
+                authentication
+            )
+            try Task.checkCancellation()
+            let authenticatedIdentity = clickedCandidate.identity
+            let finalized = try dependencies.finalizeIdentity(authenticatedIdentity)
+            guard finalized == authenticatedIdentity else {
+                throw Failure.finalAuthorityMismatch(authenticatedIdentity.keyRef)
+            }
+
+            if !self.committedCandidates.contains(clickedCandidate) {
+                self.committedCandidates.append(clickedCandidate)
+            }
+            dependencies.didCommit(clickedCandidate)
+            return authenticatedIdentity
+        }
+
+        // The authorization context has already been invalidated. This is display refresh
+        // only: authority is committed, and a failure must never offer Verify again.
+        try await dependencies.refreshPassively()
+        return authenticatedIdentity
+    }
+
+    private func requireFreshCandidate(
+        _ clickedCandidate: LegacyRelayerMigrationCandidate,
+        dependencies: Dependencies
+    ) async throws {
+        let observation = try await dependencies.fetchStatus()
+        guard observation.generation == dependencies.currentGeneration() else {
+            throw Failure.staleDaemonGeneration
+        }
+        guard let currentCandidate = try dependencies.candidateForStatus(
+            observation.status
+        ) else {
+            throw Failure.candidateUnavailable
+        }
+        guard currentCandidate == clickedCandidate else {
+            throw Failure.candidateChanged
+        }
+    }
+}
+
+enum LegacyRelayerVerificationErrorPolicy {
+    enum CandidateDisposition: Equatable {
+        case preserve
+        case clear
+    }
+
+    static func candidateDisposition(for error: Error) -> CandidateDisposition {
+        if error is CancellationError {
+            return .preserve
+        }
+        if let appError = error as? AppError,
+           case .userAuthorizationCancelled = appError {
+            return .preserve
+        }
+        if let authenticationError = error as? LAError,
+           [.userCancel, .appCancel, .systemCancel].contains(authenticationError.code) {
+            return .preserve
+        }
+        return .clear
+    }
+}
+
 // AppModel drives the signed macOS demo shell. It is intentionally opinionated
 // around the current demo scope (Sepolia, ETH transfer first, local wallet-node)
 // and should not be treated as the final wallet product architecture.
@@ -416,13 +595,16 @@ final class AppModel: ObservableObject {
             guard localRelayerStatus == nil else { return }
             verifiedLocalRelayerIdentity = nil
             passiveRelayerIdentityIssue = nil
+            legacyRelayerMigrationCandidate = nil
         }
     }
     @Published private(set) var verifiedLocalRelayerIdentity: VerifiedRelayerIdentity?
     @Published private(set) var passiveRelayerIdentityIssue: PassiveRelayerIdentityIssue?
+    @Published private(set) var legacyRelayerMigrationCandidate: LegacyRelayerMigrationCandidate?
     @Published private(set) var localRelayerMessage = "Local daemon not connected"
     @Published private(set) var relayerAccessState: RelayerAccessState = .locked
     @Published private(set) var isRefreshingLocalRelayer = false
+    @Published private(set) var isVerifyingLegacyRelayer = false
     @Published private(set) var isRotatingLocalRelayer = false
     @Published private(set) var isExportingLocalRelayer = false
     @Published private(set) var isDeletingLocalRelayer = false
@@ -460,7 +642,7 @@ final class AppModel: ObservableObject {
     /// five-flag condition — it was open-coded in three places plus `WalletIdleGate`, so a sixth
     /// in-flight flag would have had to be added to each of them.
     var isWalletIdle: Bool {
-        !isResettingWallet && WalletIdleGate.allowed(
+        !isResettingWallet && !isVerifyingLegacyRelayer && WalletIdleGate.allowed(
             isBootstrapping: isBootstrapping,
             isRunningDemo: isRunningDemo,
             isRefreshingBalance: isRefreshingBalance,
@@ -483,6 +665,7 @@ final class AppModel: ObservableObject {
     private let relayerChainStateJournalStore: RelayerChainStateJournalStore
     private let relayerPublicIdentityStore: RelayerPublicIdentityStore
     private let bundlerKeyStore: BundlerKeyStore
+    private let legacyRelayerVerificationCoordinator = LegacyRelayerVerificationCoordinator()
     private var walletNodeClient: WalletNodeClient?
     private var walletNodeDaemon: WalletNodeDaemon?
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
@@ -859,16 +1042,8 @@ final class AppModel: ObservableObject {
                 guard registeredIdentity == expectedIdentity else {
                     throw VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch
                 }
-                let persistedIdentity = try OnboardingProvisioningService(
-                    keyStore: keyStore,
-                    metadataStore: metadataStore,
-                    walletKeyValidator: walletKeyValidator,
-                    settingsStore: onboardingSettingsStore,
-                    addressPredictor: kernelAccountAddressPredictor,
-                    chain: activeChain,
-                    bundlerKeyStore: bundlerKeyStore,
-                    relayerPublicIdentityStore: relayerPublicIdentityStore,
-                    relayerChainStateJournalStore: relayerChainStateJournalStore
+                let persistedIdentity = try relayerProvisioningService(
+                    chain: activeChain
                 ).finalizeRegisteredBundlerIdentity(registeredIdentity)
                 guard persistedIdentity == expectedIdentity else {
                     throw VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch
@@ -913,6 +1088,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func relayerProvisioningService(
+        chain: ChainConfiguration
+    ) -> OnboardingProvisioningService {
+        OnboardingProvisioningService(
+            keyStore: keyStore,
+            metadataStore: metadataStore,
+            walletKeyValidator: walletKeyValidator,
+            settingsStore: onboardingSettingsStore,
+            addressPredictor: kernelAccountAddressPredictor,
+            chain: chain,
+            bundlerKeyStore: bundlerKeyStore,
+            relayerPublicIdentityStore: relayerPublicIdentityStore,
+            relayerChainStateJournalStore: relayerChainStateJournalStore
+        )
+    }
+
     private var hasNoSecretResetConflict: Bool {
         WalletIdleGate.allowed(
             isBootstrapping: isBootstrapping,
@@ -924,6 +1115,7 @@ final class AppModel: ObservableObject {
             && !isExportingLocalRelayer
             && !isDeletingLocalRelayer
             && !isReplacingPendingOperation
+            && !isVerifyingLegacyRelayer
     }
 
     private func quiesceManagedWalletNodeForSecretReset() async throws {
@@ -1588,6 +1780,7 @@ final class AppModel: ObservableObject {
 
     func refreshLocalRelayerStatus() {
         guard !isRefreshingLocalRelayer,
+              !isVerifyingLegacyRelayer,
               !isResettingWallet,
               !isRotatingLocalRelayer,
               !isDeletingLocalRelayer else {
@@ -1622,6 +1815,168 @@ final class AppModel: ObservableObject {
         }
         appendLog("relayer: diagnostic status \(status.lifecycle) \(status.eoa.shortAddress)")
         return status
+    }
+
+    /// Explicitly proves one prompt-free legacy candidate against the protected secret.
+    /// Passive refreshes only publish the candidate; they never invoke this method.
+    func verifyLegacyRelayer(
+        _ candidate: LegacyRelayerMigrationCandidate
+    ) async {
+        guard legacyRelayerMigrationCandidate == candidate else {
+            appendLog("relayer: ignored stale legacy verification request")
+            return
+        }
+
+        let isJoiningExistingVerification = isVerifyingLegacyRelayer
+        if !isJoiningExistingVerification {
+            guard hasNoSecretResetConflict, relayerInstallTask == nil else {
+                lastError = AppError.walletOperationInProgress.localizedDescription
+                return
+            }
+            isVerifyingLegacyRelayer = true
+            // Invalidate a passive refresh that started before this explicit action. Its
+            // completion must not republish a candidate from an older observation.
+            relayerStatusRefreshToken = UUID()
+            isRefreshingLocalRelayer = false
+            lastError = nil
+            localRelayerMessage = "Verifying the existing local relayer."
+            appendSection("Verify Legacy Local Relayer")
+        }
+        defer {
+            if !isJoiningExistingVerification {
+                isVerifyingLegacyRelayer = false
+            }
+        }
+
+        let expectedChain = activeChain
+        var verificationClient: WalletNodeClient?
+        var verificationGeneration: UInt64?
+        do {
+            let identity = try await legacyRelayerVerificationCoordinator.verify(
+                candidate,
+                dependencies: .init(
+                    fetchStatus: { [self] in
+                        let client: WalletNodeClient
+                        let generation: UInt64
+                        if let existingClient = verificationClient,
+                           let existingGeneration = verificationGeneration {
+                            client = existingClient
+                            generation = existingGeneration
+                        } else {
+                            let connection = try await ensureWalletNodeClientWithGeneration()
+                            client = connection.client
+                            generation = connection.generation
+                            verificationClient = client
+                            verificationGeneration = generation
+                        }
+                        try requireCurrentRelayerConnection(
+                            client: client,
+                            generation: generation
+                        )
+                        let status = try await client.bundlerStatus()
+                        try requireCurrentRelayerConnection(
+                            client: client,
+                            generation: generation
+                        )
+                        return .init(status: status, generation: generation)
+                    },
+                    currentGeneration: { [self] in walletNodeGeneration },
+                    candidateForStatus: { [self] status in
+                        try legacyRelayerMigrationCandidate(
+                            for: status,
+                            chain: expectedChain
+                        )
+                    },
+                    makeAuthenticationSession: {
+                        DeviceOwnerAuthenticationSession(
+                            reason: "Verify the existing local relayer identity"
+                        )
+                    },
+                    readBoundSecret: { [self] identity, authentication in
+                        guard let client = verificationClient,
+                              let generation = verificationGeneration else {
+                            throw LegacyRelayerVerificationCoordinator.Failure
+                                .staleDaemonGeneration
+                        }
+                        return try await readBoundRelayerSecret(
+                            identity: identity,
+                            client: client,
+                            generation: generation,
+                            authenticationSession: authentication,
+                            validateAuthority: {
+                                try self.requireCurrentRelayerConnection(
+                                    client: client,
+                                    generation: generation
+                                )
+                                let status = try await client.bundlerStatus()
+                                try self.requireCurrentRelayerConnection(
+                                    client: client,
+                                    generation: generation
+                                )
+                                guard try self.legacyRelayerMigrationCandidate(
+                                    for: status,
+                                    chain: expectedChain
+                                ) == candidate else {
+                                    throw LegacyRelayerVerificationCoordinator.Failure
+                                        .candidateChanged
+                                }
+                            }
+                        )
+                    },
+                    finalizeIdentity: { [self] identity in
+                        try relayerProvisioningService(
+                            chain: expectedChain
+                        ).finalizeRegisteredBundlerIdentity(identity)
+                    },
+                    didCommit: { [self] committedCandidate in
+                        if legacyRelayerMigrationCandidate == committedCandidate {
+                            legacyRelayerMigrationCandidate = nil
+                        }
+                        verifiedLocalRelayerIdentity = nil
+                        passiveRelayerIdentityIssue = .unavailable
+                    },
+                    refreshPassively: { [self] in
+                        guard let client = verificationClient,
+                              let generation = verificationGeneration else {
+                            throw LegacyRelayerVerificationCoordinator.Failure
+                                .staleDaemonGeneration
+                        }
+                        try requireCurrentRelayerConnection(
+                            client: client,
+                            generation: generation
+                        )
+                        let status = try await client.bundlerStatus()
+                        try requireCurrentRelayerConnection(
+                            client: client,
+                            generation: generation
+                        )
+                        guard publishLocalRelayerStatus(
+                            status,
+                            expectedGeneration: generation
+                        ) else {
+                            throw LegacyRelayerVerificationCoordinator.Failure
+                                .staleDaemonGeneration
+                        }
+                    }
+                )
+            )
+            lastError = nil
+            localRelayerMessage = "Local relayer identity verified."
+            appendLog("relayer: verified legacy identity \(identity.address.shortAddress)")
+        } catch {
+            if LegacyRelayerVerificationErrorPolicy.candidateDisposition(
+                for: error
+            ) == .clear {
+                if legacyRelayerMigrationCandidate == candidate {
+                    legacyRelayerMigrationCandidate = nil
+                }
+                verifiedLocalRelayerIdentity = nil
+                passiveRelayerIdentityIssue = .unavailable
+            }
+            lastError = error.localizedDescription
+            localRelayerMessage = error.localizedDescription
+            appendLog("relayer: legacy verification failed: \(error.localizedDescription)")
+        }
     }
 
     func monitorHeliosCheckpointAfterNetworkSettingsChange(
@@ -1716,13 +2071,33 @@ final class AppModel: ObservableObject {
                 }
             )
             passiveRelayerIdentityIssue = nil
+            legacyRelayerMigrationCandidate = nil
         } catch PassiveRelayerIdentityResolver.Failure.migrationRequired {
             verifiedLocalRelayerIdentity = nil
-            passiveRelayerIdentityIssue = .migrationRequired
-            appendLog("relayer: app-owned identity journal is missing; migration required")
+            do {
+                legacyRelayerMigrationCandidate = try legacyRelayerMigrationCandidate(
+                    for: status,
+                    chain: activeChain
+                )
+                passiveRelayerIdentityIssue = legacyRelayerMigrationCandidate == nil
+                    ? .unavailable
+                    : .migrationRequired
+                appendLog(
+                    legacyRelayerMigrationCandidate == nil
+                        ? "relayer: missing journal is not eligible for legacy verification"
+                        : "relayer: explicit legacy identity verification is available"
+                )
+            } catch {
+                legacyRelayerMigrationCandidate = nil
+                passiveRelayerIdentityIssue = .unavailable
+                appendLog(
+                    "relayer: legacy identity eligibility failed: \(String(describing: error))"
+                )
+            }
         } catch {
             verifiedLocalRelayerIdentity = nil
             passiveRelayerIdentityIssue = .unavailable
+            legacyRelayerMigrationCandidate = nil
             appendLog("relayer: passive identity verification failed: \(String(describing: error))")
         }
 
@@ -1748,6 +2123,22 @@ final class AppModel: ObservableObject {
                 : "Local relayer needs funding or attention."
         }
         return true
+    }
+
+    private func legacyRelayerMigrationCandidate(
+        for status: WalletNodeClient.RelayerStatus,
+        chain: ChainConfiguration
+    ) throws -> LegacyRelayerMigrationCandidate? {
+        try LegacyRelayerMigrationPolicy.candidate(
+            status: status,
+            expectedChainID: chain.id,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: chain.shortName,
+            snapshot: try relayerChainStateJournalStore.snapshot(chainID: chain.id),
+            identityForKeyRef: { keyRef in
+                try relayerPublicIdentityStore.identity(forKeyRef: keyRef)
+            }
+        )
     }
 
     /// Resolves protected-secret authority directly from the validated journal,
@@ -1902,6 +2293,7 @@ final class AppModel: ObservableObject {
     ) async throws -> BundlerSecretRecord {
         try requireCurrentRelayerConnection(client: client, generation: generation)
         try await validateAuthority()
+        try Task.checkCancellation()
         let record = try bundlerKeyStore.read(
             keyRef: identity.keyRef,
             reason: authenticationSession.reason,

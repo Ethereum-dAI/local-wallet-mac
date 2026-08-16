@@ -104,6 +104,64 @@ enum ChainIDFormatting {
     static func text(_ chainID: UInt64) -> String { String(chainID) }
 }
 
+/// Reconciles live app-owned relayer authority with the dashboard's cached display snapshot.
+/// A cached verified identity is never sufficient after AppModel clears or replaces authority.
+enum DashboardBundlerAuthorityPolicy {
+    static func authority(
+        migrationCandidate: LegacyRelayerMigrationCandidate?,
+        liveVerifiedIdentity: VerifiedRelayerIdentity?,
+        cachedVerifiedIdentity: VerifiedRelayerIdentity?,
+        fundingState: BundlerFundingState
+    ) -> BundlerAccountAuthorityState {
+        if let migrationCandidate {
+            return .legacyVerification(migrationCandidate)
+        }
+        guard let liveVerifiedIdentity,
+              cachedVerifiedIdentity == liveVerifiedIdentity else {
+            return .unavailable
+        }
+        return .verified(fundingState)
+    }
+}
+
+struct BundlerAccountCardPresentation: Equatable {
+    let address: String
+    let balance: String
+    let state: String
+    let showsDestinationActions: Bool
+
+    static func resolve(
+        authority: BundlerAccountAuthorityState,
+        address: String,
+        balance: String,
+        state: String
+    ) -> BundlerAccountCardPresentation {
+        switch authority {
+        case .verified:
+            return .init(
+                address: address,
+                balance: balance,
+                state: state,
+                showsDestinationActions: true
+            )
+        case .legacyVerification:
+            return .init(
+                address: "Not available",
+                balance: "Balance unavailable",
+                state: "Verification required",
+                showsDestinationActions: false
+            )
+        case .unavailable:
+            return .init(
+                address: "Not available",
+                balance: "Balance unavailable",
+                state: state,
+                showsDestinationActions: false
+            )
+        }
+    }
+}
+
 private struct ChatAccountIdentity: Equatable {
     let chainName: String
     let chainID: UInt64
@@ -1867,6 +1925,19 @@ private final class ChatDashboardModel: ObservableObject {
         walletModel.isRefreshingBalance || walletModel.isRefreshingLocalRelayer
     }
 
+    var bundlerAccountAuthority: BundlerAccountAuthorityState {
+        DashboardBundlerAuthorityPolicy.authority(
+            migrationCandidate: walletModel.legacyRelayerMigrationCandidate,
+            liveVerifiedIdentity: walletModel.verifiedLocalRelayerIdentity,
+            cachedVerifiedIdentity: accountIdentity.bundlerGas.verifiedIdentity,
+            fundingState: accountIdentity.bundlerGas.fundingState
+        )
+    }
+
+    var isVerifyingLegacyRelayer: Bool {
+        walletModel.isVerifyingLegacyRelayer
+    }
+
     func toggleThinking() {
         thinkingEnabled.toggle()
         preferencesStore.thinkingEnabled = thinkingEnabled
@@ -1886,6 +1957,12 @@ private final class ChatDashboardModel: ObservableObject {
 
     func retryBundlerFundingStatus() {
         refreshOnchainAccountStatus()
+    }
+
+    func verifyLegacyRelayer(
+        _ candidate: LegacyRelayerMigrationCandidate
+    ) async {
+        await walletModel.verifyLegacyRelayer(candidate)
     }
 
     func prepareBundlerTopUpDraft() {
@@ -5296,11 +5373,15 @@ struct LocalWalletChatDashboardView: View {
                         balance: model.accountIdentity.bundlerBalance,
                         state: model.accountIdentity.bundlerState,
                         explorerURL: explorerAddressURL(model.accountIdentity.bundlerAddress),
-                        fundingState: model.accountIdentity.bundlerGas.fundingState,
+                        authority: model.bundlerAccountAuthority,
                         forceExternalFunding: model.bundlerExternalFundingRequirement?.identity.address
                             .caseInsensitiveCompare(model.accountIdentity.bundlerAddress) == .orderedSame,
+                        isVerifyingLegacyRelayer: model.isVerifyingLegacyRelayer,
                         onRetry: { model.retryBundlerFundingStatus() },
-                        onPrefillTopUp: { model.prepareBundlerTopUpDraft() }
+                        onPrefillTopUp: { model.prepareBundlerTopUpDraft() },
+                        onVerifyLegacyRelayer: { candidate in
+                            await model.verifyLegacyRelayer(candidate)
+                        }
                     )
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
@@ -6448,23 +6529,45 @@ private struct BundlerAccountCard: View {
     let balance: String
     let state: String
     let explorerURL: URL?
-    let fundingState: BundlerFundingState
+    let authority: BundlerAccountAuthorityState
     let forceExternalFunding: Bool
+    let isVerifyingLegacyRelayer: Bool
     let onRetry: () -> Void
     let onPrefillTopUp: () -> Void
+    let onVerifyLegacyRelayer: (LegacyRelayerMigrationCandidate) async -> Void
 
     @State private var copied = false
     @State private var isRecoveryPresented = false
 
-    private var route: BundlerTopUpUIRoute {
-        BundlerTopUpUI.route(
-            fundingState: fundingState,
+    private var route: BundlerAccountActionRoute {
+        BundlerAccountActionPolicy.route(
+            authority: authority,
             forceExternalFunding: forceExternalFunding
         )
     }
 
     private var warningStyle: Bool {
-        route != .prefillComposer
+        route != .prefillTopUp
+    }
+
+    private var isLegacyVerificationRoute: Bool {
+        if case .verifyLegacyRelayer = route {
+            return true
+        }
+        return false
+    }
+
+    private var presentation: BundlerAccountCardPresentation {
+        BundlerAccountCardPresentation.resolve(
+            authority: authority,
+            address: address,
+            balance: balance,
+            state: state
+        )
+    }
+
+    private var showsVerificationProgress: Bool {
+        isLegacyVerificationRoute && isVerifyingLegacyRelayer
     }
 
     var body: some View {
@@ -6472,51 +6575,116 @@ private struct BundlerAccountCard: View {
             icon: icon,
             iconTint: warningStyle ? ChatPalette.warning : ChatPalette.accent,
             title: title,
-            address: address,
-            balance: balance,
-            state: state,
-            stateTint: warningStyle ? ChatPalette.warning : accountStateTint(state)
+            address: presentation.address,
+            balance: presentation.balance,
+            state: presentation.state,
+            stateTint: warningStyle ? ChatPalette.warning : accountStateTint(presentation.state)
         ) {
             Button {
                 switch route {
-                case .prefillComposer:
+                case .verifyLegacyRelayer(let candidate):
+                    Task { @MainActor in
+                        await onVerifyLegacyRelayer(candidate)
+                    }
+                case .prefillTopUp:
                     onPrefillTopUp()
-                case .externalFunding, .retryOnly:
+                case .externalFunding, .retryStatus:
                     isRecoveryPresented = true
                 }
             } label: {
-                Label("Top up", systemImage: "plus.circle.fill")
+                HStack(spacing: 5) {
+                    if showsVerificationProgress {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white)
+                    } else {
+                        Image(systemName: primaryActionIcon)
+                    }
+                    Text(showsVerificationProgress ? "Verifying" : primaryActionTitle)
+                }
                     .font(.system(size: 11, weight: .heavy))
-                    .foregroundStyle(ChatPalette.accent)
+                    .foregroundStyle(isLegacyVerificationRoute ? Color.white : ChatPalette.accent)
                     .padding(.horizontal, 10)
                     .frame(height: 28)
                     .background(
                         Capsule()
-                            .fill(ChatPalette.buttonCircle)
+                            .fill(isLegacyVerificationRoute ? ChatPalette.accent : ChatPalette.buttonCircle)
                             .overlay(Capsule().stroke(ChatPalette.border, lineWidth: 1))
                     )
             }
             .buttonStyle(.plain)
-            .help(
-                route == .prefillComposer
-                    ? "Prepare a reviewed bundler top-up"
-                    : "Show bundler funding options"
-            )
-            .accessibilityLabel("Top up bundler")
-            .accessibilityHint(
-                route == .prefillComposer
-                    ? "Prefills a message for review"
-                    : "Shows external funding options"
-            )
+            .disabled(showsVerificationProgress)
+            .help(primaryActionHelp)
+            .accessibilityLabel(primaryActionAccessibilityLabel)
+            .accessibilityHint(primaryActionAccessibilityHint)
             .popover(isPresented: $isRecoveryPresented, arrowEdge: .bottom) {
                 recoveryPopover
             }
 
-            accountCopyButton(address: address, copied: $copied)
+            if presentation.showsDestinationActions {
+                accountCopyButton(address: presentation.address, copied: $copied)
 
-            if let explorerURL {
-                accountExplorerLink(explorerURL)
+                if let explorerURL {
+                    accountExplorerLink(explorerURL)
+                }
             }
+        }
+    }
+
+    private var primaryActionTitle: String {
+        switch route {
+        case .verifyLegacyRelayer:
+            return "Verify bundler"
+        case .prefillTopUp, .externalFunding:
+            return "Top up"
+        case .retryStatus:
+            return "Retry"
+        }
+    }
+
+    private var primaryActionIcon: String {
+        switch route {
+        case .verifyLegacyRelayer:
+            return "checkmark.shield.fill"
+        case .prefillTopUp, .externalFunding:
+            return "plus.circle.fill"
+        case .retryStatus:
+            return "arrow.clockwise"
+        }
+    }
+
+    private var primaryActionHelp: String {
+        switch route {
+        case .verifyLegacyRelayer:
+            return "Verify the existing local bundler key once."
+        case .prefillTopUp:
+            return "Prepare a reviewed bundler top-up"
+        case .externalFunding, .retryStatus:
+            return "Show bundler funding options"
+        }
+    }
+
+    private var primaryActionAccessibilityLabel: String {
+        switch route {
+        case .verifyLegacyRelayer:
+            return "Verify bundler"
+        case .prefillTopUp, .externalFunding:
+            return "Top up bundler"
+        case .retryStatus:
+            return "Retry bundler status"
+        }
+    }
+
+    private var primaryActionAccessibilityHint: String {
+        switch route {
+        case .verifyLegacyRelayer:
+            return "Verify the existing local bundler key once."
+        case .prefillTopUp:
+            return "Prefills a message for review"
+        case .externalFunding:
+            return "Shows external funding options"
+        case .retryStatus:
+            return "Checks whether the bundler identity and balance are available"
         }
     }
 
@@ -6530,14 +6698,14 @@ private struct BundlerAccountCard: View {
                 .foregroundStyle(ChatPalette.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if route == .retryOnly {
+            if route == .retryStatus {
                 Button("Retry balance check", action: onRetry)
                     .buttonStyle(.bordered)
             }
 
-            if route == .externalFunding, hasAccountAddress(address) {
+            if route == .externalFunding, hasAccountAddress(presentation.address) {
                 BundlerExternalFundingActions(
-                    address: address,
+                    address: presentation.address,
                     faucetURL: BundlerFundingPolicy.sepoliaFaucetURL,
                     accent: ChatPalette.accent,
                     secondaryText: ChatPalette.secondaryText,
@@ -6554,22 +6722,26 @@ private struct BundlerAccountCard: View {
 
     private var recoveryTitle: String {
         switch route {
-        case .prefillComposer:
+        case .verifyLegacyRelayer:
+            return "Bundler verification required"
+        case .prefillTopUp:
             return "Bundler ready"
         case .externalFunding:
             return "Fund the bundler externally"
-        case .retryOnly:
+        case .retryStatus:
             return "Bundler balance unavailable"
         }
     }
 
     private var recoveryDetail: String {
         switch route {
-        case .prefillComposer:
+        case .verifyLegacyRelayer:
+            return "Verify the existing local bundler key once."
+        case .prefillTopUp:
             return "The bundler can relay a reviewed Kernel-funded top-up."
         case .externalFunding:
             return "Use another wallet or the Sepolia faucet before retrying."
-        case .retryOnly:
+        case .retryStatus:
             return "Retry the status check. Funding actions stay hidden until the app verifies the bundler identity."
         }
     }

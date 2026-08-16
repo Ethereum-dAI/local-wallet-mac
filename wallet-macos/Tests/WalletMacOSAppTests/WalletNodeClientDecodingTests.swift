@@ -139,4 +139,109 @@ import Testing
             ])
         }
     }
+
+    @Test func relayerStatusDecodesFullPendingFundingCandidates() throws {
+        let firstEOA = "0xA100000000000000000000000000000000000001"
+        let secondEOA = "0xb200000000000000000000000000000000000002"
+        let firstKeyRef = "bundler-eoa:default:11155111:2"
+        let secondKeyRef = "bundler-eoa:default:11155111:3"
+        let status = try WalletNodeClient.RelayerStatus(json: relayerJSON(rotation: [
+            "rotating": true,
+            "pendingFunding": [
+                ["eoa": firstEOA, "keyRef": firstKeyRef, "createdAt": 1_723_456_789],
+                ["eoa": secondEOA, "keyRef": secondKeyRef, "createdAt": 1_723_456_999],
+            ],
+            "retiring": [],
+        ]))
+
+        #expect(status.pendingFunding == [
+            .init(eoa: firstEOA.lowercased(), keyRef: firstKeyRef, createdAt: 1_723_456_789),
+            .init(eoa: secondEOA, keyRef: secondKeyRef, createdAt: 1_723_456_999),
+        ])
+        #expect(status.pendingFundingAddress == firstEOA.lowercased())
+        #expect(status.pendingFundingCount == 2)
+    }
+
+    @Test func relayerStatusWithoutRotationKeepsCompatibilityAccessorsEmpty() throws {
+        let status = try WalletNodeClient.RelayerStatus(json: relayerJSON())
+
+        #expect(status.pendingFunding.isEmpty)
+        #expect(status.pendingFundingAddress == nil)
+        #expect(status.pendingFundingCount == 0)
+    }
+
+    @Test func relayerStatusRejectsMalformedPendingFundingEntries() {
+        let valid: [String: Any] = [
+            "eoa": "0xa100000000000000000000000000000000000001",
+            "keyRef": "bundler-eoa:default:11155111:2",
+            "createdAt": 1_723_456_789,
+        ]
+        let malformedEntries: [[String: Any]] = [
+            ["keyRef": valid["keyRef"]!, "createdAt": valid["createdAt"]!],
+            ["eoa": valid["eoa"]!, "createdAt": valid["createdAt"]!],
+            ["eoa": valid["eoa"]!, "keyRef": valid["keyRef"]!],
+            ["eoa": "not-an-address", "keyRef": valid["keyRef"]!, "createdAt": valid["createdAt"]!],
+            ["eoa": valid["eoa"]!, "keyRef": "bundler-eoa:default:1:2", "createdAt": valid["createdAt"]!],
+            ["eoa": valid["eoa"]!, "keyRef": valid["keyRef"]!, "createdAt": -1],
+        ]
+
+        for malformed in malformedEntries {
+            #expect(throws: (any Error).self) {
+                _ = try WalletNodeClient.RelayerStatus(json: relayerJSON(rotation: [
+                    "pendingFunding": [malformed],
+                    "retiring": [],
+                ]))
+            }
+        }
+    }
+
+    @Test func relayerStatusRejectsMalformedPendingFundingContainersAndDuplicates() {
+        let first: [String: Any] = [
+            "eoa": "0xa100000000000000000000000000000000000001",
+            "keyRef": "bundler-eoa:default:11155111:2",
+            "createdAt": 1_723_456_789,
+        ]
+        let duplicateKeyRef: [String: Any] = [
+            "eoa": "0xb200000000000000000000000000000000000002",
+            "keyRef": first["keyRef"]!,
+            "createdAt": 1_723_456_999,
+        ]
+        let duplicateEOA: [String: Any] = [
+            "eoa": first["eoa"]!,
+            "keyRef": "bundler-eoa:default:11155111:3",
+            "createdAt": 1_723_456_999,
+        ]
+
+        for rotation: Any in [
+            "not-an-object",
+            ["pendingFunding": "not-an-array"],
+            ["pendingFunding": [first, "not-an-entry"]],
+            ["pendingFunding": [first, duplicateKeyRef]],
+            ["pendingFunding": [first, duplicateEOA]],
+        ] {
+            #expect(throws: (any Error).self) {
+                _ = try WalletNodeClient.RelayerStatus(json: relayerJSON(rotation: rotation))
+            }
+        }
+    }
+
+    private func relayerJSON(rotation: Any? = nil) -> [String: Any] {
+        var json: [String: Any] = [
+            "ready": true,
+            "keyLoaded": true,
+            "ownerScope": "default",
+            "chainId": 11_155_111,
+            "networkProfile": "sepolia",
+            "eoa": "0xa000000000000000000000000000000000000001",
+            "keyRef": "bundler-eoa:default:11155111:1",
+            "balance": "0x2386f26fc10000",
+            "thresholdLow": "0x11c37937e08000",
+            "needsTopup": false,
+            "lifecycle": "active",
+        ]
+        if let rotation {
+            json["rotation"] = rotation
+        }
+        return json
+    }
 }

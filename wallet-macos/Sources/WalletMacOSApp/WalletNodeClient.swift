@@ -76,6 +76,12 @@ struct WalletNodeClient {
     }
 
     struct RelayerStatus {
+        struct PendingFundingEntry: Equatable, Sendable {
+            let eoa: String
+            let keyRef: String
+            let createdAt: Int
+        }
+
         struct KeyHistoryEntry {
             let eoa: String
             let keyRef: String
@@ -124,8 +130,11 @@ struct WalletNodeClient {
         /// Public daemon health metadata. This remains available while the key
         /// is locked and lets pre-auth checks reject a compromised relayer.
         let compromiseSubmissionBlocked: Bool
-        let pendingFundingAddress: String?
-        let pendingFundingCount: Int
+        /// Full public identity candidates awaiting funding. Callers must still bind these
+        /// daemon observations to the app-owned journal and immutable public identity store.
+        let pendingFunding: [PendingFundingEntry]
+        var pendingFundingAddress: String? { pendingFunding.first?.eoa }
+        var pendingFundingCount: Int { pendingFunding.count }
         let retiringCount: Int
         let keyHistory: [KeyHistoryEntry]
         let latestAuditEvent: String?
@@ -1112,8 +1121,38 @@ extension WalletNodeClient.RelayerStatus {
         let eoa = json["eoa"] as? String ?? "Not available"
         let lifecycle = json["lifecycle"] as? String ?? "missing"
 
-        let rotation = json["rotation"] as? [String: Any]
-        let pendingFunding = rotation?["pendingFunding"] as? [[String: Any]] ?? []
+        let rotation: [String: Any]?
+        switch json["rotation"] {
+        case nil, is NSNull:
+            rotation = nil
+        case let value as [String: Any]:
+            rotation = value
+        default:
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+
+        let pendingFundingJSON: [[String: Any]]
+        switch rotation?["pendingFunding"] {
+        case nil:
+            pendingFundingJSON = []
+        case let value as [[String: Any]]:
+            pendingFundingJSON = value
+        default:
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        guard let chainID = UInt64(exactly: chainId) else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        let pendingFunding = try pendingFundingJSON.map {
+            try WalletNodeClient.RelayerStatus.PendingFundingEntry(
+                json: $0,
+                expectedChainID: chainID
+            )
+        }
+        guard Set(pendingFunding.map(\.keyRef)).count == pendingFunding.count,
+              Set(pendingFunding.map(\.eoa)).count == pendingFunding.count else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
         let retiring = rotation?["retiring"] as? [String] ?? []
         let keyHistory = (json["keyHistory"] as? [[String: Any]] ?? []).compactMap {
             WalletNodeClient.RelayerStatus.KeyHistoryEntry(json: $0)
@@ -1143,9 +1182,68 @@ extension WalletNodeClient.RelayerStatus {
             needsTopup: needsTopup,
             lifecycle: lifecycle,
             compromiseSubmissionBlocked: compromiseSubmissionBlocked,
-            pendingFundingAddress: pendingFunding.first?["eoa"] as? String,
-            pendingFundingCount: pendingFunding.count,
+            pendingFunding: pendingFunding,
             retiringCount: retiring.count,
+            keyHistory: keyHistory,
+            latestAuditEvent: latestAuditEvent,
+            replacement: replacement
+        )
+    }
+
+    /// Source-compatible fixture initializer for callers that predate full pending-candidate
+    /// decoding. Production JSON decoding always uses the complete `pendingFunding` records.
+    init(
+        ready: Bool,
+        keyLoaded: Bool,
+        reason: String?,
+        ownerScope: String,
+        chainId: Int,
+        networkProfile: String,
+        eoa: String,
+        keyRef: String?,
+        balance: String,
+        thresholdLow: String,
+        needsTopup: Bool,
+        lifecycle: String,
+        compromiseSubmissionBlocked: Bool,
+        pendingFundingAddress: String?,
+        pendingFundingCount: Int,
+        retiringCount: Int,
+        keyHistory: [KeyHistoryEntry],
+        latestAuditEvent: String?,
+        replacement: ReplacementStatus?
+    ) {
+        let compatibilityPendingFunding: [PendingFundingEntry]
+        if let pendingFundingAddress,
+           pendingFundingCount > 0,
+           let keyRef {
+            compatibilityPendingFunding = Array(
+                repeating: PendingFundingEntry(
+                    eoa: pendingFundingAddress,
+                    keyRef: keyRef,
+                    createdAt: 0
+                ),
+                count: pendingFundingCount
+            )
+        } else {
+            compatibilityPendingFunding = []
+        }
+        self.init(
+            ready: ready,
+            keyLoaded: keyLoaded,
+            reason: reason,
+            ownerScope: ownerScope,
+            chainId: chainId,
+            networkProfile: networkProfile,
+            eoa: eoa,
+            keyRef: keyRef,
+            balance: balance,
+            thresholdLow: thresholdLow,
+            needsTopup: needsTopup,
+            lifecycle: lifecycle,
+            compromiseSubmissionBlocked: compromiseSubmissionBlocked,
+            pendingFunding: compatibilityPendingFunding,
+            retiringCount: retiringCount,
             keyHistory: keyHistory,
             latestAuditEvent: latestAuditEvent,
             replacement: replacement
@@ -1314,6 +1412,21 @@ private extension WalletNodeClient.RelayerStatus.KeyHistoryEntry {
             deletedAt: json["deletedAt"] as? Int,
             lastExportedAt: json["lastExportedAt"] as? Int
         )
+    }
+}
+
+private extension WalletNodeClient.RelayerStatus.PendingFundingEntry {
+    init(json: [String: Any], expectedChainID: UInt64) throws {
+        guard let eoa = json["eoa"] as? String,
+              let keyRef = json["keyRef"] as? String,
+              let createdAt = json["createdAt"] as? Int,
+              createdAt >= 0,
+              BundlerLaunchKeyPolicy.chainId(ofKeyRef: keyRef) == expectedChainID,
+              let normalizedEOA = try? VerifiedRelayerIdentity.normalizedAddress(eoa)
+        else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        self.init(eoa: normalizedEOA, keyRef: keyRef, createdAt: createdAt)
     }
 }
 

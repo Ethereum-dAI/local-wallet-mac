@@ -33,7 +33,7 @@ use crate::bundler_account_reconciliation::SuppliedBundlerKey;
 use crate::bundler_keys::{BundlerKeyStore, InMemoryBundlerKeyStore};
 use cli::{Cli, CliCommand};
 use handlers::offline_chain::OfflineChainAdapter;
-use lifecycle::LifecycleHandles;
+use lifecycle::{LifecycleHandles, ShutdownOnDrop, StartupStageResult};
 use ready::ReadyEvent;
 use state::{DaemonState, TransportInfo};
 use transport::handler::Handler;
@@ -78,6 +78,34 @@ async fn main() -> ExitCode {
     if let Err(err) = cli.validate() {
         fail_before_ready!(cli, "{err}");
     }
+
+    // Arm every parent-death path before reading fd 5. In particular, the
+    // alive-pipe watcher must already be live while secret material is loaded
+    // and while the slower reconciliation and chain-startup stages run.
+    let LifecycleHandles {
+        shutdown_tx,
+        mut shutdown_rx,
+    } = LifecycleHandles::new();
+    let _shutdown_on_drop = ShutdownOnDrop::new(shutdown_tx.clone());
+    let _signal_handlers = lifecycle::install_signal_handlers(shutdown_tx.clone());
+    let _alive_pipe_watcher = match cli.alive_fd {
+        Some(alive_fd) => {
+            match lifecycle::install_alive_pipe_watcher(
+                alive_fd as RawFd,
+                shutdown_tx.clone(),
+                shutdown_rx.clone(),
+            ) {
+                Ok(watcher) => Some(watcher),
+                Err(err) => {
+                    fail_before_ready!(cli, "failed to install alive pipe watcher: {err}");
+                }
+            }
+        }
+        None => None,
+    };
+    let _ppid_backstop = cli
+        .alive_fd
+        .map(|_| lifecycle::install_ppid_backstop(shutdown_tx.clone(), Duration::from_secs(5)));
 
     let http_addr = match cli.http.as_deref() {
         Some(addr) => {
@@ -132,6 +160,9 @@ async fn main() -> ExitCode {
         fail_before_ready!(cli, "failed to migrate wallet-node store: {err}");
     }
     let store = wallet_node_store::StoreActor::start(conn);
+    if *shutdown_rx.borrow() {
+        return exit_after_startup_shutdown(&store).await;
+    }
     let bundler_key_store = Arc::new(InMemoryBundlerKeyStore::new());
     let installed_bundler_keys = match cli.secret_fd {
         Some(fd) => match load_secrets_from_fd(fd, &bundler_key_store) {
@@ -143,23 +174,32 @@ async fn main() -> ExitCode {
         None => Vec::new(),
     };
     for key in &installed_bundler_keys {
-        if let Err(err) = bundler_account_reconciliation::reconcile(
-            &store,
-            SuppliedBundlerKey {
-                owner_scope: &key.owner_scope,
-                chain_id: key.chain_id,
-                key_ref: &key.key_ref,
-                address: &key.address,
-            },
-            BundlerLifecycle::Active,
+        let reconciliation = lifecycle::run_startup_stage(
+            &mut shutdown_rx,
+            bundler_account_reconciliation::reconcile(
+                &store,
+                SuppliedBundlerKey {
+                    owner_scope: &key.owner_scope,
+                    chain_id: key.chain_id,
+                    key_ref: &key.key_ref,
+                    address: &key.address,
+                },
+                BundlerLifecycle::Active,
+            ),
         )
-        .await
-        {
-            fail_before_ready!(
-                cli,
-                "failed to register supplied bundler key {}: {err}",
-                key.key_ref
-            );
+        .await;
+        match reconciliation {
+            StartupStageResult::Completed(Ok(_)) => {}
+            StartupStageResult::Completed(Err(err)) => {
+                fail_before_ready!(
+                    cli,
+                    "failed to register supplied bundler key {}: {err}",
+                    key.key_ref
+                );
+            }
+            StartupStageResult::ShutdownRequested => {
+                return exit_after_startup_shutdown(&store).await;
+            }
         }
     }
 
@@ -172,9 +212,17 @@ async fn main() -> ExitCode {
                 data_dir: paths.helios_dir.clone(),
                 max_helios_lag_blocks: 8,
             };
-            match HeliosChainAdapter::start(chain_config).await {
-                Ok((adapter, _handle)) => Arc::new(adapter),
-                Err(ChainError::CheckpointTooOld { reason }) => {
+            let startup = lifecycle::run_startup_stage(
+                &mut shutdown_rx,
+                HeliosChainAdapter::start(chain_config),
+            )
+            .await;
+            match startup {
+                StartupStageResult::ShutdownRequested => {
+                    return exit_after_startup_shutdown(&store).await;
+                }
+                StartupStageResult::Completed(Ok((adapter, _handle))) => Arc::new(adapter),
+                StartupStageResult::Completed(Err(ChainError::CheckpointTooOld { reason })) => {
                     // T-P3-7 option b: keep the daemon serving authenticated control APIs while
                     // verified chain reads are soft-degraded until a fresh checkpoint ships.
                     tracing::warn!(
@@ -183,7 +231,7 @@ async fn main() -> ExitCode {
                     );
                     Arc::new(OfflineChainAdapter::new())
                 }
-                Err(err) => {
+                StartupStageResult::Completed(Err(err)) => {
                     tracing::error!(error = %err, "failed to start helios chain adapter");
                     fail_before_ready!(cli, "failed to start helios chain adapter: {err}");
                 }
@@ -196,33 +244,35 @@ async fn main() -> ExitCode {
             );
             let adapter =
                 ExecutionRpcChainAdapter::new(config.execution_rpc_for_helios().to_owned());
-            if let Err(err) = adapter
-                .validate_chain_id(config.chain_id_for_helios())
-                .await
-            {
-                tracing::error!(
-                    error = %err,
-                    expected_chain_id = config.chain_id_for_helios(),
-                    "execution RPC chain id validation failed"
-                );
-                fail_before_ready!(
-                    cli,
-                    "execution RPC {} rejected chain id {}: {err}",
-                    redact::redact_url(config.execution_rpc_for_helios()),
-                    config.chain_id_for_helios()
-                );
+            let validation = lifecycle::run_startup_stage(
+                &mut shutdown_rx,
+                adapter.validate_chain_id(config.chain_id_for_helios()),
+            )
+            .await;
+            match validation {
+                StartupStageResult::Completed(Ok(())) => {}
+                StartupStageResult::Completed(Err(err)) => {
+                    tracing::error!(
+                        error = %err,
+                        expected_chain_id = config.chain_id_for_helios(),
+                        "execution RPC chain id validation failed"
+                    );
+                    fail_before_ready!(
+                        cli,
+                        "execution RPC {} rejected chain id {}: {err}",
+                        redact::redact_url(config.execution_rpc_for_helios()),
+                        config.chain_id_for_helios()
+                    );
+                }
+                StartupStageResult::ShutdownRequested => {
+                    return exit_after_startup_shutdown(&store).await;
+                }
             }
             Arc::new(adapter)
         }
     };
 
     let token = Arc::new(auth::Token::generate());
-    let lifecycle = LifecycleHandles::new();
-    let LifecycleHandles {
-        shutdown_tx,
-        mut shutdown_rx,
-    } = lifecycle;
-    let _signal_handlers = lifecycle::install_signal_handlers(shutdown_tx.clone());
     let transport_info = if cli.http.is_some() {
         TransportInfo::http()
     } else {
@@ -300,16 +350,7 @@ async fn main() -> ExitCode {
         }
 
         task
-    } else if let (Some(ready_fd), Some(alive_fd)) = (cli.ready_fd, cli.alive_fd) {
-        if let Err(err) = lifecycle::install_alive_pipe_watcher(
-            alive_fd as RawFd,
-            shutdown_tx.clone(),
-            shutdown_rx.clone(),
-        ) {
-            fail_before_ready!(cli, "failed to install alive pipe watcher: {err}");
-        }
-        let _ppid_backstop =
-            lifecycle::install_ppid_backstop(shutdown_tx.clone(), Duration::from_secs(5));
+    } else if let (Some(ready_fd), Some(_alive_fd)) = (cli.ready_fd, cli.alive_fd) {
         let transport_shutdown_rx = shutdown_rx.clone();
         let socket_path = paths.socket_path.clone();
         let task = tokio::spawn(transport::unix::serve(
@@ -395,6 +436,20 @@ async fn main() -> ExitCode {
     }
 
     exit_code
+}
+
+async fn exit_after_startup_shutdown(store: &wallet_node_store::StoreHandle) -> ExitCode {
+    tracing::info!("shutdown requested before wallet-node became ready");
+    match tokio::time::timeout(Duration::from_secs(1), store.shutdown_and_wait()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, "store shutdown failed during startup cancellation");
+        }
+        Err(_) => {
+            tracing::warn!("store did not stop within 1 second during startup cancellation");
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 #[derive(Debug)]

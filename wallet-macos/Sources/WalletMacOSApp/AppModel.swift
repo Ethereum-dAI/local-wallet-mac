@@ -496,12 +496,16 @@ final class AppModel: ObservableObject {
                     reason: authentication.reason,
                     authenticationContext: authentication.context
                 )
+                let expectedIdentity = try VerifiedRelayerIdentity.derive(
+                    keyRef: replacementRelayer.keyRef,
+                    secret: replacementRelayer.secret
+                )
                 let registeredIdentity = try await relayerBootstrapRegistrationService.register(
                     record: replacementRelayer,
                     chain: activeChain,
                     gasPolicy: networkSettings.resolvedDaemonGasPolicy
                 )
-                guard registeredIdentity.keyRef == replacementRelayerKeyRef else {
+                guard registeredIdentity == expectedIdentity else {
                     throw VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch
                 }
                 syncUnlockedRelayerAddress(

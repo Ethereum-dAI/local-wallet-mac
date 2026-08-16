@@ -5,8 +5,6 @@ struct OnboardingProvisioningResult {
     let kernelAccountAddress: String
     let bundlerIdentity: VerifiedRelayerIdentity
     let bundlerSecretRecord: BundlerSecretRecord
-
-    var bundlerAddress: String { bundlerIdentity.address }
 }
 
 struct OnboardingProvisioningService {

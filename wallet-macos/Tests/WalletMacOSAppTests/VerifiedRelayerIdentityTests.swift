@@ -1,7 +1,61 @@
 import Foundation
+import LocalAuthentication
 import Security
 import Testing
 @testable import WalletMacOSApp
+
+private final class RecordingSecurityItemClient: SecurityItemClient, @unchecked Sendable {
+    struct Response {
+        let status: OSStatus
+        let result: Any?
+    }
+
+    var addResponses: [Response]
+    var copyResponses: [Response]
+    var deleteStatuses: [OSStatus]
+    private(set) var additions: [[String: Any]] = []
+    private(set) var copies: [[String: Any]] = []
+    private(set) var copyInteractionNotAllowed: [Bool?] = []
+    private(set) var deletions: [[String: Any]] = []
+
+    init(
+        addResponses: [Response] = [],
+        copyResponses: [Response] = [],
+        deleteStatuses: [OSStatus] = []
+    ) {
+        self.addResponses = addResponses
+        self.copyResponses = copyResponses
+        self.deleteStatuses = deleteStatuses
+    }
+
+    func add(_ attributes: [String: Any]) -> (status: OSStatus, result: Any?) {
+        additions.append(attributes)
+        return addResponses.isEmpty
+            ? (errSecSuccess, nil)
+            : consumeFirst(&addResponses)
+    }
+
+    func copyMatching(_ query: [String: Any]) -> (status: OSStatus, result: Any?) {
+        copies.append(query)
+        let context = query[kSecUseAuthenticationContext as String] as? LAContext
+        copyInteractionNotAllowed.append(context?.interactionNotAllowed)
+        return copyResponses.isEmpty
+            ? (errSecItemNotFound, nil)
+            : consumeFirst(&copyResponses)
+    }
+
+    func delete(_ query: [String: Any]) -> OSStatus {
+        deletions.append(query)
+        return deleteStatuses.isEmpty
+            ? errSecSuccess
+            : deleteStatuses.removeFirst()
+    }
+
+    private func consumeFirst(_ responses: inout [Response]) -> (OSStatus, Any?) {
+        let response = responses.removeFirst()
+        return (response.status, response.result)
+    }
+}
 
 @Suite struct VerifiedRelayerIdentityTests {
     private let chainID: UInt64 = 11_155_111
@@ -21,6 +75,10 @@ import Testing
         #expect(identity.address == address.lowercased())
         #expect(
             try VerifiedRelayerIdentity.decodeMetadata(identity.encodedMetadata()) == identity
+        )
+        #expect(
+            String(data: try identity.encodedMetadata(), encoding: .utf8)
+                == #"{"address":"0x7a3f000000000000000000000000000000009c21","chainID":11155111,"keyRef":"bundler-eoa:default:11155111:1","version":1}"#
         )
     }
 
@@ -97,65 +155,221 @@ import Testing
         }
     }
 
-    @Test func keyStorePersistsPromptFreeIdentityAttributesWhenEntitled() throws {
-        let store = BundlerKeyStore.shared
-        let uniqueChain = 900_000_000_000 + UInt64.random(in: 0..<1_000_000)
-        let keyRef = "bundler-eoa:identity-test:\(uniqueChain):0"
-        let secret = Data(repeating: 0x33, count: 32)
-        defer { try? store.delete(keyRef: keyRef) }
-
-        do {
-            try store.add(keyRef: keyRef, secret: secret)
-        } catch AppError.missingEntitlement {
-            // The unsigned SwiftPM test runner cannot write biometric-gated
-            // data-protection Keychain items. Signed Xcode tests exercise this path.
-            return
-        }
-
-        let maybeStored = try store.verifiedIdentity(forKeyRef: keyRef)
-        let stored = try #require(maybeStored)
-        #expect(stored == (try VerifiedRelayerIdentity.derive(keyRef: keyRef, secret: secret)))
-    }
-
-    @Test func atomicInsertKeepsTheFirstSecretWhenEntitled() throws {
-        let store = BundlerKeyStore.shared
-        let uniqueChain = 901_000_000_000 + UInt64.random(in: 0..<1_000_000)
-        let keyRef = "bundler-eoa:atomic-test:\(uniqueChain):0"
-        let firstSecret = Data(repeating: 0x44, count: 32)
-        let losingSecret = Data(repeating: 0x55, count: 32)
-        defer { try? store.delete(keyRef: keyRef) }
-
-        do {
-            #expect(
-                try store.addIfAbsent(keyRef: keyRef, secret: firstSecret) == .inserted
-            )
-            #expect(
-                try store.addIfAbsent(keyRef: keyRef, secret: losingSecret) == .existing
-            )
-        } catch AppError.missingEntitlement {
-            return
-        }
-
-        let maybeStored = try store.verifiedIdentity(forKeyRef: keyRef)
-        let stored = try #require(maybeStored)
-        let winner = try VerifiedRelayerIdentity.derive(
-            keyRef: keyRef,
-            secret: firstSecret
-        )
-        let loser = try VerifiedRelayerIdentity.derive(
-            keyRef: keyRef,
-            secret: losingSecret
-        )
-        #expect(stored == winner)
-        #expect(stored != loser)
-    }
-
     @Test func insertionStatusTreatsOnlyDuplicateAsAnExistingWinner() throws {
         #expect(try BundlerKeyStore.insertionResult(for: errSecSuccess) == .inserted)
         #expect(try BundlerKeyStore.insertionResult(for: errSecDuplicateItem) == .existing)
         #expect(throws: (any Error).self) {
             try BundlerKeyStore.insertionResult(for: errSecAuthFailed)
         }
+    }
+
+    @Test func publicIdentityStoreUsesCanonicalImmutableRecords() throws {
+        let client = RecordingSecurityItemClient()
+        let store = RelayerPublicIdentityStore(client: client)
+        let identity = try VerifiedRelayerIdentity(
+            chainID: chainID,
+            keyRef: keyRef,
+            address: address
+        )
+
+        try store.insertOrRequireIdentity(identity)
+
+        let attributes = try #require(client.additions.first)
+        #expect(attributes[kSecAttrService as String] as? String == RelayerPublicIdentityStore.service)
+        #expect(attributes[kSecAttrAccount as String] as? String == keyRef)
+        #expect(attributes[kSecUseDataProtectionKeychain as String] as? Bool == true)
+        #expect(
+            (attributes[kSecAttrAccessible as String] as? String)
+                == (kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String)
+        )
+        #expect(attributes[kSecAttrAccessControl as String] == nil)
+        let encodedIdentity = try identity.encodedMetadata()
+        #expect(attributes[kSecValueData as String] as? Data == encodedIdentity)
+    }
+
+    @Test func publicIdentityExactDuplicateIsIdempotent() throws {
+        let identity = try VerifiedRelayerIdentity(
+            chainID: chainID,
+            keyRef: keyRef,
+            address: address
+        )
+        let client = RecordingSecurityItemClient(
+            addResponses: [.init(status: errSecDuplicateItem, result: nil)],
+            copyResponses: [.init(status: errSecSuccess, result: try identity.encodedMetadata())]
+        )
+
+        try RelayerPublicIdentityStore(client: client).insertOrRequireIdentity(identity)
+
+        #expect(client.additions.count == 1)
+        #expect(client.copies.count == 1)
+    }
+
+    @Test func publicIdentityConflictingDuplicateFailsClosed() throws {
+        let expected = try VerifiedRelayerIdentity(
+            chainID: chainID,
+            keyRef: keyRef,
+            address: address
+        )
+        let conflicting = try VerifiedRelayerIdentity(
+            chainID: chainID,
+            keyRef: keyRef,
+            address: "0x2222222222222222222222222222222222222222"
+        )
+        let client = RecordingSecurityItemClient(
+            addResponses: [.init(status: errSecDuplicateItem, result: nil)],
+            copyResponses: [.init(status: errSecSuccess, result: try conflicting.encodedMetadata())]
+        )
+
+        #expect(throws: RelayerPublicIdentityStore.StoreError.conflictingIdentity(keyRef)) {
+            try RelayerPublicIdentityStore(client: client).insertOrRequireIdentity(expected)
+        }
+    }
+
+    @Test func publicIdentityMalformedAndWrongAccountRecordsFailClosed() throws {
+        let malformedClient = RecordingSecurityItemClient(
+            copyResponses: [.init(status: errSecSuccess, result: Data("{}".utf8))]
+        )
+        #expect(throws: RelayerPublicIdentityStore.StoreError.malformedRecord(keyRef)) {
+            _ = try RelayerPublicIdentityStore(client: malformedClient)
+                .identity(forKeyRef: keyRef)
+        }
+
+        let otherKeyRef = "bundler-eoa:default:11155111:2"
+        let wrongIdentity = try VerifiedRelayerIdentity(
+            chainID: chainID,
+            keyRef: otherKeyRef,
+            address: address
+        )
+        let wrongClient = RecordingSecurityItemClient(
+            copyResponses: [.init(status: errSecSuccess, result: try wrongIdentity.encodedMetadata())]
+        )
+        #expect(
+            throws: RelayerPublicIdentityStore.StoreError.wrongKeyRef(
+                expected: keyRef,
+                actual: otherKeyRef
+            )
+        ) {
+            _ = try RelayerPublicIdentityStore(client: wrongClient)
+                .identity(forKeyRef: keyRef)
+        }
+    }
+
+    @Test func publicIdentityReadsExplicitlyDisableInteraction() throws {
+        let client = RecordingSecurityItemClient(
+            copyResponses: [.init(status: errSecItemNotFound, result: nil)]
+        )
+
+        #expect(
+            try RelayerPublicIdentityStore(client: client).identity(forKeyRef: keyRef) == nil
+        )
+
+        let query = try #require(client.copies.first)
+        #expect(query[kSecUseDataProtectionKeychain as String] as? Bool == true)
+        #expect(query[kSecReturnData as String] as? Bool == true)
+        #expect(query[kSecUseAuthenticationContext as String] is LAContext)
+        #expect(client.copyInteractionNotAllowed == [true])
+    }
+
+    @Test func publicIdentityInteractionRequirementIsNotTreatedAsMissing() {
+        let client = RecordingSecurityItemClient(
+            copyResponses: [.init(status: errSecInteractionNotAllowed, result: nil)]
+        )
+        #expect(throws: RelayerPublicIdentityStore.StoreError.interactionRequired(keyRef)) {
+            _ = try RelayerPublicIdentityStore(client: client).identity(forKeyRef: keyRef)
+        }
+    }
+
+    @Test func freshSecretInsertionDoesNotReadProtectedKeychain() throws {
+        let protectedClient = RecordingSecurityItemClient(
+            addResponses: [.init(status: errSecSuccess, result: nil)]
+        )
+        let publicClient = RecordingSecurityItemClient()
+        let store = BundlerKeyStore(
+            client: protectedClient,
+            publicIdentityStore: RelayerPublicIdentityStore(client: publicClient)
+        )
+
+        let record = try store.createIfNeeded(
+            keyRef: keyRef,
+            authenticationContext: LAContext()
+        )
+
+        #expect(record.keyRef == keyRef)
+        #expect(record.secret.count == 32)
+        #expect(protectedClient.additions.count == 1)
+        #expect(protectedClient.copies.isEmpty)
+        #expect(protectedClient.additions[0][kSecAttrGeneric as String] == nil)
+        #expect(publicClient.additions.count == 1)
+    }
+
+    @Test func duplicateSecretReadsWinnerOnceWithExactCallerContext() throws {
+        let winnerSecret = Data(repeating: 0x44, count: 32)
+        let protectedClient = RecordingSecurityItemClient(
+            addResponses: [.init(status: errSecDuplicateItem, result: nil)],
+            copyResponses: [
+                .init(
+                    status: errSecSuccess,
+                    result: [
+                        kSecAttrAccount as String: keyRef,
+                        kSecValueData as String: winnerSecret,
+                    ]
+                ),
+            ]
+        )
+        let publicClient = RecordingSecurityItemClient()
+        let store = BundlerKeyStore(
+            client: protectedClient,
+            publicIdentityStore: RelayerPublicIdentityStore(client: publicClient)
+        )
+        let context = LAContext()
+
+        let record = try store.createIfNeeded(
+            keyRef: keyRef,
+            authenticationContext: context
+        )
+
+        #expect(record.secret == winnerSecret)
+        #expect(protectedClient.copies.count == 1)
+        let query = protectedClient.copies[0]
+        #expect(query[kSecUseAuthenticationContext as String] as? LAContext === context)
+        #expect(query[kSecReturnData as String] as? Bool == true)
+        #expect(query[kSecReturnAttributes as String] as? Bool == true)
+        #expect(publicClient.additions.count == 1)
+    }
+
+    @Test func legacyMetadataIsValidatedInsideTheSingleAuthenticatedRead() throws {
+        let winnerSecret = Data(repeating: 0x44, count: 32)
+        let conflicting = try VerifiedRelayerIdentity.derive(
+            keyRef: keyRef,
+            secret: Data(repeating: 0x55, count: 32)
+        )
+        let protectedClient = RecordingSecurityItemClient(
+            copyResponses: [
+                .init(
+                    status: errSecSuccess,
+                    result: [
+                        kSecAttrAccount as String: keyRef,
+                        kSecAttrGeneric as String: try conflicting.encodedMetadata(),
+                        kSecValueData as String: winnerSecret,
+                    ]
+                ),
+            ]
+        )
+        let publicClient = RecordingSecurityItemClient()
+        let store = BundlerKeyStore(
+            client: protectedClient,
+            publicIdentityStore: RelayerPublicIdentityStore(client: publicClient)
+        )
+
+        #expect(throws: VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch) {
+            _ = try store.read(
+                keyRef: keyRef,
+                reason: "Test",
+                authenticationContext: LAContext()
+            )
+        }
+        #expect(protectedClient.copies.count == 1)
+        #expect(publicClient.additions.isEmpty)
     }
 }
 

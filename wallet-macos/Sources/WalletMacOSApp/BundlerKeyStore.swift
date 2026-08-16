@@ -3,6 +3,173 @@ import LocalAuthentication
 import Security
 import WalletSignature
 
+protocol SecurityItemClient: Sendable {
+    func add(_ attributes: [String: Any]) -> (status: OSStatus, result: Any?)
+    func copyMatching(_ query: [String: Any]) -> (status: OSStatus, result: Any?)
+    func delete(_ query: [String: Any]) -> OSStatus
+}
+
+struct SystemSecurityItemClient: SecurityItemClient {
+    func add(_ attributes: [String: Any]) -> (status: OSStatus, result: Any?) {
+        var result: CFTypeRef?
+        let status = SecItemAdd(attributes as CFDictionary, &result)
+        return (status, result)
+    }
+
+    func copyMatching(_ query: [String: Any]) -> (status: OSStatus, result: Any?) {
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        return (status, result)
+    }
+
+    func delete(_ query: [String: Any]) -> OSStatus {
+        SecItemDelete(query as CFDictionary)
+    }
+}
+
+/// Immutable public identity records for protected local relayer secrets.
+///
+/// These records deliberately live outside the `.userPresence` item. A caller
+/// may render and validate public relayer state without evaluating the secret's
+/// access control, while a privileged secret read still re-derives and checks
+/// this exact identity before use.
+struct RelayerPublicIdentityStore: Sendable {
+    static let shared = RelayerPublicIdentityStore()
+    static let service = "com.localwallet.bundler-eoa.public-identity"
+
+    enum StoreError: Error, Equatable, LocalizedError {
+        case interactionRequired(String)
+        case malformedRecord(String)
+        case wrongKeyRef(expected: String, actual: String)
+        case conflictingIdentity(String)
+        case duplicateRecordMissing(String)
+        case keychain(OSStatus)
+
+        var errorDescription: String? {
+            switch self {
+            case .interactionRequired(let keyRef):
+                return "Public relayer identity unexpectedly requires authentication for \(keyRef)."
+            case .malformedRecord(let keyRef):
+                return "Public relayer identity is malformed for \(keyRef)."
+            case let .wrongKeyRef(expected, actual):
+                return "Public relayer identity belongs to \(actual), expected \(expected)."
+            case .conflictingIdentity(let keyRef):
+                return "Public relayer identity conflicts with the authenticated secret for \(keyRef)."
+            case .duplicateRecordMissing(let keyRef):
+                return "Public relayer identity disappeared while reconciling \(keyRef)."
+            case .keychain(let status):
+                return "Public relayer identity Keychain operation failed with status \(status)."
+            }
+        }
+    }
+
+    private let client: any SecurityItemClient
+
+    init(client: any SecurityItemClient = SystemSecurityItemClient()) {
+        self.client = client
+    }
+
+    func identity(forKeyRef keyRef: String) throws -> VerifiedRelayerIdentity? {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        defer { context.invalidate() }
+
+        var query = baseQuery(keyRef: keyRef)
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecReturnData as String] = true
+        query[kSecUseAuthenticationContext as String] = context
+
+        let response = client.copyMatching(query)
+        if response.status == errSecItemNotFound {
+            return nil
+        }
+        if response.status == errSecInteractionNotAllowed {
+            throw StoreError.interactionRequired(keyRef)
+        }
+        guard response.status == errSecSuccess else {
+            throw mapSecurityStatus(response.status)
+        }
+        guard let data = response.result as? Data else {
+            throw StoreError.malformedRecord(keyRef)
+        }
+
+        let identity: VerifiedRelayerIdentity
+        do {
+            identity = try VerifiedRelayerIdentity.decodeMetadata(data)
+            guard try identity.encodedMetadata() == data else {
+                throw StoreError.malformedRecord(keyRef)
+            }
+        } catch let error as StoreError {
+            throw error
+        } catch {
+            throw StoreError.malformedRecord(keyRef)
+        }
+        guard identity.keyRef == keyRef else {
+            throw StoreError.wrongKeyRef(expected: keyRef, actual: identity.keyRef)
+        }
+        return identity
+    }
+
+    /// Inserts the identity once. Keychain's unique `(class, service, account)`
+    /// tuple is the arbitration point; an exact concurrent winner is
+    /// idempotent, while any semantic conflict is a hard failure.
+    func insertOrRequireIdentity(_ identity: VerifiedRelayerIdentity) throws {
+        var attributes = baseQuery(keyRef: identity.keyRef)
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        attributes[kSecValueData as String] = try identity.encodedMetadata()
+
+        let response = client.add(attributes)
+        switch response.status {
+        case errSecSuccess:
+            return
+        case errSecDuplicateItem:
+            guard let existing = try self.identity(forKeyRef: identity.keyRef) else {
+                throw StoreError.duplicateRecordMissing(identity.keyRef)
+            }
+            guard existing == identity else {
+                throw StoreError.conflictingIdentity(identity.keyRef)
+            }
+        default:
+            throw mapSecurityStatus(response.status)
+        }
+    }
+
+    func delete(keyRef: String) throws {
+        let status = client.delete(baseQuery(keyRef: keyRef))
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw mapSecurityStatus(status)
+        }
+    }
+
+    func deleteAll() throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecUseDataProtectionKeychain as String: true,
+        ]
+        let status = client.delete(query)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw mapSecurityStatus(status)
+        }
+    }
+
+    private func baseQuery(keyRef: String) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: keyRef,
+            kSecUseDataProtectionKeychain as String: true,
+        ]
+    }
+
+    private func mapSecurityStatus(_ status: OSStatus) -> Error {
+        if status == errSecMissingEntitlement {
+            return AppError.missingEntitlement
+        }
+        return StoreError.keychain(status)
+    }
+}
+
 struct BundlerSecretRecord: Sendable {
     let keyRef: String
     let secret: Data
@@ -25,20 +192,16 @@ struct BundlerKeyStore {
     // protected more strictly than the key that actually controls the funds.
     static let secretAccessFlags: SecAccessControlCreateFlags = [.userPresence]
 
-    private let service = "com.localwallet.bundler-eoa.app"
+    private static let service = "com.localwallet.bundler-eoa.app"
+    private let client: any SecurityItemClient
+    private let publicIdentityStore: RelayerPublicIdentityStore
 
-    func hasKey(forKeyRef keyRef: String) throws -> Bool {
-        var query = baseQuery(keyRef: keyRef)
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
-        if status == errSecItemNotFound {
-            return false
-        }
-        guard status == errSecSuccess else {
-            throw mapSecurityStatus(status)
-        }
-        return true
+    init(
+        client: any SecurityItemClient = SystemSecurityItemClient(),
+        publicIdentityStore: RelayerPublicIdentityStore = .shared
+    ) {
+        self.client = client
+        self.publicIdentityStore = publicIdentityStore
     }
 
     func createIfNeeded(
@@ -47,92 +210,20 @@ struct BundlerKeyStore {
         authenticationContext: LAContext? = nil
     ) throws -> BundlerSecretRecord {
         try withAuthenticationContext(authenticationContext, reason: reason) { context in
-            try load(
-                keyRef: keyRef,
-                createIfMissing: true,
-                reason: reason,
-                authenticationContext: context
-            )
+            let generated = try WalletSignature.generateBundlerSecret()
+            switch try addIfAbsent(keyRef: keyRef, secret: generated.secret) {
+            case .inserted:
+                return BundlerSecretRecord(keyRef: keyRef, secret: generated.secret)
+            case .existing:
+                return try read(keyRef: keyRef, authenticationContext: context)
+            }
         }
     }
 
-    // Attribute-only query: enumerating accounts does not evaluate the items'
-    // biometric access control, so this never prompts.
-    func listKeyRefs() throws -> [String] {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecReturnAttributes as String: true,
-        ]
-
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound {
-            return []
-        }
-        guard status == errSecSuccess, let items = result as? [[String: Any]] else {
-            throw mapSecurityStatus(status)
-        }
-        return items.compactMap { $0[kSecAttrAccount as String] as? String }
-    }
-
-    /// Reads only public attributes from the protected secret item. Attribute
-    /// queries never request `kSecValueData`, so this path stays prompt-free and
-    /// is safe for dashboard rendering and pre-auth transaction checks.
+    /// Compatibility shim while callers move to `RelayerPublicIdentityStore`.
+    /// This never queries the protected service.
     func verifiedIdentity(forKeyRef keyRef: String) throws -> VerifiedRelayerIdentity? {
-        var query = baseQuery(keyRef: keyRef)
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        query[kSecReturnAttributes as String] = true
-
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound {
-            return nil
-        }
-        guard status == errSecSuccess,
-              let attributes = result as? [String: Any] else {
-            throw mapSecurityStatus(status)
-        }
-        guard let metadata = attributes[kSecAttrGeneric as String] as? Data else {
-            // Legacy protected item. The next authenticated read derives and
-            // migrates this metadata rather than trusting an external cache.
-            return nil
-        }
-        let identity = try VerifiedRelayerIdentity.decodeMetadata(metadata)
-        guard identity.keyRef == keyRef else {
-            throw VerifiedRelayerIdentity.ValidationError.metadataKeyRefMismatch(
-                expected: keyRef,
-                actual: identity.keyRef
-            )
-        }
-        return identity
-    }
-
-    private func load(
-        keyRef: String,
-        createIfMissing: Bool,
-        reason: String,
-        authenticationContext: LAContext
-    ) throws -> BundlerSecretRecord {
-        if try hasKey(forKeyRef: keyRef) {
-            return try read(
-                keyRef: keyRef,
-                reason: reason,
-                authenticationContext: authenticationContext
-            )
-        }
-
-        guard createIfMissing else {
-            throw AppError.localRelayerKeyMissing
-        }
-        let generated = try WalletSignature.generateBundlerSecret()
-        _ = try addIfAbsent(keyRef: keyRef, secret: generated.secret)
-        return try read(
-            keyRef: keyRef,
-            reason: reason,
-            authenticationContext: authenticationContext
-        )
+        try publicIdentityStore.identity(forKeyRef: keyRef)
     }
 
     func add(keyRef: String, secret: Data) throws {
@@ -173,10 +264,12 @@ struct BundlerKeyStore {
         var query = baseQuery(keyRef: keyRef)
         query[kSecValueData as String] = secret
         query[kSecAttrAccessControl as String] = accessControl
-        query[kSecAttrGeneric as String] = try identity.encodedMetadata()
 
-        let status = SecItemAdd(query as CFDictionary, nil)
-        return try Self.insertionResult(for: status)
+        let result = try Self.insertionResult(for: client.add(query).status)
+        if result == .inserted {
+            try publicIdentityStore.insertOrRequireIdentity(identity)
+        }
+        return result
     }
 
     static func insertionResult(for status: OSStatus) throws -> BundlerSecretInsertionResult {
@@ -203,9 +296,11 @@ struct BundlerKeyStore {
         }
     }
 
-    func delete(keyRef: String) throws {
+    func delete(keyRef: String, authenticationContext: LAContext) throws {
         BiometricAuthenticationContexts.shared.invalidate(.relayerLaunch)
-        let status = SecItemDelete(baseQuery(keyRef: keyRef) as CFDictionary)
+        var query = baseQuery(keyRef: keyRef)
+        query[kSecUseAuthenticationContext as String] = authenticationContext
+        let status = client.delete(query)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw mapSecurityStatus(status)
         }
@@ -214,9 +309,9 @@ struct BundlerKeyStore {
     func deleteAll() throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: Self.service,
         ]
-        let status = SecItemDelete(query as CFDictionary)
+        let status = client.delete(query)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw mapSecurityStatus(status)
         }
@@ -228,13 +323,17 @@ struct BundlerKeyStore {
     ) throws -> BundlerSecretRecord {
         var query = baseQuery(keyRef: keyRef)
         query[kSecReturnData as String] = true
+        query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         query[kSecUseAuthenticationContext as String] = authenticationContext
 
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let secret = result as? Data else {
-            throw mapSecurityStatus(status)
+        let response = client.copyMatching(query)
+        guard response.status == errSecSuccess else {
+            throw mapSecurityStatus(response.status)
+        }
+        guard let attributes = response.result as? [String: Any],
+              let secret = attributes[kSecValueData as String] as? Data else {
+            throw Self.describeSecurityStatus(errSecDecode)
         }
         guard secret.count == 32 else {
             throw AppError.invalidHexString
@@ -244,34 +343,27 @@ struct BundlerKeyStore {
             keyRef: keyRef,
             secret: secret
         )
-        switch try VerifiedRelayerIdentityMetadataPolicy.decision(
-            stored: try verifiedIdentity(forKeyRef: keyRef),
+        let legacyIdentity: VerifiedRelayerIdentity?
+        if let rawMetadata = attributes[kSecAttrGeneric as String] {
+            guard let metadata = rawMetadata as? Data else {
+                throw VerifiedRelayerIdentity.ValidationError.malformedMetadata
+            }
+            legacyIdentity = try VerifiedRelayerIdentity.decodeMetadata(metadata)
+            guard legacyIdentity?.keyRef == keyRef else {
+                throw VerifiedRelayerIdentity.ValidationError.metadataKeyRefMismatch(
+                    expected: keyRef,
+                    actual: legacyIdentity?.keyRef ?? ""
+                )
+            }
+        } else {
+            legacyIdentity = nil
+        }
+        _ = try VerifiedRelayerIdentityMetadataPolicy.decision(
+            stored: legacyIdentity,
             derived: derivedIdentity
-        ) {
-        case .current:
-            break
-        case .migrate(let identity):
-            try updateVerifiedIdentity(
-                identity,
-                authenticationContext: authenticationContext
-            )
-        }
-        return BundlerSecretRecord(keyRef: keyRef, secret: secret)
-    }
-
-    private func updateVerifiedIdentity(
-        _ identity: VerifiedRelayerIdentity,
-        authenticationContext: LAContext
-    ) throws {
-        var query = baseQuery(keyRef: identity.keyRef)
-        query[kSecUseAuthenticationContext as String] = authenticationContext
-        let status = SecItemUpdate(
-            query as CFDictionary,
-            [kSecAttrGeneric as String: try identity.encodedMetadata()] as CFDictionary
         )
-        guard status == errSecSuccess else {
-            throw mapSecurityStatus(status)
-        }
+        try publicIdentityStore.insertOrRequireIdentity(derivedIdentity)
+        return BundlerSecretRecord(keyRef: keyRef, secret: secret)
     }
 
     private func withAuthenticationContext<Result>(
@@ -295,7 +387,7 @@ struct BundlerKeyStore {
     private func baseQuery(keyRef: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: Self.service,
             kSecAttrAccount as String: keyRef,
         ]
     }
@@ -325,9 +417,9 @@ struct BundlerKeyStore {
 /// App-owned public identity for a protected local relayer secret.
 ///
 /// The private key remains behind Keychain user-presence access control. This
-/// versioned metadata is stored on the same item so prompt-free UI and preflight
-/// code can bind wallet-node's public status to an identity the app previously
-/// derived from that secret.
+/// versioned metadata is stored in a separate immutable public record so
+/// prompt-free UI and preflight code can bind wallet-node's public status to an
+/// identity the app previously derived from that secret.
 struct VerifiedRelayerIdentity: Codable, Equatable, Sendable {
     static let currentVersion = 1
 
@@ -425,7 +517,9 @@ struct VerifiedRelayerIdentity: Codable, Equatable, Sendable {
     }
 
     func encodedMetadata() throws -> Data {
-        try JSONEncoder().encode(self)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(self)
     }
 
     static func decodeMetadata(_ data: Data) throws -> VerifiedRelayerIdentity {

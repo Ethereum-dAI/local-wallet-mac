@@ -137,32 +137,6 @@ import Testing
     #expect(keys?[1]["secret"] == "0x" + String(repeating: "01", count: 32))
 }
 
-@Test func bundlerKeyStoreListsStoredKeyRefs() throws {
-    let store = BundlerKeyStore.shared
-    let chainId: UInt64 = 999_000_000_000 + UInt64.random(in: 0..<1_000_000)
-    let first = "bundler-eoa:default:\(chainId):1"
-    let second = "bundler-eoa:default:\(chainId):2"
-    defer {
-        try? store.delete(keyRef: first)
-        try? store.delete(keyRef: second)
-    }
-
-    do {
-        try store.add(keyRef: first, secret: Data(repeating: 0x11, count: 32))
-        try store.add(keyRef: second, secret: Data(repeating: 0x22, count: 32))
-    } catch AppError.missingEntitlement {
-        // Biometric-gated items need the data-protection keychain, which an
-        // unsigned `swift test` runner cannot write to. The listing query and
-        // ordering logic stay covered by the pure policy tests above; run this
-        // test from a signed Xcode build for the end-to-end check.
-        return
-    }
-
-    let listed = try store.listKeyRefs()
-    #expect(listed.contains(first))
-    #expect(listed.contains(second))
-}
-
 // MARK: - Relayer identity cache is chain-scoped (B-2)
 
 private func withTestDefaults(_ body: (UserDefaults) throws -> Void) rethrows {

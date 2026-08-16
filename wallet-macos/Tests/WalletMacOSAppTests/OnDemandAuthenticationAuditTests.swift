@@ -3,20 +3,45 @@ import Testing
 @testable import WalletMacOSApp
 
 @Suite struct OnDemandAuthenticationAuditTests {
-    @Test func promptFreeRelayerIdentityLookupReadsOnlyPublicAttributes() throws {
+    @Test func promptFreeRelayerIdentityLookupUsesOnlyThePublicService() throws {
         let source = try appSource("BundlerKeyStore.swift")
         let lookup = try slice(
             source,
-            from: "func verifiedIdentity(forKeyRef",
-            until: "private func load("
+            from: "func identity(forKeyRef",
+            until: "func insertOrRequireIdentity("
+        )
+        let publicStore = try slice(
+            source,
+            from: "struct RelayerPublicIdentityStore",
+            until: "struct BundlerSecretRecord"
         )
 
-        #expect(lookup.contains("kSecReturnAttributes"))
-        #expect(lookup.contains("kSecAttrGeneric"))
-        #expect(!lookup.contains("kSecReturnData"))
+        #expect(lookup.contains("kSecReturnData"))
+        #expect(lookup.contains("kSecUseAuthenticationContext"))
+        #expect(lookup.contains("interactionNotAllowed = true"))
+        #expect(!lookup.contains("com.localwallet.bundler-eoa.app"))
         #expect(!lookup.contains("kSecValueData"))
-        #expect(!lookup.contains("kSecUseAuthenticationContext"))
-        #expect(!lookup.contains("LAContext()"))
+        #expect(publicStore.contains("com.localwallet.bundler-eoa.public-identity"))
+        #expect(publicStore.contains("kSecUseDataProtectionKeychain"))
+        #expect(publicStore.contains("kSecAttrAccessibleWhenUnlockedThisDeviceOnly"))
+        #expect(publicStore.contains("kSecAttrAccessControl") == false)
+    }
+
+    @Test func protectedRelayerReadUsesOneCallerOwnedDataAndAttributeQuery() throws {
+        let source = try appSource("BundlerKeyStore.swift")
+        let lookup = try slice(
+            source,
+            from: "private func read(\n        keyRef:",
+            until: "private func withAuthenticationContext"
+        )
+
+        #expect(lookup.contains("kSecReturnData"))
+        #expect(lookup.contains("kSecReturnAttributes"))
+        #expect(lookup.contains("kSecUseAuthenticationContext"))
+        #expect(lookup.contains("client.copyMatching(query)"))
+        #expect(lookup.contains("SecItemCopyMatching") == false)
+        #expect(lookup.contains("verifiedIdentity(forKeyRef") == false)
+        #expect(lookup.contains("LAContext()") == false)
     }
 
     @Test func appActivationAndManagedDaemonLaunchNeverReadProtectedSecrets() throws {
@@ -148,7 +173,7 @@ import Testing
             from: "func addIfAbsent(",
             until: "static func insertionResult("
         )
-        #expect(insertion.contains("SecItemAdd"))
+        #expect(insertion.contains("client.add(query)"))
         #expect(insertion.contains("delete(keyRef:") == false)
 
         let insertionStatus = try slice(

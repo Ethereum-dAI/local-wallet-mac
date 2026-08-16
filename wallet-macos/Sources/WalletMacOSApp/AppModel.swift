@@ -1457,7 +1457,10 @@ final class AppModel: ObservableObject {
                 nonce: challenge.nonce
             )
         )
-        try BundlerKeyStore.shared.delete(keyRef: keyRef)
+        try BundlerKeyStore.shared.delete(
+            keyRef: keyRef,
+            authenticationContext: authentication.context
+        )
         relayerInstallTask?.cancel()
         relayerInstallTask = nil
         relayerAccessState = .locked

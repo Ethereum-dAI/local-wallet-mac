@@ -99,6 +99,27 @@ import Testing
         #expect(install.contains("walletNodeGeneration == generation"))
     }
 
+    @Test func onboardingRegistersRelayerBeforePublishingFundingAddress() throws {
+        let source = try appSource("OnboardingView.swift")
+        let provisioning = try slice(
+            source,
+            from: "func provisionKeys()",
+            until: "func startBundlerActivationIfNeeded"
+        )
+        let registration = try #require(
+            provisioning.range(of: "try await relayerRegistrationService.register(")
+        )
+        let ready = try #require(provisioning.range(of: "keyState = .ready("))
+        #expect(registration.lowerBound < ready.lowerBound)
+
+        let complete = try slice(
+            source,
+            from: "func complete() -> Bool",
+            until: "private func cancelChainReadiness"
+        )
+        #expect(complete.contains("guard case .ready = keyState"))
+    }
+
     @Test func replacementActionsAuthorizeEvenWithAWarmRelayer() throws {
         let source = try appSource("AppModel.swift")
         let cancel = try slice(

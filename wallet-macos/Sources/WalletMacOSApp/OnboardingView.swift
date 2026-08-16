@@ -146,6 +146,7 @@ final class OnboardingState: ObservableObject {
     private let settingsStore: OnboardingSettingsStore
     private let networkSettingsStore: DemoSettingsStore
     private let provisioningService: OnboardingProvisioningService
+    private let relayerRegistrationService: RelayerBootstrapRegistrationService
     private let downloadManager: any LocalAIModelManaging
     private let hardwareInspector: LocalHardwareInspector
     private let chainReadinessService: OnboardingChainReadinessService
@@ -163,6 +164,7 @@ final class OnboardingState: ObservableObject {
         settingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
         networkSettingsStore: DemoSettingsStore = DemoSettingsStore(),
         provisioningService: OnboardingProvisioningService = OnboardingProvisioningService(),
+        relayerRegistrationService: RelayerBootstrapRegistrationService? = nil,
         downloadManager: any LocalAIModelManaging = LocalAIModelDownloadManager(),
         hardwareInspector: LocalHardwareInspector = LocalHardwareInspector(),
         chainReadinessService: OnboardingChainReadinessService? = nil,
@@ -173,6 +175,7 @@ final class OnboardingState: ObservableObject {
         self.settingsStore = settingsStore
         self.networkSettingsStore = networkSettingsStore
         self.provisioningService = provisioningService
+        self.relayerRegistrationService = relayerRegistrationService ?? .init()
         self.downloadManager = downloadManager
         self.hardwareInspector = hardwareInspector
         self.chainReadinessService = chainReadinessService ?? OnboardingChainReadinessService(
@@ -454,13 +457,23 @@ final class OnboardingState: ObservableObject {
 
         cancelBundlerActivation(reset: true)
         cancelChainReadiness(reset: true)
+        persistNetwork()
         keyState = .creating
         Task {
             do {
                 let result = try provisioningService.createOrLoadIdentity()
+                let networkSettings = networkSettingsStore.networkSettings
+                let registeredIdentity = try await relayerRegistrationService.register(
+                    record: result.bundlerSecretRecord,
+                    chain: networkSettings.activeChain,
+                    gasPolicy: networkSettings.resolvedDaemonGasPolicy
+                )
+                guard registeredIdentity == result.bundlerIdentity else {
+                    throw VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch
+                }
                 keyState = .ready(
                     kernelAddress: result.kernelAccountAddress,
-                    bundlerAddress: result.bundlerAddress
+                    bundlerAddress: registeredIdentity.address
                 )
             } catch {
                 keyState = .failed(error.localizedDescription)

@@ -3,7 +3,10 @@ import WalletSignature
 
 struct OnboardingProvisioningResult {
     let kernelAccountAddress: String
-    let bundlerAddress: String
+    let bundlerIdentity: VerifiedRelayerIdentity
+    let bundlerSecretRecord: BundlerSecretRecord
+
+    var bundlerAddress: String { bundlerIdentity.address }
 }
 
 struct OnboardingProvisioningService {
@@ -32,11 +35,12 @@ struct OnboardingProvisioningService {
 
     func createOrLoadIdentity() throws -> OnboardingProvisioningResult {
         let wallet = try createOrLoadWalletRecord()
-        let bundlerAddress = try createOrLoadBundlerAddress()
+        let bundler = try createOrLoadBundlerIdentity()
 
         return OnboardingProvisioningResult(
             kernelAccountAddress: wallet.kernelAccountAddress ?? "Unavailable",
-            bundlerAddress: bundlerAddress
+            bundlerIdentity: bundler.identity,
+            bundlerSecretRecord: bundler.record
         )
     }
 
@@ -104,13 +108,23 @@ struct OnboardingProvisioningService {
         return created
     }
 
-    private func createOrLoadBundlerAddress() throws -> String {
+    private func createOrLoadBundlerIdentity() throws -> (
+        identity: VerifiedRelayerIdentity,
+        record: BundlerSecretRecord
+    ) {
         let keyRef = settingsStore.bundlerKeyRef(chainId: chain.id) ?? "bundler-eoa:default:\(chain.id):1"
         settingsStore.setBundlerKeyRef(keyRef, chainId: chain.id)
 
         if let identity = try BundlerKeyStore.shared.verifiedIdentity(forKeyRef: keyRef) {
+            // This is reached only from the explicit Create Keys / Retry action.
+            // Reading the protected value proves the stored public metadata still
+            // matches the secret before wallet-node is allowed to register it.
+            let record = try BundlerKeyStore.shared.read(
+                keyRef: keyRef,
+                reason: "Finish setting up the local relayer"
+            )
             settingsStore.setBundlerAddress(identity.address, chainId: chain.id)
-            return identity.address
+            return (identity, record)
         }
 
         if try BundlerKeyStore.shared.hasKey(forKeyRef: keyRef) {
@@ -123,17 +137,18 @@ struct OnboardingProvisioningService {
                 secret: record.secret
             )
             settingsStore.setBundlerAddress(identity.address, chainId: chain.id)
-            return identity.address
+            return (identity, record)
         }
 
         let generated = try WalletSignature.generateBundlerSecret()
         try BundlerKeyStore.shared.add(keyRef: keyRef, secret: generated.secret)
+        let record = BundlerSecretRecord(keyRef: keyRef, secret: generated.secret)
         let identity = try VerifiedRelayerIdentity.derive(
             keyRef: keyRef,
             secret: generated.secret
         )
         settingsStore.setBundlerAddress(identity.address, chainId: chain.id)
-        return identity.address
+        return (identity, record)
     }
 
 }

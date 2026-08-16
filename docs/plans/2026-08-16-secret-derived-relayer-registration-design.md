@@ -10,6 +10,7 @@ This is not a display-only problem. Falling back to the cached address would let
 
 - wallet-node must derive the registered address from the 32-byte relayer secret. It must not accept a bare public address as proof of identity.
 - The secret must travel only through the existing authenticated inherited file descriptor after the helper executable has passed `TrustedHelperLaunchGate` verification.
+- wallet-node must install its signal, alive-pipe, and parent-PID lifecycle guards before reading that descriptor. Reconciliation and chain startup must stop if the parent disappears, so a secret-bearing startup cannot outlive the app while waiting on RPC or Helios.
 - A fresh setup must not add another biometric prompt. The newly generated secret is already in app memory.
 - Existing or interrupted setup may authenticate once when the user explicitly resumes key setup. Passive launch, focus, and status refresh paths must remain prompt-free.
 - After registration, the helper that received the secret must be terminated and reaped. A second read-only launch must prove that the durable public mapping survived while the private key is absent from daemon memory.
@@ -29,6 +30,8 @@ For a supplied `BundlerSecretRecord`, the service:
 5. Launches wallet-node again with `{"keys":[]}`.
 6. Reads status and verifies the same identity, `keyLoaded == false`, and the normal locked state.
 7. Terminates and reaps the read-only daemon before returning success.
+
+Before any fd 5 payload is read, wallet-node installs the app-lifetime watcher and parent-PID backstop. Every asynchronous startup phase races against that shutdown signal. This makes the short-lived registration launch safe even if the app crashes before wallet-node emits its ready event.
 
 The service disables Helios only for these two short registration probes. Registration needs the local store and the public execution RPC balance surface, not a consensus sync. The normal onboarding readiness and dashboard launch immediately rewrite the daemon configuration with the user's actual verification setting.
 
@@ -71,4 +74,5 @@ This would make onboarding appear to work but violate on-demand authentication. 
 - Source/integration tests proving onboarding cannot publish ready before registration and reset cannot bootstrap before registration.
 - Existing authentication audits proving passive startup and focus changes still contain no relayer Keychain read.
 - Existing wallet-node fd lifecycle tests proving secret-fd registration persists an active account, plus focused Rust tests for reconciliation conflict and idempotency behavior.
+- Startup lifecycle tests proving alive-pipe closure cancels work even before the ready event and cannot strand a secret-loaded helper during a slow chain startup.
 - Full Swift and Rust test suites, followed by an Xcode Debug build using an isolated DerivedData directory so the developer's runnable signed product is not overwritten by an unsigned verification build.

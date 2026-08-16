@@ -28,6 +28,8 @@
 - `wallet-macos/Tests/WalletMacOSAppTests/RelayerBootstrapRegistrationTests.swift`: pure policy and two-probe orchestration regression tests.
 - `wallet-macos/Tests/WalletMacOSAppTests/OnDemandAuthenticationAuditTests.swift`: source-order checks for onboarding/reset and preservation of prompt-free passive paths.
 - `local-wallet-daemon/crates/wallet-node/tests/integration_fd_e2e.rs`: prove an fd-registered identity persists across an empty-key restart as active and locked.
+- `local-wallet-daemon/crates/wallet-node/src/main.rs`: install parent-lifetime guards before secret loading and make startup cancellation-aware.
+- `local-wallet-daemon/crates/wallet-node/src/lifecycle.rs`: provide any small shared cancellation primitive needed by early startup.
 
 ---
 
@@ -308,10 +310,45 @@ git commit -m "test: prove relayer registration survives locked restart"
 
 ---
 
-### Task 5: Full Verification and Final Checkpoint
+### Task 5: Harden Secret-Bearing Startup Against Parent Death
 
 **Files:**
-- Modify only if verification exposes a defect in Task 1 through Task 4.
+- Modify: `local-wallet-daemon/crates/wallet-node/src/main.rs`
+- Modify if needed: `local-wallet-daemon/crates/wallet-node/src/lifecycle.rs`
+- Modify: `local-wallet-daemon/crates/wallet-node/tests/integration_fd_e2e.rs`
+
+- [ ] **Step 1: Add a failing early-parent-death regression test**
+
+Start wallet-node in fd mode against a deliberately non-responsive execution RPC, deliver a valid secret payload, close the alive-pipe writer before a ready event is possible, and assert the child exits within the bounded timeout.
+
+- [ ] **Step 2: Install lifetime guards before secret loading**
+
+Create the shutdown watch channel and install signal handlers immediately after CLI validation. In fd mode, install the alive-pipe watcher and parent-PID backstop before opening the store or reading fd 5. Do not install them a second time when the Unix transport starts.
+
+- [ ] **Step 3: Make async startup cancellation-aware**
+
+Race bundler-account reconciliation, Helios startup, and execution-RPC validation against the shutdown receiver. Parent death exits cleanly without emitting a misleading ready failure and drops the in-memory key store. Preserve existing fatal-ready error reporting for genuine startup failures.
+
+- [ ] **Step 4: Run focused Rust tests**
+
+```bash
+cargo test --manifest-path local-wallet-daemon/Cargo.toml -p wallet-node lifecycle
+cargo test --manifest-path local-wallet-daemon/Cargo.toml -p wallet-node --test integration_fd_e2e -- --include-ignored --test-threads=1
+```
+
+- [ ] **Step 5: Commit Task 5**
+
+```bash
+git add local-wallet-daemon/crates/wallet-node/src/main.rs local-wallet-daemon/crates/wallet-node/src/lifecycle.rs local-wallet-daemon/crates/wallet-node/tests/integration_fd_e2e.rs
+git commit -m "fix: guard secret-bearing daemon startup"
+```
+
+---
+
+### Task 6: Full Verification and Final Checkpoint
+
+**Files:**
+- Modify only if verification exposes a defect in Task 1 through Task 5.
 
 **Interfaces:**
 - Consumes: all prior tasks.
@@ -347,7 +384,7 @@ Expected: `** BUILD SUCCEEDED **`. Do not run this unsigned artifact and do not 
 ```bash
 git diff --check
 git status --short
-git diff --stat HEAD~4..HEAD
+git diff --stat HEAD~5..HEAD
 ```
 
 Expected: no whitespace errors; `LocalWallet.xcodeproj/project.pbxproj` remains the only unrelated unstaged modification.

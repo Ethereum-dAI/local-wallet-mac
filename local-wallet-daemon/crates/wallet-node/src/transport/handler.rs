@@ -4730,7 +4730,8 @@ mod tests {
         assert_eq!(chain.is_synced_call_count(), 0);
 
         let mut new_op = sample_user_op("0xab");
-        new_op["callData"] = json!("0x1235");
+        new_op["callData"] = json!(sample_execution_call_data(&[0x12, 0x35]));
+        canonicalize_submit_gas(&mut new_op);
         let new_value = call_rpc(
             &handler,
             &auth_header,
@@ -5916,7 +5917,7 @@ mod tests {
             "nonce": "0x01",
             "factory": format!("{:#x}", wallet_bundler::PINNED_KERNEL_FACTORY_ADDRESS),
             "factoryData": hex_data(&factory_data),
-            "callData": "0x1234",
+            "callData": sample_execution_call_data(&[0x12, 0x34]),
             "callGasLimit": "0x10",
             "verificationGasLimit": "0x20",
             "preVerificationGas": "0x30",
@@ -5928,6 +5929,14 @@ mod tests {
             canonicalize_submit_gas(&mut op);
         }
         op
+    }
+
+    fn sample_execution_call_data(inner: &[u8]) -> String {
+        hex_data(&wallet_bundler::encode_erc7579_single_execution(
+            Address::from([0x11; 20]),
+            U256::ZERO,
+            ChainBytes::copy_from_slice(inner),
+        ))
     }
 
     fn deployed_sample_user_op(signature: &str) -> serde_json::Value {

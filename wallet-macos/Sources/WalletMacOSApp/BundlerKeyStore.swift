@@ -170,6 +170,257 @@ struct RelayerPublicIdentityStore: Sendable {
     }
 }
 
+/// Append-only public journal selecting the relayer identities authorized for one chain.
+///
+/// Keychain account uniqueness arbitrates concurrent writers. Every candidate is validated
+/// against the current digest-linked snapshot before insertion, and a duplicate account is
+/// accepted only when the stored record is byte-for-byte the same canonical transition.
+struct RelayerChainStateJournalStore: Sendable {
+    static let shared = RelayerChainStateJournalStore()
+    static let service = "com.localwallet.bundler-eoa.chain-state"
+
+    enum StoreError: Error, Equatable, LocalizedError {
+        case interactionRequired
+        case malformedResult
+        case malformedAccount(String)
+        case malformedRecord(String)
+        case recordAccountMismatch(account: String, chainID: UInt64, epoch: UInt64)
+        case duplicateRecordMissing(String)
+        case conflictingAppend(chainID: UInt64, epoch: UInt64)
+        case keychain(OSStatus)
+
+        var errorDescription: String? {
+            switch self {
+            case .interactionRequired:
+                return "Relayer selection journal unexpectedly requires authentication."
+            case .malformedResult:
+                return "Relayer selection journal returned a malformed Keychain result."
+            case .malformedAccount(let account):
+                return "Relayer selection journal has a malformed account \(account)."
+            case .malformedRecord(let account):
+                return "Relayer selection journal has a malformed record for \(account)."
+            case let .recordAccountMismatch(account, chainID, epoch):
+                return "Relayer selection journal record \(account) does not match chain \(chainID), epoch \(epoch)."
+            case .duplicateRecordMissing(let account):
+                return "Relayer selection journal record \(account) disappeared during reconciliation."
+            case let .conflictingAppend(chainID, epoch):
+                return "Relayer selection journal has a conflicting transition for chain \(chainID), epoch \(epoch)."
+            case .keychain(let status):
+                return "Relayer selection journal Keychain operation failed with status \(status)."
+            }
+        }
+    }
+
+    private let client: any SecurityItemClient
+
+    init(client: any SecurityItemClient = SystemSecurityItemClient()) {
+        self.client = client
+    }
+
+    /// Appends one validated transition. Repeating the exact transition is idempotent.
+    @discardableResult
+    func append(_ proposed: RelayerChainState) throws -> RelayerChainState {
+        let existing = try records()
+        let chainRecords = existing.filter { $0.chainID == proposed.chainID }
+        if !chainRecords.isEmpty {
+            _ = try RelayerChainSnapshot.validate(
+                chainRecords,
+                expectedChainID: proposed.chainID
+            )
+        }
+
+        if let sameEpoch = chainRecords.first(where: { $0.epoch == proposed.epoch }) {
+            guard sameEpoch == proposed else {
+                throw StoreError.conflictingAppend(
+                    chainID: proposed.chainID,
+                    epoch: proposed.epoch
+                )
+            }
+        } else {
+            _ = try RelayerChainSnapshot.validate(
+                chainRecords + [proposed],
+                expectedChainID: proposed.chainID
+            )
+        }
+
+        var attributes = baseQuery(account: Self.account(for: proposed))
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        attributes[kSecValueData as String] = try proposed.canonicalEncoding()
+
+        let response = client.add(attributes)
+        switch response.status {
+        case errSecSuccess:
+            return proposed
+        case errSecDuplicateItem:
+            let account = Self.account(for: proposed)
+            guard let stored = try record(account: account) else {
+                throw StoreError.duplicateRecordMissing(account)
+            }
+            do {
+                return try RelayerChainStateAppendPolicy.resolveConcurrentAppend(
+                    proposed: proposed,
+                    stored: stored
+                )
+            } catch {
+                throw StoreError.conflictingAppend(
+                    chainID: proposed.chainID,
+                    epoch: proposed.epoch
+                )
+            }
+        default:
+            throw mapSecurityStatus(response.status)
+        }
+    }
+
+    func snapshot(chainID: UInt64) throws -> RelayerChainSnapshot? {
+        let chainRecords = try records().filter { $0.chainID == chainID }
+        guard !chainRecords.isEmpty else { return nil }
+        return try RelayerChainSnapshot.validate(chainRecords, expectedChainID: chainID)
+    }
+
+    func deleteAll() throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecUseDataProtectionKeychain as String: true,
+        ]
+        let status = client.delete(query)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw mapSecurityStatus(status)
+        }
+    }
+
+    static func account(chainID: UInt64, epoch: UInt64) -> String {
+        "v1:\(chainID):\(epoch)"
+    }
+
+    private static func account(for state: RelayerChainState) -> String {
+        account(chainID: state.chainID, epoch: state.epoch)
+    }
+
+    private func records() throws -> [RelayerChainState] {
+        let context = nonInteractiveContext()
+        defer { context.invalidate() }
+
+        var query = baseQuery(account: nil)
+        query[kSecMatchLimit as String] = kSecMatchLimitAll
+        query[kSecReturnAttributes as String] = true
+        query[kSecReturnData as String] = true
+        query[kSecUseAuthenticationContext as String] = context
+
+        let response = client.copyMatching(query)
+        if response.status == errSecItemNotFound {
+            return []
+        }
+        if response.status == errSecInteractionNotAllowed {
+            throw StoreError.interactionRequired
+        }
+        guard response.status == errSecSuccess else {
+            throw mapSecurityStatus(response.status)
+        }
+
+        let items: [[String: Any]]
+        if let all = response.result as? [[String: Any]] {
+            items = all
+        } else if let one = response.result as? [String: Any] {
+            items = [one]
+        } else {
+            throw StoreError.malformedResult
+        }
+        return try items.map(decodeItem)
+    }
+
+    private func record(account: String) throws -> RelayerChainState? {
+        let context = nonInteractiveContext()
+        defer { context.invalidate() }
+
+        var query = baseQuery(account: account)
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecReturnAttributes as String] = true
+        query[kSecReturnData as String] = true
+        query[kSecUseAuthenticationContext as String] = context
+
+        let response = client.copyMatching(query)
+        if response.status == errSecItemNotFound {
+            return nil
+        }
+        if response.status == errSecInteractionNotAllowed {
+            throw StoreError.interactionRequired
+        }
+        guard response.status == errSecSuccess else {
+            throw mapSecurityStatus(response.status)
+        }
+        guard let item = response.result as? [String: Any] else {
+            throw StoreError.malformedResult
+        }
+        return try decodeItem(item)
+    }
+
+    private func decodeItem(_ item: [String: Any]) throws -> RelayerChainState {
+        guard let account = item[kSecAttrAccount as String] as? String else {
+            throw StoreError.malformedResult
+        }
+        guard let slot = Self.slot(from: account) else {
+            throw StoreError.malformedAccount(account)
+        }
+        guard let data = item[kSecValueData as String] as? Data else {
+            throw StoreError.malformedRecord(account)
+        }
+        let state: RelayerChainState
+        do {
+            state = try RelayerChainState.decodeCanonical(data)
+        } catch {
+            throw StoreError.malformedRecord(account)
+        }
+        guard state.chainID == slot.chainID, state.epoch == slot.epoch else {
+            throw StoreError.recordAccountMismatch(
+                account: account,
+                chainID: state.chainID,
+                epoch: state.epoch
+            )
+        }
+        return state
+    }
+
+    private static func slot(from account: String) -> (chainID: UInt64, epoch: UInt64)? {
+        let parts = account.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              parts[0] == "v1",
+              let chainID = UInt64(parts[1]),
+              chainID > 0,
+              let epoch = UInt64(parts[2]),
+              account == Self.account(chainID: chainID, epoch: epoch) else {
+            return nil
+        }
+        return (chainID, epoch)
+    }
+
+    private func baseQuery(account: String?) -> [String: Any] {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecUseDataProtectionKeychain as String: true,
+        ]
+        if let account {
+            query[kSecAttrAccount as String] = account
+        }
+        return query
+    }
+
+    private func nonInteractiveContext() -> LAContext {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        return context
+    }
+
+    private func mapSecurityStatus(_ status: OSStatus) -> Error {
+        if status == errSecMissingEntitlement {
+            return AppError.missingEntitlement
+        }
+        return StoreError.keychain(status)
+    }
+}
+
 struct BundlerSecretRecord: Sendable {
     let keyRef: String
     let secret: Data

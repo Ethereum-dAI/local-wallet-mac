@@ -1,6 +1,58 @@
 import Foundation
+import LocalAuthentication
+import Security
 import Testing
 @testable import WalletMacOSApp
+
+private final class JournalSecurityItemClient: SecurityItemClient, @unchecked Sendable {
+    struct Response {
+        let status: OSStatus
+        let result: Any?
+    }
+
+    var addResponses: [Response]
+    var copyResponses: [Response]
+    var deleteStatuses: [OSStatus]
+    private(set) var additions: [[String: Any]] = []
+    private(set) var copies: [[String: Any]] = []
+    private(set) var copyInteractionNotAllowed: [Bool] = []
+    private(set) var deletions: [[String: Any]] = []
+
+    init(
+        addResponses: [Response] = [],
+        copyResponses: [Response] = [],
+        deleteStatuses: [OSStatus] = []
+    ) {
+        self.addResponses = addResponses
+        self.copyResponses = copyResponses
+        self.deleteStatuses = deleteStatuses
+    }
+
+    func add(_ attributes: [String: Any]) -> (status: OSStatus, result: Any?) {
+        additions.append(attributes)
+        let response = addResponses.isEmpty
+            ? Response(status: errSecSuccess, result: nil)
+            : addResponses.removeFirst()
+        return (response.status, response.result)
+    }
+
+    func copyMatching(_ query: [String: Any]) -> (status: OSStatus, result: Any?) {
+        copies.append(query)
+        copyInteractionNotAllowed.append(
+            (query[kSecUseAuthenticationContext as String] as? LAContext)?.interactionNotAllowed
+                ?? false
+        )
+        let response = copyResponses.isEmpty
+            ? Response(status: errSecItemNotFound, result: nil)
+            : copyResponses.removeFirst()
+        return (response.status, response.result)
+    }
+
+    func delete(_ query: [String: Any]) -> OSStatus {
+        deletions.append(query)
+        return deleteStatuses.isEmpty ? errSecSuccess : deleteStatuses.removeFirst()
+    }
+}
 
 @Suite struct RelayerChainStateJournalTests {
     private let chainID: UInt64 = 11_155_111
@@ -354,6 +406,154 @@ import Testing
         }
     }
 
+    @Test func journalStoreWritesCanonicalPromptFreeDataProtectionRecords() throws {
+        let genesis = try RelayerChainStateTransition.genesis(
+            chainID: chainID,
+            activeKeyRef: keyRef(1)
+        )
+        let client = JournalSecurityItemClient(
+            addResponses: [.init(status: errSecSuccess, result: nil)],
+            copyResponses: [.init(status: errSecItemNotFound, result: nil)]
+        )
+
+        #expect(try RelayerChainStateJournalStore(client: client).append(genesis) == genesis)
+
+        let addition = try #require(client.additions.first)
+        #expect(addition[kSecAttrService as String] as? String == RelayerChainStateJournalStore.service)
+        #expect(addition[kSecAttrAccount as String] as? String == "v1:11155111:0")
+        #expect(addition[kSecUseDataProtectionKeychain as String] as? Bool == true)
+        #expect(
+            addition[kSecAttrAccessible as String] as? String
+                == kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String
+        )
+        #expect(addition[kSecAttrAccessControl as String] == nil)
+        #expect(addition[kSecValueData as String] as? Data == (try genesis.canonicalEncoding()))
+
+        let read = try #require(client.copies.first)
+        #expect(read[kSecUseAuthenticationContext as String] is LAContext)
+        #expect(client.copyInteractionNotAllowed == [true])
+        #expect(read[kSecUseDataProtectionKeychain as String] as? Bool == true)
+    }
+
+    @Test func journalStoreAcceptsOnlyAnExactDuplicateWinner() throws {
+        let genesis = try RelayerChainStateTransition.genesis(
+            chainID: chainID,
+            activeKeyRef: keyRef(1)
+        )
+        let item = try journalItem(genesis)
+        let exactClient = JournalSecurityItemClient(
+            addResponses: [.init(status: errSecDuplicateItem, result: nil)],
+            copyResponses: [
+                .init(status: errSecSuccess, result: [item]),
+                .init(status: errSecSuccess, result: item),
+            ]
+        )
+        #expect(try RelayerChainStateJournalStore(client: exactClient).append(genesis) == genesis)
+
+        let competing = try RelayerChainStateTransition.genesis(
+            chainID: chainID,
+            activeKeyRef: keyRef(2)
+        )
+        let conflictClient = JournalSecurityItemClient(
+            addResponses: [.init(status: errSecDuplicateItem, result: nil)],
+            copyResponses: [
+                .init(status: errSecItemNotFound, result: nil),
+                .init(status: errSecSuccess, result: try journalItem(competing)),
+            ]
+        )
+        #expect(throws: RelayerChainStateJournalStore.StoreError.conflictingAppend(
+            chainID: chainID,
+            epoch: 0
+        )) {
+            try RelayerChainStateJournalStore(client: conflictClient).append(genesis)
+        }
+    }
+
+    @Test func journalStoreLoadsAndValidatesAChainSnapshot() throws {
+        let genesis = try RelayerChainStateTransition.genesis(
+            chainID: chainID,
+            activeKeyRef: keyRef(1)
+        )
+        let pending = try RelayerChainStateTransition.beginRotation(
+            from: try RelayerChainSnapshot.validate([genesis], expectedChainID: chainID),
+            candidateKeyRef: keyRef(2)
+        )
+        let mainnet = try RelayerChainStateTransition.genesis(
+            chainID: 1,
+            activeKeyRef: "bundler-eoa:default:1:1"
+        )
+        let client = JournalSecurityItemClient(copyResponses: [
+            .init(status: errSecSuccess, result: [
+                try journalItem(pending),
+                try journalItem(mainnet),
+                try journalItem(genesis),
+            ]),
+        ])
+
+        let snapshot = try #require(
+            try RelayerChainStateJournalStore(client: client).snapshot(chainID: chainID)
+        )
+        #expect(snapshot.states == [genesis, pending])
+        #expect(snapshot.head == pending)
+        let query = try #require(client.copies.first)
+        #expect(query[kSecUseAuthenticationContext as String] is LAContext)
+        #expect(client.copyInteractionNotAllowed == [true])
+        #expect(query[kSecMatchLimit as String] as? String == kSecMatchLimitAll as String)
+    }
+
+    @Test func journalStoreRejectsInvalidAppendBeforeWriting() throws {
+        let genesis = try RelayerChainStateTransition.genesis(
+            chainID: chainID,
+            activeKeyRef: keyRef(1)
+        )
+        let gap = try RelayerChainState(
+            chainID: chainID,
+            epoch: 2,
+            previousDigest: try genesis.digest(),
+            activeKeyRef: keyRef(1),
+            pendingKeyRef: keyRef(2)
+        )
+        let client = JournalSecurityItemClient(copyResponses: [
+            .init(status: errSecSuccess, result: [try journalItem(genesis)]),
+        ])
+
+        #expect(throws: RelayerChainSnapshot.ValidationError.epochGap(expected: 1, actual: 2)) {
+            try RelayerChainStateJournalStore(client: client).append(gap)
+        }
+        #expect(client.additions.isEmpty)
+    }
+
+    @Test func journalStoreRejectsMalformedAccountsAndInteractiveReads() throws {
+        let malformedClient = JournalSecurityItemClient(copyResponses: [
+            .init(status: errSecSuccess, result: [[
+                kSecAttrAccount as String: "not-a-journal-slot",
+                kSecValueData as String: Data(),
+            ]]),
+        ])
+        #expect(throws: RelayerChainStateJournalStore.StoreError.malformedAccount(
+            "not-a-journal-slot"
+        )) {
+            try RelayerChainStateJournalStore(client: malformedClient).snapshot(chainID: chainID)
+        }
+
+        let interactiveClient = JournalSecurityItemClient(copyResponses: [
+            .init(status: errSecInteractionNotAllowed, result: nil),
+        ])
+        #expect(throws: RelayerChainStateJournalStore.StoreError.interactionRequired) {
+            try RelayerChainStateJournalStore(client: interactiveClient).snapshot(chainID: chainID)
+        }
+    }
+
+    @Test func journalStoreDeleteAllIsScopedToItsDataProtectionService() throws {
+        let client = JournalSecurityItemClient(deleteStatuses: [errSecSuccess])
+        try RelayerChainStateJournalStore(client: client).deleteAll()
+
+        let query = try #require(client.deletions.first)
+        #expect(query[kSecAttrService as String] as? String == RelayerChainStateJournalStore.service)
+        #expect(query[kSecUseDataProtectionKeychain as String] as? Bool == true)
+        #expect(query[kSecAttrAccount as String] == nil)
+    }
+
     private func keyRef(_ index: UInt64) -> String {
         "bundler-eoa:default:\(chainID):\(index)"
     }
@@ -368,5 +568,15 @@ import Testing
             keyRef: keyRef(index),
             address: address(index: index)
         )
+    }
+
+    private func journalItem(_ state: RelayerChainState) throws -> [String: Any] {
+        [
+            kSecAttrAccount as String: RelayerChainStateJournalStore.account(
+                chainID: state.chainID,
+                epoch: state.epoch
+            ),
+            kSecValueData as String: try state.canonicalEncoding(),
+        ]
     }
 }

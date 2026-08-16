@@ -170,4 +170,3 @@ git add wallet-macos/Sources/WalletMacOSApp/ChatDashboardView.swift \
     wallet-macos/Tests/WalletMacOSAppTests/DashboardChromeAuditTests.swift
 git commit -m "feat: highlight active assistant controls"
 ```
-

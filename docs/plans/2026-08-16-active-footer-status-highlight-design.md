@@ -46,4 +46,3 @@ Thinking supplies `ChatPalette.accent` and highlights only when `thinkingEnabled
 - Add source-level audit coverage proving Session key highlights only the exact active state.
 - Run the focused dashboard chrome tests.
 - Run the full Swift package test suite.
-

@@ -4807,6 +4807,10 @@ struct LocalWalletChatDashboardView: View {
         }
     }
 
+    private var sessionPillIsHighlighted: Bool {
+        model.settingsSnapshot.session.statusTitle == "Active"
+    }
+
     private func runSessionPopoverAction(_ action: @escaping () async throws -> String) {
         guard !isSessionActionInProgress else {
             return
@@ -4829,9 +4833,17 @@ struct LocalWalletChatDashboardView: View {
             Button {
                 model.toggleThinking()
             } label: {
-                StatusPill(icon: model.thinkingEnabled ? "brain" : "brain.head.profile", text: model.thinkingEnabled ? "Thinking on" : "Thinking off")
+                StatusPill(
+                    icon: model.thinkingEnabled ? "brain" : "brain.head.profile",
+                    text: model.thinkingEnabled ? "Thinking on" : "Thinking off",
+                    tint: model.thinkingEnabled ? ChatPalette.accent : ChatPalette.secondaryText,
+                    isHighlighted: model.thinkingEnabled
+                )
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Thinking")
+            .accessibilityValue(model.thinkingEnabled ? "On" : "Off")
+            .help("Toggle model thinking")
             if model.hasExecutingIntent {
                 StatusPill(
                     icon: "arrow.triangle.2.circlepath",
@@ -4846,7 +4858,8 @@ struct LocalWalletChatDashboardView: View {
                 StatusPill(
                     icon: sessionPillIcon,
                     text: sessionPillText,
-                    tint: sessionPillTint
+                    tint: sessionPillTint,
+                    isHighlighted: sessionPillIsHighlighted
                 )
             }
             .buttonStyle(.plain)
@@ -7593,6 +7606,7 @@ private struct StatusPill: View {
     let icon: String
     let text: String
     var tint: Color = ChatPalette.secondaryText
+    var isHighlighted = false
 
     var body: some View {
         HStack(spacing: 7) {
@@ -7601,12 +7615,21 @@ private struct StatusPill: View {
                 .foregroundStyle(tint)
             Text(text)
                 .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(ChatPalette.secondaryText)
+                .foregroundStyle(isHighlighted ? ChatPalette.primaryText : ChatPalette.secondaryText)
                 .lineLimit(1)
         }
         .padding(.horizontal, 11)
         .frame(height: 32)
-        .background(Capsule().fill(ChatPalette.panel).overlay(Capsule().stroke(ChatPalette.border, lineWidth: 0.8)))
+        .background(
+            Capsule()
+                .fill(isHighlighted ? ChatPalette.selectedPanel : ChatPalette.panel)
+                .overlay(
+                    Capsule().stroke(
+                        isHighlighted ? tint.opacity(0.8) : ChatPalette.border,
+                        lineWidth: isHighlighted ? 1 : 0.8
+                    )
+                )
+        )
     }
 }
 

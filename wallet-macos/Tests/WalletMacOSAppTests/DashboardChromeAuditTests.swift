@@ -32,6 +32,41 @@ import Testing
         #expect(emptyState.contains("WelcomeStarterChip"))
     }
 
+    @Test func activeFooterControlsUseSemanticHighlights() throws {
+        let source = try dashboardSource()
+        let footer = try slice(source, from: "private var footerControls", until: "private var composer")
+        let thinkingControl = try slice(
+            footer,
+            from: "Button {\n                model.toggleThinking()",
+            until: "if model.hasExecutingIntent"
+        )
+        let sessionControl = try slice(
+            footer,
+            from: "Button {\n                isSessionPopoverPresented.toggle()",
+            until: "Button {\n                isGasPopoverPresented.toggle()"
+        )
+        let sessionHighlight = try slice(
+            source,
+            from: "private var sessionPillIsHighlighted",
+            until: "private func runSessionPopoverAction"
+        )
+        let statusPill = try slice(
+            source,
+            from: "private struct StatusPill",
+            until: "private struct SessionStatusPopover"
+        )
+
+        #expect(thinkingControl.contains("isHighlighted: model.thinkingEnabled"))
+        #expect(thinkingControl.contains(".accessibilityLabel(\"Thinking\")"))
+        #expect(thinkingControl.contains(".accessibilityValue(model.thinkingEnabled ? \"On\" : \"Off\")"))
+        #expect(sessionControl.contains("isHighlighted: sessionPillIsHighlighted"))
+        #expect(sessionHighlight.contains("model.settingsSnapshot.session.statusTitle == \"Active\""))
+        #expect(statusPill.contains("var isHighlighted = false"))
+        #expect(statusPill.contains("isHighlighted ? ChatPalette.primaryText : ChatPalette.secondaryText"))
+        #expect(statusPill.contains("isHighlighted ? ChatPalette.selectedPanel : ChatPalette.panel"))
+        #expect(statusPill.contains("isHighlighted ? tint.opacity(0.8) : ChatPalette.border"))
+    }
+
     private func dashboardSource() throws -> String {
         try String(
             contentsOf: packageRoot

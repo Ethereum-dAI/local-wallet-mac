@@ -81,12 +81,9 @@ struct BundlerKeyStore {
     /// queries never request `kSecValueData`, so this path stays prompt-free and
     /// is safe for dashboard rendering and pre-auth transaction checks.
     func verifiedIdentity(forKeyRef keyRef: String) throws -> VerifiedRelayerIdentity? {
-        let authenticationContext = LAContext()
-        authenticationContext.interactionNotAllowed = true
         var query = baseQuery(keyRef: keyRef)
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         query[kSecReturnAttributes as String] = true
-        query[kSecUseAuthenticationContext as String] = authenticationContext
 
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)

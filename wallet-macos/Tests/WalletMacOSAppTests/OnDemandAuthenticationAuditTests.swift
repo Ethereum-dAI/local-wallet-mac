@@ -3,6 +3,22 @@ import Testing
 @testable import WalletMacOSApp
 
 @Suite struct OnDemandAuthenticationAuditTests {
+    @Test func promptFreeRelayerIdentityLookupReadsOnlyPublicAttributes() throws {
+        let source = try appSource("BundlerKeyStore.swift")
+        let lookup = try slice(
+            source,
+            from: "func verifiedIdentity(forKeyRef",
+            until: "private func load("
+        )
+
+        #expect(lookup.contains("kSecReturnAttributes"))
+        #expect(lookup.contains("kSecAttrGeneric"))
+        #expect(!lookup.contains("kSecReturnData"))
+        #expect(!lookup.contains("kSecValueData"))
+        #expect(!lookup.contains("kSecUseAuthenticationContext"))
+        #expect(!lookup.contains("LAContext()"))
+    }
+
     @Test func appActivationAndManagedDaemonLaunchNeverReadProtectedSecrets() throws {
         let source = try appSource("AppModel.swift")
         let resume = try slice(

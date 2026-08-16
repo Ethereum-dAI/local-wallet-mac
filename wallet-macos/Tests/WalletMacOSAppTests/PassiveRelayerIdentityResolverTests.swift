@@ -12,6 +12,8 @@ import Testing
         let resolved = try PassiveRelayerIdentityResolver.resolve(
             status: status(index: 1),
             expectedChainID: chainID,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: "sepolia",
             snapshot: snapshot,
             identityForKeyRef: { keyRef in
                 requestedKeyRefs.append(keyRef)
@@ -32,6 +34,8 @@ import Testing
             _ = try PassiveRelayerIdentityResolver.resolve(
                 status: status(index: 1),
                 expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
                 snapshot: nil,
                 identityForKeyRef: { _ in
                     identityReadCount += 1
@@ -52,6 +56,8 @@ import Testing
             _ = try PassiveRelayerIdentityResolver.resolve(
                 status: status(index: 2),
                 expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
                 snapshot: try activeSnapshot(index: 1),
                 identityForKeyRef: { keyRef in
                     [active.keyRef: active, unjournaled.keyRef: unjournaled][keyRef]
@@ -82,6 +88,8 @@ import Testing
             _ = try PassiveRelayerIdentityResolver.resolve(
                 status: status(index: 2, lifecycle: "pending_funding"),
                 expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
                 snapshot: snapshot,
                 identityForKeyRef: { keyRef in
                     [active.keyRef: active, pending.keyRef: pending][keyRef]
@@ -97,10 +105,51 @@ import Testing
             _ = try PassiveRelayerIdentityResolver.resolve(
                 status: status(index: 1, compromiseSubmissionBlocked: true),
                 expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
                 snapshot: try activeSnapshot(index: 1),
                 identityForKeyRef: { _ in expected }
             )
         }
+    }
+
+    @Test func wrongOwnerScopeOrNetworkProfileFailsBeforePublicIdentityRead() throws {
+        var identityReadCount = 0
+        let snapshot = try activeSnapshot(index: 1)
+
+        #expect(throws: PassiveRelayerIdentityResolver.Failure.wrongOwnerScope(
+            expected: "default",
+            actual: "attacker"
+        )) {
+            _ = try PassiveRelayerIdentityResolver.resolve(
+                status: status(index: 1, ownerScope: "attacker"),
+                expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
+                snapshot: snapshot,
+                identityForKeyRef: { _ in
+                    identityReadCount += 1
+                    return nil
+                }
+            )
+        }
+        #expect(throws: PassiveRelayerIdentityResolver.Failure.wrongNetworkProfile(
+            expected: "sepolia",
+            actual: "mainnet"
+        )) {
+            _ = try PassiveRelayerIdentityResolver.resolve(
+                status: status(index: 1, networkProfile: "mainnet"),
+                expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
+                snapshot: snapshot,
+                identityForKeyRef: { _ in
+                    identityReadCount += 1
+                    return nil
+                }
+            )
+        }
+        #expect(identityReadCount == 0)
     }
 
     private func activeSnapshot(index: UInt64) throws -> RelayerChainSnapshot {
@@ -130,15 +179,17 @@ import Testing
     private func status(
         index: UInt64,
         lifecycle: String = "active",
-        compromiseSubmissionBlocked: Bool = false
+        compromiseSubmissionBlocked: Bool = false,
+        ownerScope: String = "default",
+        networkProfile: String = "sepolia"
     ) -> WalletNodeClient.RelayerStatus {
         WalletNodeClient.RelayerStatus(
             ready: !compromiseSubmissionBlocked && lifecycle == "active",
             keyLoaded: true,
             reason: nil,
-            ownerScope: "default",
+            ownerScope: ownerScope,
             chainId: Int(chainID),
-            networkProfile: "sepolia",
+            networkProfile: networkProfile,
             eoa: address(index),
             keyRef: keyRef(index),
             balance: "0x2386f26fc10000",

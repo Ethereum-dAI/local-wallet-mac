@@ -1,4 +1,5 @@
 import Darwin
+import CoreFoundation
 import Foundation
 
 struct WalletNodeClient {
@@ -92,11 +93,7 @@ struct WalletNodeClient {
             let lastExportedAt: Int?
 
             var canExport: Bool {
-                lifecycle == "active" || lifecycle == "retiring" || lifecycle == "retired"
-            }
-
-            var canDelete: Bool {
-                lifecycle != "deleted"
+                lifecycle == "active" || lifecycle == "retiring"
             }
 
             var displayTitle: String {
@@ -486,15 +483,22 @@ struct WalletNodeClient {
     }
 
     func sendUserOperation(
-        operation signedOperation: SignedUserOperation
+        operation signedOperation: SignedUserOperation,
+        expectedRelayer: VerifiedRelayerIdentity
     ) async throws -> String {
         let draft = signedOperation.draft
+        let params: [Any] = [
+            rpcUserOperation(draft: draft, signature: signedOperation.signature),
+            draft.entryPoint,
+            [
+                "chainId": expectedRelayer.chainID,
+                "keyRef": expectedRelayer.keyRef,
+                "address": expectedRelayer.address,
+            ],
+        ]
         let result = try await call(
             method: "localwallet_sendUserOperation",
-            params: [
-                rpcUserOperation(draft: draft, signature: signedOperation.signature),
-                draft.entryPoint,
-            ]
+            params: params
         )
         guard let userOpHash = result as? String else {
             throw ClientError.invalidResponse
@@ -1102,50 +1106,143 @@ private extension String {
     }
 }
 
+private enum ManagedRelayerJSONScalar {
+    static func boolean(_ value: Any?) throws -> Bool {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID() else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        return number.boolValue
+    }
+
+    static func integer(_ value: Any?) throws -> Int {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              !CFNumberIsFloatType(number),
+              let value = Int(number.stringValue),
+              String(value) == number.stringValue else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        return value
+    }
+
+    static func optionalNonnegativeInteger(_ value: Any?) throws -> Int? {
+        if value == nil || value is NSNull {
+            return nil
+        }
+        let value = try integer(value)
+        guard value >= 0 else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        return value
+    }
+}
+
 extension WalletNodeClient.RelayerStatus {
     init(json: [String: Any]) throws {
-        guard let ready = json["ready"] as? Bool,
-              let ownerScope = json["ownerScope"] as? String,
-              let chainId = json["chainId"] as? Int,
+        let ready = try ManagedRelayerJSONScalar.boolean(json["ready"])
+        let keyLoaded = try ManagedRelayerJSONScalar.boolean(json["keyLoaded"])
+        let chainId = try ManagedRelayerJSONScalar.integer(json["chainId"])
+        let needsTopup = try ManagedRelayerJSONScalar.boolean(json["needsTopup"])
+        guard let ownerScope = json["ownerScope"] as? String,
               let networkProfile = json["networkProfile"] as? String,
               let balance = json["balance"] as? String,
-              let thresholdLow = json["thresholdLow"] as? String,
-              let needsTopup = json["needsTopup"] as? Bool
-        else {
+              let thresholdLow = json["thresholdLow"] as? String else {
             throw WalletNodeClient.ClientError.invalidResponse
         }
 
-        // A fresh read-only daemon intentionally has no active relayer row. The managed daemon
-        // returns nulls for those two fields; decoding that ordinary locked state must not turn
-        // a passive status read into an error.
-        let eoa = json["eoa"] as? String ?? "Not available"
-        let lifecycle = json["lifecycle"] as? String ?? "missing"
+        guard let chainID = UInt64(exactly: chainId), chainID > 0 else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
 
-        let rotation: [String: Any]?
-        switch json["rotation"] {
+        guard json.keys.contains("reason") else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        let reason: String?
+        switch json["reason"] {
         case nil, is NSNull:
-            rotation = nil
-        case let value as [String: Any]:
-            rotation = value
+            reason = nil
+        case let value as String:
+            reason = value
         default:
             throw WalletNodeClient.ClientError.invalidResponse
         }
 
-        let pendingFundingJSON: [[String: Any]]
-        switch rotation?["pendingFunding"] {
-        case nil:
-            pendingFundingJSON = []
-        case let value as [[String: Any]]:
-            pendingFundingJSON = value
+        guard json.keys.contains("keyRef") else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        let keyRef: String?
+        switch json["keyRef"] {
+        case is NSNull:
+            keyRef = nil
+        case let value as String:
+            keyRef = value
         default:
             throw WalletNodeClient.ClientError.invalidResponse
         }
-        guard let chainID = UInt64(exactly: chainId) else {
+
+        let eoa: String
+        let lifecycle: String
+        if let keyRef {
+            guard RelayerKeyReferenceAuthorityPolicy.matches(
+                keyRef,
+                ownerScope: ownerScope,
+                chainID: chainID
+            ),
+            let rawEOA = json["eoa"] as? String,
+            let normalizedEOA = try? VerifiedRelayerIdentity.normalizedAddress(rawEOA),
+            let rawLifecycle = json["lifecycle"] as? String,
+            rawLifecycle == "active" else {
+                throw WalletNodeClient.ClientError.invalidResponse
+            }
+            eoa = normalizedEOA
+            lifecycle = rawLifecycle
+        } else {
+            guard json["eoa"] is NSNull,
+                  json["lifecycle"] is NSNull,
+                  keyLoaded == false else {
+                throw WalletNodeClient.ClientError.invalidResponse
+            }
+            eoa = "Not available"
+            lifecycle = "missing"
+        }
+
+        guard let compromise = json["compromise"] as? [String: Any],
+              compromise.keys.contains("reason") else {
             throw WalletNodeClient.ClientError.invalidResponse
         }
+        let compromiseSuspected = try ManagedRelayerJSONScalar.boolean(
+            compromise["suspected"]
+        )
+        let compromiseSubmissionBlocked = try ManagedRelayerJSONScalar.boolean(
+            compromise["submissionBlocked"]
+        )
+        let compromiseReason: String?
+        switch compromise["reason"] {
+        case nil, is NSNull:
+            compromiseReason = nil
+        case let value as String:
+            compromiseReason = value
+        default:
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        guard compromiseSuspected == compromiseSubmissionBlocked,
+              (compromiseReason != nil) == compromiseSuspected,
+              (reason == "bundler_eoa_compromise_suspected")
+                == compromiseSubmissionBlocked else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+
+        guard let rotation = json["rotation"] as? [String: Any],
+              let pendingFundingJSON = rotation["pendingFunding"] as? [[String: Any]],
+              let retiringJSON = rotation["retiring"] as? [String] else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        let rotating = try ManagedRelayerJSONScalar.boolean(rotation["rotating"])
         let pendingFunding = try pendingFundingJSON.map {
             try WalletNodeClient.RelayerStatus.PendingFundingEntry(
                 json: $0,
+                expectedOwnerScope: ownerScope,
                 expectedChainID: chainID
             )
         }
@@ -1153,30 +1250,69 @@ extension WalletNodeClient.RelayerStatus {
               Set(pendingFunding.map(\.eoa)).count == pendingFunding.count else {
             throw WalletNodeClient.ClientError.invalidResponse
         }
-        let retiring = rotation?["retiring"] as? [String] ?? []
-        let keyHistory = (json["keyHistory"] as? [[String: Any]] ?? []).compactMap {
-            WalletNodeClient.RelayerStatus.KeyHistoryEntry(json: $0)
+        let retiring = try retiringJSON.map {
+            try VerifiedRelayerIdentity.normalizedAddress($0)
+        }
+        guard Set(retiring).count == retiring.count,
+              rotating == (!pendingFunding.isEmpty || !retiring.isEmpty) else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+
+        guard let keyHistoryJSON = json["keyHistory"] as? [[String: Any]] else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        let keyHistory = try keyHistoryJSON.map {
+            try WalletNodeClient.RelayerStatus.KeyHistoryEntry(
+                json: $0,
+                expectedOwnerScope: ownerScope,
+                expectedChainID: chainID
+            )
+        }
+        guard Set(keyHistory.map(\.keyRef)).count == keyHistory.count,
+              Set(keyHistory.map(\.eoa)).count == keyHistory.count else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        if let keyRef {
+            let currentRows = keyHistory.filter {
+                $0.keyRef == keyRef || $0.eoa == eoa || $0.lifecycle == "active"
+            }
+            guard currentRows.count == 1,
+                  currentRows[0].keyRef == keyRef,
+                  currentRows[0].eoa == eoa,
+                  currentRows[0].lifecycle == lifecycle else {
+                throw WalletNodeClient.ClientError.invalidResponse
+            }
+        } else if keyHistory.contains(where: { $0.lifecycle == "active" }) {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        let pendingHistory = keyHistory.filter { $0.lifecycle == "pending_funding" }
+        guard pendingHistory.count == pendingFunding.count,
+              Set(pendingHistory.map(\.keyRef)) == Set(pendingFunding.map(\.keyRef)),
+              Set(pendingHistory.map(\.eoa)) == Set(pendingFunding.map(\.eoa)) else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        let retiringHistory = keyHistory.filter { $0.lifecycle == "retiring" }
+        guard retiringHistory.count == retiring.count,
+              Set(retiringHistory.map(\.eoa)) == Set(retiring) else {
+            throw WalletNodeClient.ClientError.invalidResponse
         }
         let auditEvents = json["auditEvents"] as? [[String: Any]] ?? []
         let latestAuditEvent = auditEvents.first?["event_type"] as? String
-        let replacement = (json["replacement"] as? [String: Any]).flatMap {
-            WalletNodeClient.RelayerStatus.ReplacementStatus(json: $0)
+        guard let replacementJSON = json["replacement"] as? [String: Any] else {
+            throw WalletNodeClient.ClientError.invalidResponse
         }
-        let compromise = json["compromise"] as? [String: Any]
-        let compromiseSubmissionBlocked = compromise?["submissionBlocked"] as? Bool
-            ?? ((json["reason"] as? String) == "bundler_eoa_compromise_suspected")
-
+        let replacement = try WalletNodeClient.RelayerStatus.ReplacementStatus(
+            json: replacementJSON
+        )
         self.init(
             ready: ready,
-            // Older externally managed daemons do not expose this field. Preserve compatibility
-            // there; the managed daemon always sends the authoritative value.
-            keyLoaded: json["keyLoaded"] as? Bool ?? true,
-            reason: json["reason"] as? String,
+            keyLoaded: keyLoaded,
+            reason: reason,
             ownerScope: ownerScope,
             chainId: chainId,
             networkProfile: networkProfile,
             eoa: eoa,
-            keyRef: json["keyRef"] as? String,
+            keyRef: keyRef,
             balance: balance,
             thresholdLow: thresholdLow,
             needsTopup: needsTopup,
@@ -1395,33 +1531,65 @@ extension WalletNodeClient.NetworkStatus.Bundler {
 }
 
 private extension WalletNodeClient.RelayerStatus.KeyHistoryEntry {
-    init?(json: [String: Any]) {
+    init(
+        json: [String: Any],
+        expectedOwnerScope: String,
+        expectedChainID: UInt64
+    ) throws {
+        let retiredAt = try Self.optionalNonnegativeInt(json["retiredAt"])
+        let deletedAt = try Self.optionalNonnegativeInt(json["deletedAt"])
+        let lastExportedAt = try Self.optionalNonnegativeInt(json["lastExportedAt"])
         guard let eoa = json["eoa"] as? String,
               let keyRef = json["keyRef"] as? String,
-              let lifecycle = json["lifecycle"] as? String
+              let ownerScope = json["ownerScope"] as? String,
+              ownerScope == expectedOwnerScope,
+              let entryChainID = try? ManagedRelayerJSONScalar.integer(json["chainId"]),
+              UInt64(exactly: entryChainID) == expectedChainID,
+              let lifecycle = json["lifecycle"] as? String,
+              ["active", "pending_funding", "retiring", "retired", "deleted"].contains(lifecycle),
+              let createdAt = try? ManagedRelayerJSONScalar.integer(json["createdAt"]),
+              createdAt >= 0,
+              RelayerKeyReferenceAuthorityPolicy.matches(
+                keyRef,
+                ownerScope: expectedOwnerScope,
+                chainID: expectedChainID
+              ),
+              let normalizedEOA = try? VerifiedRelayerIdentity.normalizedAddress(eoa)
         else {
-            return nil
+            throw WalletNodeClient.ClientError.invalidResponse
         }
 
         self.init(
-            eoa: eoa,
+            eoa: normalizedEOA,
             keyRef: keyRef,
             lifecycle: lifecycle,
-            createdAt: json["createdAt"] as? Int,
-            retiredAt: json["retiredAt"] as? Int,
-            deletedAt: json["deletedAt"] as? Int,
-            lastExportedAt: json["lastExportedAt"] as? Int
+            createdAt: createdAt,
+            retiredAt: retiredAt,
+            deletedAt: deletedAt,
+            lastExportedAt: lastExportedAt
         )
+    }
+
+    private static func optionalNonnegativeInt(_ value: Any?) throws -> Int? {
+        try ManagedRelayerJSONScalar.optionalNonnegativeInteger(value)
     }
 }
 
 private extension WalletNodeClient.RelayerStatus.PendingFundingEntry {
-    init(json: [String: Any], expectedChainID: UInt64) throws {
+    init(
+        json: [String: Any],
+        expectedOwnerScope: String,
+        expectedChainID: UInt64
+    ) throws {
         guard let eoa = json["eoa"] as? String,
               let keyRef = json["keyRef"] as? String,
-              let createdAt = json["createdAt"] as? Int,
+              let createdAt = try? ManagedRelayerJSONScalar.integer(json["createdAt"]),
               createdAt >= 0,
-              BundlerLaunchKeyPolicy.chainId(ofKeyRef: keyRef) == expectedChainID,
+              RelayerKeyReferenceAuthorityPolicy.matches(
+                keyRef,
+                ownerScope: expectedOwnerScope,
+                chainID: expectedChainID
+              ),
               let normalizedEOA = try? VerifiedRelayerIdentity.normalizedAddress(eoa)
         else {
             throw WalletNodeClient.ClientError.invalidResponse
@@ -1431,20 +1599,41 @@ private extension WalletNodeClient.RelayerStatus.PendingFundingEntry {
 }
 
 extension WalletNodeClient.RelayerStatus.ReplacementStatus {
-    init?(json: [String: Any]) {
-        guard let eligible = json["eligible"] as? Bool,
-              let blocked = json["blocked"] as? Bool
-        else {
-            return nil
+    init(json: [String: Any]) throws {
+        guard json.keys.contains("blockedReason"),
+              json.keys.contains("txHash"),
+              json.keys.contains("userOpHash"),
+              json.keys.contains("nonce") else {
+            throw WalletNodeClient.ClientError.invalidResponse
         }
+        let eligible = try ManagedRelayerJSONScalar.boolean(json["eligible"])
+        let blocked = try ManagedRelayerJSONScalar.boolean(json["blocked"])
+        let blockedReason = try Self.optionalString(json["blockedReason"])
+        let txHash = try Self.optionalString(json["txHash"])
+        let userOpHash = try Self.optionalString(json["userOpHash"])
+        let nonce = try Self.optionalNonnegativeInt(json["nonce"])
         self.init(
             eligible: eligible,
             blocked: blocked,
-            blockedReason: json["blockedReason"] as? String,
-            txHash: json["txHash"] as? String,
-            userOpHash: json["userOpHash"] as? String,
-            nonce: json["nonce"] as? Int
+            blockedReason: blockedReason,
+            txHash: txHash,
+            userOpHash: userOpHash,
+            nonce: nonce
         )
+    }
+
+    private static func optionalString(_ value: Any?) throws -> String? {
+        if value == nil || value is NSNull {
+            return nil
+        }
+        guard let value = value as? String else {
+            throw WalletNodeClient.ClientError.invalidResponse
+        }
+        return value
+    }
+
+    private static func optionalNonnegativeInt(_ value: Any?) throws -> Int? {
+        try ManagedRelayerJSONScalar.optionalNonnegativeInteger(value)
     }
 }
 

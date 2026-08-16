@@ -174,6 +174,29 @@ impl StoreHandle {
         reply_rx.await.map_err(|_| StoreError::Backpressure)?
     }
 
+    pub async fn bundler_account_rollback_replacement_for_owner(
+        &self,
+        owner_scope: &str,
+        chain_id: u64,
+        transient_address: &str,
+        transient_key_ref: &str,
+        restored_address: &str,
+        restored_key_ref: &str,
+    ) -> Result<(), StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.send_command(StoreCommand::BundlerAccountRollbackReplacement {
+            owner_scope: owner_scope.to_owned(),
+            chain_id,
+            transient_address: transient_address.to_owned(),
+            transient_key_ref: transient_key_ref.to_owned(),
+            restored_address: restored_address.to_owned(),
+            restored_key_ref: restored_key_ref.to_owned(),
+            reply: reply_tx,
+        })
+        .await?;
+        reply_rx.await.map_err(|_| StoreError::Backpressure)?
+    }
+
     pub async fn bundler_account_set_lifecycle(
         &self,
         chain_id: u64,
@@ -295,6 +318,51 @@ impl StoreHandle {
         reply_rx.await.map_err(|_| StoreError::Backpressure)?
     }
 
+    pub async fn reserve_next_nonce_for_user_op(
+        &self,
+        chain_id: u64,
+        bundler_address: &str,
+        confirmed_nonce: u64,
+        user_op_hash: &str,
+    ) -> Result<u64, StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.send_command(StoreCommand::NonceReserveNextForUserOp {
+            chain_id,
+            bundler_address: bundler_address.to_owned(),
+            confirmed_nonce,
+            user_op_hash: user_op_hash.to_owned(),
+            reply: reply_tx,
+        })
+        .await?;
+        reply_rx.await.map_err(|_| StoreError::Backpressure)?
+    }
+
+    pub async fn release_prebundle_nonce(
+        &self,
+        chain_id: u64,
+        bundler_address: &str,
+        nonce: u64,
+        user_op_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.send_command(StoreCommand::NonceReleasePrebundle {
+            chain_id,
+            bundler_address: bundler_address.to_owned(),
+            nonce,
+            user_op_hash: user_op_hash.to_owned(),
+            reply: reply_tx,
+        })
+        .await?;
+        reply_rx.await.map_err(|_| StoreError::Backpressure)?
+    }
+
+    pub async fn release_orphaned_prebundle_nonces(&self) -> Result<usize, StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.send_command(StoreCommand::NoncesReleaseOrphanedPrebundle { reply: reply_tx })
+            .await?;
+        reply_rx.await.map_err(|_| StoreError::Backpressure)?
+    }
+
     pub async fn nonce_attach_tx_hash(
         &self,
         chain_id: u64,
@@ -371,6 +439,27 @@ impl StoreHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.send_command(StoreCommand::UserOpInsertAbandonNonceOnExists {
             op,
+            nonce_chain_id,
+            nonce_bundler_address: nonce_bundler_address.to_owned(),
+            nonce,
+            reply: reply_tx,
+        })
+        .await?;
+        reply_rx.await.map_err(|_| StoreError::Backpressure)?
+    }
+
+    pub async fn persist_submission_bundle(
+        &self,
+        op: UserOperation,
+        tx: SubmittedTransaction,
+        nonce_chain_id: u64,
+        nonce_bundler_address: &str,
+        nonce: u64,
+    ) -> Result<UserOpInsertOutcome, StoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.send_command(StoreCommand::PersistSubmissionBundle {
+            op,
+            tx,
             nonce_chain_id,
             nonce_bundler_address: nonce_bundler_address.to_owned(),
             nonce,

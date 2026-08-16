@@ -255,6 +255,8 @@ ERC-4337/bundler methods:
 
 Deprecated one-release aliases (still accepted on the wire, will be removed in a future release): `eth_supportedEntryPoints`, `eth_estimateUserOperationGas`, `eth_sendUserOperation`, `eth_getUserOperationReceipt`, `pimlico_getUserOperationGasPrice`.
 
+Deprecated aliases inherit the canonical method's parameter contract. In particular, the daemon's `eth_sendUserOperation` alias requires the same expected-relayer binding as `localwallet_sendUserOperation`; it is not a standard two-parameter ERC-4337 submission endpoint.
+
 The wire method list lives in `wallet-node-api`.
 
 ## RPC Quickstart
@@ -357,12 +359,22 @@ curl -s \
   -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
   --data '{
     "jsonrpc":"2.0","id":7,"method":"localwallet_sendUserOperation",
-    "params":[<packedUserOperation>, "0x0000000071727De22E5E9d8BAf0edAc6f37da032"]
+    "params":[
+      <packedUserOperation>,
+      "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+      {
+        "chainId":11155111,
+        "keyRef":"bundler-eoa:default:11155111:1",
+        "address":"0x<active-relayer-address>"
+      }
+    ]
   }' \
   http://<addr>
 ```
 
-Returns the `userOpHash`. The daemon persists the UserOp, encodes and signs `handleOps([op], beneficiary)`, submits the raw transaction, and lets the watcher reconcile the receipt. The accepted Kernel nonce-key set is intentionally narrow: root key zero, or permission keys with validation type `0x02`, default/enable mode, and parallel key zero.
+The third parameter is mandatory and must exactly identify the active relayer reported by `wallet_bundlerStatus`. The daemon checks the binding when the request arrives and again under the relayer lifecycle lock before reserving a nonce, signing, or persisting the submission. A rotation between those checks fails closed.
+
+Returns the `userOpHash`. The daemon reserves a relayer nonce, encodes and signs `handleOps([op], beneficiary)`, then atomically persists the UserOperation, signed transaction, and submitted nonce before broadcasting. Build/sign/persist errors release only reservations with no durable transaction evidence. Startup applies the same evidence check to recover process-death and legacy partial-persistence windows without recycling a nonce that could have reached the network. The watcher reconciles the receipt and retries fully persisted submissions. The accepted Kernel nonce-key set is intentionally narrow: root key zero, or permission keys with validation type `0x02`, default/enable mode, and parallel key zero.
 
 ### Poll a UserOperation receipt
 
@@ -400,6 +412,7 @@ JSON-RPC error responses carry a stable `code` (negative integer) plus a string 
 | `replacement_not_possible` | Cancellation/replacement attempted on a UserOp not in a replaceable state (e.g. already terminal). |
 | `gas_relay_stuck` | Legacy replacement-cap reason. Current cancel and speed-up replacements use live gas to clear the relayer nonce. |
 | `relayer_rotated_during_send` | The active bundler EOA changed mid-flight between policy and submission. |
+| `relayer_authority_changed_before_submit` | The active relayer no longer matches the request's mandatory `(chainId, keyRef, address)` binding. No nonce is reserved and no transaction is signed or persisted. |
 | `admin_authorization_required` / `admin_challenge_*` | Mutating admin RPC called without a valid challenge from `wallet_beginAdminAction`, or the challenge is bound to a different `(action, ownerScope, chainId, keyRef)`. |
 
 The exhaustive list — including audit/repair-specific reasons — lives alongside the handlers in `crates/wallet-node/src/handlers/`.
@@ -409,15 +422,16 @@ The exhaustive list — including audit/repair-specific reasons — lives alongs
 `localwallet_sendUserOperation` roughly follows this path:
 
 1. authenticate and parse JSON-RPC
-2. validate EntryPoint, chain, no-paymaster policy, request size, rate limits, gas caps, and fixed Kernel allowlist
-3. read same-block account balance and EntryPoint deposit
-4. reject smart-account gas/value shortfalls before submission
-5. run EntryPointSimulations when verified reads are available
-6. ensure an active funded bundler EOA exists
-7. sign an EIP-1559 `handleOps([op], beneficiary)` raw transaction
-8. persist the UserOp, nonce reservation, and submitted tx
-9. submit the raw transaction
-10. watcher reconciles receipts, retries persisted submissions, and records UserOperationEvent outcomes
+2. require and validate the exact active-relayer `(chainId, keyRef, address)` binding
+3. validate EntryPoint, chain, no-paymaster policy, request size, rate limits, gas caps, and fixed Kernel allowlist
+4. read same-block account balance and EntryPoint deposit
+5. reject smart-account gas/value shortfalls before submission
+6. run EntryPointSimulations when verified reads are available
+7. recheck the relayer binding under the lifecycle lock
+8. sign an EIP-1559 `handleOps([op], beneficiary)` raw transaction
+9. atomically persist the UserOperation, signed transaction, and submitted nonce
+10. submit the raw transaction
+11. watcher reconciles receipts, retries persisted submissions, and records UserOperationEvent outcomes
 
 ```mermaid
 sequenceDiagram

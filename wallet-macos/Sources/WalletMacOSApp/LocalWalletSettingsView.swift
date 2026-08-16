@@ -292,7 +292,6 @@ struct LocalWalletSettingsView: View {
     let onRefreshRelayer: () -> Void
     let onRotateRelayer: () async throws -> String
     let onExportRelayerKey: () async throws -> String
-    let onDeleteRelayerKey: (Bool) async throws -> String
     let onResetWallet: () async throws -> String
     let onEnableSessionKeys: () async throws -> String
     let onRevokeSessionKeys: () async throws -> String
@@ -331,7 +330,6 @@ struct LocalWalletSettingsView: View {
     @State private var isRunningDiagnostics = false
     @State private var isRotatingRelayer = false
     @State private var isExportingRelayer = false
-    @State private var isDeletingRelayer = false
     @State private var isResettingWallet = false
     @State private var isEnablingSessionKeys = false
     @State private var isRevokingSessionKeys = false
@@ -363,7 +361,6 @@ struct LocalWalletSettingsView: View {
         onRefreshRelayer: @escaping () -> Void,
         onRotateRelayer: @escaping () async throws -> String,
         onExportRelayerKey: @escaping () async throws -> String,
-        onDeleteRelayerKey: @escaping (Bool) async throws -> String,
         onResetWallet: @escaping () async throws -> String,
         onEnableSessionKeys: @escaping () async throws -> String,
         onRevokeSessionKeys: @escaping () async throws -> String,
@@ -398,7 +395,6 @@ struct LocalWalletSettingsView: View {
         self.onRefreshRelayer = onRefreshRelayer
         self.onRotateRelayer = onRotateRelayer
         self.onExportRelayerKey = onExportRelayerKey
-        self.onDeleteRelayerKey = onDeleteRelayerKey
         self.onResetWallet = onResetWallet
         self.onEnableSessionKeys = onEnableSessionKeys
         self.onRevokeSessionKeys = onRevokeSessionKeys
@@ -1926,24 +1922,6 @@ struct LocalWalletSettingsView: View {
                         .foregroundStyle(SettingsPalette.secondaryText)
                     HStack(spacing: 12) {
                         Button {
-                            pendingConfirmation = .deleteRelayerKey(unsafe: false)
-                        } label: {
-                            Label("Safe delete relayer", systemImage: "trash")
-                                .font(.system(size: 13, weight: .bold))
-                        }
-                        .buttonStyle(SettingsDestructiveButtonStyle())
-                        .disabled(isDeletingRelayer)
-
-                        Button {
-                            pendingConfirmation = .deleteRelayerKey(unsafe: true)
-                        } label: {
-                            Label("Unsafe reset relayer", systemImage: "exclamationmark.triangle.fill")
-                                .font(.system(size: 13, weight: .bold))
-                        }
-                        .buttonStyle(SettingsDestructiveButtonStyle())
-                        .disabled(isDeletingRelayer)
-
-                        Button {
                             pendingConfirmation = .resetWallet
                         } label: {
                             Label(isResettingWallet ? "Resetting..." : "Reset wallet", systemImage: "xmark.octagon.fill")
@@ -2342,28 +2320,6 @@ struct LocalWalletSettingsView: View {
         }
     }
 
-    private func deleteRelayerKey(unsafe: Bool) {
-        guard !isDeletingRelayer else {
-            return
-        }
-        isDeletingRelayer = true
-        securityMessage = SettingsMessage(kind: .info, text: "Requesting local authorization to delete the relayer key...")
-        Task {
-            do {
-                let message = try await onDeleteRelayerKey(unsafe)
-                await MainActor.run {
-                    securityMessage = SettingsMessage(kind: .success, text: message)
-                    isDeletingRelayer = false
-                }
-            } catch {
-                await MainActor.run {
-                    securityMessage = SettingsMessage(kind: .error, text: error.localizedDescription)
-                    isDeletingRelayer = false
-                }
-            }
-        }
-    }
-
     private func resetWallet() {
         guard !isResettingWallet else { return }
         isResettingWallet = true
@@ -2394,8 +2350,6 @@ struct LocalWalletSettingsView: View {
                 dataMessage = SettingsMessage(kind: .success, text: try onClearRankings())
             case .clearChatHistory:
                 dataMessage = SettingsMessage(kind: .success, text: try onClearChatHistory())
-            case .deleteRelayerKey(let unsafe):
-                deleteRelayerKey(unsafe: unsafe)
             case .revokeSessionKeys:
                 revokeSessionKeys()
             case .resetWallet:
@@ -2408,7 +2362,7 @@ struct LocalWalletSettingsView: View {
                 dataMessage = message
             case .revokeSessionKeys:
                 sessionMessage = message
-            case .deleteRelayerKey, .resetWallet:
+            case .resetWallet:
                 securityMessage = message
             }
         }
@@ -2443,7 +2397,6 @@ struct LocalWalletSettingsView: View {
 private enum SettingsConfirmation: Identifiable, Equatable {
     case clearRankings
     case clearChatHistory
-    case deleteRelayerKey(unsafe: Bool)
     case revokeSessionKeys
     case resetWallet
 
@@ -2453,8 +2406,6 @@ private enum SettingsConfirmation: Identifiable, Equatable {
             return "clear-rankings"
         case .clearChatHistory:
             return "clear-chat-history"
-        case .deleteRelayerKey(let unsafe):
-            return unsafe ? "unsafe-reset-relayer" : "delete-relayer"
         case .revokeSessionKeys:
             return "revoke-session-keys"
         case .resetWallet:
@@ -2468,8 +2419,6 @@ private enum SettingsConfirmation: Identifiable, Equatable {
             return "Clear rankings?"
         case .clearChatHistory:
             return "Clear chat history?"
-        case .deleteRelayerKey(let unsafe):
-            return unsafe ? "Unsafe reset relayer key?" : "Safe delete relayer key?"
         case .revokeSessionKeys:
             return "Disable session keys?"
         case .resetWallet:
@@ -2483,10 +2432,6 @@ private enum SettingsConfirmation: Identifiable, Equatable {
             return "This removes all local tool-feedback records used for ranking and evaluation."
         case .clearChatHistory:
             return "This removes local conversations and messages, then creates a new empty chat."
-        case .deleteRelayerKey(let unsafe):
-            return unsafe
-                ? "This deletes relayer key material even if wallet-node has pending relay state."
-                : "This asks wallet-node to delete the relayer key only when it is safe."
         case .revokeSessionKeys:
             return "This starts a passkey-authorized onchain revoke transaction. Stay on the Session Keys settings screen until the transaction finishes and the local session key state is cleared."
         case .resetWallet:
@@ -2500,8 +2445,6 @@ private enum SettingsConfirmation: Identifiable, Equatable {
             return "Clear Rankings"
         case .clearChatHistory:
             return "Clear History"
-        case .deleteRelayerKey(let unsafe):
-            return unsafe ? "Unsafe Reset" : "Safe Delete"
         case .revokeSessionKeys:
             return "Disable"
         case .resetWallet:

@@ -6,7 +6,7 @@ import WalletToolLayer
 /// its balance is under `thresholdLow`. These cover the app-side half: what the card says,
 /// which intents get declined before the passkey prompt, and the raw-error backstop.
 @Suite struct BundlerGasWarningTests {
-    private static let keyRef = "bundler-eoa:owner:11155111:1"
+    private static let keyRef = "bundler-eoa:default:11155111:1"
 
     private static var identity: VerifiedRelayerIdentity {
         try! VerifiedRelayerIdentity(
@@ -19,6 +19,8 @@ import WalletToolLayer
     private static func relayer(
         balance: String,
         needsTopup: Bool,
+        ownerScope: String = "default",
+        networkProfile: String = "sepolia",
         eoa: String = "0x7A3f000000000000000000000000000000009C21"
     ) -> WalletNodeClient.RelayerStatus {
         WalletNodeClient.RelayerStatus(
@@ -27,9 +29,9 @@ import WalletToolLayer
             reason: needsTopup
                 ? BundlerGasStatus.needsTopupReason
                 : balance == "unavailable" ? "bundler_balance_unavailable" : nil,
-            ownerScope: "owner",
+            ownerScope: ownerScope,
             chainId: 11_155_111,
-            networkProfile: "sepolia",
+            networkProfile: networkProfile,
             eoa: eoa,
             keyRef: keyRef,
             balance: balance,
@@ -116,6 +118,31 @@ import WalletToolLayer
         #expect(status.fundingState == .unavailable)
         #expect(status.verifiedIdentity == nil)
         #expect(status.address == nil)
+    }
+
+    @Test func wrongOwnerScopeOrNetworkProfileNeverExposesAFundingAddress() {
+        for relayer in [
+            Self.relayer(
+                balance: BundlerFundingPolicy.recommendedBalanceWeiHex,
+                needsTopup: false,
+                ownerScope: "attacker"
+            ),
+            Self.relayer(
+                balance: BundlerFundingPolicy.recommendedBalanceWeiHex,
+                needsTopup: false,
+                networkProfile: "mainnet"
+            ),
+        ] {
+            let status = BundlerGasStatus.from(
+                relayer: relayer,
+                verifiedIdentity: Self.identity,
+                chain: .ethereumSepolia
+            )
+
+            #expect(status.fundingState == .unavailable)
+            #expect(status.verifiedIdentity == nil)
+            #expect(status.address == nil)
+        }
     }
 
     @Test func mapsDaemonThresholdIntoHumanCopy() throws {

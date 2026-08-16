@@ -726,11 +726,14 @@ struct VerifiedRelayerIdentity: Codable, Equatable, Sendable {
         guard chainID > 0 else {
             throw ValidationError.invalidChainID(chainID)
         }
-        guard let keyRefChainID = BundlerLaunchKeyPolicy.chainId(ofKeyRef: keyRef) else {
+        guard let keyRefComponents = RelayerKeyReferenceAuthorityPolicy.components(keyRef) else {
             throw ValidationError.invalidKeyRef(keyRef)
         }
-        guard keyRefChainID == chainID else {
-            throw ValidationError.keyRefChainMismatch(expected: chainID, actual: keyRefChainID)
+        guard keyRefComponents.chainID == chainID else {
+            throw ValidationError.keyRefChainMismatch(
+                expected: chainID,
+                actual: keyRefComponents.chainID
+            )
         }
 
         self.version = version
@@ -743,12 +746,12 @@ struct VerifiedRelayerIdentity: Codable, Equatable, Sendable {
         guard secret.count == 32 else {
             throw AppError.invalidHexString
         }
-        guard let chainID = BundlerLaunchKeyPolicy.chainId(ofKeyRef: keyRef) else {
+        guard let components = RelayerKeyReferenceAuthorityPolicy.components(keyRef) else {
             throw ValidationError.invalidKeyRef(keyRef)
         }
         let addressData = try WalletSignature.bundlerAddress(fromSecret: secret)
         return try VerifiedRelayerIdentity(
-            chainID: chainID,
+            chainID: components.chainID,
             keyRef: keyRef,
             address: "0x" + addressData.hexEncodedString
         )
@@ -828,20 +831,7 @@ enum VerifiedRelayerIdentityMetadataPolicy {
 
 enum BundlerLaunchKeyPolicy {
     static func chainId(ofKeyRef keyRef: String) -> UInt64? {
-        components(ofKeyRef: keyRef)?.chainId
-    }
-
-    // keyRef format: bundler-eoa:<ownerScope>:<chainId>:<index>
-    private static func components(ofKeyRef keyRef: String) -> (chainId: UInt64, index: UInt64)? {
-        let parts = keyRef.split(separator: ":", omittingEmptySubsequences: false)
-        guard parts.count == 4,
-              parts[0] == "bundler-eoa",
-              !parts[1].isEmpty,
-              let chainId = UInt64(parts[2]),
-              let index = UInt64(parts[3]) else {
-            return nil
-        }
-        return (chainId, index)
+        RelayerKeyReferenceAuthorityPolicy.components(keyRef)?.chainID
     }
 }
 

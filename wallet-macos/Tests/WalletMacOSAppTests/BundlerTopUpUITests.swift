@@ -35,7 +35,7 @@ import Testing
     }
 
     @Test func exactShortfallSurvivesCoarseHealthyRefresh() throws {
-        let identity = try relayerIdentity(addressSuffix: "01")
+        let identity = try relayerIdentity(index: 1, addressSuffix: "01")
         let requirement = BundlerExternalFundingRequirement(
             identity: identity,
             // 0.02 ETH, intentionally above the normal 0.005 ETH floor.
@@ -64,8 +64,8 @@ import Testing
     }
 
     @Test func exactShortfallRequiresVerifiedIdentityAndDoesNotFollowRotation() throws {
-        let original = try relayerIdentity(addressSuffix: "01")
-        let replacement = try relayerIdentity(addressSuffix: "02")
+        let original = try relayerIdentity(index: 1, addressSuffix: "01")
+        let replacement = try relayerIdentity(index: 2, addressSuffix: "02")
         let requirement = BundlerExternalFundingRequirement(
             identity: original,
             requiredBalanceWeiHex: BundlerFundingPolicy.minimumBalanceWeiHex,
@@ -84,10 +84,13 @@ import Testing
         ))
     }
 
-    private func relayerIdentity(addressSuffix: String) throws -> VerifiedRelayerIdentity {
+    private func relayerIdentity(
+        index: UInt64,
+        addressSuffix: String
+    ) throws -> VerifiedRelayerIdentity {
         try VerifiedRelayerIdentity(
             chainID: 11_155_111,
-            keyRef: "bundler-eoa:test-owner:11155111:0",
+            keyRef: "bundler-eoa:test-owner:11155111:\(index)",
             address: "0x" + String(repeating: "0", count: 38) + addressSuffix
         )
     }

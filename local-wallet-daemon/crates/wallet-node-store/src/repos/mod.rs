@@ -4,6 +4,7 @@ pub mod daemon_meta;
 pub mod nonce_reservations;
 pub mod operation_diagnostics;
 pub mod relayer_key_audit_events;
+pub mod submission_bundles;
 pub mod submitted_transactions;
 pub mod user_operation_receipts;
 pub mod user_operations;

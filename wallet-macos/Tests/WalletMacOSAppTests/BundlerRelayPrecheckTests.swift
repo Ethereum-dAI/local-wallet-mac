@@ -157,30 +157,27 @@ private func relayer(
     lifecycle: String = "active",
     compromiseSubmissionBlocked: Bool = false
 ) -> WalletNodeClient.RelayerStatus {
-    do {
-        var json: [String: Any] = [
-            "ready": ready,
-            "keyLoaded": keyLoaded,
-            "ownerScope": "default",
-            "chainId": chainID,
-            "networkProfile": "sepolia",
-            "eoa": eoa,
-            "balance": balance,
-            "thresholdLow": threshold,
-            "needsTopup": needsTopup,
-            "lifecycle": lifecycle,
-            "compromise": [
-                "suspected": compromiseSubmissionBlocked,
-                "submissionBlocked": compromiseSubmissionBlocked,
-            ],
-        ]
-        if let reason {
-            json["reason"] = reason
-        }
-        return try WalletNodeClient.RelayerStatus(json: json)
-    } catch {
-        fatalError("Invalid relayer fixture: \(error)")
-    }
+    WalletNodeClient.RelayerStatus(
+        ready: ready,
+        keyLoaded: keyLoaded,
+        reason: reason,
+        ownerScope: "default",
+        chainId: chainID,
+        networkProfile: "sepolia",
+        eoa: eoa,
+        keyRef: "bundler-eoa:default:\(chainID):1",
+        balance: balance,
+        thresholdLow: threshold,
+        needsTopup: needsTopup,
+        lifecycle: lifecycle,
+        compromiseSubmissionBlocked: compromiseSubmissionBlocked,
+        pendingFundingAddress: nil,
+        pendingFundingCount: 0,
+        retiringCount: 0,
+        keyHistory: [],
+        latestAuditEvent: nil,
+        replacement: nil
+    )
 }
 
 private func decision(

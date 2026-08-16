@@ -115,6 +115,48 @@ private final class JournalSecurityItemClient: SecurityItemClient, @unchecked Se
         }
     }
 
+    @Test func journalRejectsNoncanonicalOrWrongScopeKeyReferences() {
+        let invalidKeyRefs = [
+            "bundler-eoa:default:011155111:1",
+            "bundler-eoa:default:11155111:01",
+            "bundler-eoa:default:0:1",
+            "bundler-eoa:default:11155111:0",
+            "bundler-eoa:other:11155111:1",
+        ]
+
+        for invalidKeyRef in invalidKeyRefs {
+            #expect(throws: RelayerChainState.ValidationError.invalidKeyRef(
+                invalidKeyRef
+            )) {
+                try RelayerChainState(
+                    chainID: chainID,
+                    epoch: 0,
+                    previousDigest: RelayerChainState.zeroDigest,
+                    activeKeyRef: invalidKeyRef,
+                    pendingKeyRef: nil
+                )
+            }
+        }
+    }
+
+    @Test func canonicalDecoderRejectsLeadingZeroKeyReferenceAliases() {
+        for invalidKeyRef in [
+            "bundler-eoa:default:011155111:1",
+            "bundler-eoa:default:11155111:01",
+            "bundler-eoa:default:0:1",
+            "bundler-eoa:default:11155111:0",
+        ] {
+            let encoded = """
+            {"activeKeyRef":"\(invalidKeyRef)","chainID":11155111,"epoch":0,"pendingKeyRef":null,"previousDigest":"0000000000000000000000000000000000000000000000000000000000000000","version":1}
+            """
+            #expect(throws: RelayerChainState.ValidationError.invalidKeyRef(
+                invalidKeyRef
+            )) {
+                try RelayerChainState.decodeCanonical(Data(encoded.utf8))
+            }
+        }
+    }
+
     @Test func snapshotRequiresAContiguousDigestLinkedSequence() throws {
         let genesis = try RelayerChainStateTransition.genesis(
             chainID: chainID,

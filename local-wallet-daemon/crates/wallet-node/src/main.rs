@@ -163,9 +163,20 @@ async fn main() -> ExitCode {
     if *shutdown_rx.borrow() {
         return exit_after_startup_shutdown(&store).await;
     }
+    if let Err(err) = store.release_orphaned_prebundle_nonces().await {
+        fail_before_ready!(
+            cli,
+            "failed to recover pre-submission nonce reservations: {err}"
+        );
+    }
     let bundler_key_store = Arc::new(InMemoryBundlerKeyStore::new());
     let installed_bundler_keys = match cli.secret_fd {
-        Some(fd) => match load_secrets_from_fd(fd, &bundler_key_store) {
+        Some(fd) => match load_secrets_from_fd(
+            fd,
+            &bundler_key_store,
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            config.network.chain_id,
+        ) {
             Ok(keys) => keys,
             Err(err) => {
                 fail_before_ready!(cli, "failed to load bundler secrets from fd {fd}: {err}");
@@ -478,7 +489,10 @@ struct SecretFdEntry {
 fn load_secrets_from_fd(
     fd: u32,
     store: &InMemoryBundlerKeyStore,
+    expected_owner_scope: &str,
+    expected_chain_id: u64,
 ) -> Result<Vec<InstalledBundlerKey>, String> {
+    use std::collections::HashSet;
     use std::io::Read;
 
     let mut file = unsafe { std::fs::File::from_raw_fd(fd as RawFd) };
@@ -501,9 +515,20 @@ fn load_secrets_from_fd(
         return Err("payload contains no keys".to_string());
     }
 
-    let mut installed = Vec::new();
+    let mut validated = Vec::with_capacity(entries.len());
+    let mut seen_key_refs = HashSet::with_capacity(entries.len());
+    let mut seen_addresses = HashSet::with_capacity(entries.len());
     for entry in entries {
-        let (owner_scope, chain_id) = parse_bundler_key_ref(&entry.key_ref)?;
+        let parsed = bundler_keys::parse_canonical_key_ref(&entry.key_ref)
+            .map_err(|err| format!("invalid keyRef {}: {err}", entry.key_ref))?;
+        if parsed.owner_scope != expected_owner_scope || parsed.chain_id != expected_chain_id {
+            return Err(format!(
+                "keyRef {} does not match configured owner {} and chain {}",
+                entry.key_ref, expected_owner_scope, expected_chain_id
+            ));
+        }
+        let owner_scope = parsed.owner_scope.to_string();
+        let chain_id = parsed.chain_id;
         let bytes = hex::decode(entry.secret.trim_start_matches("0x"))
             .map_err(|err| format!("invalid secret hex for {}: {err}", entry.key_ref))?;
         if bytes.len() != 32 {
@@ -515,30 +540,32 @@ fn load_secrets_from_fd(
         }
         let mut secret = [0u8; 32];
         secret.copy_from_slice(&bytes);
+        let address = bundler_keys::address_for_secret(&entry.key_ref, &secret)
+            .map_err(|err| format!("invalid secret for {}: {err}", entry.key_ref))?;
+        if !seen_key_refs.insert(entry.key_ref.clone()) {
+            return Err(format!("duplicate keyRef {}", entry.key_ref));
+        }
+        if !seen_addresses.insert(address) {
+            return Err(format!(
+                "duplicate bundler address {address:#x} in secret payload"
+            ));
+        }
+        validated.push((entry.key_ref, owner_scope, chain_id, secret));
+    }
+
+    let mut installed = Vec::with_capacity(validated.len());
+    for (key_ref, owner_scope, chain_id, secret) in validated {
         let address = store
-            .install_key(&entry.key_ref, secret)
-            .map_err(|err| format!("install failed for {}: {err}", entry.key_ref))?;
+            .install_key(&key_ref, secret)
+            .map_err(|err| format!("install failed for {key_ref}: {err}"))?;
         installed.push(InstalledBundlerKey {
-            key_ref: entry.key_ref,
+            key_ref,
             owner_scope,
             chain_id,
             address: format!("{address:#x}"),
         });
     }
     Ok(installed)
-}
-
-fn parse_bundler_key_ref(key_ref: &str) -> Result<(String, u64), String> {
-    let parts = key_ref.split(':').collect::<Vec<_>>();
-    if parts.len() != 4 || parts[0] != "bundler-eoa" {
-        return Err(format!(
-            "invalid keyRef {key_ref}; expected bundler-eoa:<ownerScope>:<chainId>:<index>"
-        ));
-    }
-    let chain_id = parts[2]
-        .parse::<u64>()
-        .map_err(|err| format!("invalid chain id in keyRef {key_ref}: {err}"))?;
-    Ok((parts[1].to_string(), chain_id))
 }
 
 #[cfg(test)]
@@ -557,8 +584,13 @@ mod tests {
         drop(writer);
 
         let store = InMemoryBundlerKeyStore::new();
-        let installed = load_secrets_from_fd(read_fd.into_raw_fd() as u32, &store)
-            .expect("an explicit empty key list should be a valid read-only launch");
+        let installed = load_secrets_from_fd(
+            read_fd.into_raw_fd() as u32,
+            &store,
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            1,
+        )
+        .expect("an explicit empty key list should be a valid read-only launch");
 
         assert!(installed.is_empty());
     }
@@ -573,9 +605,121 @@ mod tests {
         drop(writer);
 
         let store = InMemoryBundlerKeyStore::new();
-        let error = load_secrets_from_fd(read_fd.into_raw_fd() as u32, &store)
-            .expect_err("an omitted key list must not silently become read-only");
+        let error = load_secrets_from_fd(
+            read_fd.into_raw_fd() as u32,
+            &store,
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            1,
+        )
+        .expect_err("an omitted key list must not silently become read-only");
 
         assert_eq!(error, "payload contains no keys");
+    }
+
+    #[test]
+    fn secret_fd_rejects_noncanonical_or_out_of_scope_key_refs_without_installing() {
+        for key_ref in [
+            "bundler-eoa:default:01:1",
+            "bundler-eoa:default:1:01",
+            "bundler-eoa:default:1:0",
+            "bundler-eoa:other:1:1",
+            "bundler-eoa:default:2:1",
+        ] {
+            let (read_fd, write_fd) = nix::unistd::pipe().expect("secret pipe should open");
+            let mut writer = std::fs::File::from(write_fd);
+            let payload = serde_json::json!({
+                "keys": [{
+                    "keyRef": key_ref,
+                    "secret": format!("0x{}", "01".repeat(32)),
+                }]
+            });
+            writer
+                .write_all(payload.to_string().as_bytes())
+                .expect("invalid secret payload should write");
+            drop(writer);
+
+            let store = InMemoryBundlerKeyStore::new();
+            let result = load_secrets_from_fd(
+                read_fd.into_raw_fd() as u32,
+                &store,
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+            );
+
+            assert!(result.is_err(), "{key_ref}");
+            assert!(!store.is_key_loaded(key_ref).unwrap(), "{key_ref}");
+        }
+    }
+
+    #[test]
+    fn secret_fd_validates_every_entry_before_installing_any_key() {
+        let valid_key_ref = "bundler-eoa:default:1:1";
+        let invalid_key_ref = "bundler-eoa:default:1:02";
+        let (read_fd, write_fd) = nix::unistd::pipe().expect("secret pipe should open");
+        let mut writer = std::fs::File::from(write_fd);
+        let payload = serde_json::json!({
+            "keys": [
+                {
+                    "keyRef": valid_key_ref,
+                    "secret": format!("0x{}", "01".repeat(32)),
+                },
+                {
+                    "keyRef": invalid_key_ref,
+                    "secret": format!("0x{}", "02".repeat(32)),
+                }
+            ]
+        });
+        writer
+            .write_all(payload.to_string().as_bytes())
+            .expect("mixed secret payload should write");
+        drop(writer);
+
+        let store = InMemoryBundlerKeyStore::new();
+        let result = load_secrets_from_fd(
+            read_fd.into_raw_fd() as u32,
+            &store,
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            1,
+        );
+
+        assert!(result.is_err());
+        assert!(!store.is_key_loaded(valid_key_ref).unwrap());
+        assert!(!store.is_key_loaded(invalid_key_ref).unwrap());
+    }
+
+    #[test]
+    fn secret_fd_rejects_invalid_later_secret_without_partial_install() {
+        let valid_key_ref = "bundler-eoa:default:1:1";
+        let invalid_key_ref = "bundler-eoa:default:1:2";
+        let (read_fd, write_fd) = nix::unistd::pipe().expect("secret pipe should open");
+        let mut writer = std::fs::File::from(write_fd);
+        let payload = serde_json::json!({
+            "keys": [
+                {
+                    "keyRef": valid_key_ref,
+                    "secret": format!("0x{}", "01".repeat(32)),
+                },
+                {
+                    "keyRef": invalid_key_ref,
+                    "secret": format!("0x{}", "00".repeat(32)),
+                }
+            ]
+        });
+        writer
+            .write_all(payload.to_string().as_bytes())
+            .expect("mixed secret payload should write");
+        drop(writer);
+
+        let store = InMemoryBundlerKeyStore::new();
+        let result = load_secrets_from_fd(
+            read_fd.into_raw_fd() as u32,
+            &store,
+            wallet_node_store::DEFAULT_OWNER_SCOPE,
+            1,
+        );
+
+        assert!(result.is_err());
+        assert!(!store.is_key_loaded(valid_key_ref).unwrap());
+        assert!(!store.is_key_loaded(invalid_key_ref).unwrap());
     }
 }

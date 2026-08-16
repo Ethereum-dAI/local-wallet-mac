@@ -81,11 +81,15 @@ pub async fn handle(
             None
         }
     };
-    let compromise = match balance {
-        Some(balance) => {
-            super::bundler_account::compromise_status(state, active, balance, threshold).await?
-        }
-        None => None,
+    let compromise = match super::bundler_account::recorded_compromise_status(state, active).await?
+    {
+        Some(reason) => Some(reason),
+        None => match balance {
+            Some(balance) => {
+                super::bundler_account::compromise_status(state, active, balance, threshold).await?
+            }
+            None => None,
+        },
     };
     let replacement = replacement_status(state, &active.address)
         .await
@@ -98,14 +102,14 @@ pub async fn handle(
         });
     let ready =
         key_loaded && balance.is_some_and(|balance| balance >= threshold) && compromise.is_none();
-    let reason = if !key_loaded {
+    let reason = if compromise.is_some() {
+        Some("bundler_eoa_compromise_suspected")
+    } else if !key_loaded {
         Some("bundler_eoa_locked")
     } else if balance.is_none() {
         Some("bundler_balance_unavailable")
     } else if balance.is_some_and(|balance| balance < threshold) {
         Some("bundler_eoa_needs_topup")
-    } else if compromise.is_some() {
-        Some("bundler_eoa_compromise_suspected")
     } else {
         None
     };

@@ -6,12 +6,12 @@ import Testing
     @Test func loadedRegistrationAndLockedRestartAreBothRequired() throws {
         let identity = try fixtureIdentity()
 
-        try RelayerBootstrapRegistrationPolicy.verify(
+        try verify(
             status: fixtureStatus(identity: identity, keyLoaded: true),
             identity: identity,
             expectedKeyLoaded: true
         )
-        try RelayerBootstrapRegistrationPolicy.verify(
+        try verify(
             status: fixtureStatus(identity: identity, keyLoaded: false),
             identity: identity,
             expectedKeyLoaded: false
@@ -25,7 +25,7 @@ import Testing
             expected: identity.chainID,
             actual: 1
         )) {
-            try RelayerBootstrapRegistrationPolicy.verify(
+            try verify(
                 status: fixtureStatus(identity: identity, chainID: 1),
                 identity: identity,
                 expectedKeyLoaded: true
@@ -41,7 +41,7 @@ import Testing
             expected: identity.keyRef,
             actual: wrongKeyRef
         )) {
-            try RelayerBootstrapRegistrationPolicy.verify(
+            try verify(
                 status: fixtureStatus(identity: identity, keyRef: wrongKeyRef),
                 identity: identity,
                 expectedKeyLoaded: true
@@ -57,7 +57,7 @@ import Testing
             expected: identity.address,
             actual: wrongEOA
         )) {
-            try RelayerBootstrapRegistrationPolicy.verify(
+            try verify(
                 status: fixtureStatus(identity: identity, eoa: wrongEOA),
                 identity: identity,
                 expectedKeyLoaded: true
@@ -69,7 +69,7 @@ import Testing
         let identity = try fixtureIdentity()
 
         #expect(throws: RelayerIdentityBindingPolicy.Failure.inactiveLifecycle("retiring")) {
-            try RelayerBootstrapRegistrationPolicy.verify(
+            try verify(
                 status: fixtureStatus(identity: identity, lifecycle: "retiring"),
                 identity: identity,
                 expectedKeyLoaded: true
@@ -81,7 +81,7 @@ import Testing
         let identity = try fixtureIdentity()
 
         #expect(throws: RelayerIdentityBindingPolicy.Failure.compromiseSuspected) {
-            try RelayerBootstrapRegistrationPolicy.verify(
+            try verify(
                 status: fixtureStatus(
                     identity: identity,
                     keyLoaded: true,
@@ -100,7 +100,7 @@ import Testing
             expected: true,
             actual: false
         )) {
-            try RelayerBootstrapRegistrationPolicy.verify(
+            try verify(
                 status: fixtureStatus(identity: identity, keyLoaded: false),
                 identity: identity,
                 expectedKeyLoaded: true
@@ -115,12 +115,51 @@ import Testing
             expected: false,
             actual: true
         )) {
-            try RelayerBootstrapRegistrationPolicy.verify(
+            try verify(
                 status: fixtureStatus(identity: identity, keyLoaded: true),
                 identity: identity,
                 expectedKeyLoaded: false
             )
         }
+    }
+
+    @Test func wrongOwnerScopeAndNetworkProfileAreRejected() throws {
+        let identity = try fixtureIdentity()
+
+        #expect(throws: RelayerIdentityBindingPolicy.Failure.wrongOwnerScope(
+            expected: "default",
+            actual: "attacker"
+        )) {
+            try verify(
+                status: fixtureStatus(identity: identity, ownerScope: "attacker"),
+                identity: identity,
+                expectedKeyLoaded: true
+            )
+        }
+        #expect(throws: RelayerIdentityBindingPolicy.Failure.wrongNetworkProfile(
+            expected: "sepolia",
+            actual: "mainnet"
+        )) {
+            try verify(
+                status: fixtureStatus(identity: identity, networkProfile: "mainnet"),
+                identity: identity,
+                expectedKeyLoaded: true
+            )
+        }
+    }
+
+    private func verify(
+        status: WalletNodeClient.RelayerStatus,
+        identity: VerifiedRelayerIdentity,
+        expectedKeyLoaded: Bool
+    ) throws {
+        try RelayerBootstrapRegistrationPolicy.verify(
+            status: status,
+            identity: identity,
+            expectedKeyLoaded: expectedKeyLoaded,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: "sepolia"
+        )
     }
 }
 
@@ -286,30 +325,29 @@ private func fixtureStatus(
     eoa: String? = nil,
     keyLoaded: Bool = true,
     lifecycle: String = "active",
+    ownerScope: String = "default",
+    networkProfile: String = "sepolia",
     compromiseSubmissionBlocked: Bool = false
 ) -> WalletNodeClient.RelayerStatus {
-    do {
-        let balance = "0x0"
-        let reason = keyLoaded ? "bundler_eoa_needs_topup" : "bundler_eoa_locked"
-        return try WalletNodeClient.RelayerStatus(json: [
-            "ready": false,
-            "keyLoaded": keyLoaded,
-            "reason": reason,
-            "ownerScope": "default",
-            "chainId": chainID ?? Int(identity.chainID),
-            "networkProfile": "sepolia",
-            "eoa": eoa ?? identity.address,
-            "keyRef": keyRef ?? identity.keyRef,
-            "balance": balance,
-            "thresholdLow": "0x11c37937e08000",
-            "needsTopup": true,
-            "lifecycle": lifecycle,
-            "compromise": [
-                "suspected": compromiseSubmissionBlocked,
-                "submissionBlocked": compromiseSubmissionBlocked,
-            ],
-        ])
-    } catch {
-        fatalError("Invalid relayer bootstrap fixture: \(error)")
-    }
+    WalletNodeClient.RelayerStatus(
+        ready: false,
+        keyLoaded: keyLoaded,
+        reason: keyLoaded ? "bundler_eoa_needs_topup" : "bundler_eoa_locked",
+        ownerScope: ownerScope,
+        chainId: chainID ?? Int(identity.chainID),
+        networkProfile: networkProfile,
+        eoa: eoa ?? identity.address,
+        keyRef: keyRef ?? identity.keyRef,
+        balance: "0x0",
+        thresholdLow: "0x11c37937e08000",
+        needsTopup: true,
+        lifecycle: lifecycle,
+        compromiseSubmissionBlocked: compromiseSubmissionBlocked,
+        pendingFundingAddress: nil,
+        pendingFundingCount: 0,
+        retiringCount: 0,
+        keyHistory: [],
+        latestAuditEvent: nil,
+        replacement: nil
+    )
 }

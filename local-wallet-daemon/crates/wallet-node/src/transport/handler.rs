@@ -1739,6 +1739,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rotate_bundler_eoa_rechecks_challenge_after_lifecycle_lock() {
+        let (handler, auth_header, state) = test_handler(Arc::new(MockChainAdapter::new()));
+        let original =
+            crate::handlers::wallet::bundler_account::ensure_active_bundler_account(&state)
+                .await
+                .unwrap();
+        let challenge = begin_admin(&handler, &auth_header, "rotate_bundler_eoa", None).await;
+        assert_eq!(challenge["result"]["keyRef"], original.key_ref);
+        let lifecycle_guard = state
+            .relayer_lifecycle_locks
+            .acquire(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await;
+        let task_state = state.clone();
+        let authorization = admin_auth(&challenge);
+        let rotation = tokio::spawn(async move {
+            crate::handlers::wallet::rotate_bundler_eoa::handle(
+                &task_state,
+                json!([{ "authorization": authorization }]),
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!rotation.is_finished());
+        let replacement_address = "0x2222000000000000000000000000000000000000";
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                replacement_address,
+                "bundler-eoa:default:1:2",
+                BundlerLifecycle::PendingFunding,
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .bundler_account_activate_pending_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                replacement_address,
+            )
+            .await
+            .unwrap();
+        drop(lifecycle_guard);
+
+        let error = tokio::time::timeout(Duration::from_secs(1), rotation)
+            .await
+            .expect("rotation should finish after lifecycle lock release")
+            .expect("rotation task should not panic")
+            .unwrap_err();
+        assert_eq!(
+            error.data.unwrap()["reason"],
+            "admin_challenge_key_mismatch"
+        );
+        let accounts = state
+            .store
+            .bundler_account_list_for_owner(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await
+            .unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert!(accounts
+            .iter()
+            .all(|account| account.lifecycle != BundlerLifecycle::PendingFunding));
+        assert!(state
+            .bundler_keys
+            .address_for_key("bundler-eoa:default:1:3")
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn rotate_bundler_eoa_rejects_noncanonical_active_key_ref_without_mutation() {
+        let (handler, auth_header, state) = test_handler(Arc::new(MockChainAdapter::new()));
+        let invalid_key_ref = "bundler-eoa:default:1:01";
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                "0x1111000000000000000000000000000000000000",
+                invalid_key_ref,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        let challenge = begin_admin(&handler, &auth_header, "rotate_bundler_eoa", None).await;
+
+        let rejected = call_rpc(
+            &handler,
+            &auth_header,
+            "wallet_rotateBundlerEOA",
+            json!([{ "authorization": admin_auth(&challenge) }]),
+        )
+        .await;
+
+        assert_eq!(
+            rejected["error"]["data"]["reason"],
+            "invalid_bundler_key_ref"
+        );
+        let accounts = state
+            .store
+            .bundler_account_list_for_owner(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await
+            .unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].key_ref, invalid_key_ref);
+        assert!(state
+            .bundler_keys
+            .address_for_key("bundler-eoa:default:1:1")
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn install_bundler_eoa_requires_admin_and_installs_supplied_secret() {
         let (handler, auth_header, state) = test_handler(Arc::new(MockChainAdapter::new()));
         crate::handlers::wallet::bundler_account::ensure_active_bundler_account(&state)
@@ -1792,6 +1906,182 @@ mod tests {
             .unwrap();
         assert!(accounts.iter().any(|account| account.key_ref == key_ref
             && account.lifecycle == BundlerLifecycle::PendingFunding));
+    }
+
+    #[tokio::test]
+    async fn install_bundler_eoa_restores_exact_retiring_key_without_mutating_lifecycle() {
+        let (handler, auth_header, state) = test_handler(Arc::new(MockChainAdapter::new()));
+        let retiring_key_ref = "bundler-eoa:default:1:1";
+        let active_key_ref = "bundler-eoa:default:1:2";
+        let retiring_secret = [0x01; 32];
+        let active_secret = [0x02; 32];
+        let retiring_address = format!(
+            "{:#x}",
+            crate::bundler_keys::address_for_secret(retiring_key_ref, &retiring_secret).unwrap()
+        );
+        let active_address = format!(
+            "{:#x}",
+            crate::bundler_keys::address_for_secret(active_key_ref, &active_secret).unwrap()
+        );
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                "default",
+                1,
+                &retiring_address,
+                retiring_key_ref,
+                BundlerLifecycle::Retiring,
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                "default",
+                1,
+                &active_address,
+                active_key_ref,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .reserve_next_nonce(1, &retiring_address, 7)
+            .await
+            .unwrap();
+
+        let active_challenge = begin_admin(
+            &handler,
+            &auth_header,
+            "install_bundler_eoa",
+            Some(active_key_ref),
+        )
+        .await;
+        let active_install = call_rpc(
+            &handler,
+            &auth_header,
+            "wallet_installBundlerEOA",
+            json!([{
+                "keyRef": active_key_ref,
+                "secret": format!("0x{}", hex::encode(active_secret)),
+                "authorization": admin_auth(&active_challenge)
+            }]),
+        )
+        .await;
+        assert_eq!(active_install["result"]["lifecycle"], "active");
+
+        let retiring_challenge = begin_admin(
+            &handler,
+            &auth_header,
+            "install_bundler_eoa",
+            Some(retiring_key_ref),
+        )
+        .await;
+        let retiring_install = call_rpc(
+            &handler,
+            &auth_header,
+            "wallet_installBundlerEOA",
+            json!([{
+                "keyRef": retiring_key_ref,
+                "secret": format!("0x{}", hex::encode(retiring_secret)),
+                "authorization": admin_auth(&retiring_challenge)
+            }]),
+        )
+        .await;
+        assert_eq!(retiring_install["result"]["lifecycle"], "retiring");
+        assert_eq!(
+            state
+                .bundler_keys
+                .address_for_key(retiring_key_ref)
+                .unwrap(),
+            retiring_address.parse::<Address>().unwrap()
+        );
+        assert_eq!(
+            state.bundler_keys.address_for_key(active_key_ref).unwrap(),
+            active_address.parse::<Address>().unwrap()
+        );
+        state
+            .bundler_keys
+            .sign_eip1559_payload(
+                retiring_key_ref,
+                &alloy_primitives::Bytes::from_static(&[0x02, 0xc0]),
+            )
+            .expect("retiring key must remain available to replace live work");
+
+        let mismatched_secret_challenge = begin_admin(
+            &handler,
+            &auth_header,
+            "install_bundler_eoa",
+            Some(retiring_key_ref),
+        )
+        .await;
+        let mismatched_secret = call_rpc(
+            &handler,
+            &auth_header,
+            "wallet_installBundlerEOA",
+            json!([{
+                "keyRef": retiring_key_ref,
+                "secret": format!("0x{}", "03".repeat(32)),
+                "authorization": admin_auth(&mismatched_secret_challenge)
+            }]),
+        )
+        .await;
+        assert_eq!(
+            mismatched_secret["error"]["data"]["reason"],
+            "relayer_key_ref_address_mismatch"
+        );
+
+        let mismatched_key_ref = "bundler-eoa:default:1:3";
+        let mismatched_key_challenge = begin_admin(
+            &handler,
+            &auth_header,
+            "install_bundler_eoa",
+            Some(mismatched_key_ref),
+        )
+        .await;
+        let mismatched_key = call_rpc(
+            &handler,
+            &auth_header,
+            "wallet_installBundlerEOA",
+            json!([{
+                "keyRef": mismatched_key_ref,
+                "secret": format!("0x{}", hex::encode(retiring_secret)),
+                "authorization": admin_auth(&mismatched_key_challenge)
+            }]),
+        )
+        .await;
+        assert_eq!(
+            mismatched_key["error"]["data"]["reason"],
+            "relayer_key_ref_address_mismatch"
+        );
+        assert!(state
+            .bundler_keys
+            .address_for_key(mismatched_key_ref)
+            .is_err());
+        assert_eq!(
+            state
+                .bundler_keys
+                .address_for_key(retiring_key_ref)
+                .unwrap(),
+            retiring_address.parse::<Address>().unwrap()
+        );
+        let accounts = state
+            .store
+            .bundler_account_list_for_owner("default", 1)
+            .await
+            .unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert!(accounts.iter().any(|account| {
+            account.key_ref == retiring_key_ref
+                && account.address == retiring_address
+                && account.lifecycle == BundlerLifecycle::Retiring
+        }));
+        assert!(accounts.iter().any(|account| {
+            account.key_ref == active_key_ref
+                && account.address == active_address
+                && account.lifecycle == BundlerLifecycle::Active
+        }));
     }
 
     #[tokio::test]
@@ -1998,25 +2288,40 @@ mod tests {
 
     #[tokio::test]
     async fn install_bundler_eoa_rejects_invalid_key_ref_and_secret() {
-        let (handler, auth_header, _state) = test_handler(Arc::new(MockChainAdapter::new()));
-        let bad_ref = "bundler-eoa:other:1:1";
-        let bad_ref_challenge =
-            begin_admin(&handler, &auth_header, "install_bundler_eoa", Some(bad_ref)).await;
-        let bad_ref_response = call_rpc(
-            &handler,
-            &auth_header,
-            "wallet_installBundlerEOA",
-            json!([{
-                "keyRef": bad_ref,
-                "secret": format!("0x{}", "01".repeat(32)),
-                "authorization": admin_auth(&bad_ref_challenge)
-            }]),
-        )
-        .await;
-        assert_eq!(
-            bad_ref_response["error"]["data"]["reason"],
-            "invalid_bundler_key_ref"
-        );
+        let (handler, auth_header, state) = test_handler(Arc::new(MockChainAdapter::new()));
+        for bad_ref in [
+            "bundler-eoa:other:1:1",
+            "bundler-eoa:default:2:1",
+            "bundler-eoa:default:01:1",
+            "bundler-eoa:default:1:01",
+            "bundler-eoa:default:1:0",
+            "bundler-eoa:1",
+        ] {
+            let bad_ref_challenge =
+                begin_admin(&handler, &auth_header, "install_bundler_eoa", Some(bad_ref)).await;
+            let bad_ref_response = call_rpc(
+                &handler,
+                &auth_header,
+                "wallet_installBundlerEOA",
+                json!([{
+                    "keyRef": bad_ref,
+                    "secret": format!("0x{}", "01".repeat(32)),
+                    "authorization": admin_auth(&bad_ref_challenge)
+                }]),
+            )
+            .await;
+            assert_eq!(
+                bad_ref_response["error"]["data"]["reason"], "invalid_bundler_key_ref",
+                "{bad_ref}"
+            );
+            assert!(state.bundler_keys.address_for_key(bad_ref).is_err());
+        }
+        assert!(state
+            .store
+            .bundler_account_list_for_owner(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await
+            .unwrap()
+            .is_empty());
 
         let key_ref = "bundler-eoa:default:1:100";
         let bad_secret_challenge =
@@ -2370,7 +2675,17 @@ mod tests {
         };
         let chain = Arc::new(MockChainAdapter::with_synced(true));
         chain.set_current_head(head.clone());
-        let op = wallet_bundler::UserOperation::parse(sample_user_op("0xab")).unwrap();
+        let mut raw_op = sample_user_op("0xab");
+        let call_data = wallet_bundler::encode_erc7579_single_execution(
+            "0x1111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+            U256::ZERO,
+            ChainBytes::new(),
+        );
+        raw_op["callData"] = json!(hex_data(&call_data));
+        canonicalize_submit_gas(&mut raw_op);
+        let op = wallet_bundler::UserOperation::parse(raw_op.clone()).unwrap();
         chain.set_balance(
             op.sender,
             BlockTag::Hash(head.hash),
@@ -2385,7 +2700,8 @@ mod tests {
         );
         let (handler, auth_header, state) = test_handler(chain.clone());
         state.mark_state_override_smoke_passed();
-        let bundler_address = state.bundler_keys.create_key("bundler-eoa:1").unwrap();
+        let bundler_key_ref = "bundler-eoa:default:1:1";
+        let bundler_address = state.bundler_keys.create_key(bundler_key_ref).unwrap();
         let bundler_eoa = format!("{bundler_address:#x}");
         chain.set_balance(
             bundler_address,
@@ -2394,7 +2710,7 @@ mod tests {
         );
         state
             .store
-            .bundler_account_insert(1, &bundler_eoa, "bundler-eoa:1")
+            .bundler_account_insert(1, &bundler_eoa, bundler_key_ref)
             .await
             .unwrap();
         let challenge = begin_admin(&handler, &auth_header, "rotate_bundler_eoa", None).await;
@@ -2403,7 +2719,11 @@ mod tests {
             &handler,
             &auth_header,
             "localwallet_sendUserOperation",
-            json!([sample_user_op("0xab"), entry_point_v07_hex()]),
+            json!([
+                raw_op,
+                entry_point_v07_hex(),
+                expected_relayer_param(bundler_key_ref, &bundler_eoa)
+            ]),
         );
         let rotate = call_rpc(
             &handler,
@@ -2413,7 +2733,21 @@ mod tests {
         );
         let (send, rotate) = tokio::join!(send, rotate);
 
-        assert!(send["result"].as_str().unwrap().starts_with("0x"));
+        let send_succeeded = if let Some(result) = send["result"].as_str() {
+            assert!(result.starts_with("0x"));
+            true
+        } else {
+            assert_eq!(
+                send["error"]["code"],
+                wallet_node_api::NOT_READY,
+                "unexpected send response: {send}"
+            );
+            assert_eq!(
+                send["error"]["data"]["reason"],
+                "relayer_authority_changed_before_submit"
+            );
+            false
+        };
         assert_eq!(rotate["result"]["lifecycle"], "pending_funding");
         let accounts = state
             .store
@@ -2441,7 +2775,10 @@ mod tests {
             json!([]),
         )
         .await;
-        assert_eq!(pending["result"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            pending["result"].as_array().unwrap().len(),
+            usize::from(send_succeeded)
+        );
     }
 
     #[tokio::test]
@@ -2525,7 +2862,7 @@ mod tests {
                 1,
                 "0x1111000000000000000000000000000000000000",
                 key_ref,
-                BundlerLifecycle::Active,
+                BundlerLifecycle::Retired,
             )
             .await
             .unwrap();
@@ -2555,6 +2892,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_bundler_eoa_rejects_noncanonical_key_ref_without_mutation() {
+        let (handler, auth_header, state) = test_handler(Arc::new(MockChainAdapter::new()));
+        let invalid_key_ref = "bundler-eoa:default:1:01";
+        let address = state.bundler_keys.create_key(invalid_key_ref).unwrap();
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                &format!("{address:#x}"),
+                invalid_key_ref,
+                BundlerLifecycle::Retired,
+            )
+            .await
+            .unwrap();
+        let challenge = begin_admin(
+            &handler,
+            &auth_header,
+            "delete_bundler_eoa",
+            Some(invalid_key_ref),
+        )
+        .await;
+
+        let rejected = call_rpc(
+            &handler,
+            &auth_header,
+            "wallet_deleteBundlerEOA",
+            json!([{
+                "keyRef": invalid_key_ref,
+                "authorization": admin_auth(&challenge)
+            }]),
+        )
+        .await;
+
+        assert_eq!(
+            rejected["error"]["data"]["reason"],
+            "invalid_bundler_key_ref"
+        );
+        assert!(state.bundler_keys.is_key_loaded(invalid_key_ref).unwrap());
+        let accounts = state
+            .store
+            .bundler_account_list_for_owner(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await
+            .unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].lifecycle, BundlerLifecycle::Retired);
+    }
+
+    #[tokio::test]
     async fn delete_bundler_eoa_blocks_pending_without_unsafe_reset() {
         let chain = Arc::new(MockChainAdapter::new());
         let (handler, auth_header, state) = test_handler(chain);
@@ -2562,6 +2948,16 @@ mod tests {
             crate::handlers::wallet::bundler_account::ensure_active_bundler_account(&state)
                 .await
                 .unwrap();
+        state
+            .store
+            .bundler_account_set_lifecycle_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                &account.address,
+                BundlerLifecycle::Retired,
+            )
+            .await
+            .unwrap();
         state
             .store
             .submitted_tx_insert(SubmittedTransaction {
@@ -2732,6 +3128,16 @@ mod tests {
             crate::handlers::wallet::bundler_account::ensure_active_bundler_account(&state)
                 .await
                 .unwrap();
+        state
+            .store
+            .bundler_account_set_lifecycle_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                &account.address,
+                BundlerLifecycle::Retired,
+            )
+            .await
+            .unwrap();
         let challenge = begin_admin(
             &handler,
             &auth_header,
@@ -2793,6 +3199,16 @@ mod tests {
             crate::handlers::wallet::bundler_account::ensure_active_bundler_account(&state)
                 .await
                 .unwrap();
+        state
+            .store
+            .bundler_account_set_lifecycle_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                &account.address,
+                BundlerLifecycle::Retired,
+            )
+            .await
+            .unwrap();
         let challenge = begin_admin(
             &handler,
             &auth_header,
@@ -2821,7 +3237,7 @@ mod tests {
             .await
             .unwrap();
         assert!(stored.iter().any(|stored| {
-            stored.key_ref == account.key_ref && stored.lifecycle == BundlerLifecycle::Active
+            stored.key_ref == account.key_ref && stored.lifecycle == BundlerLifecycle::Retired
         }));
         let events = state
             .store
@@ -2834,6 +3250,81 @@ mod tests {
                 && event.failure_reason.as_deref()
                     == Some("sqlite_delete_mark_failed_keychain_deleted")
         }));
+    }
+
+    #[tokio::test]
+    async fn safe_delete_rechecks_retired_lifecycle_after_lock() {
+        let (handler, auth_header, state) = test_handler(Arc::new(MockChainAdapter::new()));
+        let account =
+            crate::handlers::wallet::bundler_account::ensure_active_bundler_account(&state)
+                .await
+                .unwrap();
+        state
+            .store
+            .bundler_account_set_lifecycle_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                &account.address,
+                BundlerLifecycle::Retired,
+            )
+            .await
+            .unwrap();
+        let challenge = begin_admin(
+            &handler,
+            &auth_header,
+            "delete_bundler_eoa",
+            Some(&account.key_ref),
+        )
+        .await;
+        let lifecycle_guard = state
+            .relayer_lifecycle_locks
+            .acquire(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await;
+        let task_state = state.clone();
+        let key_ref = account.key_ref.clone();
+        let authorization = admin_auth(&challenge);
+        let deletion = tokio::spawn(async move {
+            crate::handlers::wallet::delete_bundler_eoa::handle(
+                &task_state,
+                json!([{
+                    "keyRef": key_ref,
+                    "authorization": authorization
+                }]),
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!deletion.is_finished());
+        state
+            .store
+            .bundler_account_set_lifecycle_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                &account.address,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        drop(lifecycle_guard);
+
+        let error = tokio::time::timeout(Duration::from_secs(1), deletion)
+            .await
+            .expect("deletion should finish after lifecycle lock release")
+            .expect("deletion task should not panic")
+            .unwrap_err();
+        assert_eq!(
+            error.data.unwrap()["reason"],
+            "relayer_lifecycle_not_retired"
+        );
+        assert!(state.bundler_keys.is_key_loaded(&account.key_ref).unwrap());
+        let stored = state
+            .store
+            .bundler_account_list_for_owner(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].lifecycle, BundlerLifecycle::Active);
     }
 
     #[tokio::test]
@@ -2857,6 +3348,7 @@ mod tests {
             "wallet_deleteBundlerEOA",
             json!([{
                 "keyRef": account.key_ref,
+                "unsafeReset": true,
                 "authorization": admin_auth(&challenge)
             }]),
         )
@@ -2973,6 +3465,124 @@ mod tests {
         assert_eq!(value["result"]["reason"], "bundler_eoa_locked");
         assert_eq!(value["result"]["keyLoaded"], false);
         assert_eq!(value["result"]["eoa"], bundler_eoa);
+    }
+
+    #[tokio::test]
+    async fn bundler_status_prioritizes_compromise_over_locked_key() {
+        let chain = Arc::new(MockChainAdapter::with_synced(true));
+        let bundler_eoa = "0xbeef000000000000000000000000000000000000";
+        chain.set_balance(
+            bundler_eoa.parse().unwrap(),
+            BlockTag::Latest,
+            U256::from(0x11c37937e08000_u64),
+        );
+        let (handler, auth_header, state) = test_handler(chain);
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                bundler_eoa,
+                "bundler-eoa:default:1:1",
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .meta_set(
+                &format!("bundler_eoa_compromised:1:{bundler_eoa}"),
+                "test_compromise",
+            )
+            .await
+            .unwrap();
+
+        let value = call_rpc(&handler, &auth_header, "wallet_bundlerStatus", json!([])).await;
+
+        assert_eq!(
+            value["result"]["reason"],
+            "bundler_eoa_compromise_suspected"
+        );
+        assert_eq!(value["result"]["keyLoaded"], false);
+        assert_eq!(value["result"]["compromise"]["suspected"], true);
+        assert_eq!(value["result"]["compromise"]["submissionBlocked"], true);
+    }
+
+    #[tokio::test]
+    async fn bundler_status_prioritizes_compromise_over_low_balance() {
+        let chain = Arc::new(MockChainAdapter::with_synced(true));
+        let (handler, auth_header, state) = test_handler(chain);
+        let key_ref = "bundler-eoa:default:1:1";
+        let address = state.bundler_keys.create_key(key_ref).unwrap();
+        let bundler_eoa = format!("{address:#x}");
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                &bundler_eoa,
+                key_ref,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .meta_set(
+                &format!("bundler_eoa_compromised:1:{bundler_eoa}"),
+                "test_compromise",
+            )
+            .await
+            .unwrap();
+
+        let value = call_rpc(&handler, &auth_header, "wallet_bundlerStatus", json!([])).await;
+
+        assert_eq!(
+            value["result"]["reason"],
+            "bundler_eoa_compromise_suspected"
+        );
+        assert_eq!(value["result"]["needsTopup"], true);
+        assert_eq!(value["result"]["compromise"]["suspected"], true);
+        assert_eq!(value["result"]["compromise"]["submissionBlocked"], true);
+    }
+
+    #[tokio::test]
+    async fn bundler_status_preserves_recorded_compromise_when_balance_is_unavailable() {
+        let chain = Arc::new(MockChainAdapter::with_synced(false));
+        chain.inject_error(Box::new(|| {
+            ChainError::RpcError("verified chain reads unavailable".to_string())
+        }));
+        let bundler_eoa = "0xbeef000000000000000000000000000000000000";
+        let (handler, auth_header, state) = test_handler(chain);
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                bundler_eoa,
+                "bundler-eoa:default:1:1",
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .meta_set(
+                &format!("bundler_eoa_compromised:1:{bundler_eoa}"),
+                "test_compromise",
+            )
+            .await
+            .unwrap();
+
+        let value = call_rpc(&handler, &auth_header, "wallet_bundlerStatus", json!([])).await;
+
+        assert_eq!(value["result"]["balanceUnavailable"], true);
+        assert_eq!(
+            value["result"]["reason"],
+            "bundler_eoa_compromise_suspected"
+        );
+        assert_eq!(value["result"]["compromise"]["suspected"], true);
+        assert_eq!(value["result"]["compromise"]["submissionBlocked"], true);
     }
 
     #[tokio::test]
@@ -3885,6 +4495,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_user_operation_wire_methods_require_expected_relayer_binding() {
+        let (handler, auth_header, state) = test_handler(Arc::new(MockChainAdapter::new()));
+
+        for method in ["localwallet_sendUserOperation", "eth_sendUserOperation"] {
+            let value = call_rpc(
+                &handler,
+                &auth_header,
+                method,
+                json!([sample_user_op("0xab"), entry_point_v07_hex()]),
+            )
+            .await;
+
+            assert_eq!(value["error"]["code"], wallet_node_api::INVALID_REQUEST);
+        }
+        assert!(state
+            .store
+            .bundler_account_active_for_owner(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn send_user_operation_does_not_create_authority_for_unbound_expectation() {
+        let expected_key_ref = "bundler-eoa:default:1:7";
+        let expected_address = "0x1111111111111111111111111111111111111111";
+        let (handler, auth_header, state) = test_handler(Arc::new(MockChainAdapter::new()));
+        let entry_point: Address = entry_point_v07_hex().parse().unwrap();
+        let op = wallet_bundler::UserOperation::parse(sample_user_op("0xab")).unwrap();
+        let user_op_hash = format!(
+            "{:#x}",
+            B256::from(op.user_op_hash(entry_point, 1).unwrap())
+        );
+
+        let value = call_rpc(
+            &handler,
+            &auth_header,
+            "localwallet_sendUserOperation",
+            json!([
+                sample_user_op("0xab"),
+                entry_point_v07_hex(),
+                expected_relayer_param(expected_key_ref, expected_address)
+            ]),
+        )
+        .await;
+
+        assert_eq!(value["error"]["code"], wallet_node_api::NOT_READY);
+        assert_eq!(
+            value["error"]["data"]["reason"],
+            "relayer_key_setup_required"
+        );
+        assert!(state
+            .store
+            .bundler_account_list_for_owner(wallet_node_store::DEFAULT_OWNER_SCOPE, 1)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .bundler_keys
+            .address_for_key("bundler-eoa:default:1:0")
+            .is_err());
+        assert!(state
+            .store
+            .nonces_list_pending(1, expected_address)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .store
+            .user_op_get(&user_op_hash)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(state
+            .store
+            .submitted_txs_list_all()
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_user_operation_identity_mismatch_does_not_consume_sender_quota() {
+        let chain = Arc::new(MockChainAdapter::with_synced(false));
+        let mut config = Config::default();
+        config.policy.max_user_ops_per_sender_per_minute = 1;
+        let (handler, auth_header, state) = test_handler_with_config(chain, config);
+        let active_key_ref = "bundler-eoa:default:1:1";
+        let active_address = "0xbeef000000000000000000000000000000000000";
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                active_address,
+                active_key_ref,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+
+        let mismatch = call_rpc(
+            &handler,
+            &auth_header,
+            "localwallet_sendUserOperation",
+            json!([
+                sample_user_op("0xab"),
+                entry_point_v07_hex(),
+                expected_relayer_param(
+                    "bundler-eoa:default:1:2",
+                    "0x2222222222222222222222222222222222222222"
+                )
+            ]),
+        )
+        .await;
+        assert_eq!(mismatch["error"]["code"], wallet_node_api::NOT_READY);
+        assert_eq!(
+            mismatch["error"]["data"]["reason"],
+            "relayer_authority_changed_before_submit"
+        );
+
+        let correctly_bound = call_rpc(
+            &handler,
+            &auth_header,
+            "localwallet_sendUserOperation",
+            json!([
+                sample_user_op("0xab"),
+                entry_point_v07_hex(),
+                expected_relayer_param(active_key_ref, active_address)
+            ]),
+        )
+        .await;
+        assert_ne!(
+            correctly_bound["error"]["code"],
+            wallet_node_api::RATE_LIMITED
+        );
+        assert_eq!(
+            correctly_bound["error"]["data"]["reason"],
+            "verified_reads_not_ready"
+        );
+    }
+
+    #[tokio::test]
     async fn send_user_operation_returns_existing_hash_idempotently() {
         let entry_point: Address = entry_point_v07_hex().parse().unwrap();
         let op = wallet_bundler::UserOperation::parse(sample_user_op("0xab")).unwrap();
@@ -3896,6 +4649,14 @@ mod tests {
         let mut config = Config::default();
         config.policy.max_user_ops_per_sender_per_minute = 1;
         let (handler, auth_header, state) = test_handler_with_config(chain.clone(), config);
+        let bundler_key_ref = "bundler-eoa:default:1:1";
+        let bundler_address = state.bundler_keys.create_key(bundler_key_ref).unwrap();
+        let bundler_eoa = format!("{bundler_address:#x}");
+        state
+            .store
+            .bundler_account_insert(1, &bundler_eoa, bundler_key_ref)
+            .await
+            .unwrap();
         state
             .store
             .user_op_insert(StoredUserOperation {
@@ -3911,12 +4672,57 @@ mod tests {
             })
             .await
             .unwrap();
+        state
+            .store
+            .submitted_tx_insert(SubmittedTransaction {
+                tx_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+                user_op_hash: hash.clone(),
+                chain_id: 1,
+                bundler_address: bundler_eoa.clone(),
+                nonce: 7,
+                raw_tx: "0x02c0".to_string(),
+                max_fee_per_gas: "0x40".to_string(),
+                max_priority_fee_per_gas: "0x5".to_string(),
+                status: SubmittedTxStatus::Submitted,
+                replacement_of: None,
+                submitted_at_block: Some(1),
+                recovery_attempts: 0,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .unwrap();
+
+        let mismatched = call_rpc(
+            &handler,
+            &auth_header,
+            "localwallet_sendUserOperation",
+            json!([
+                sample_user_op("0xab"),
+                entry_point_v07_hex(),
+                expected_relayer_param(
+                    "bundler-eoa:default:1:2",
+                    "0x2222222222222222222222222222222222222222"
+                )
+            ]),
+        )
+        .await;
+        assert_eq!(mismatched["error"]["code"], wallet_node_api::NOT_READY);
+        assert_eq!(
+            mismatched["error"]["data"]["reason"],
+            "relayer_authority_changed_before_submit"
+        );
 
         let value = call_rpc(
             &handler,
             &auth_header,
             "localwallet_sendUserOperation",
-            json!([sample_user_op("0xab"), entry_point_v07_hex()]),
+            json!([
+                sample_user_op("0xab"),
+                entry_point_v07_hex(),
+                expected_relayer_param(bundler_key_ref, &bundler_eoa)
+            ]),
         )
         .await;
 
@@ -3929,7 +4735,11 @@ mod tests {
             &handler,
             &auth_header,
             "localwallet_sendUserOperation",
-            json!([new_op, entry_point_v07_hex()]),
+            json!([
+                new_op,
+                entry_point_v07_hex(),
+                expected_relayer_param(bundler_key_ref, &bundler_eoa)
+            ]),
         )
         .await;
 
@@ -3941,7 +4751,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_user_operation_rejects_orphan_user_op_without_submission_record() {
+        let entry_point: Address = entry_point_v07_hex().parse().unwrap();
+        let op = wallet_bundler::UserOperation::parse(sample_user_op("0xab")).unwrap();
+        let hash = format!(
+            "{:#x}",
+            B256::from(op.user_op_hash(entry_point, 1).unwrap())
+        );
+        let chain = Arc::new(MockChainAdapter::with_synced(false));
+        let (handler, auth_header, state) = test_handler(chain.clone());
+        let bundler_key_ref = "bundler-eoa:default:1:1";
+        let bundler_address = state.bundler_keys.create_key(bundler_key_ref).unwrap();
+        let bundler_eoa = format!("{bundler_address:#x}");
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                &bundler_eoa,
+                bundler_key_ref,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .user_op_insert(StoredUserOperation {
+                user_op_hash: hash,
+                chain_id: 1,
+                entry_point: format!("{entry_point:#x}"),
+                sender: format!("{:#x}", op.sender),
+                nonce: format!("0x{:x}", op.nonce),
+                user_op_json: serde_json::to_string(&op.raw).unwrap(),
+                status: UserOpStatus::Submitted,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .unwrap();
+
+        let value = call_rpc(
+            &handler,
+            &auth_header,
+            "localwallet_sendUserOperation",
+            json!([
+                sample_user_op("0xab"),
+                entry_point_v07_hex(),
+                expected_relayer_param(bundler_key_ref, &bundler_eoa)
+            ]),
+        )
+        .await;
+
+        assert_eq!(value["error"]["code"], wallet_node_api::NOT_READY);
+        assert_eq!(
+            value["error"]["data"]["reason"],
+            "user_operation_submission_incomplete"
+        );
+        assert_eq!(chain.is_synced_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn send_user_operation_rejects_existing_submission_bound_to_another_relayer() {
+        let entry_point: Address = entry_point_v07_hex().parse().unwrap();
+        let op = wallet_bundler::UserOperation::parse(sample_user_op("0xab")).unwrap();
+        let hash = format!(
+            "{:#x}",
+            B256::from(op.user_op_hash(entry_point, 1).unwrap())
+        );
+        let chain = Arc::new(MockChainAdapter::with_synced(false));
+        let (handler, auth_header, state) = test_handler(chain.clone());
+        let bundler_key_ref = "bundler-eoa:default:1:1";
+        let bundler_address = state.bundler_keys.create_key(bundler_key_ref).unwrap();
+        let bundler_eoa = format!("{bundler_address:#x}");
+        state
+            .store
+            .bundler_account_insert_for_owner(
+                wallet_node_store::DEFAULT_OWNER_SCOPE,
+                1,
+                &bundler_eoa,
+                bundler_key_ref,
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .user_op_insert(StoredUserOperation {
+                user_op_hash: hash.clone(),
+                chain_id: 1,
+                entry_point: format!("{entry_point:#x}"),
+                sender: format!("{:#x}", op.sender),
+                nonce: format!("0x{:x}", op.nonce),
+                user_op_json: serde_json::to_string(&op.raw).unwrap(),
+                status: UserOpStatus::Submitted,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .unwrap();
+        state
+            .store
+            .submitted_tx_insert(SubmittedTransaction {
+                tx_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_string(),
+                user_op_hash: hash,
+                chain_id: 1,
+                bundler_address: "0x2222222222222222222222222222222222222222".to_string(),
+                nonce: 7,
+                raw_tx: "0x02c0".to_string(),
+                max_fee_per_gas: "0x40".to_string(),
+                max_priority_fee_per_gas: "0x5".to_string(),
+                status: SubmittedTxStatus::Submitted,
+                replacement_of: None,
+                submitted_at_block: Some(1),
+                recovery_attempts: 0,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .unwrap();
+
+        let value = call_rpc(
+            &handler,
+            &auth_header,
+            "localwallet_sendUserOperation",
+            json!([
+                sample_user_op("0xab"),
+                entry_point_v07_hex(),
+                expected_relayer_param(bundler_key_ref, &bundler_eoa)
+            ]),
+        )
+        .await;
+
+        assert_eq!(value["error"]["code"], wallet_node_api::NOT_READY);
+        assert_eq!(
+            value["error"]["data"]["reason"],
+            "user_operation_relayer_binding_mismatch"
+        );
+        assert_eq!(chain.is_synced_call_count(), 0);
+    }
+
+    #[tokio::test]
     async fn send_user_operation_persists_and_submits_raw_transaction() {
+        let bundler_key_ref = "bundler-eoa:default:1:1";
         let entry_point: Address = entry_point_v07_hex().parse().unwrap();
         let head = BlockHeader {
             number: 124,
@@ -3972,7 +4924,7 @@ mod tests {
         );
         let (handler, auth_header, state) = test_handler(chain.clone());
         state.mark_state_override_smoke_passed();
-        let bundler_address = state.bundler_keys.create_key("bundler-eoa:1").unwrap();
+        let bundler_address = state.bundler_keys.create_key(bundler_key_ref).unwrap();
         let bundler_eoa = format!("{bundler_address:#x}");
         chain.set_balance(
             bundler_address,
@@ -3981,7 +4933,7 @@ mod tests {
         );
         state
             .store
-            .bundler_account_insert(1, &bundler_eoa, "bundler-eoa:1")
+            .bundler_account_insert(1, &bundler_eoa, bundler_key_ref)
             .await
             .unwrap();
 
@@ -3989,7 +4941,11 @@ mod tests {
             &handler,
             &auth_header,
             "localwallet_sendUserOperation",
-            json!([sample_user_op("0xab"), entry_point_v07_hex()]),
+            json!([
+                sample_user_op("0xab"),
+                entry_point_v07_hex(),
+                expected_relayer_param(bundler_key_ref, &bundler_eoa)
+            ]),
         )
         .await;
 
@@ -4011,6 +4967,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_user_operation_first_submit_failure_records_static_diagnostics() {
+        let bundler_key_ref = "bundler-eoa:default:1:1";
         let entry_point: Address = entry_point_v07_hex().parse().unwrap();
         let head = BlockHeader {
             number: 124,
@@ -4050,7 +5007,7 @@ mod tests {
             Arc::new(FailingRawTransactionSubmitter),
         );
         state.mark_state_override_smoke_passed();
-        let bundler_address = state.bundler_keys.create_key("bundler-eoa:1").unwrap();
+        let bundler_address = state.bundler_keys.create_key(bundler_key_ref).unwrap();
         let bundler_eoa = format!("{bundler_address:#x}");
         chain.set_balance(
             bundler_address,
@@ -4059,7 +5016,7 @@ mod tests {
         );
         state
             .store
-            .bundler_account_insert(1, &bundler_eoa, "bundler-eoa:1")
+            .bundler_account_insert(1, &bundler_eoa, bundler_key_ref)
             .await
             .unwrap();
 
@@ -4067,7 +5024,11 @@ mod tests {
             &handler,
             &auth_header,
             "localwallet_sendUserOperation",
-            json!([raw_op, entry_point_v07_hex()]),
+            json!([
+                raw_op,
+                entry_point_v07_hex(),
+                expected_relayer_param(bundler_key_ref, &bundler_eoa)
+            ]),
         )
         .await;
 
@@ -4112,7 +5073,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_user_operation_creates_missing_bundler_eoa_then_requires_topup() {
+    async fn send_user_operation_requires_topup_after_bundler_eoa_creation() {
         let chain = Arc::new(MockChainAdapter::with_synced(true));
         let head = BlockHeader {
             number: 124,
@@ -4129,12 +5090,20 @@ mod tests {
         chain.set_current_head(head);
         let (handler, auth_header, state) = test_handler(chain.clone());
         state.mark_state_override_smoke_passed();
+        let active =
+            crate::handlers::wallet::bundler_account::ensure_active_bundler_account(&state)
+                .await
+                .unwrap();
 
         let value = call_rpc(
             &handler,
             &auth_header,
             "localwallet_sendUserOperation",
-            json!([sample_user_op("0xab"), entry_point_v07_hex()]),
+            json!([
+                sample_user_op("0xab"),
+                entry_point_v07_hex(),
+                expected_relayer_param(&active.key_ref, &active.address)
+            ]),
         )
         .await;
 
@@ -4151,6 +5120,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_user_operation_rejects_underfunded_bundler_eoa_before_simulation() {
+        let bundler_key_ref = "bundler-eoa:default:1:1";
         let bundler_eoa = "0xbeef000000000000000000000000000000000000";
         let bundler_address: Address = bundler_eoa.parse().unwrap();
         let chain = Arc::new(MockChainAdapter::with_synced(true));
@@ -4176,7 +5146,7 @@ mod tests {
         state.mark_state_override_smoke_passed();
         state
             .store
-            .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
+            .bundler_account_insert(1, bundler_eoa, bundler_key_ref)
             .await
             .unwrap();
 
@@ -4184,7 +5154,11 @@ mod tests {
             &handler,
             &auth_header,
             "localwallet_sendUserOperation",
-            json!([sample_user_op("0xab"), entry_point_v07_hex()]),
+            json!([
+                sample_user_op("0xab"),
+                entry_point_v07_hex(),
+                expected_relayer_param(bundler_key_ref, bundler_eoa)
+            ]),
         )
         .await;
 
@@ -4195,6 +5169,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_user_operation_stops_when_bundler_eoa_compromise_is_suspected() {
+        let bundler_key_ref = "bundler-eoa:default:1:1";
         let bundler_eoa = "0xbeef000000000000000000000000000000000000";
         let bundler_address: Address = bundler_eoa.parse().unwrap();
         let head = BlockHeader {
@@ -4221,7 +5196,7 @@ mod tests {
         state.mark_state_override_smoke_passed();
         state
             .store
-            .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
+            .bundler_account_insert(1, bundler_eoa, bundler_key_ref)
             .await
             .unwrap();
 
@@ -4232,7 +5207,11 @@ mod tests {
             &handler,
             &auth_header,
             "localwallet_sendUserOperation",
-            json!([sample_user_op("0xab"), entry_point_v07_hex()]),
+            json!([
+                sample_user_op("0xab"),
+                entry_point_v07_hex(),
+                expected_relayer_param(bundler_key_ref, bundler_eoa)
+            ]),
         )
         .await;
 
@@ -4246,6 +5225,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_user_operation_rejects_non_allowlisted_sender_code_before_raw_disabled() {
+        let bundler_key_ref = "bundler-eoa:default:1:1";
         let bundler_eoa = "0xbeef000000000000000000000000000000000000";
         let bundler_address: Address = bundler_eoa.parse().unwrap();
         let head = BlockHeader {
@@ -4277,7 +5257,7 @@ mod tests {
         state.mark_state_override_smoke_passed();
         state
             .store
-            .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
+            .bundler_account_insert(1, bundler_eoa, bundler_key_ref)
             .await
             .unwrap();
 
@@ -4285,7 +5265,11 @@ mod tests {
             &handler,
             &auth_header,
             "localwallet_sendUserOperation",
-            json!([deployed_sample_user_op("0xab"), entry_point_v07_hex()]),
+            json!([
+                deployed_sample_user_op("0xab"),
+                entry_point_v07_hex(),
+                expected_relayer_param(bundler_key_ref, bundler_eoa)
+            ]),
         )
         .await;
 
@@ -4300,6 +5284,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_user_operation_rejects_gas_underfunding_before_raw_disabled() {
+        let bundler_key_ref = "bundler-eoa:default:1:1";
         let entry_point: Address = entry_point_v07_hex().parse().unwrap();
         let bundler_eoa = "0xbeef000000000000000000000000000000000000";
         let bundler_address: Address = bundler_eoa.parse().unwrap();
@@ -4339,7 +5324,7 @@ mod tests {
         state.mark_state_override_smoke_passed();
         state
             .store
-            .bundler_account_insert(1, bundler_eoa, "bundler-eoa:1")
+            .bundler_account_insert(1, bundler_eoa, bundler_key_ref)
             .await
             .unwrap();
 
@@ -4347,7 +5332,11 @@ mod tests {
             &handler,
             &auth_header,
             "localwallet_sendUserOperation",
-            json!([sample_user_op("0xab"), entry_point_v07_hex()]),
+            json!([
+                sample_user_op("0xab"),
+                entry_point_v07_hex(),
+                expected_relayer_param(bundler_key_ref, bundler_eoa)
+            ]),
         )
         .await;
 
@@ -4371,7 +5360,14 @@ mod tests {
             &handler,
             &auth_header,
             "localwallet_sendUserOperation",
-            json!([op, entry_point_v07_hex()]),
+            json!([
+                op,
+                entry_point_v07_hex(),
+                expected_relayer_param(
+                    "bundler-eoa:default:1:1",
+                    "0xbeef000000000000000000000000000000000000"
+                )
+            ]),
         )
         .await;
 
@@ -4393,7 +5389,14 @@ mod tests {
             &handler,
             &auth_header,
             "localwallet_sendUserOperation",
-            json!([op, entry_point_v07_hex()]),
+            json!([
+                op,
+                entry_point_v07_hex(),
+                expected_relayer_param(
+                    "bundler-eoa:default:1:1",
+                    "0xbeef000000000000000000000000000000000000"
+                )
+            ]),
         )
         .await;
 
@@ -4883,6 +5886,14 @@ mod tests {
         json!({
             "adminActionId": challenge["result"]["adminActionId"],
             "nonce": challenge["result"]["nonce"]
+        })
+    }
+
+    fn expected_relayer_param(key_ref: &str, address: &str) -> serde_json::Value {
+        json!({
+            "chainId": 1,
+            "keyRef": key_ref,
+            "address": address,
         })
     }
 

@@ -73,6 +73,55 @@ enum BundlerTopUpUIRoute: Equatable {
     case retryOnly
 }
 
+/// The primary action shown on the bundler account card.
+///
+/// Legacy verification intentionally outranks every funding route. Until the
+/// protected secret is explicitly verified and app-owned authority is established,
+/// the daemon address is not a trusted top-up destination.
+enum BundlerAccountActionRoute: Equatable {
+    case verifyLegacyRelayer(LegacyRelayerMigrationCandidate)
+    case prefillTopUp
+    case externalFunding
+    case retryStatus
+}
+
+/// App-owned authority available to the bundler account card.
+///
+/// A missing migration candidate does not prove that relayer authority exists.
+/// Keeping unavailable, legacy, and verified states distinct makes it impossible
+/// for a malformed or corrupt passive state to inherit a funding route.
+enum BundlerAccountAuthorityState: Equatable {
+    case unavailable
+    case legacyVerification(LegacyRelayerMigrationCandidate)
+    case verified(BundlerFundingState)
+}
+
+enum BundlerAccountActionPolicy {
+    static func route(
+        authority: BundlerAccountAuthorityState,
+        forceExternalFunding: Bool
+    ) -> BundlerAccountActionRoute {
+        switch authority {
+        case .unavailable:
+            return .retryStatus
+        case .legacyVerification(let migrationCandidate):
+            return .verifyLegacyRelayer(migrationCandidate)
+        case .verified(let fundingState):
+            switch BundlerTopUpUI.route(
+                fundingState: fundingState,
+                forceExternalFunding: forceExternalFunding
+            ) {
+            case .prefillComposer:
+                return .prefillTopUp
+            case .externalFunding:
+                return .externalFunding
+            case .retryOnly:
+                return .retryStatus
+            }
+        }
+    }
+}
+
 enum BundlerTopUpUI {
     static let defaultPrompt = "Top up the bundler with 0.01 ETH"
 

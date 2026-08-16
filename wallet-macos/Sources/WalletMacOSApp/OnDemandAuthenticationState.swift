@@ -193,13 +193,14 @@ struct RelayerChainState: Codable, Equatable, Sendable {
 
     private static func validate(keyRef: String?, chainID: UInt64) throws {
         guard let keyRef else { return }
-        guard let keyRefChainID = BundlerLaunchKeyPolicy.chainId(ofKeyRef: keyRef) else {
+        guard let components = RelayerKeyReferenceAuthorityPolicy.components(keyRef),
+              components.ownerScope == "default" else {
             throw ValidationError.invalidKeyRef(keyRef)
         }
-        guard keyRefChainID == chainID else {
+        guard components.chainID == chainID else {
             throw ValidationError.keyRefChainMismatch(
                 expected: chainID,
-                actual: keyRefChainID,
+                actual: components.chainID,
                 keyRef: keyRef
             )
         }
@@ -686,7 +687,9 @@ enum RelayerRotationCoordinator {
             )
         }
 
-        guard let activeComponents = keyRefComponents(activeKeyRef) else {
+        guard let activeComponents = keyRefComponents(activeKeyRef),
+              activeComponents.ownerScope == "default",
+              activeComponents.chainID == head.chainID else {
             throw Failure.malformedActiveKeyRef(activeKeyRef)
         }
         let usedIndices = snapshot.historicalKeyRefs.compactMap { keyRef -> UInt64? in
@@ -721,6 +724,7 @@ enum RelayerRotationCoordinator {
 
     /// Executes preparation and installation in a fixed order. If daemon installation fails
     /// after the append, the next call plans `.reusePending` and therefore retries the same key.
+    @MainActor
     static func prepareAndInstall(
         plan: Plan,
         snapshot: RelayerChainSnapshot,
@@ -907,18 +911,13 @@ enum RelayerRotationCoordinator {
         }
     }
 
-    private static func keyRefComponents(
+    static func keyRefComponents(
         _ keyRef: String
     ) -> (ownerScope: String, chainID: UInt64, index: UInt64)? {
-        let parts = keyRef.split(separator: ":", omittingEmptySubsequences: false)
-        guard parts.count == 4,
-              parts[0] == "bundler-eoa",
-              !parts[1].isEmpty,
-              let chainID = UInt64(parts[2]),
-              let index = UInt64(parts[3]) else {
+        guard let components = RelayerKeyReferenceAuthorityPolicy.components(keyRef) else {
             return nil
         }
-        return (String(parts[1]), chainID, index)
+        return (components.ownerScope, components.chainID, components.index)
     }
 }
 
@@ -928,9 +927,16 @@ enum RelayerRotationCoordinator {
 ///
 /// An `unsafeReset` daemon flag is deliberately not authority to remove an app-selected active
 /// or pending identity. Individual deletion is restricted to an exact public identity that the
-/// app journal remembers and the daemon reports as retired. The returned local deletion order
-/// makes the public authority record disappear before the protected secret can be removed.
+/// app journal remembers and the daemon reports as retired. An exact `deleted` observation is
+/// accepted only to resume cleanup after an already-completed idempotent daemon deletion. The
+/// returned local deletion order removes the protected secret first. A stale immutable public
+/// identity is inert, while a secret left behind without its public binding is unrecoverable.
 enum RelayerTargetedDeletionPolicy {
+    enum DaemonDeletionPhase: Equatable, Sendable {
+        case required
+        case alreadyCompleted
+    }
+
     enum LocalDeletionStep: Equatable, Sendable {
         case publicIdentity
         case protectedSecret
@@ -938,11 +944,16 @@ enum RelayerTargetedDeletionPolicy {
 
     struct Authorization: Equatable, Sendable {
         let identity: VerifiedRelayerIdentity
+        let daemonDeletionPhase: DaemonDeletionPhase
         let requiredLocalDeletionOrder: [LocalDeletionStep]
 
-        fileprivate init(identity: VerifiedRelayerIdentity) {
+        fileprivate init(
+            identity: VerifiedRelayerIdentity,
+            daemonDeletionPhase: DaemonDeletionPhase
+        ) {
             self.identity = identity
-            self.requiredLocalDeletionOrder = [.publicIdentity, .protectedSecret]
+            self.daemonDeletionPhase = daemonDeletionPhase
+            self.requiredLocalDeletionOrder = [.protectedSecret, .publicIdentity]
         }
     }
 
@@ -952,7 +963,6 @@ enum RelayerTargetedDeletionPolicy {
         case pendingIdentityProtected(String)
         case nonHistoricalIdentity(String)
         case retiringIdentityMayHaveLiveWork(String)
-        case identityAlreadyDeleted(String)
         case lifecycleNotRetired(String)
         case missingPublicIdentity(String)
         case publicIdentityKeyRefMismatch(expected: String, actual: String)
@@ -981,13 +991,17 @@ enum RelayerTargetedDeletionPolicy {
             throw Failure.nonHistoricalIdentity(claim.keyRef)
         }
 
+        let daemonDeletionPhase: DaemonDeletionPhase
         switch claim.lifecycle {
         case "retired":
-            break
+            daemonDeletionPhase = .required
         case "retiring":
             throw Failure.retiringIdentityMayHaveLiveWork(claim.keyRef)
         case "deleted":
-            throw Failure.identityAlreadyDeleted(claim.keyRef)
+            // wallet-node deletion is idempotent. This recovery-only mode lets
+            // an authenticated retry finish public/secret cleanup after a crash
+            // between daemon deletion and the two local deletion steps.
+            daemonDeletionPhase = .alreadyCompleted
         default:
             throw Failure.lifecycleNotRetired(claim.lifecycle)
         }
@@ -1021,6 +1035,9 @@ enum RelayerTargetedDeletionPolicy {
                 actual: normalizedAddress
             )
         }
-        return Authorization(identity: identity)
+        return Authorization(
+            identity: identity,
+            daemonDeletionPhase: daemonDeletionPhase
+        )
     }
 }

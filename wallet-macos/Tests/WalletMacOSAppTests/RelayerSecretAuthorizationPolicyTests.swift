@@ -13,6 +13,8 @@ import Testing
                 retiring: [history(index: 1, lifecycle: "retiring")]
             ),
             expectedChainID: chainID,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: "sepolia",
             snapshot: try rotatedSnapshot(from: 1, to: 2),
             identityForKeyRef: { identities[$0] }
         )
@@ -34,6 +36,8 @@ import Testing
                 retiring: [history(index: 1, lifecycle: "retired")]
             ),
             expectedChainID: chainID,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: "sepolia",
             snapshot: snapshot,
             identityForKeyRef: { identities[$0] }
         )
@@ -55,6 +59,8 @@ import Testing
                     retiring: [history(index: 3, lifecycle: "retiring")]
                 ),
                 expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
                 snapshot: try rotatedSnapshot(from: 1, to: 2),
                 identityForKeyRef: { identities[$0] }
             )
@@ -85,6 +91,8 @@ import Testing
                     retiring: [history(index: 2, lifecycle: "retiring")]
                 ),
                 expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
                 snapshot: snapshot,
                 identityForKeyRef: { identities[$0] }
             )
@@ -124,6 +132,8 @@ import Testing
                     retiring: [history(index: 2, lifecycle: "retiring")]
                 ),
                 expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
                 snapshot: snapshot,
                 identityForKeyRef: { identities[$0] }
             )
@@ -152,12 +162,16 @@ import Testing
         let before = try RelayerSecretAuthorizationPolicy.resolve(
             status: status(activeIndex: 1),
             expectedChainID: chainID,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: "sepolia",
             snapshot: genesisSnapshot,
             identityForKeyRef: { identities[$0] }
         )
         let after = try RelayerSecretAuthorizationPolicy.resolve(
             status: status(activeIndex: 1),
             expectedChainID: chainID,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: "sepolia",
             snapshot: pendingSnapshot,
             identityForKeyRef: { identities[$0] }
         )
@@ -179,6 +193,8 @@ import Testing
             _ = try RelayerSecretAuthorizationPolicy.resolve(
                 status: status(activeIndex: 2, retiring: [duplicate, duplicate]),
                 expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
                 snapshot: snapshot,
                 identityForKeyRef: { identities[$0] }
             )
@@ -191,6 +207,8 @@ import Testing
             _ = try RelayerSecretAuthorizationPolicy.resolve(
                 status: status(activeIndex: 2, retiring: [duplicate], retiringCount: 2),
                 expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
                 snapshot: snapshot,
                 identityForKeyRef: { identities[$0] }
             )
@@ -211,6 +229,8 @@ import Testing
                     retiring: [history(index: 1, lifecycle: "retiring", addressIndex: 9)]
                 ),
                 expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
                 snapshot: try rotatedSnapshot(from: 1, to: 2),
                 identityForKeyRef: { identities[$0] }
             )
@@ -224,10 +244,51 @@ import Testing
             _ = try RelayerSecretAuthorizationPolicy.resolve(
                 status: status(activeIndex: 1, compromiseSubmissionBlocked: true),
                 expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
                 snapshot: try activeSnapshot(index: 1),
                 identityForKeyRef: { identities[$0] }
             )
         }
+    }
+
+    @Test func wrongDaemonScopeOrProfileRejectsSecretAuthorizationBeforeIdentityRead() throws {
+        var identityReadCount = 0
+        let snapshot = try activeSnapshot(index: 1)
+
+        #expect(throws: PassiveRelayerIdentityResolver.Failure.wrongOwnerScope(
+            expected: "default",
+            actual: "attacker"
+        )) {
+            _ = try RelayerSecretAuthorizationPolicy.resolve(
+                status: status(activeIndex: 1, ownerScope: "attacker"),
+                expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
+                snapshot: snapshot,
+                identityForKeyRef: { _ in
+                    identityReadCount += 1
+                    return nil
+                }
+            )
+        }
+        #expect(throws: PassiveRelayerIdentityResolver.Failure.wrongNetworkProfile(
+            expected: "sepolia",
+            actual: "mainnet"
+        )) {
+            _ = try RelayerSecretAuthorizationPolicy.resolve(
+                status: status(activeIndex: 1, networkProfile: "mainnet"),
+                expectedChainID: chainID,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia",
+                snapshot: snapshot,
+                identityForKeyRef: { _ in
+                    identityReadCount += 1
+                    return nil
+                }
+            )
+        }
+        #expect(identityReadCount == 0)
     }
 
     @Test func authenticatedSecretMustReDeriveTheExactAuthorizedIdentity() throws {
@@ -305,15 +366,17 @@ import Testing
         activeIndex: UInt64,
         retiring: [WalletNodeClient.RelayerStatus.KeyHistoryEntry] = [],
         retiringCount: Int? = nil,
-        compromiseSubmissionBlocked: Bool = false
+        compromiseSubmissionBlocked: Bool = false,
+        ownerScope: String = "default",
+        networkProfile: String = "sepolia"
     ) -> WalletNodeClient.RelayerStatus {
         WalletNodeClient.RelayerStatus(
             ready: !compromiseSubmissionBlocked,
             keyLoaded: true,
             reason: nil,
-            ownerScope: "default",
+            ownerScope: ownerScope,
             chainId: Int(chainID),
-            networkProfile: "sepolia",
+            networkProfile: networkProfile,
             eoa: address(activeIndex),
             keyRef: keyRef(activeIndex),
             balance: "0x2386f26fc10000",

@@ -289,7 +289,7 @@ import Testing
             reset.range(of: "WalletNodeManagedStoreCleanup.clear")
         )
         let replacement = try #require(
-            reset.range(of: "BundlerKeyStore.shared.createIfNeeded(")
+            reset.range(of: "bundlerKeyStore.createIfNeeded(")
         )
         let registration = try #require(
             reset.range(of: "try await relayerBootstrapRegistrationService.register(")
@@ -309,6 +309,7 @@ import Testing
         #expect(registration.lowerBound < authorityPersistence.lowerBound)
         #expect(authorityPersistence.lowerBound < cacheSync.lowerBound)
         #expect(cacheSync.lowerBound < stateClear.lowerBound)
+        #expect(reset.contains("BundlerKeyStore.shared") == false)
     }
 
     @Test func appMenuAndDashboardShareOneAppModelInstance() throws {
@@ -421,6 +422,9 @@ import Testing
         )
         let postAuthenticationCheck = try #require(send.range(of: "phase: \"post-auth\""))
         let signing = try #require(send.range(of: "UserOperationSigning.signForSend"))
+        let daemonBoundExpectedIdentity = try #require(
+            send.range(of: "expectedRelayer: expectedSubmissionRelayer")
+        )
 
         #expect(preAuthenticationCheck.lowerBound < authentication.lowerBound)
         #expect(authentication.lowerBound < unlock.lowerBound)
@@ -428,6 +432,7 @@ import Testing
         #expect(identityMatch.lowerBound < protectedSecretRead.lowerBound)
         #expect(protectedSecretRead.lowerBound < postAuthenticationCheck.lowerBound)
         #expect(postAuthenticationCheck.lowerBound < signing.lowerBound)
+        #expect(signing.lowerBound < daemonBoundExpectedIdentity.lowerBound)
     }
 
     @Test func appModelHasOneJournalAuthorizedProtectedRelayerReadBoundary() throws {
@@ -438,20 +443,26 @@ import Testing
 
         let protectedRead = try slice(
             source,
+            from: "private func readBoundRelayerSecret(",
+            until: "private func readAuthorizedRelayerSecret("
+        )
+        let authorityWrapper = try slice(
+            source,
             from: "private func readAuthorizedRelayerSecret(",
             until: "private func requireCurrentRelayerConnection"
         )
-        let beforeAuthority = try #require(
-            protectedRead.range(of: "let beforePlan = try relayerSecretAuthorizationPlan")
-        )
+        let beforeAuthority = try #require(protectedRead.range(of: "try await validateAuthority()"))
         let keychainRead = try #require(
             protectedRead.range(of: "let record = try bundlerKeyStore.read(")
         )
         let secretBinding = try #require(
-            protectedRead.range(of: "RelayerSecretAuthorizationPolicy.verifyAuthenticated")
+            protectedRead.range(of: "VerifiedRelayerIdentity.derive(")
         )
         let afterAuthority = try #require(
-            protectedRead.range(of: "let afterPlan = try relayerSecretAuthorizationPlan")
+            protectedRead.range(
+                of: "try await validateAuthority()",
+                range: secretBinding.upperBound..<protectedRead.endIndex
+            )
         )
 
         #expect(beforeAuthority.lowerBound < keychainRead.lowerBound)
@@ -459,6 +470,230 @@ import Testing
         #expect(secretBinding.lowerBound < afterAuthority.lowerBound)
         #expect(protectedRead.contains("authenticationContext: authenticationSession.context"))
         #expect(protectedRead.contains("requireCurrentRelayerConnection"))
+        #expect(authorityWrapper.contains("relayerSecretAuthorizationPlan(for: status)"))
+        #expect(authorityWrapper.contains("plan == expectedPlan"))
+    }
+
+    @Test func liveRotationUsesTheAppOwnedRetrySafeCoordinator() throws {
+        let source = try appSource("AppModel.swift")
+        let rotation = try slice(
+            source,
+            from: "func rotateLocalRelayerKey() async throws",
+            until: "func exportLocalRelayerKey("
+        )
+        let snapshot = try #require(rotation.range(of: "requiredRelayerSnapshot()"))
+        let plan = try #require(
+            rotation.range(of: "RelayerRotationCoordinator.plan(from:")
+        )
+        let authorize = try #require(
+            rotation.range(of: "try await authentication.authorize()")
+        )
+        let prepare = try #require(
+            rotation.range(of: "RelayerRotationCoordinator.prepareAndInstall(")
+        )
+        let create = try #require(
+            rotation.range(of: "bundlerKeyStore.createIfNeeded(")
+        )
+        let install = try #require(
+            rotation.range(of: "client.installBundlerEOA(")
+        )
+
+        #expect(snapshot.lowerBound < plan.lowerBound)
+        #expect(plan.lowerBound < authorize.lowerBound)
+        #expect(authorize.lowerBound < prepare.lowerBound)
+        #expect(prepare.lowerBound < create.lowerBound)
+        #expect(create.lowerBound < install.lowerBound)
+        #expect(rotation.contains("appendJournal:"))
+        #expect(rotation.contains("readBoundRelayerSecret("))
+        #expect(rotation.contains("expectedPendingHead"))
+        #expect(rotation.contains("requirePendingRotationBinding("))
+        #expect(rotation.contains("BundlerKeyStore.shared") == false)
+        #expect(rotation.contains("UserDefaults") == false)
+    }
+
+    @Test func journalPromotionRequiresExactDaemonLifecycleObservations() throws {
+        let source = try appSource("AppModel.swift")
+        let promotion = try slice(
+            source,
+            from: "private func promotePendingRelayerIfReady(",
+            until: "private func readBoundRelayerSecret("
+        )
+        #expect(promotion.contains("RelayerPromotionObservationPolicy.validate("))
+        #expect(promotion.contains("RelayerRotationCoordinator.promoteIfReady("))
+        #expect(promotion.contains("observations.daemonActive"))
+        #expect(promotion.contains("observations.priorActive"))
+        #expect(promotion.contains("relayerPublicIdentityStore.identity"))
+        #expect(promotion.contains("relayerChainStateJournalStore.append"))
+        #expect(promotion.contains("BundlerKeyStore") == false)
+    }
+
+    @Test func targetedDeletionQuiescesThenDeletesDaemonSecretAndPublicInOrder() throws {
+        let source = try appSource("AppModel.swift")
+        let deletion = try slice(
+            source,
+            from: "func deleteLocalRelayerKey(",
+            until: "func cancelPendingOperation("
+        )
+        let firstAuthority = try #require(
+            deletion.range(of: "targetedRelayerDeletionAuthorization(")
+        )
+        let authorize = try #require(
+            deletion.range(of: "try await authentication.authorize()")
+        )
+        let secondAuthority = try #require(
+            deletion.range(
+                of: "targetedRelayerDeletionAuthorization(",
+                range: authorize.upperBound..<deletion.endIndex
+            )
+        )
+        let quiesce = try #require(
+            deletion.range(of: "quiesceRelayerInstallForTargetedDeletion(")
+        )
+        let daemonDelete = try #require(
+            deletion.range(of: "client.deleteBundlerEOA(")
+        )
+        let daemonStop = try #require(
+            deletion.range(of: "terminateManagedWalletNodeAfterTargetedDeletion(")
+        )
+        let publicDelete = try #require(
+            deletion.range(of: "relayerPublicIdentityStore.delete(")
+        )
+        let secretDelete = try #require(
+            deletion.range(of: "bundlerKeyStore.delete(")
+        )
+
+        #expect(firstAuthority.lowerBound < authorize.lowerBound)
+        #expect(authorize.lowerBound < secondAuthority.lowerBound)
+        #expect(secondAuthority.lowerBound < quiesce.lowerBound)
+        #expect(quiesce.lowerBound < daemonDelete.lowerBound)
+        #expect(daemonDelete.lowerBound < daemonStop.lowerBound)
+        #expect(daemonStop.lowerBound < secretDelete.lowerBound)
+        #expect(secretDelete.lowerBound < publicDelete.lowerBound)
+        #expect(deletion.contains("RelayerTargetedDeletionPolicy.authorizeIndividualDeletion"))
+        #expect(deletion.contains("unsafeReset: false"))
+        #expect(deletion.contains("relayerInstallTask == nil"))
+        #expect(deletion.contains("guard relayerInstallTask == nil"))
+        #expect(deletion.contains("relayerInstallTask?.cancel()") == false)
+        #expect(deletion.contains("try await relayerInstallTask.value") == false)
+        #expect(deletion.contains("walletNodeGeneration &+= 1"))
+        #expect(deletion.contains("status.ownerScope == \"default\""))
+        #expect(deletion.contains("status.networkProfile == activeChain.shortName"))
+        #expect(deletion.contains("BundlerKeyStore.shared") == false)
+        #expect(deletion.contains("targetKeyRef ??") == false)
+        #expect(deletion.contains("Unsafe Reset Local Relayer") == false)
+        #expect(deletion.contains("func canDeleteLocalRelayerKey(keyRef: String) -> Bool"))
+        #expect(deletion.contains("targetedRelayerDeletionAuthorization("))
+    }
+
+    @Test func targetedDeletionUIOnlyOffersExplicitRetiredKeyCleanup() throws {
+        let appKitSource = try appSource("WalletMacOSApp.swift")
+        let adminDeletion = try slice(
+            appKitSource,
+            from: "private func deleteLocalRelayer()",
+            until: "private func clearDebugLog()"
+        )
+        #expect(adminDeletion.contains("Delete Retired Key"))
+        #expect(adminDeletion.contains("Finish Cleanup"))
+        #expect(adminDeletion.contains("keyRef: target.keyRef"))
+        #expect(adminDeletion.contains("Unsafe Reset") == false)
+        #expect(adminDeletion.contains("Safe Delete") == false)
+
+        let settingsSource = try appSource("LocalWalletSettingsView.swift")
+        #expect(settingsSource.contains("onDeleteRelayerKey") == false)
+        #expect(settingsSource.contains("Safe delete relayer") == false)
+        #expect(settingsSource.contains("Unsafe reset relayer") == false)
+        #expect(settingsSource.contains("pendingConfirmation = .resetWallet"))
+    }
+
+    @Test func relayerMutationsAreSerializedAgainstSigningAndInstallation() throws {
+        let source = try appSource("AppModel.swift")
+        let rotation = try slice(
+            source,
+            from: "func rotateLocalRelayerKey() async throws",
+            until: "func exportLocalRelayerKey("
+        )
+        let send = try slice(
+            source,
+            from: "private func executeUserOperation(",
+            until: "private func sendUserOperation("
+        )
+        let unlock = try slice(
+            source,
+            from: "private func ensureRelayerUnlocked(",
+            until: "private func syncUnlockedRelayerAddress"
+        )
+        let replacement = try slice(
+            source,
+            from: "func cancelPendingOperation(",
+            until: "private func markReplacementUnavailableInHistory("
+        )
+        let previewBuild = try slice(
+            source,
+            from: "func buildUserOperationDraftPreview()",
+            until: "func sendCurrentUserOperation()"
+        )
+
+        #expect(rotation.contains("hasNoSecretResetConflict"))
+        #expect(rotation.contains("relayerInstallTask == nil"))
+        #expect(send.contains("!isRotatingLocalRelayer"))
+        #expect(send.contains("!isDeletingLocalRelayer"))
+        #expect(unlock.contains("guard !isDeletingLocalRelayer"))
+        #expect(replacement.contains("guard hasNoSecretResetConflict"))
+        #expect(previewBuild.contains("!isRotatingLocalRelayer"))
+        #expect(previewBuild.contains("!isDeletingLocalRelayer"))
+    }
+
+    @Test func firstUnlockStatusPublishesAnExactPromotionBeforeResolvingSecretAuthority() throws {
+        let source = try appSource("AppModel.swift")
+        let unlock = try slice(
+            source,
+            from: "private func ensureRelayerUnlocked(",
+            until: "private func syncUnlockedRelayerAddress"
+        )
+        let status = try #require(
+            unlock.range(of: "let observedStatus = try await client.bundlerStatus()")
+        )
+        let publish = try #require(
+            unlock.range(of: "publishLocalRelayerStatus(")
+        )
+        let plan = try #require(
+            unlock.range(of: "relayerSecretAuthorizationPlan(for: observedStatus)")
+        )
+
+        #expect(status.lowerBound < publish.lowerBound)
+        #expect(publish.lowerBound < plan.lowerBound)
+        #expect(unlock.contains("passiveRelayerIdentityIssue == nil"))
+    }
+
+    @Test func everyLocalSubmissionCarriesTheFreshJournalActiveRelayerToTheDaemon() throws {
+        let source = try appSource("AppModel.swift")
+        let selection = try slice(
+            source,
+            from: "private func expectedRelayerIdentityForSubmission(",
+            until: "func rotateLocalRelayerKey() async throws"
+        )
+        #expect(selection.contains("client.bundlerStatus()"))
+        #expect(selection.contains("publishLocalRelayerStatus"))
+        #expect(selection.contains("relayerSecretAuthorizationPlan(for: status)"))
+        #expect(selection.contains("return plan.active.identity"))
+
+        let send = try slice(
+            source,
+            from: "private func sendUserOperation(",
+            until: "private func activeSessionPlan"
+        )
+        let selected = try #require(
+            send.range(of: "expectedRelayerIdentityForSubmission(")
+        )
+        let signing = try #require(
+            send.range(of: "UserOperationSigning.signForSend")
+        )
+        let submission = try #require(
+            send.range(of: "expectedRelayer: expectedSubmissionRelayer")
+        )
+        #expect(selected.lowerBound < signing.lowerBound)
+        #expect(signing.lowerBound < submission.lowerBound)
+        #expect(send.contains("pendingKeyRef == nil") == false)
     }
 
     @Test func relayerUnlockRejectsCacheAndDaemonSelectedFallbacks() throws {

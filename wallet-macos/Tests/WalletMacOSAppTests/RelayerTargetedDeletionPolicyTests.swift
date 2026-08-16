@@ -4,7 +4,7 @@ import Testing
 @Suite struct RelayerTargetedDeletionPolicyTests {
     private let chainID: UInt64 = 11_155_111
 
-    @Test func exactHistoricalRetiredIdentityIsAuthorizedPublicBeforeSecret() throws {
+    @Test func exactHistoricalRetiredIdentityIsAuthorizedSecretBeforePublic() throws {
         let snapshot = try promotedSnapshot()
         let retiredIdentity = try identity(1)
         var requestedKeyRefs: [String] = []
@@ -20,9 +20,10 @@ import Testing
         )
 
         #expect(authorization.identity == retiredIdentity)
+        #expect(authorization.daemonDeletionPhase == .required)
         #expect(authorization.requiredLocalDeletionOrder == [
-            .publicIdentity,
             .protectedSecret,
+            .publicIdentity,
         ])
         #expect(requestedKeyRefs == [keyRef(1)])
     }
@@ -84,19 +85,26 @@ import Testing
         }
     }
 
-    @Test func deletedAndArbitraryLifecycleClaimsFailClosed() throws {
+    @Test func exactDeletedHistoricalIdentityCanResumeLocalCleanupAfterACrash() throws {
         let snapshot = try promotedSnapshot()
+        let deletedIdentity = try identity(1)
 
-        #expect(throws: RelayerTargetedDeletionPolicy.Failure.identityAlreadyDeleted(
-            keyRef(1)
-        )) {
-            _ = try RelayerTargetedDeletionPolicy.authorizeIndividualDeletion(
-                snapshot: snapshot,
-                daemonClaim: claim(index: 1, lifecycle: "deleted"),
-                unsafeReset: false,
-                identityForKeyRef: { _ in try identity(1) }
-            )
-        }
+        let authorization = try RelayerTargetedDeletionPolicy.authorizeIndividualDeletion(
+            snapshot: snapshot,
+            daemonClaim: claim(index: 1, lifecycle: "deleted"),
+            unsafeReset: false,
+            identityForKeyRef: { _ in deletedIdentity }
+        )
+        #expect(authorization.identity == deletedIdentity)
+        #expect(authorization.daemonDeletionPhase == .alreadyCompleted)
+        #expect(authorization.requiredLocalDeletionOrder == [
+            .protectedSecret,
+            .publicIdentity,
+        ])
+    }
+
+    @Test func arbitraryLifecycleClaimsStillFailClosed() throws {
+        let snapshot = try promotedSnapshot()
 
         #expect(throws: RelayerTargetedDeletionPolicy.Failure.lifecycleNotRetired(
             "pending_funding"

@@ -7,6 +7,7 @@ final class UserOperationSubmissionURLProtocol: URLProtocol {
     nonisolated(unsafe) static var responseHash = ""
     nonisolated(unsafe) static var capturedMethod: String?
     nonisolated(unsafe) static var capturedSignature: String?
+    nonisolated(unsafe) static var capturedParams: [Any]?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -17,6 +18,7 @@ final class UserOperationSubmissionURLProtocol: URLProtocol {
             Self.capturedMethod = body["method"] as? String
             if let params = body["params"] as? [Any],
                let userOperation = params.first as? [String: Any] {
+                Self.capturedParams = params
                 Self.capturedSignature = userOperation["signature"] as? String
             }
 
@@ -124,11 +126,40 @@ final class PostSignFreshnessURLProtocol: URLProtocol {
         UserOperationSubmissionURLProtocol.responseHash = operation.userOpHashHex.uppercased()
         Self.resetCapture()
 
-        let result = try await walletNodeClient().sendUserOperation(operation: operation)
+        let result = try await walletNodeClient().sendUserOperation(
+            operation: operation,
+            expectedRelayer: try expectedRelayer(for: operation)
+        )
 
         #expect(result == operation.userOpHashHex)
         #expect(UserOperationSubmissionURLProtocol.capturedMethod == "localwallet_sendUserOperation")
         #expect(UserOperationSubmissionURLProtocol.capturedSignature == "0xaabb")
+        #expect(UserOperationSubmissionURLProtocol.capturedParams?.count == 3)
+    }
+
+    @Test func walletNodeBindsSubmissionToExpectedRelayerIdentity() async throws {
+        let operation = try makeSignedOperation()
+        let expectedRelayer = try VerifiedRelayerIdentity(
+            chainID: operation.draft.chainId,
+            keyRef: "bundler-eoa:default:\(operation.draft.chainId):7",
+            address: "0x2222222222222222222222222222222222222222"
+        )
+        UserOperationSubmissionURLProtocol.responseHash = operation.userOpHashHex
+        Self.resetCapture()
+
+        let result = try await walletNodeClient().sendUserOperation(
+            operation: operation,
+            expectedRelayer: expectedRelayer
+        )
+
+        #expect(result == operation.userOpHashHex)
+        let params = try #require(UserOperationSubmissionURLProtocol.capturedParams)
+        #expect(params.count == 3)
+        let binding = try #require(params[2] as? [String: Any])
+        #expect(Set(binding.keys) == ["chainId", "keyRef", "address"])
+        #expect((binding["chainId"] as? NSNumber)?.uint64Value == operation.draft.chainId)
+        #expect(binding["keyRef"] as? String == expectedRelayer.keyRef)
+        #expect(binding["address"] as? String == expectedRelayer.address)
     }
 
     @Test func walletNodeRejectsReturnedHashThatDoesNotMatchSignedOperation() async throws {
@@ -143,7 +174,10 @@ final class PostSignFreshnessURLProtocol: URLProtocol {
                 actual: wrongHash
             )
         ) {
-            _ = try await walletNodeClient().sendUserOperation(operation: operation)
+            _ = try await walletNodeClient().sendUserOperation(
+                operation: operation,
+                expectedRelayer: try expectedRelayer(for: operation)
+            )
         }
     }
 
@@ -377,6 +411,7 @@ final class PostSignFreshnessURLProtocol: URLProtocol {
     private static func resetCapture() {
         UserOperationSubmissionURLProtocol.capturedMethod = nil
         UserOperationSubmissionURLProtocol.capturedSignature = nil
+        UserOperationSubmissionURLProtocol.capturedParams = nil
     }
 
     private static let freshnessRPCURL = URL(string: "http://127.0.0.1:8545")!
@@ -397,11 +432,24 @@ final class PostSignFreshnessURLProtocol: URLProtocol {
         operation: SignedUserOperation,
         probe: SubmissionAcceptanceProbe
     ) async throws -> String {
-        let hash = try await walletNodeClient().sendUserOperation(operation: operation)
+        let hash = try await walletNodeClient().sendUserOperation(
+            operation: operation,
+            expectedRelayer: try expectedRelayer(for: operation)
+        )
         probe.optimisticNonceWrites += 1
         probe.historyWrites += 1
         probe.sessionStateWrites += 1
         return hash
+    }
+
+    private func expectedRelayer(
+        for operation: SignedUserOperation
+    ) throws -> VerifiedRelayerIdentity {
+        try VerifiedRelayerIdentity(
+            chainID: operation.draft.chainId,
+            keyRef: "bundler-eoa:default:\(operation.draft.chainId):7",
+            address: "0x2222222222222222222222222222222222222222"
+        )
     }
 
     private func makeSignedOperation(usedSession: Bool = false) throws -> SignedUserOperation {

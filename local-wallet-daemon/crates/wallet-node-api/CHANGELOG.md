@@ -18,6 +18,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Changed
 
 - `localwallet_sendUserOperation` now rejects sends before persistence when the active bundler EOA cannot cover the estimated `handleOps` gas budget.
+- `localwallet_sendUserOperation` now requires a third `{chainId, keyRef, address}` parameter binding the request to the exact active relayer. Missing, malformed, stale, or non-canonical bindings fail before nonce reservation, signing, and persistence. The deprecated `eth_sendUserOperation` daemon alias inherits this hardened contract.
+- Relayer submission persistence is now atomic across the UserOperation, submitted transaction, and nonce state. Startup recovers only provably unbroadcast pre-bundle reservations, including the legacy crash window where a UserOperation existed without any transaction evidence.
 
 ## [0.1.0] - 2026-05-11
 

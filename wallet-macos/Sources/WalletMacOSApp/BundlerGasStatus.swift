@@ -1,6 +1,48 @@
 import Foundation
 import WalletToolLayer
 
+/// Canonical parser for app-managed relayer key references.
+///
+/// Swift's integer parser accepts aliases such as `011155111` and `01`. The
+/// daemon does not: authority-bearing key references must round-trip to the one
+/// canonical decimal representation shared with Rust.
+enum RelayerKeyReferenceAuthorityPolicy {
+    struct Components: Equatable, Sendable {
+        let ownerScope: String
+        let chainID: UInt64
+        let index: UInt64
+    }
+
+    static func components(_ keyRef: String) -> Components? {
+        let parts = keyRef.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 4,
+              parts[0] == "bundler-eoa",
+              !parts[1].isEmpty,
+              let chainID = UInt64(parts[2]),
+              chainID > 0,
+              String(parts[2]) == String(chainID),
+              let index = UInt64(parts[3]),
+              index > 0,
+              String(parts[3]) == String(index) else {
+            return nil
+        }
+        return Components(
+            ownerScope: String(parts[1]),
+            chainID: chainID,
+            index: index
+        )
+    }
+
+    static func matches(
+        _ keyRef: String,
+        ownerScope: String,
+        chainID: UInt64
+    ) -> Bool {
+        guard let components = components(keyRef) else { return false }
+        return components.ownerScope == ownerScope && components.chainID == chainID
+    }
+}
+
 /// Result of the app's prompt-free, app-owned relayer selection check.
 ///
 /// A daemon can report any public key reference. It is therefore only an observation, never
@@ -13,6 +55,8 @@ enum PassiveRelayerIdentityResolver {
         case invalidDaemonChainID(Int)
         case wrongDaemonChain(expected: UInt64, actual: UInt64)
         case wrongJournalChain(expected: UInt64, actual: UInt64)
+        case wrongOwnerScope(expected: String, actual: String)
+        case wrongNetworkProfile(expected: String, actual: String)
         case missingDaemonKeyRef
         case inactiveJournalIdentity(String)
     }
@@ -20,6 +64,8 @@ enum PassiveRelayerIdentityResolver {
     static func resolve(
         status: WalletNodeClient.RelayerStatus,
         expectedChainID: UInt64,
+        expectedOwnerScope: String,
+        expectedNetworkProfile: String,
         snapshot: RelayerChainSnapshot?,
         identityForKeyRef: (String) throws -> VerifiedRelayerIdentity?
     ) throws -> VerifiedRelayerIdentity {
@@ -37,6 +83,18 @@ enum PassiveRelayerIdentityResolver {
         }
         guard daemonChainID == expectedChainID else {
             throw Failure.wrongDaemonChain(expected: expectedChainID, actual: daemonChainID)
+        }
+        guard status.ownerScope == expectedOwnerScope else {
+            throw Failure.wrongOwnerScope(
+                expected: expectedOwnerScope,
+                actual: status.ownerScope
+            )
+        }
+        guard status.networkProfile == expectedNetworkProfile else {
+            throw Failure.wrongNetworkProfile(
+                expected: expectedNetworkProfile,
+                actual: status.networkProfile
+            )
         }
         guard let keyRef = status.keyRef else {
             throw Failure.missingDaemonKeyRef
@@ -58,8 +116,128 @@ enum PassiveRelayerIdentityResolver {
 
         return try RelayerIdentityBindingPolicy.verify(
             status: status,
-            against: authorization.identity
+            against: authorization.identity,
+            expectedOwnerScope: expectedOwnerScope,
+            expectedNetworkProfile: expectedNetworkProfile
         )
+    }
+}
+
+/// One legacy relayer identity that is eligible for explicit user verification.
+///
+/// This is only a public observation. It does not authorize the daemon identity or
+/// access to the protected secret. The explicit migration action must authenticate,
+/// re-derive this identity from the secret, and bind a fresh daemon status before it
+/// creates the app-owned public record and journal genesis.
+struct LegacyRelayerMigrationCandidate: Equatable, Sendable {
+    let identity: VerifiedRelayerIdentity
+}
+
+/// Prompt-free eligibility for the explicit legacy relayer verification action.
+///
+/// An absent journal is the only state in which daemon identity may become a
+/// migration candidate. A daemon observation is never adopted directly: it must be
+/// structurally valid, coherent, active, uncompromised, and either have no immutable
+/// public record yet or match that record exactly.
+enum LegacyRelayerMigrationPolicy {
+    static func candidate(
+        status: WalletNodeClient.RelayerStatus,
+        expectedChainID: UInt64,
+        expectedOwnerScope: String,
+        expectedNetworkProfile: String,
+        snapshot: RelayerChainSnapshot?,
+        identityForKeyRef: (String) throws -> VerifiedRelayerIdentity?
+    ) throws -> LegacyRelayerMigrationCandidate? {
+        // Any validated journal, including a tombstoned head, means this is not a
+        // legacy wallet. Missing public data in that state is corruption/recovery,
+        // not permission to trust daemon-selected identity.
+        guard snapshot == nil,
+              UInt64(exactly: status.chainId) == expectedChainID,
+              status.ownerScope == expectedOwnerScope,
+              status.networkProfile == expectedNetworkProfile,
+              let keyRef = status.keyRef else {
+            return nil
+        }
+        guard keyRefHasExpectedAuthority(
+            keyRef,
+            ownerScope: expectedOwnerScope,
+            chainID: expectedChainID
+        ) else {
+            return nil
+        }
+
+        let observedIdentity: VerifiedRelayerIdentity
+        do {
+            observedIdentity = try VerifiedRelayerIdentity(
+                chainID: expectedChainID,
+                keyRef: keyRef,
+                address: status.eoa
+            )
+            try RelayerIdentityBindingPolicy.verify(
+                status: status,
+                against: observedIdentity,
+                expectedOwnerScope: expectedOwnerScope,
+                expectedNetworkProfile: expectedNetworkProfile
+            )
+        } catch {
+            return nil
+        }
+        guard hasCleanLegacyLifecycle(
+            status: status,
+            identity: observedIdentity
+        ) else {
+            return nil
+        }
+
+        let publicIdentity = try identityForKeyRef(keyRef)
+        guard publicIdentity == nil || publicIdentity == observedIdentity else {
+            return nil
+        }
+        return LegacyRelayerMigrationCandidate(identity: observedIdentity)
+    }
+
+    private static func keyRefHasExpectedAuthority(
+        _ keyRef: String,
+        ownerScope: String,
+        chainID: UInt64
+    ) -> Bool {
+        RelayerKeyReferenceAuthorityPolicy.matches(
+            keyRef,
+            ownerScope: ownerScope,
+            chainID: chainID
+        )
+    }
+
+    /// Legacy migration may create a genesis record only when the daemon has
+    /// exactly one clean active identity. Pending, retiring, historical, or
+    /// replacement state needs a dedicated recovery flow instead of being dropped.
+    private static func hasCleanLegacyLifecycle(
+        status: WalletNodeClient.RelayerStatus,
+        identity: VerifiedRelayerIdentity
+    ) -> Bool {
+        guard status.pendingFunding.isEmpty,
+              status.retiringCount == 0,
+              status.keyHistory.count == 1,
+              let history = status.keyHistory.first,
+              history.keyRef == identity.keyRef,
+              history.lifecycle == "active",
+              history.createdAt.map({ $0 >= 0 }) == true,
+              history.retiredAt == nil,
+              history.deletedAt == nil,
+              let historyAddress = try? VerifiedRelayerIdentity.normalizedAddress(
+                  history.eoa
+              ),
+              historyAddress == identity.address,
+              let replacement = status.replacement,
+              replacement.eligible == false,
+              replacement.blocked == false,
+              replacement.blockedReason == nil,
+              replacement.txHash == nil,
+              replacement.userOpHash == nil,
+              replacement.nonce == nil else {
+            return false
+        }
+        return true
     }
 }
 
@@ -146,6 +324,8 @@ enum RelayerSecretAuthorizationPolicy {
     static func resolve(
         status: WalletNodeClient.RelayerStatus,
         expectedChainID: UInt64,
+        expectedOwnerScope: String,
+        expectedNetworkProfile: String,
         snapshot: RelayerChainSnapshot?,
         identityForKeyRef: (String) throws -> VerifiedRelayerIdentity?
     ) throws -> RelayerSecretAuthorizationPlan {
@@ -158,6 +338,8 @@ enum RelayerSecretAuthorizationPolicy {
         let activeIdentity = try PassiveRelayerIdentityResolver.resolve(
             status: status,
             expectedChainID: expectedChainID,
+            expectedOwnerScope: expectedOwnerScope,
+            expectedNetworkProfile: expectedNetworkProfile,
             snapshot: snapshot,
             identityForKeyRef: identityForKeyRef
         )
@@ -334,7 +516,9 @@ struct BundlerGasStatus: Equatable {
               verifiedIdentity.chainID == chain.id,
               (try? RelayerIdentityBindingPolicy.verify(
                   status: relayer,
-                  against: verifiedIdentity
+                  against: verifiedIdentity,
+                  expectedOwnerScope: "default",
+                  expectedNetworkProfile: chain.shortName
               )) != nil else {
             return BundlerGasStatus(
                 verifiedIdentity: nil,
@@ -450,6 +634,8 @@ enum RelayerIdentityBindingPolicy {
         case invalidEOA(String)
         case wrongEOA(expected: String, actual: String)
         case inactiveLifecycle(String)
+        case wrongOwnerScope(expected: String, actual: String)
+        case wrongNetworkProfile(expected: String, actual: String)
         case compromiseSuspected
         case incoherentStatus
     }
@@ -457,10 +643,24 @@ enum RelayerIdentityBindingPolicy {
     @discardableResult
     static func verify(
         status: WalletNodeClient.RelayerStatus,
-        against identity: VerifiedRelayerIdentity
+        against identity: VerifiedRelayerIdentity,
+        expectedOwnerScope: String,
+        expectedNetworkProfile: String
     ) throws -> VerifiedRelayerIdentity {
         guard UInt64(exactly: status.chainId) == identity.chainID else {
             throw Failure.wrongChain(expected: identity.chainID, actual: status.chainId)
+        }
+        guard status.ownerScope == expectedOwnerScope else {
+            throw Failure.wrongOwnerScope(
+                expected: expectedOwnerScope,
+                actual: status.ownerScope
+            )
+        }
+        guard status.networkProfile == expectedNetworkProfile else {
+            throw Failure.wrongNetworkProfile(
+                expected: expectedNetworkProfile,
+                actual: status.networkProfile
+            )
         }
         guard let statusKeyRef = status.keyRef else {
             throw Failure.missingKeyRef

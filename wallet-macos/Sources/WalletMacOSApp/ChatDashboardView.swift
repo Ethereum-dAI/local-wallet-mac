@@ -3075,14 +3075,6 @@ private final class ChatDashboardModel: ObservableObject {
         try await walletModel.exportLocalRelayerKey()
     }
 
-    func deleteLocalRelayerKeyFromSettings(unsafe: Bool) async throws -> String {
-        try await walletModel.deleteLocalRelayerKey(unsafeReset: unsafe)
-        refreshAccountIdentity()
-        return unsafe
-            ? "Relayer key reset. Submissions stay blocked until a funded relayer exists."
-            : "Relayer key deleted. Submissions stay blocked until a funded relayer exists."
-    }
-
     func resetWalletFromSettings() async throws -> String {
         try await walletModel.resetDemoWalletAuthorized()
         refreshAccountIdentity()
@@ -5167,9 +5159,6 @@ struct LocalWalletChatDashboardView: View {
             },
             onExportRelayerKey: {
                 try await model.exportLocalRelayerKeyFromSettings()
-            },
-            onDeleteRelayerKey: { unsafe in
-                try await model.deleteLocalRelayerKeyFromSettings(unsafe: unsafe)
             },
             onResetWallet: {
                 try await model.resetWalletFromSettings()

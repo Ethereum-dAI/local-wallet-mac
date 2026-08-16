@@ -917,7 +917,9 @@ enum RelayerBootstrapRegistrationPolicy {
     static func verify(
         status: WalletNodeClient.RelayerStatus,
         identity: VerifiedRelayerIdentity,
-        expectedKeyLoaded: Bool
+        expectedKeyLoaded: Bool,
+        expectedOwnerScope: String,
+        expectedNetworkProfile: String
     ) throws {
         guard status.keyLoaded == expectedKeyLoaded else {
             throw Failure.unexpectedLoadedState(
@@ -925,7 +927,12 @@ enum RelayerBootstrapRegistrationPolicy {
                 actual: status.keyLoaded
             )
         }
-        try RelayerIdentityBindingPolicy.verify(status: status, against: identity)
+        try RelayerIdentityBindingPolicy.verify(
+            status: status,
+            against: identity,
+            expectedOwnerScope: expectedOwnerScope,
+            expectedNetworkProfile: expectedNetworkProfile
+        )
     }
 }
 
@@ -974,7 +981,9 @@ struct RelayerBootstrapRegistrationService {
         try RelayerBootstrapRegistrationPolicy.verify(
             status: registeredStatus,
             identity: identity,
-            expectedKeyLoaded: true
+            expectedKeyLoaded: true,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: chain.shortName
         )
 
         try Task.checkCancellation()
@@ -983,7 +992,9 @@ struct RelayerBootstrapRegistrationService {
         try RelayerBootstrapRegistrationPolicy.verify(
             status: lockedStatus,
             identity: identity,
-            expectedKeyLoaded: false
+            expectedKeyLoaded: false,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: chain.shortName
         )
         return identity
     }

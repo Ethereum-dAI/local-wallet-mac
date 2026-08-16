@@ -4,7 +4,7 @@
 //! Unlike `mainnet_fork_kernel` (which calls the EntryPoint directly), this spawns
 //! the actual `wallet-node` binary in its production fd/unix-socket mode (ready +
 //! alive + secret pipes, bundler EOA installed over the secret pipe) and drives
-//! `eth_estimateUserOperationGas` + `eth_sendUserOperation` +
+//! `eth_estimateUserOperationGas` + `localwallet_sendUserOperation` +
 //! `eth_getUserOperationReceipt` over the authenticated socket, exercising
 //! probe -> health -> effective-flag estimation -> policy -> simulation ->
 //! self-relay -> receipt watcher. Fusaka is live on Sepolia, so the on-chain
@@ -133,6 +133,11 @@ async fn sepolia_fork_daemon_sends_userop_via_p256_precompile() {
     // 4. Wait until the bundler EOA is installed (its address is reported by
     //    health before it is funded), then fund it on the fork.
     let bundler_eoa = wait_for_bundler_eoa(&socket, &token).await;
+    let expected_relayer = json!({
+        "chainId": SEPOLIA_CHAIN_ID,
+        "keyRef": BUNDLER_KEY_REF,
+        "address": format!("{bundler_eoa:#x}"),
+    });
     anvil_set_balance(
         &client,
         &fork_url,
@@ -197,8 +202,8 @@ async fn sepolia_fork_daemon_sends_userop_via_p256_precompile() {
     let rejection = daemon_rpc_raw(
         &socket,
         &token,
-        "eth_sendUserOperation",
-        json!([forged_json, ENTRY_POINT]),
+        "localwallet_sendUserOperation",
+        json!([forged_json, ENTRY_POINT, expected_relayer.clone()]),
     )
     .await;
     assert_eq!(
@@ -265,8 +270,8 @@ async fn sepolia_fork_daemon_sends_userop_via_p256_precompile() {
     let sent_hash = daemon_rpc(
         &socket,
         &token,
-        "eth_sendUserOperation",
-        json!([signed_json, ENTRY_POINT]),
+        "localwallet_sendUserOperation",
+        json!([signed_json, ENTRY_POINT, expected_relayer]),
     )
     .await;
     let sent_hash = sent_hash

@@ -120,6 +120,32 @@ private final class RecordingSecurityItemClient: SecurityItemClient, @unchecked 
                 address: address
             )
         }
+        for malformedKeyRef in [
+            "bundler-eoa:default:011155111:1",
+            "bundler-eoa:default:11155111:01",
+            "bundler-eoa:default:0:1",
+            "bundler-eoa:default:11155111:0",
+            "bundler-eoa:default:18446744073709551616:1",
+            "bundler-eoa:default:11155111:18446744073709551616",
+        ] {
+            #expect(throws: VerifiedRelayerIdentity.ValidationError.invalidKeyRef(
+                malformedKeyRef
+            )) {
+                try VerifiedRelayerIdentity(
+                    chainID: chainID,
+                    keyRef: malformedKeyRef,
+                    address: address
+                )
+            }
+            #expect(throws: VerifiedRelayerIdentity.ValidationError.invalidKeyRef(
+                malformedKeyRef
+            )) {
+                try VerifiedRelayerIdentity.derive(
+                    keyRef: malformedKeyRef,
+                    secret: Data(repeating: 0x11, count: 32)
+                )
+            }
+        }
     }
 
     @Test func authenticatedSecretDerivationAndLegacyMetadataDecisionAreFailClosed() throws {
@@ -387,7 +413,9 @@ private final class RecordingSecurityItemClient: SecurityItemClient, @unchecked 
     @Test func legitimateReadyLockedAndUnderfundedStatesBind() throws {
         #expect(try RelayerIdentityBindingPolicy.verify(
             status: status(),
-            against: identity
+            against: identity,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: "sepolia"
         ) == identity)
         #expect(try RelayerIdentityBindingPolicy.verify(
             status: status(
@@ -395,7 +423,9 @@ private final class RecordingSecurityItemClient: SecurityItemClient, @unchecked 
                 keyLoaded: false,
                 reason: "bundler_eoa_locked"
             ),
-            against: identity
+            against: identity,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: "sepolia"
         ) == identity)
         #expect(try RelayerIdentityBindingPolicy.verify(
             status: status(
@@ -405,7 +435,9 @@ private final class RecordingSecurityItemClient: SecurityItemClient, @unchecked 
                 balance: "0x0",
                 needsTopup: true
             ),
-            against: identity
+            against: identity,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: "sepolia"
         ) == identity)
         #expect(try RelayerIdentityBindingPolicy.verify(
             status: status(
@@ -414,7 +446,9 @@ private final class RecordingSecurityItemClient: SecurityItemClient, @unchecked 
                 reason: "bundler_balance_unavailable",
                 balance: "unavailable"
             ),
-            against: identity
+            against: identity,
+            expectedOwnerScope: "default",
+            expectedNetworkProfile: "sepolia"
         ) == identity)
     }
 
@@ -425,13 +459,17 @@ private final class RecordingSecurityItemClient: SecurityItemClient, @unchecked 
         )) {
             try RelayerIdentityBindingPolicy.verify(
                 status: status(chainID: 1),
-                against: identity
+                against: identity,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia"
             )
         }
         #expect(throws: RelayerIdentityBindingPolicy.Failure.missingKeyRef) {
             try RelayerIdentityBindingPolicy.verify(
                 status: status(keyRef: nil),
-                against: identity
+                against: identity,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia"
             )
         }
         #expect(throws: RelayerIdentityBindingPolicy.Failure.wrongKeyRef(
@@ -440,7 +478,9 @@ private final class RecordingSecurityItemClient: SecurityItemClient, @unchecked 
         )) {
             try RelayerIdentityBindingPolicy.verify(
                 status: status(keyRef: "bundler-eoa:default:11155111:2"),
-                against: identity
+                against: identity,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia"
             )
         }
         #expect(throws: RelayerIdentityBindingPolicy.Failure.wrongEOA(
@@ -449,13 +489,17 @@ private final class RecordingSecurityItemClient: SecurityItemClient, @unchecked 
         )) {
             try RelayerIdentityBindingPolicy.verify(
                 status: status(eoa: "0x2222222222222222222222222222222222222222"),
-                against: identity
+                against: identity,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia"
             )
         }
         #expect(throws: RelayerIdentityBindingPolicy.Failure.inactiveLifecycle("retiring")) {
             try RelayerIdentityBindingPolicy.verify(
                 status: status(lifecycle: "retiring"),
-                against: identity
+                against: identity,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia"
             )
         }
         #expect(throws: RelayerIdentityBindingPolicy.Failure.compromiseSuspected) {
@@ -466,7 +510,9 @@ private final class RecordingSecurityItemClient: SecurityItemClient, @unchecked 
                     reason: "bundler_eoa_compromise_suspected",
                     compromiseSubmissionBlocked: true
                 ),
-                against: identity
+                against: identity,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia"
             )
         }
     }
@@ -491,8 +537,38 @@ private final class RecordingSecurityItemClient: SecurityItemClient, @unchecked 
             ),
         ] {
             #expect(throws: RelayerIdentityBindingPolicy.Failure.incoherentStatus) {
-                try RelayerIdentityBindingPolicy.verify(status: inconsistent, against: identity)
+                try RelayerIdentityBindingPolicy.verify(
+                    status: inconsistent,
+                    against: identity,
+                    expectedOwnerScope: "default",
+                    expectedNetworkProfile: "sepolia"
+                )
             }
+        }
+    }
+
+    @Test func wrongOwnerScopeAndNetworkProfileFailClosed() {
+        #expect(throws: RelayerIdentityBindingPolicy.Failure.wrongOwnerScope(
+            expected: "default",
+            actual: "attacker"
+        )) {
+            try RelayerIdentityBindingPolicy.verify(
+                status: status(ownerScope: "attacker"),
+                against: identity,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia"
+            )
+        }
+        #expect(throws: RelayerIdentityBindingPolicy.Failure.wrongNetworkProfile(
+            expected: "sepolia",
+            actual: "mainnet"
+        )) {
+            try RelayerIdentityBindingPolicy.verify(
+                status: status(networkProfile: "mainnet"),
+                against: identity,
+                expectedOwnerScope: "default",
+                expectedNetworkProfile: "sepolia"
+            )
         }
     }
 
@@ -500,6 +576,8 @@ private final class RecordingSecurityItemClient: SecurityItemClient, @unchecked 
         chainID: Int = 11_155_111,
         keyRef: String? = "bundler-eoa:default:11155111:1",
         eoa: String = "0x7A3F000000000000000000000000000000009C21",
+        ownerScope: String = "default",
+        networkProfile: String = "sepolia",
         ready: Bool = true,
         keyLoaded: Bool = true,
         reason: String? = nil,
@@ -508,28 +586,26 @@ private final class RecordingSecurityItemClient: SecurityItemClient, @unchecked 
         lifecycle: String = "active",
         compromiseSubmissionBlocked: Bool = false
     ) -> WalletNodeClient.RelayerStatus {
-        do {
-            var json: [String: Any] = [
-                "ready": ready,
-                "keyLoaded": keyLoaded,
-                "ownerScope": "default",
-                "chainId": chainID,
-                "networkProfile": "sepolia",
-                "eoa": eoa,
-                "balance": balance,
-                "thresholdLow": "0x11c37937e08000",
-                "needsTopup": needsTopup,
-                "lifecycle": lifecycle,
-                "compromise": [
-                    "suspected": compromiseSubmissionBlocked,
-                    "submissionBlocked": compromiseSubmissionBlocked,
-                ],
-            ]
-            json["keyRef"] = keyRef ?? NSNull()
-            if let reason { json["reason"] = reason }
-            return try WalletNodeClient.RelayerStatus(json: json)
-        } catch {
-            fatalError("Invalid relayer fixture: \(error)")
-        }
+        WalletNodeClient.RelayerStatus(
+            ready: ready,
+            keyLoaded: keyLoaded,
+            reason: reason,
+            ownerScope: ownerScope,
+            chainId: chainID,
+            networkProfile: networkProfile,
+            eoa: eoa,
+            keyRef: keyRef,
+            balance: balance,
+            thresholdLow: "0x11c37937e08000",
+            needsTopup: needsTopup,
+            lifecycle: lifecycle,
+            compromiseSubmissionBlocked: compromiseSubmissionBlocked,
+            pendingFundingAddress: nil,
+            pendingFundingCount: 0,
+            retiringCount: 0,
+            keyHistory: [],
+            latestAuditEvent: nil,
+            replacement: nil
+        )
     }
 }

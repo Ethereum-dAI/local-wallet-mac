@@ -58,7 +58,14 @@ pub(crate) async fn reconcile(
         if address_match.key_ref != supplied.key_ref {
             return Err(ReconciliationError::AddressRegisteredUnderDifferentKeyRef);
         }
+        if matches!(
+            address_match.lifecycle,
+            BundlerLifecycle::Retired | BundlerLifecycle::Deleted
+        ) {
+            return Err(ReconciliationError::SuppliedAccountNotActive);
+        }
         if address_match.lifecycle == BundlerLifecycle::Active
+            || address_match.lifecycle == BundlerLifecycle::Retiring
             || address_match.lifecycle == desired_lifecycle
         {
             return Ok(ReconciliationOutcome {
@@ -67,19 +74,20 @@ pub(crate) async fn reconcile(
             });
         }
 
-        if let Some(active) = active_account(&accounts) {
-            if active.key_ref != supplied.key_ref {
-                return Err(ReconciliationError::SuppliedAccountNotActive);
-            }
-            return rebind_active(store, supplied, active).await;
+        if address_match.lifecycle != BundlerLifecycle::PendingFunding
+            || desired_lifecycle != BundlerLifecycle::Active
+        {
+            return Err(ReconciliationError::SuppliedAccountNotActive);
+        }
+        if active_account(&accounts).is_some() {
+            return Err(ReconciliationError::ActiveAccountDiffers);
         }
 
         store
-            .bundler_account_set_lifecycle_for_owner(
+            .bundler_account_activate_pending_for_owner(
                 supplied.owner_scope,
                 supplied.chain_id,
                 supplied.address,
-                desired_lifecycle,
             )
             .await?;
         return Ok(ReconciliationOutcome {
@@ -125,10 +133,11 @@ pub(crate) async fn rollback_rebound(
         return Ok(false);
     };
     store
-        .bundler_account_replace_active_for_owner(
+        .bundler_account_rollback_replacement_for_owner(
             &outcome.current.owner_scope,
             outcome.current.chain_id,
             &outcome.current.address,
+            &outcome.current.key_ref,
             &previous.address,
             &previous.key_ref,
         )
@@ -272,6 +281,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exact_retiring_key_is_accepted_without_lifecycle_mutation() {
+        let store = migrated_store();
+        store
+            .bundler_account_insert_for_owner(
+                OWNER,
+                CHAIN_ID,
+                OLD_ADDRESS,
+                KEY_REF,
+                BundlerLifecycle::Retiring,
+            )
+            .await
+            .unwrap();
+        store
+            .bundler_account_insert_for_owner(
+                OWNER,
+                CHAIN_ID,
+                NEW_ADDRESS,
+                "bundler-eoa:default:11155111:2",
+                BundlerLifecycle::Active,
+            )
+            .await
+            .unwrap();
+
+        let outcome = reconcile(
+            &store,
+            supplied(OLD_ADDRESS, KEY_REF),
+            BundlerLifecycle::PendingFunding,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome.mutation, ReconciliationMutation::None));
+        assert_eq!(outcome.current.lifecycle, BundlerLifecycle::Retiring);
+        let accounts = store
+            .bundler_account_list_for_owner(OWNER, CHAIN_ID)
+            .await
+            .unwrap();
+        assert!(accounts.iter().any(|account| {
+            account.address == OLD_ADDRESS
+                && account.key_ref == KEY_REF
+                && account.lifecycle == BundlerLifecycle::Retiring
+        }));
+        store.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exact_deleted_key_is_never_resurrected() {
+        for desired in [BundlerLifecycle::Active, BundlerLifecycle::PendingFunding] {
+            let store = migrated_store();
+            store
+                .bundler_account_insert_for_owner(
+                    OWNER,
+                    CHAIN_ID,
+                    OLD_ADDRESS,
+                    KEY_REF,
+                    BundlerLifecycle::Deleted,
+                )
+                .await
+                .unwrap();
+
+            let error = reconcile(&store, supplied(OLD_ADDRESS, KEY_REF), desired)
+                .await
+                .unwrap_err();
+
+            assert!(matches!(
+                error,
+                ReconciliationError::SuppliedAccountNotActive
+            ));
+            let accounts = store
+                .bundler_account_list_for_owner(OWNER, CHAIN_ID)
+                .await
+                .unwrap();
+            assert_eq!(accounts.len(), 1);
+            assert_eq!(accounts[0].lifecycle, BundlerLifecycle::Deleted);
+            store.shutdown_and_wait().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_retired_key_is_never_resurrected() {
+        for desired in [BundlerLifecycle::Active, BundlerLifecycle::PendingFunding] {
+            let store = migrated_store();
+            store
+                .bundler_account_insert_for_owner(
+                    OWNER,
+                    CHAIN_ID,
+                    OLD_ADDRESS,
+                    KEY_REF,
+                    BundlerLifecycle::Retired,
+                )
+                .await
+                .unwrap();
+
+            let error = reconcile(&store, supplied(OLD_ADDRESS, KEY_REF), desired)
+                .await
+                .unwrap_err();
+
+            assert!(matches!(
+                error,
+                ReconciliationError::SuppliedAccountNotActive
+            ));
+            let accounts = store
+                .bundler_account_list_for_owner(OWNER, CHAIN_ID)
+                .await
+                .unwrap();
+            assert_eq!(accounts.len(), 1);
+            assert_eq!(accounts[0].lifecycle, BundlerLifecycle::Retired);
+            store.shutdown_and_wait().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_pending_key_can_recover_to_active_when_no_active_exists() {
+        let store = migrated_store();
+        store
+            .bundler_account_insert_for_owner(
+                OWNER,
+                CHAIN_ID,
+                OLD_ADDRESS,
+                KEY_REF,
+                BundlerLifecycle::PendingFunding,
+            )
+            .await
+            .unwrap();
+
+        let outcome = reconcile(
+            &store,
+            supplied(OLD_ADDRESS, KEY_REF),
+            BundlerLifecycle::Active,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome.mutation,
+            ReconciliationMutation::ActivatedExisting
+        ));
+        let active = store
+            .bundler_account_active_for_owner(OWNER, CHAIN_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.address, OLD_ADDRESS);
+        assert_eq!(active.key_ref, KEY_REF);
+        store.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn supplied_bundler_key_registration_rejects_address_under_different_key_ref() {
         let store = migrated_store();
         store
@@ -392,6 +549,13 @@ mod tests {
         .await
         .unwrap();
         assert!(rollback_rebound(&store, &first).await.unwrap());
+        let rolled_back_accounts = store
+            .bundler_account_list_for_owner(OWNER, CHAIN_ID)
+            .await
+            .unwrap();
+        assert_eq!(rolled_back_accounts.len(), 1);
+        assert_eq!(rolled_back_accounts[0].address, OLD_ADDRESS);
+        assert_eq!(rolled_back_accounts[0].lifecycle, BundlerLifecycle::Active);
 
         let retried = reconcile(
             &store,

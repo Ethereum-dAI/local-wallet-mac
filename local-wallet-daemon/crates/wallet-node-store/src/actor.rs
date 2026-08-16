@@ -136,6 +136,28 @@ impl StoreActor {
                 );
                 false
             }
+            StoreCommand::BundlerAccountRollbackReplacement {
+                owner_scope,
+                chain_id,
+                transient_address,
+                transient_key_ref,
+                restored_address,
+                restored_key_ref,
+                reply,
+            } => {
+                let _ = reply.send(
+                    crate::repos::bundler_accounts::bundler_account_rollback_replacement_for_owner(
+                        &mut self.conn,
+                        &owner_scope,
+                        chain_id,
+                        &transient_address,
+                        &transient_key_ref,
+                        &restored_address,
+                        &restored_key_ref,
+                    ),
+                );
+                false
+            }
             StoreCommand::BundlerAccountSetLifecycle {
                 owner_scope,
                 chain_id,
@@ -216,6 +238,48 @@ impl StoreActor {
                 ));
                 false
             }
+            StoreCommand::NonceReserveNextForUserOp {
+                chain_id,
+                bundler_address,
+                confirmed_nonce,
+                user_op_hash,
+                reply,
+            } => {
+                let _ = reply.send(
+                    crate::repos::nonce_reservations::reserve_next_nonce_for_user_op(
+                        &mut self.conn,
+                        chain_id,
+                        &bundler_address,
+                        confirmed_nonce,
+                        &user_op_hash,
+                    ),
+                );
+                false
+            }
+            StoreCommand::NonceReleasePrebundle {
+                chain_id,
+                bundler_address,
+                nonce,
+                user_op_hash,
+                reply,
+            } => {
+                let _ = reply.send(crate::repos::nonce_reservations::release_prebundle_nonce(
+                    &mut self.conn,
+                    chain_id,
+                    &bundler_address,
+                    nonce,
+                    &user_op_hash,
+                ));
+                false
+            }
+            StoreCommand::NoncesReleaseOrphanedPrebundle { reply } => {
+                let _ = reply.send(
+                    crate::repos::nonce_reservations::release_orphaned_prebundle_nonces(
+                        &mut self.conn,
+                    ),
+                );
+                false
+            }
             StoreCommand::NonceAttachTxHash {
                 chain_id,
                 bundler_address,
@@ -283,6 +347,24 @@ impl StoreActor {
                         nonce,
                     ),
                 );
+                false
+            }
+            StoreCommand::PersistSubmissionBundle {
+                op,
+                tx,
+                nonce_chain_id,
+                nonce_bundler_address,
+                nonce,
+                reply,
+            } => {
+                let _ = reply.send(crate::repos::submission_bundles::persist_submission_bundle(
+                    &mut self.conn,
+                    op,
+                    tx,
+                    nonce_chain_id,
+                    &nonce_bundler_address,
+                    nonce,
+                ));
                 false
             }
             StoreCommand::UserOpGet {

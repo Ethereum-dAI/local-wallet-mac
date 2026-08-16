@@ -227,6 +227,19 @@ private final class ResetSecurityItemClient: SecurityItemClient, @unchecked Send
     #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "session-key:11155111:0xabc") == nil)
     #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "bundler-eoa:default:notachain:1") == nil)
     #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "bundler-eoa:default:11155111") == nil)
+    #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "bundler-eoa:default:011155111:1") == nil)
+    #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "bundler-eoa:default:11155111:01") == nil)
+    #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "bundler-eoa:default:0:1") == nil)
+    #expect(BundlerLaunchKeyPolicy.chainId(ofKeyRef: "bundler-eoa:default:11155111:0") == nil)
+    #expect(BundlerLaunchKeyPolicy.chainId(
+        ofKeyRef: "bundler-eoa:default:18446744073709551615:18446744073709551615"
+    ) == UInt64.max)
+    #expect(BundlerLaunchKeyPolicy.chainId(
+        ofKeyRef: "bundler-eoa:default:18446744073709551616:1"
+    ) == nil)
+    #expect(BundlerLaunchKeyPolicy.chainId(
+        ofKeyRef: "bundler-eoa:default:11155111:18446744073709551616"
+    ) == nil)
 }
 
 @Test func secretPayloadEncodesAllRecordsInOrder() throws {
@@ -283,6 +296,30 @@ private func withTestDefaults(_ body: (UserDefaults) throws -> Void) rethrows {
 
         #expect(defaults.string(forKey: "com.localwallet.demo.onboarding.bundler-key-ref") == nil)
         #expect(defaults.string(forKey: "com.localwallet.demo.onboarding.bundler-address") == nil)
+    }
+}
+
+@Test func malformedLegacyBundlerCacheNeverMigratesIntoCanonicalChainSlot() {
+    for malformedKeyRef in [
+        "bundler-eoa:default:011155111:1",
+        "bundler-eoa:default:11155111:01",
+        "bundler-eoa:default:0:1",
+        "bundler-eoa:default:11155111:0",
+    ] {
+        withTestDefaults { defaults in
+            defaults.set(
+                malformedKeyRef,
+                forKey: "com.localwallet.demo.onboarding.bundler-key-ref"
+            )
+            defaults.set(
+                "0xabcabcabcabcabcabcabcabcabcabcabcabcabca",
+                forKey: "com.localwallet.demo.onboarding.bundler-address"
+            )
+            let store = OnboardingSettingsStore(defaults: defaults)
+
+            #expect(store.bundlerKeyRef(chainId: 11_155_111) == nil)
+            #expect(store.bundlerAddress(chainId: 11_155_111) == nil)
+        }
     }
 }
 

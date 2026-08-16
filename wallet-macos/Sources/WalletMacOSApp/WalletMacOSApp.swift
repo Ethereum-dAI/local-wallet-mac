@@ -277,7 +277,7 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
     private let refreshRelayerButton = NSButton(title: "Refresh", target: nil, action: nil)
     private let rotateRelayerButton = NSButton(title: "Rotate", target: nil, action: nil)
     private let exportRelayerButton = NSButton(title: "Export", target: nil, action: nil)
-    private let deleteRelayerButton = NSButton(title: "Delete / Reset", target: nil, action: nil)
+    private let deleteRelayerButton = NSButton(title: "Delete Retired Key", target: nil, action: nil)
     private let logsTitleLabel = NSTextField(labelWithString: "Debug Activity")
     private let logsDetailLabel = NSTextField(labelWithString: "Timestamps for bootstrap, inspection, gas estimation, Secure Enclave signing, bundler submission, and receipt polling.")
     private let clearLogsButton = NSButton(title: "Clear Logs", target: nil, action: nil)
@@ -1096,7 +1096,11 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         styleButton(exportRelayerButton, role: canExportSelectedKey ? .secondary : .disabled)
 
         deleteRelayerButton.isEnabled = canDeleteSelectedKey
-        deleteRelayerButton.title = model.isDeletingLocalRelayer ? "Deleting…" : "Delete / Reset"
+        deleteRelayerButton.title = model.isDeletingLocalRelayer
+            ? "Deleting…"
+            : selectedTarget?.lifecycle == "deleted"
+                ? "Finish Cleanup"
+                : "Delete Retired Key"
         styleButton(deleteRelayerButton, role: canDeleteSelectedKey ? .quiet : .disabled)
     }
 
@@ -1122,7 +1126,8 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
             let prefix = entry.keyRef == status.keyRef ? "Current" : "History"
             relayerHistoryPopup.addItem(withTitle: "\(prefix): \(entry.displayTitle)")
             relayerHistoryPopup.lastItem?.representedObject = entry.keyRef
-            relayerHistoryPopup.lastItem?.isEnabled = entry.canExport || entry.canDelete
+            relayerHistoryPopup.lastItem?.isEnabled = entry.canExport
+                || model.canDeleteLocalRelayerKey(keyRef: entry.keyRef)
         }
 
         let fallbackSelection = status.keyRef ?? entries.first?.keyRef
@@ -1138,7 +1143,13 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         relayerHistoryPopup.isEnabled = entries.count > 1
     }
 
-    private func selectedRelayerAdminTarget() -> (keyRef: String, label: String, canExport: Bool, canDelete: Bool)? {
+    private func selectedRelayerAdminTarget() -> (
+        keyRef: String,
+        label: String,
+        lifecycle: String,
+        canExport: Bool,
+        canDelete: Bool
+    )? {
         guard let status = model.localRelayerStatus else {
             return nil
         }
@@ -1150,15 +1161,26 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
             return (
                 keyRef: entry.keyRef,
                 label: entry.eoa.shortAddress,
+                lifecycle: entry.lifecycle,
                 canExport: entry.canExport,
-                canDelete: entry.canDelete
+                canDelete: model.canDeleteLocalRelayerKey(keyRef: entry.keyRef)
             )
         }
+        let fallback = WalletNodeClient.RelayerStatus.KeyHistoryEntry(
+            eoa: status.eoa,
+            keyRef: keyRef,
+            lifecycle: status.lifecycle,
+            createdAt: nil,
+            retiredAt: nil,
+            deletedAt: nil,
+            lastExportedAt: nil
+        )
         return (
             keyRef: keyRef,
             label: status.eoa.shortAddress,
-            canExport: true,
-            canDelete: true
+            lifecycle: fallback.lifecycle,
+            canExport: fallback.canExport,
+            canDelete: model.canDeleteLocalRelayerKey(keyRef: fallback.keyRef)
         )
     }
 
@@ -1312,24 +1334,26 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
             return
         }
         let alert = NSAlert()
-        alert.messageText = "Delete or reset local relayer key?"
-        alert.informativeText = "This targets \(target.label). Safe delete is blocked when pending relayer transactions exist. Unsafe reset deletes key material anyway and can orphan pending relay state."
-        alert.addButton(withTitle: "Safe Delete")
-        alert.addButton(withTitle: "Unsafe Reset")
+        alert.messageText = target.lifecycle == "deleted"
+            ? "Finish relayer key cleanup?"
+            : "Delete retired relayer key?"
+        alert.informativeText = target.lifecycle == "deleted"
+            ? "This removes the remaining local records for \(target.label)."
+            : "This permanently removes the retired key for \(target.label). Active, pending, and retiring keys cannot be deleted here."
+        alert.addButton(withTitle: target.lifecycle == "deleted" ? "Finish Cleanup" : "Delete Retired Key")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .critical
 
-        let runDelete: (Bool) -> Void = { [weak self] unsafeReset in
+        let runDelete: () -> Void = { [weak self] in
             guard let self else { return }
             Task {
                 do {
                     try await self.model.deleteLocalRelayerKey(
                         keyRef: target.keyRef,
-                        label: target.label,
-                        unsafeReset: unsafeReset
+                        label: target.label
                     )
                 } catch {
-                    self.showError(unsafeReset ? "Unsafe reset failed" : "Delete failed", error)
+                    self.showError("Delete failed", error)
                 }
             }
         }
@@ -1337,17 +1361,13 @@ private final class WalletViewController: NSViewController, NSTextFieldDelegate 
         if let window = view.window {
             alert.beginSheetModal(for: window) { response in
                 if response == .alertFirstButtonReturn {
-                    runDelete(false)
-                } else if response == .alertSecondButtonReturn {
-                    runDelete(true)
+                    runDelete()
                 }
             }
         } else {
             let response = alert.runModal()
             if response == .alertFirstButtonReturn {
-                runDelete(false)
-            } else if response == .alertSecondButtonReturn {
-                runDelete(true)
+                runDelete()
             }
         }
     }

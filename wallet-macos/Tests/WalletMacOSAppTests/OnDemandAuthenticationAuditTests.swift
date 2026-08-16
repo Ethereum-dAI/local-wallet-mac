@@ -154,6 +154,35 @@ import Testing
         #expect(dashboard.contains("try await daemon?.terminateAndWait()"))
     }
 
+    @Test func dashboardResetRegistersReplacementRelayerBeforePublishingIt() throws {
+        let source = try appSource("AppModel.swift")
+        let reset = try slice(
+            source,
+            from: "func resetDemoWalletAuthorized",
+            until: "private var hasNoSecretResetConflict"
+        )
+        let storeCleanup = try #require(
+            reset.range(of: "WalletNodeManagedStoreCleanup.clear")
+        )
+        let replacement = try #require(
+            reset.range(of: "BundlerKeyStore.shared.createIfNeeded(")
+        )
+        let registration = try #require(
+            reset.range(of: "try await relayerBootstrapRegistrationService.register(")
+        )
+        let cacheSync = try #require(
+            reset.range(of: "syncUnlockedRelayerAddress(")
+        )
+        let stateClear = try #require(
+            reset.range(of: "clearInMemoryWalletStateAfterReset()")
+        )
+
+        #expect(storeCleanup.lowerBound < replacement.lowerBound)
+        #expect(replacement.lowerBound < registration.lowerBound)
+        #expect(registration.lowerBound < cacheSync.lowerBound)
+        #expect(cacheSync.lowerBound < stateClear.lowerBound)
+    }
+
     @Test func appMenuAndDashboardShareOneAppModelInstance() throws {
         let source = try appSource("WalletMacOSApp.swift")
         let dashboard = try slice(source, from: "private func showDashboard", until: "private func showLegacyDashboard")

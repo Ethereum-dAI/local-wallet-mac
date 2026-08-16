@@ -144,6 +144,7 @@ final class AppModel: ObservableObject {
     private let settingsStore: DemoSettingsStore
     private let onboardingSettingsStore: OnboardingSettingsStore
     private let kernelAccountAddressPredictor: KernelAccountAddressPredictor
+    private let relayerBootstrapRegistrationService: RelayerBootstrapRegistrationService
     private var walletNodeClient: WalletNodeClient?
     private var walletNodeDaemon: WalletNodeDaemon?
     private var walletNodeLaunchTask: Task<WalletNodeDaemon, Error>?
@@ -212,6 +213,7 @@ final class AppModel: ObservableObject {
         onboardingSettingsStore: OnboardingSettingsStore = OnboardingSettingsStore(),
         walletKeyValidator: WalletKeyValidator? = nil,
         kernelAccountAddressPredictor: KernelAccountAddressPredictor = KernelAccountAddressPredictor(),
+        relayerBootstrapRegistrationService: RelayerBootstrapRegistrationService? = nil,
         walletNodeClient: WalletNodeClient? = WalletNodeClient.Configuration.fromEnvironment().map {
             WalletNodeClient(configuration: $0)
         },
@@ -224,6 +226,7 @@ final class AppModel: ObservableObject {
         self.settingsStore = settingsStore
         self.onboardingSettingsStore = onboardingSettingsStore
         self.kernelAccountAddressPredictor = kernelAccountAddressPredictor
+        self.relayerBootstrapRegistrationService = relayerBootstrapRegistrationService ?? .init()
         self.walletNodeClient = walletNodeClient
         self.userOperationBuilder = userOperationBuilder
         self.walletHistoryStore = walletHistoryStore
@@ -493,6 +496,14 @@ final class AppModel: ObservableObject {
                     reason: authentication.reason,
                     authenticationContext: authentication.context
                 )
+                let registeredIdentity = try await relayerBootstrapRegistrationService.register(
+                    record: replacementRelayer,
+                    chain: activeChain,
+                    gasPolicy: networkSettings.resolvedDaemonGasPolicy
+                )
+                guard registeredIdentity.keyRef == replacementRelayerKeyRef else {
+                    throw VerifiedRelayerIdentity.ValidationError.storedIdentityMismatch
+                }
                 syncUnlockedRelayerAddress(
                     keyRef: replacementRelayerKeyRef,
                     secret: replacementRelayer.secret

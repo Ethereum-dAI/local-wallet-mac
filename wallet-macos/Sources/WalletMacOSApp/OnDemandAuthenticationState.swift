@@ -912,3 +912,106 @@ enum RelayerRotationCoordinator {
         return (String(parts[1]), chainID, index)
     }
 }
+
+// MARK: - Targeted relayer deletion policy
+
+/// Authorizes individual relayer-key deletion without weakening the full-wallet reset boundary.
+///
+/// An `unsafeReset` daemon flag is deliberately not authority to remove an app-selected active
+/// or pending identity. Individual deletion is restricted to an exact public identity that the
+/// app journal remembers and the daemon reports as retired. The returned local deletion order
+/// makes the public authority record disappear before the protected secret can be removed.
+enum RelayerTargetedDeletionPolicy {
+    enum LocalDeletionStep: Equatable, Sendable {
+        case publicIdentity
+        case protectedSecret
+    }
+
+    struct Authorization: Equatable, Sendable {
+        let identity: VerifiedRelayerIdentity
+        let requiredLocalDeletionOrder: [LocalDeletionStep]
+
+        fileprivate init(identity: VerifiedRelayerIdentity) {
+            self.identity = identity
+            self.requiredLocalDeletionOrder = [.publicIdentity, .protectedSecret]
+        }
+    }
+
+    enum Failure: Error, Equatable {
+        case wrongClaimChain(expected: UInt64, actual: UInt64)
+        case activeIdentityProtected(String)
+        case pendingIdentityProtected(String)
+        case nonHistoricalIdentity(String)
+        case retiringIdentityMayHaveLiveWork(String)
+        case identityAlreadyDeleted(String)
+        case lifecycleNotRetired(String)
+        case missingPublicIdentity(String)
+        case publicIdentityKeyRefMismatch(expected: String, actual: String)
+        case publicIdentityChainMismatch(expected: UInt64, actual: UInt64, keyRef: String)
+        case invalidClaimAddress(String)
+        case wrongClaimAddress(expected: String, actual: String)
+    }
+
+    static func authorizeIndividualDeletion(
+        snapshot: RelayerChainSnapshot,
+        daemonClaim claim: RelayerIdentityAuthority.Claim,
+        unsafeReset _: Bool,
+        identityForKeyRef: (String) throws -> VerifiedRelayerIdentity?
+    ) throws -> Authorization {
+        let head = snapshot.head
+        guard claim.chainID == head.chainID else {
+            throw Failure.wrongClaimChain(expected: head.chainID, actual: claim.chainID)
+        }
+        if claim.keyRef == head.activeKeyRef {
+            throw Failure.activeIdentityProtected(claim.keyRef)
+        }
+        if claim.keyRef == head.pendingKeyRef {
+            throw Failure.pendingIdentityProtected(claim.keyRef)
+        }
+        guard snapshot.historicalKeyRefs.contains(claim.keyRef) else {
+            throw Failure.nonHistoricalIdentity(claim.keyRef)
+        }
+
+        switch claim.lifecycle {
+        case "retired":
+            break
+        case "retiring":
+            throw Failure.retiringIdentityMayHaveLiveWork(claim.keyRef)
+        case "deleted":
+            throw Failure.identityAlreadyDeleted(claim.keyRef)
+        default:
+            throw Failure.lifecycleNotRetired(claim.lifecycle)
+        }
+
+        guard let identity = try identityForKeyRef(claim.keyRef) else {
+            throw Failure.missingPublicIdentity(claim.keyRef)
+        }
+        guard identity.keyRef == claim.keyRef else {
+            throw Failure.publicIdentityKeyRefMismatch(
+                expected: claim.keyRef,
+                actual: identity.keyRef
+            )
+        }
+        guard identity.chainID == head.chainID else {
+            throw Failure.publicIdentityChainMismatch(
+                expected: head.chainID,
+                actual: identity.chainID,
+                keyRef: identity.keyRef
+            )
+        }
+
+        let normalizedAddress: String
+        do {
+            normalizedAddress = try VerifiedRelayerIdentity.normalizedAddress(claim.address)
+        } catch {
+            throw Failure.invalidClaimAddress(claim.address)
+        }
+        guard normalizedAddress == identity.address else {
+            throw Failure.wrongClaimAddress(
+                expected: identity.address,
+                actual: normalizedAddress
+            )
+        }
+        return Authorization(identity: identity)
+    }
+}

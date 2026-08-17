@@ -6842,6 +6842,10 @@ private struct ChatBubble: View {
     @State private var editText = ""
     @FocusState private var editorFocused: Bool
 
+    private var displayedThinking: String? {
+        ReasoningChannelFallback.sanitizedReasoning(message.thinking)
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             if message.role == .user {
@@ -6950,7 +6954,7 @@ private struct ChatBubble: View {
 
     private var bubbleContent: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if let thinking = message.thinking, message.role == .assistant {
+            if let thinking = displayedThinking, message.role == .assistant {
                 DisclosureGroup(isExpanded: $isThinkingExpanded) {
                     MarkdownMessageText(markdown: thinking, fontSize: 14, color: ChatPalette.secondaryText)
                         .padding(.top, 6)
@@ -7445,7 +7449,7 @@ private struct StreamingAssistantBubble: View {
                     }
                 } else {
                     let parts = split
-                    if let reasoning = parts.reasoning {
+                    if let reasoning = ReasoningChannelFallback.sanitizedReasoning(parts.reasoning) {
                         DisclosureGroup(isExpanded: $isThinkingExpanded) {
                             MarkdownMessageText(
                                 markdown: reasoning,

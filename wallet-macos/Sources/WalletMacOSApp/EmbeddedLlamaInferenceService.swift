@@ -74,9 +74,13 @@ enum ReasoningChannelFallback {
                 continue
             }
             let bodyStart = trimmed.index(trimmed.startIndex, offsetBy: markers.open.count)
-            let bodyEnd = trimmed.index(trimmed.endIndex, offsetBy: -markers.close.count)
-            guard bodyStart <= bodyEnd else { continue }
-            let body = String(trimmed[bodyStart..<bodyEnd])
+            guard let closeRange = trimmed.range(
+                of: markers.close,
+                range: bodyStart..<trimmed.endIndex
+            ), closeRange.upperBound == trimmed.endIndex else {
+                continue
+            }
+            let body = String(trimmed[bodyStart..<closeRange.lowerBound])
             let sanitized = strippedChannelName(body, markers: markers)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return sanitized.isEmpty ? nil : sanitized

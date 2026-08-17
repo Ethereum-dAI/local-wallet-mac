@@ -105,6 +105,11 @@ struct ReasoningChannelFallbackTests {
             ReasoningChannelFallback.sanitizedReasoning("<think>unfinished")
                 == "<think>unfinished"
         )
+        let adjacent = "<think>first</think><think>second</think>"
+        #expect(ReasoningChannelFallback.sanitizedReasoning(adjacent) == adjacent)
+
+        let nested = "<think>outer <think>inner</think></think>"
+        #expect(ReasoningChannelFallback.sanitizedReasoning(nested) == nested)
     }
 
     @Test func sanitizerDropsAnEmptyOuterBlock() {
@@ -143,6 +148,19 @@ struct ReasoningChannelFallbackTests {
         let split = ReasoningChannelFallback.streamingSplit(of: "<think>first</think>mid<|channel>x second<channel|>end")
         #expect(split.reasoning == "first")
         #expect(split.content.hasPrefix("mid"))
+    }
+
+    @Test func dashboardSanitizesStoredAndStreamingReasoningBeforeRendering() throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let sourceURL = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/WalletMacOSApp/ChatDashboardView.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(source.contains("ReasoningChannelFallback.sanitizedReasoning(message.thinking)"))
+        #expect(source.contains("ReasoningChannelFallback.sanitizedReasoning(parts.reasoning)"))
     }
 
 }

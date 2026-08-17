@@ -64,6 +64,27 @@ struct ReasoningMarkers {
 }
 
 enum ReasoningChannelFallback {
+    static func sanitizedReasoning(_ reasoning: String?) -> String? {
+        guard let reasoning else { return nil }
+        let trimmed = reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        for markers in ReasoningMarkers.all {
+            guard trimmed.hasPrefix(markers.open), trimmed.hasSuffix(markers.close) else {
+                continue
+            }
+            let bodyStart = trimmed.index(trimmed.startIndex, offsetBy: markers.open.count)
+            let bodyEnd = trimmed.index(trimmed.endIndex, offsetBy: -markers.close.count)
+            guard bodyStart <= bodyEnd else { continue }
+            let body = String(trimmed[bodyStart..<bodyEnd])
+            let sanitized = strippedChannelName(body, markers: markers)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return sanitized.isEmpty ? nil : sanitized
+        }
+
+        return trimmed
+    }
+
     static func streamingSplit(of text: String) -> ReasoningSplit {
         if let opened = firstOpen(in: text) {
             return splitAtOpen(text, markers: opened.markers, openRange: opened.range)
@@ -83,8 +104,14 @@ enum ReasoningChannelFallback {
 
     static func normalise(_ parsed: ParsedAssistantTurnFlat) -> ParsedAssistantTurnFlat {
         let trimmedReasoning = parsed.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard trimmedReasoning.isEmpty,
-              let content = parsed.content,
+        if !trimmedReasoning.isEmpty {
+            return ParsedAssistantTurnFlat(
+                content: parsed.content,
+                reasoning: sanitizedReasoning(trimmedReasoning),
+                toolCalls: parsed.toolCalls
+            )
+        }
+        guard let content = parsed.content,
               containsAnyMarker(content)
         else {
             return parsed

@@ -70,6 +70,47 @@ struct ReasoningChannelFallbackTests {
         #expect(result.reasoning == "already split")
     }
 
+    @Test func normaliseStripsMarkersFromAnExistingReasoningField() {
+        let parsed = ParsedAssistantTurnFlat(
+            content: nil,
+            reasoning: "<think>Which token? ETH or another ERC-20?</think>",
+            toolCalls: []
+        )
+        let result = ReasoningChannelFallback.normalise(parsed)
+
+        #expect(result.reasoning == "Which token? ETH or another ERC-20?")
+        #expect(result.content == nil)
+        #expect(result.toolCalls.isEmpty)
+    }
+
+    @Test func sanitizerHandlesKnownOuterMarkersAndWhitespace() {
+        #expect(
+            ReasoningChannelFallback.sanitizedReasoning(
+                "  <think> deciding </think>  "
+            ) == "deciding"
+        )
+        #expect(
+            ReasoningChannelFallback.sanitizedReasoning(
+                "<|channel>thought weighing the options<channel|>"
+            ) == "weighing the options"
+        )
+    }
+
+    @Test func sanitizerPreservesEmbeddedOrUnmatchedMarkerExamples() {
+        #expect(
+            ReasoningChannelFallback.sanitizedReasoning("Explain <think> tags")
+                == "Explain <think> tags"
+        )
+        #expect(
+            ReasoningChannelFallback.sanitizedReasoning("<think>unfinished")
+                == "<think>unfinished"
+        )
+    }
+
+    @Test func sanitizerDropsAnEmptyOuterBlock() {
+        #expect(ReasoningChannelFallback.sanitizedReasoning(" <think>  </think> ") == nil)
+    }
+
     @Test func normaliseRescuesAQwenTurnTheParserMissed() {
         let parsed = ParsedAssistantTurnFlat(
             content: "<think>deciding</think>Ethereum is a blockchain.",
@@ -103,4 +144,5 @@ struct ReasoningChannelFallbackTests {
         #expect(split.reasoning == "first")
         #expect(split.content.hasPrefix("mid"))
     }
+
 }

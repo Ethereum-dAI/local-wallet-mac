@@ -17,9 +17,7 @@ func runRoundTrip(options: EvalOptions) async throws {
 
     for i in 0..<options.repeats {
         let started = Date()
-        let system = """
-        You are the local AI inside a macOS Ethereum wallet app. \(ToolDefinitions.systemNudge)
-        """
+        let system = ToolDefinitions.appSystemPrompt
 
         var messages: [LocalLLM.ChatMessage] = [
             .init(role: .system, content: system),

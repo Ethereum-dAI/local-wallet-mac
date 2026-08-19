@@ -181,7 +181,7 @@ The v0.1 alpha zip targets macOS 15+ on Apple Silicon and does not embed the rec
 
 ## Chat layer
 
-The chat dashboard is the primary entry point of the demo app. It runs a streaming conversation against an on-device GGUF model loaded by the sibling `local-llm` Swift package (`LlamaRuntime`) — by default `gemma-4-E4B-wallet-ft.Q4_K_M.gguf`, a wallet tool-calling fine-tune of Gemma 4 E4B.
+The chat dashboard is the primary entry point of the demo app. It runs a streaming conversation against an on-device GGUF model loaded by the sibling `local-llm` Swift package (`LlamaRuntime`) — by default `gemma-4-E4B-it-Q4_K_M.gguf`, the untuned Gemma 4 E4B. (A wallet tool-calling fine-tune shipped as the default until it was re-measured against the app's current tool contract and scored 68.6% against this model's 90.3%; it is still curated for installs that have it.)
 
 Highlights of the current UX:
 
@@ -238,7 +238,7 @@ Shared flags:
 
 | Flag                 | Default                  | Notes                                  |
 |----------------------|--------------------------|----------------------------------------|
-| `--model PATH`       | the app's default model (`gemma-4-E4B-wallet-ft.Q4_K_M.gguf` under Application Support) | Path to a Gemma 4 GGUF |
+| `--model PATH`       | the app's default model (`gemma-4-E4B-it-Q4_K_M.gguf` under Application Support) | Path to a Gemma 4 GGUF |
 | `--repeats N`        | `3`                      | Per-case repetitions                   |
 | `--seed S`           | `0xC0DEFEED`             | Hex or decimal                         |
 | `--json PATH`        | (none)                   | Structured `EvalEntry[]` report        |

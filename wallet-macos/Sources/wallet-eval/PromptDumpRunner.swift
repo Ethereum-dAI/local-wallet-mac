@@ -22,9 +22,11 @@ private struct PromptDump: Encodable {
     let cases: [PromptDumpCase]
 }
 
-/// The app's system prompt, verbatim. `EmbeddedLlamaInferenceService` and every
-/// wallet-eval runner build it this way; keep them in step.
-let appSystemPrompt = "You are the local AI inside a macOS Ethereum wallet app. \(ToolDefinitions.systemNudge)"
+/// The app's system prompt, verbatim — now composed in exactly ONE place,
+/// `ToolDefinitions.appSystemPrompt`, which is also what every other wallet-eval
+/// runner reads. This file used to own the string and the other four runners inlined
+/// their own copy of it, so a prompt edit reached whichever the author remembered.
+let appSystemPrompt = ToolDefinitions.appSystemPrompt
 
 func runPromptDump(options: EvalOptions) async throws {
     let runtime = LlamaRuntime()

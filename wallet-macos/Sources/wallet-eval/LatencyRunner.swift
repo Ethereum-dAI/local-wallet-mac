@@ -11,7 +11,7 @@ func runLatency(options: EvalOptions) async throws {
     defer { runtime.unload() }
 
     let prompt = "Send 0.1 ETH to vitalik.eth"
-    let system = "You are the local AI inside a macOS Ethereum wallet app. \(ToolDefinitions.systemNudge)"
+    let system = ToolDefinitions.appSystemPrompt
 
     var ttftSamples: [Double] = []
     var ttdSamples: [Double] = []

@@ -49,43 +49,66 @@ struct SettingsWiringAuditTests {
     /// user-extensible, so selection drives the runtime through
     /// `InstalledModelStore` + `EmbeddedLlamaInferenceService.setActiveModel`.
     /// What must stay true is that the shipped default is the reviewed one.
-    @Test func defaultModelIsTheWalletFineTune() {
-        #expect(LocalAIModel.recommended.id == "ef-dai-team/gemma-4-E4B-wallet-ft")
-        #expect(LocalAIModel.recommended.artifactFileName == "gemma-4-E4B-wallet-ft.Q4_K_M.gguf")
+    @Test func defaultModelIsTheUntunedQ4KMBase() {
+        #expect(LocalAIModel.recommended.id == "google/gemma-4-E4B-it")
+        #expect(LocalAIModel.recommended.artifactFileName == "gemma-4-E4B-it-Q4_K_M.gguf")
         #expect(LocalAIModel.curated.first?.id == LocalAIModel.recommended.id)
         // The values that make an accidental default-model change dangerous rather
         // than merely wrong: an edited checksum or URL would silently point the
         // wallet at different bytes than the ones this build was pinned against.
-        #expect(LocalAIModel.recommended.sha256 == "fdf5c30e86d83c0391bed5e005af85bd2af2eb1ef7455a64b9a463d4d8ced16b")
-        #expect(LocalAIModel.recommended.artifactURL == URL(string: "https://huggingface.co/ef-dai-team/gemma-4-E4B-wallet-ft/resolve/main/gemma-4-E4B-wallet-ft.Q4_K_M.gguf?download=true")!)
+        // This sha256 is confirmed three ways — Hugging Face's `x-linked-etag` at the
+        // pinned revision, a local copy of the file, and the pin an earlier revision
+        // of this repo carried before Q4_K_M vanished from `main`.
+        #expect(LocalAIModel.recommended.sha256 == "90ce98129eb3e8cc57e62433d500c97c624b1e3af1fcc85dd3b55ad7e0313e9f")
+        #expect(LocalAIModel.recommended.artifactURL == URL(string: "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/1762c8e8713f/gemma-4-E4B-it-Q4_K_M.gguf?download=true")!)
+    }
+
+    /// The URL must stay revision-pinned. ggml-org re-quantized this repo and dropped
+    /// Q4_K_M from `main`, so `resolve/main/gemma-4-E4B-it-Q4_K_M.gguf` returns 404 —
+    /// a "tidy the URL" edit would break every new install's download, and the failure
+    /// would surface as an unexplained "failed to load model" rather than a 404.
+    @Test func defaultModelURLIsPinnedToARevisionNotToMain() {
+        let url = LocalAIModel.recommended.artifactURL.absoluteString
+        #expect(url.contains("/resolve/1762c8e8713f/"))
+        #expect(!url.contains("/resolve/main/"))
     }
 
     /// The fine-tune is a merge into Gemma 4 E4B, not a different model: same
     /// `gemma4` block/head shape and trained context, so the Gemma DSL parsing and
     /// the context presets carry over untouched. Only the weights got bigger.
     @Test func defaultModelKeepsTheGemma4Shape() {
-        let tuned = LocalAIModel.recommended.memoryProfile
-        let base = LocalAIModel.gemma4Base.memoryProfile
+        let base = LocalAIModel.recommended.memoryProfile
+        let tuned = LocalAIModel.walletFineTune.memoryProfile
         #expect(tuned.blockCount == base.blockCount)
         #expect(tuned.kvHeadCount == base.kvHeadCount)
         #expect(tuned.keyLength == base.keyLength)
         #expect(tuned.valueLength == base.valueLength)
         #expect(tuned.trainedContextTokens == base.trainedContextTokens)
+        #expect(base.weightBytes == 5_335_289_824)
         #expect(tuned.weightBytes == 5_335_292_160)
     }
 
-    /// The base model stays in the catalog, at its own pin. Dropping it would
-    /// strand every wallet that onboarded before the fine-tune: their stored
-    /// `selectedModelID` would stop resolving and silently fall back to a model
-    /// they have not downloaded.
-    @Test func untunedBaseStaysCuratedAtItsOwnPin() {
-        let base = LocalAIModel.gemma4Base
-        #expect(base.id == "google/gemma-4-E4B-it")
-        #expect(base.artifactFileName == "gemma-4-E4B-it-Q4_0.gguf")
-        #expect(base.sha256 == "a555b900214b477d8880e7832e0b8925e139b0159640036b09fe472b6f2097f2")
-        #expect(base.artifactURL == URL(string: "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf?download=true")!)
-        #expect(LocalAIModel.curated.contains { $0.id == base.id })
-        #expect(base.id != LocalAIModel.recommended.id)
+    /// The fine-tune stays in the catalog, at its own pin. Dropping it would strand
+    /// every wallet that onboarded onto it: their stored `selectedModelID` would stop
+    /// resolving and silently fall back to a model they have not downloaded.
+    @Test func supersededFineTuneStaysCuratedAtItsOwnPin() {
+        let tuned = LocalAIModel.walletFineTune
+        #expect(tuned.id == "ef-dai-team/gemma-4-E4B-wallet-ft")
+        #expect(tuned.artifactFileName == "gemma-4-E4B-wallet-ft.Q4_K_M.gguf")
+        #expect(tuned.sha256 == "fdf5c30e86d83c0391bed5e005af85bd2af2eb1ef7455a64b9a463d4d8ced16b")
+        #expect(tuned.artifactURL == URL(string: "https://huggingface.co/ef-dai-team/gemma-4-E4B-wallet-ft/resolve/main/gemma-4-E4B-wallet-ft.Q4_K_M.gguf?download=true")!)
+        #expect(LocalAIModel.curated.contains { $0.id == tuned.id })
+        #expect(tuned.id != LocalAIModel.recommended.id)
+    }
+
+    /// Every curated id is distinct. `curated` is the lookup table a stored
+    /// `selectedModelID` resolves through and the `Identifiable` list Settings
+    /// renders, so a duplicate id would make one row unreachable and the other
+    /// ambiguous — which is the trap in reusing `google/gemma-4-E4B-it` for two
+    /// different quantizations of the same model.
+    @Test func curatedIDsAreUnique() {
+        let ids = LocalAIModel.curated.map(\.id)
+        #expect(Set(ids).count == ids.count)
     }
 
     /// An existing install keeps the model it downloaded. `selectedModelID` only
@@ -99,12 +122,21 @@ struct SettingsWiringAuditTests {
         #expect(OnboardingSettingsStore(defaults: suite()).selectedModelID == LocalAIModel.recommended.id)
     }
 
-    /// First-run setup offers the default and nothing else. The second curated
-    /// model is a Settings decision, made later by someone who has seen their own
-    /// hardware verdicts — not a fork in the road before the wallet works.
-    @Test func onboardingOffersTheDefaultAndNothingElse() {
-        #expect(LocalAIModel.onboardingOptions.map(\.id) == [LocalAIModel.recommended.id])
+    /// First-run setup offers the default and Qwen3 8B, in that order — two pinned,
+    /// measured models in the same memory class, so either gives a working wallet.
+    /// It must stay a short list and never become a browser: any other GGUF is a
+    /// Settings › Models decision, made later by someone who has seen their own
+    /// hardware verdicts.
+    @Test func onboardingOffersTheDefaultAndQwen() {
+        #expect(LocalAIModel.onboardingOptions.map(\.id)
+                == [LocalAIModel.recommended.id, LocalAIModel.qwen3.id])
         #expect(LocalAIModel.curated.count > LocalAIModel.onboardingOptions.count)
+    }
+
+    /// The superseded fine-tune is retained, not offered. A new install that picked it
+    /// at onboarding would be choosing the model this change exists to demote.
+    @Test func onboardingDoesNotOfferTheSupersededFineTune() {
+        #expect(!LocalAIModel.onboardingOptions.contains { $0.id == LocalAIModel.walletFineTune.id })
     }
 
     /// Same pin as the default model, for the same reason: an edited checksum or

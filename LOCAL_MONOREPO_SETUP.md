@@ -210,9 +210,11 @@ Local Xcode development does not require the GGUF model to be embedded in the ap
 
 If the model is already present there, the app will reuse it. Packaged demo builds may embed the model, but normal Xcode development should treat the model as a local runtime asset installed during setup.
 
-The default model — `gemma-4-E4B-wallet-ft.Q4_K_M.gguf`, a wallet fine-tune of Gemma 4 E4B — is a 5.34 GB download, and 16 GB of RAM is the practical floor for it.
+The default model — `gemma-4-E4B-it-Q4_K_M.gguf`, the untuned Gemma 4 E4B — is a 5.34 GB download, and 16 GB of RAM is the practical floor for it.
 
-The `local-llm` bench and the model-backed Swift tests still default to the **untuned base**, `gemma-4-E4B-it-Q4_0.gguf`, and self-skip when it is absent. If you want to run them, install the base from Settings › Models as well (it is still curated), or point them at another GGUF with `--model`. If you onboarded before the Q4_K_M pin broke, the app downloads the Q4_0 base rather than reusing the old `gemma-4-E4B-it-Q4_K_M.gguf`; delete the stale file to reclaim the disk.
+The `local-llm` bench and the model-backed Swift tests default to `gemma-4-E4B-it-Q4_0.gguf` — the same model as the app's default but a **different quantization**, kept because that is what those tests were calibrated on. They self-skip when it is absent; point them at another GGUF with `--model` if you would rather not keep a second copy.
+
+If you onboarded onto the wallet fine-tune, nothing migrates: `gemma-4-E4B-wallet-ft` stays curated and your stored selection keeps resolving. Switch to the default in Settings › Models when you want the 21.7-point improvement, and delete the fine-tune afterwards to reclaim 5.34 GB.
 
 ## Optional Hosted Bundler Endpoint
 

@@ -172,7 +172,7 @@ private func scoreModelCase(_ c: RecognitionCase,
                             runtime: LlamaRuntime,
                             extractor: BridgePEGExtractor,
                             options: EvalOptions) async throws -> RecognitionOutcome {
-    let system = "You are the local AI inside a macOS Ethereum wallet app. \(ToolDefinitions.systemNudge)"
+    let system = ToolDefinitions.appSystemPrompt
     let messages: [LocalLLM.ChatMessage] = [
         .init(role: .system, content: system),
         .init(role: .user, content: c.user_message),

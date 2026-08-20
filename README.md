@@ -150,9 +150,9 @@ The current demo exercises two complementary layers — wallet plumbing and a lo
 
 **Local LLM and tool intent layer:**
 
-- On-device inference via `llama.cpp` (no network at inference time) on a Gemma 4 E4B
-  fine-tuned for wallet tool calls — 80.1% against the base model's 9.8% on a 307-case
-  tool-call evaluation — with the untuned base, Qwen3 8B, and any public Hugging Face
+- On-device inference via `llama.cpp` (no network at inference time) on Gemma 4 E4B —
+  90.3% on a frozen 1000-case tool-call evaluation, scored under the app's own prompt
+  and tools — with Qwen3 8B, a superseded wallet fine-tune, and any public Hugging Face
   GGUF selectable in Settings
 - Streaming chat with thinking/reasoning disclosure, copy / regenerate / edit-and-resend on bubbles, stop button, code-block copy, and a smart auto-scroll that does not yank the user when scrolled up
 - SQLite-backed conversation history (`chat.sqlite` in Application Support), with delete / rename / date-bucketed sidebar

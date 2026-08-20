@@ -82,6 +82,15 @@ final class LlamaProbeRuntime: ModelProbeRuntime {
         runtime = candidate
     }
 
+    /// Sends `systemNudge` ALONE, deliberately: this asks "can these weights emit a
+    /// structured tool call at all", and `safetyTail` would make a correctly cautious
+    /// model answer in prose and read as a broken install.
+    ///
+    /// For the same reason the recipient must be an ordinary address. It used to be the
+    /// burn address, which coupled the self-test to the model NOT being safety-trained:
+    /// refusing a send to 0x...dEaD is the behaviour the shipped prompt now teaches, and
+    /// on the frozen benchmark it goes from 0/4 to 4/4 once the clause is present. A
+    /// model that got that right would have failed this probe.
     func probeToolCall() async throws -> Bool {
         guard let runtime else { return false }
         var options = SamplerOptions()
@@ -89,7 +98,7 @@ final class LlamaProbeRuntime: ModelProbeRuntime {
         options.temperature = 0
         let messages = [
             LocalLLM.ChatMessage(role: .system, content: ToolDefinitions.systemNudge),
-            LocalLLM.ChatMessage(role: .user, content: "Send 0.001 ETH to 0x000000000000000000000000000000000000dEaD"),
+            LocalLLM.ChatMessage(role: .user, content: "Send 0.001 ETH to 0x52d52a177Db687ACc09744DcF19592dB95c51b67"),
         ]
         var accumulated = ""
         for try await event in runtime.chat(messages: messages, tools: ToolDefinitions.phase1, options: options) {

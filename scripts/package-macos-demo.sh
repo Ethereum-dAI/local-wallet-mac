@@ -25,10 +25,12 @@ EMBED_MODEL="${LOCAL_WALLET_EMBED_MODEL:-0}"
 # Must stay the model `LocalAIModel.recommended` names: the app only looks in
 # Contents/Resources/Models for the default model's own file name, so embedding
 # any other GGUF ships a 5 GB file the app will ignore and then re-download.
-MODEL_FILE_NAME="gemma-4-E4B-wallet-ft.Q4_K_M.gguf"
-MODEL_SHA256="fdf5c30e86d83c0391bed5e005af85bd2af2eb1ef7455a64b9a463d4d8ced16b"
+MODEL_FILE_NAME="gemma-4-E4B-it-Q4_K_M.gguf"
+MODEL_SHA256="90ce98129eb3e8cc57e62433d500c97c624b1e3af1fcc85dd3b55ad7e0313e9f"
 MODEL_SIZE_LABEL="5.34 GB"
-MODEL_URL="${LOCAL_WALLET_MODEL_URL:-https://huggingface.co/ef-dai-team/gemma-4-E4B-wallet-ft/resolve/main/$MODEL_FILE_NAME?download=true}"
+# Revision-pinned, like `LocalAIModel.recommended`: ggml-org dropped Q4_K_M from
+# `main`, so a `resolve/main/` URL for this file name 404s.
+MODEL_URL="${LOCAL_WALLET_MODEL_URL:-https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/1762c8e8713f/$MODEL_FILE_NAME?download=true}"
 APP_SUPPORT_MODEL="$HOME/Library/Application Support/LocalWallet/Models/$MODEL_FILE_NAME"
 MODEL_CACHE_DIR="${LOCAL_WALLET_MODEL_CACHE_DIR:-$REPO_ROOT/build/model-cache}"
 NOTARYTOOL_AUTH_ARGS=()

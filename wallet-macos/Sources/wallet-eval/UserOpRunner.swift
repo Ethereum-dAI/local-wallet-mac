@@ -261,7 +261,7 @@ struct UserOpCaseResult {
 }
 
 private func buildMessages(for c: UserOpDatasetCase) -> [LocalLLM.ChatMessage] {
-    let system = "You are the local AI inside a macOS Ethereum wallet app. \(ToolDefinitions.systemNudge)"
+    let system = ToolDefinitions.appSystemPrompt
     var messages: [LocalLLM.ChatMessage] = [.init(role: .system, content: system)]
     for turn in c.turns {
         let role: LocalLLM.ChatMessage.Role = turn.role == "assistant" ? .assistant : .user

@@ -187,10 +187,11 @@ struct ModelRemovalPlannerTests {
     @Test func aCuratedFileWithNoRecordIsStillRemoved() {
         #expect(ModelRemovalPlanner.target(
             record: nil,
-            curated: .gemma4Base,
-            downloadedCopyPath: "/tmp/gemma-4-E4B-it-Q4_0.gguf",
+            curated: .walletFineTune,
+            downloadedCopyPath: "/tmp/gemma-4-E4B-wallet-ft.Q4_K_M.gguf",
             bundledCopyPath: nil
-        ) == .untracked(path: "/tmp/gemma-4-E4B-it-Q4_0.gguf", displayName: LocalAIModel.gemma4Base.name))
+        ) == .untracked(path: "/tmp/gemma-4-E4B-wallet-ft.Q4_K_M.gguf",
+                        displayName: LocalAIModel.walletFineTune.name))
     }
 
     /// Deleting the copy inside `Contents/Resources/Models` would damage the running
@@ -302,9 +303,12 @@ struct ModelFileResolverTests {
 /// install mine?" without holding any state of its own.
 struct ModelInstallProgressTests {
     @Test func progressIsAddressedByModelIDSoARowCanClaimIt() {
+        // Built from `recommended` rather than a literal id: the point of the test is
+        // that progress is addressed BY model id, and a hardcoded default id turned
+        // this into a second, incidental pin on which model ships.
         var install = ModelInstallProgress(
-            modelID: "ef-dai-team/gemma-4-E4B-wallet-ft",
-            displayName: "Gemma 4 E4B (wallet-tuned)",
+            modelID: LocalAIModel.recommended.id,
+            displayName: LocalAIModel.recommended.name,
             phase: .downloading(progress(0))
         )
         #expect(install.modelID == LocalAIModel.recommended.id)

@@ -205,9 +205,13 @@ struct LocalAIModel: Identifiable, Equatable {
     /// Q4_K_M, and its `x-linked-etag` is the sha256 below — the same bytes the 90.3%
     /// was measured on. Do not "fix" this to `resolve/main/`: that 404s.
     ///
-    /// `walletFineTune` stays in `curated`, so anyone who onboarded onto it keeps
-    /// resolving their stored `selectedModelID` and is never force-migrated into a
-    /// second multi-gigabyte download.
+    /// This is now the ONLY Gemma entry. The superseded wallet fine-tune used to sit
+    /// beside it in `curated` so that installs which onboarded onto it kept resolving
+    /// their stored `selectedModelID`. Its Hugging Face repo has since been deleted, so
+    /// that entry pointed at a 404: an install whose GGUF was missing could not
+    /// re-download it, and one whose GGUF was present was pinned to a model measured at
+    /// 68.6% against this one's 90.3%. Those installs now fall back here, which is a
+    /// download they were going to need eventually and a better model when they get it.
     static let recommended = LocalAIModel(
         id: "google/gemma-4-E4B-it",
         name: "Gemma 4 E4B",
@@ -224,37 +228,6 @@ struct LocalAIModel: Identifiable, Equatable {
         // context_length=131072 → 168 KiB of KV cache per token.
         memoryProfile: ModelMemoryProfile(
             weightBytes: 5_335_289_824,
-            blockCount: 42,
-            kvHeadCount: 2,
-            keyLength: 512,
-            valueLength: 512,
-            trainedContextTokens: 131_072
-        )
-    )
-
-    /// The wallet tool-calling fine-tune. **No longer the default** — see
-    /// `recommended` for the measurement that demoted it — but kept in `curated` so
-    /// that every install which onboarded onto it keeps resolving its stored
-    /// `selectedModelID` instead of silently falling back to a model it has not
-    /// downloaded. Same `gemma4` shape as the base, so nothing about parsing,
-    /// context presets or memory planning differs.
-    static let walletFineTune = LocalAIModel(
-        id: "ef-dai-team/gemma-4-E4B-wallet-ft",
-        name: "Gemma 4 E4B (wallet-tuned)",
-        size: "5.34 GB",
-        detail: "Gemma 4 E4B with a wallet tool-calling LoRA merged in, as a Q4_K_M GGUF. Trained for the retired base-unit tool contract: it scores 68.6% on the current 1000-case benchmark against the untuned base's 90.3%, mostly by refusing to call a tool at all. Kept for existing installs.",
-        tag: "GGUF",
-        systemImage: "sparkles",
-        artifactRepo: "ef-dai-team/gemma-4-E4B-wallet-ft",
-        artifactFileName: "gemma-4-E4B-wallet-ft.Q4_K_M.gguf",
-        artifactURL: URL(string: "https://huggingface.co/ef-dai-team/gemma-4-E4B-wallet-ft/resolve/main/gemma-4-E4B-wallet-ft.Q4_K_M.gguf?download=true")!,
-        sha256: "fdf5c30e86d83c0391bed5e005af85bd2af2eb1ef7455a64b9a463d4d8ced16b",
-        // Read from the GGUF header of the pinned artifact: the merge changes the
-        // weights, not the shape — gemma4.block_count=42, head_count_kv=2,
-        // key/value_length=512, context_length=131072 → the same 168 KiB of KV
-        // cache per token as the base.
-        memoryProfile: ModelMemoryProfile(
-            weightBytes: 5_335_292_160,
             blockCount: 42,
             kvHeadCount: 2,
             keyLength: 512,
@@ -292,10 +265,14 @@ struct LocalAIModel: Identifiable, Equatable {
 
     /// Every model the app ships knowledge of: the Settings catalog, and the lookup
     /// table for resolving a persisted `selectedModelID` back to its pinned profile.
+    ///
+    /// Every entry must name an artifact that is actually fetchable. A row whose repo
+    /// has been deleted is worse than no row: it resolves, so the fallback to
+    /// `recommended` never fires, and the download 404s instead.
+    /// `curatedModelsPointAtLiveUpstreamRepos` guards that.
     static let curated: [LocalAIModel] = [
         recommended,
         qwen3,
-        walletFineTune,
     ]
 
     /// What first-run setup offers: the default, and Qwen3 8B as the one alternative.
@@ -306,9 +283,6 @@ struct LocalAIModel: Identifiable, Equatable {
     /// wallet. What onboarding must not become is a browser: anything beyond these two,
     /// including any other GGUF on Hugging Face, is a Settings › Models decision made
     /// later by someone who has seen their own hardware verdicts.
-    ///
-    /// `walletFineTune` is deliberately NOT here. It is retained for installs that
-    /// already have it, not offered to new ones.
     static let onboardingOptions: [LocalAIModel] = [
         recommended,
         qwen3,

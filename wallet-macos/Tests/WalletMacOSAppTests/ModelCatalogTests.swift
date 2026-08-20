@@ -89,7 +89,7 @@ struct ModelCatalogTests {
     }
 
     @Test func curatedGemmaCarriesItsMeasuredMemoryProfile() {
-        let profile = LocalAIModel.walletFineTune.memoryProfile
+        let profile = LocalAIModel.recommended.memoryProfile
         #expect(profile.blockCount == 42)
         #expect(profile.kvHeadCount == 2)
         #expect(profile.keyLength == 512)

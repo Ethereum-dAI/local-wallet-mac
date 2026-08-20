@@ -40,10 +40,11 @@ struct ModelDownloadRequestTests {
         let manager = LocalAIModelDownloadManager()
         let curated = try manager.localFileURL(for: ModelDownloadRequest(model: .recommended))
         #expect(curated.lastPathComponent == "gemma-4-E4B-it-Q4_K_M.gguf")
-        // The fine-tune kept its own un-namespaced name across the default change,
-        // which is what lets an existing install keep its file on disk.
-        let tuned = try manager.localFileURL(for: ModelDownloadRequest(model: .walletFineTune))
-        #expect(tuned.lastPathComponent == "gemma-4-E4B-wallet-ft.Q4_K_M.gguf")
+        // Every curated model keeps the artifact's own un-namespaced file name, which
+        // is what lets an install that already downloaded one keep its file on disk
+        // across a catalog change.
+        let qwen = try manager.localFileURL(for: ModelDownloadRequest(model: .qwen3))
+        #expect(qwen.lastPathComponent == "Qwen3-8B-Q4_K_M.gguf")
     }
 
     @Test func diskCheckRejectsADownloadThatWillNotFit() {

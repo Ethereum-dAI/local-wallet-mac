@@ -104,18 +104,39 @@ public enum ToolDefinitions {
         refused.
         """
 
+    /// The nudge and the refusal contract, joined by a SINGLE SPACE. Every system turn
+    /// the app sends ends with exactly this, and it exists so that join lives in one
+    /// place rather than at each call site.
+    ///
+    /// The single space is load-bearing: the harness measured this exact concatenation
+    /// (2110 characters against the app dump's 533), and `"\n\n"` here would be a
+    /// different string from the one the 95.9% refusal number describes.
+    public static let safetyTail = "\(systemNudge) \(safetyClause)"
+
     /// The app's system prompt for every `wallet-eval` runner, in ONE place.
     ///
     /// Five runners used to inline this same string, so a prompt change reached
     /// whichever the author remembered — the recognition, user-op and latency
     /// benchmarks could silently score a different prompt from the dump the fine-tune
     /// was trained against. They all read this now.
-    ///
-    /// `EmbeddedLlamaInferenceService` deliberately does NOT: the chat path prefixes
-    /// `personaSystemPrompt()` instead of this one-line preamble. That divergence
-    /// predates the clause and is tracked separately; what must stay true is that the
-    /// nudge and the clause are identical on both paths, which
-    /// `appPromptCarriesTheSafetyClause` checks.
     public static let appSystemPrompt =
-        "You are the local AI inside a macOS Ethereum wallet app. \(systemNudge) \(safetyClause)"
+        "You are the local AI inside a macOS Ethereum wallet app. \(safetyTail)"
+
+    /// The chat path's system turn: a persona preamble, then `safetyTail`.
+    ///
+    /// The chat path diverges from `appSystemPrompt` in its preamble — it sends
+    /// `personaSystemPrompt()` where the runners send a one-line description — and that
+    /// divergence predates the clause. What must NOT diverge is the tail, and this
+    /// function is why it cannot: `EmbeddedLlamaInferenceService` calls this instead of
+    /// interpolating the two constants itself.
+    ///
+    /// It used to interpolate them, and the doc comment here claimed
+    /// `appPromptCarriesTheSafetyClause` covered it. That test only ever read
+    /// `appSystemPrompt`, so the claim was false and the second copy of the join was
+    /// unguarded — the same defect the five runners had. `chatPromptEndsWithTheSafetyTail`
+    /// covers this one, and `noSourceOutsideToolDefinitionsBuildsTheSafetyTail` fails the
+    /// suite if a third copy appears.
+    public static func chatSystemPrompt(persona: String) -> String {
+        "\(persona)\n\n\(safetyTail)"
+    }
 }

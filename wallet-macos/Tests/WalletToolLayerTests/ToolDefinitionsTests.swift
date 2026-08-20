@@ -108,12 +108,33 @@ import LocalLLM
 /// The clause must reach the model, not merely exist. Five `wallet-eval` runners used
 /// to inline their own copy of the system prompt, so a prompt edit reached whichever
 /// one the author remembered — the composition now lives here and they all read it.
+@Test func safetyTailJoinsTheNudgeAndClauseWithOneSpace() {
+    let tail = ToolDefinitions.safetyTail
+    #expect(tail == "\(ToolDefinitions.systemNudge) \(ToolDefinitions.safetyClause)")
+    // The harness scored exactly this concatenation; "\n\n" would be a different string
+    // from the one every recorded number describes.
+    #expect(!tail.contains("\(ToolDefinitions.systemNudge)\n"))
+    #expect(tail.hasPrefix(ToolDefinitions.systemNudge))
+    #expect(tail.hasSuffix(ToolDefinitions.safetyClause))
+}
+
 @Test func appPromptCarriesTheSafetyClause() {
     let prompt = ToolDefinitions.appSystemPrompt
     #expect(prompt.contains(ToolDefinitions.systemNudge))
     #expect(prompt.contains(ToolDefinitions.safetyClause))
     #expect(prompt.hasPrefix("You are the local AI inside a macOS Ethereum wallet app. "))
-    // A single space joins the nudge and the clause. The harness scored exactly this
-    // concatenation; "\n\n" here would be a different string from the measured one.
-    #expect(prompt.contains("\(ToolDefinitions.systemNudge) \(ToolDefinitions.safetyClause)"))
+    // Built FROM the tail, not a parallel copy of the same join.
+    #expect(prompt.hasSuffix(ToolDefinitions.safetyTail))
+}
+
+@Test func chatPromptEndsWithTheSafetyTail() {
+    // The chat path's preamble differs from the runners' on purpose (a persona, not a
+    // one-line description); the tail must not. This is the assertion whose absence let
+    // `EmbeddedLlamaInferenceService` keep a hand-built second copy of the join.
+    let prompt = ToolDefinitions.chatSystemPrompt(persona: "PERSONA")
+    #expect(prompt.hasPrefix("PERSONA\n\n"))
+    #expect(prompt.hasSuffix(ToolDefinitions.safetyTail))
+    #expect(prompt == "PERSONA\n\n\(ToolDefinitions.safetyTail)")
+    // Same tail on both paths, which is the property the old doc comment claimed.
+    #expect(ToolDefinitions.appSystemPrompt.hasSuffix(ToolDefinitions.safetyTail))
 }

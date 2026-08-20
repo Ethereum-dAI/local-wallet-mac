@@ -267,7 +267,7 @@ final class EmbeddedLlamaInferenceService: @unchecked Sendable {
                     var messages: [LocalLLM.ChatMessage] = [
                         LocalLLM.ChatMessage(
                             role: LocalLLM.ChatMessage.Role.system,
-                            content: "\(personaSystemPrompt())\n\n\(ToolDefinitions.systemNudge) \(ToolDefinitions.safetyClause)"
+                            content: ToolDefinitions.chatSystemPrompt(persona: personaSystemPrompt())
                         )
                     ]
                     messages.append(contentsOf: history.map { turn in

@@ -214,7 +214,9 @@ The default model — `gemma-4-E4B-it-Q4_K_M.gguf`, the untuned Gemma 4 E4B — 
 
 The `local-llm` bench and the model-backed Swift tests default to `gemma-4-E4B-it-Q4_0.gguf` — the same model as the app's default but a **different quantization**, kept because that is what those tests were calibrated on. They self-skip when it is absent; point them at another GGUF with `--model` if you would rather not keep a second copy.
 
-If you onboarded onto the wallet fine-tune, nothing migrates: `gemma-4-E4B-wallet-ft` stays curated and your stored selection keeps resolving. Switch to the default in Settings › Models when you want the 21.7-point improvement, and delete the fine-tune afterwards to reclaim 5.34 GB.
+If you onboarded onto the wallet fine-tune, you are now moved to the default. Its Hugging Face repo has been deleted, so the catalog entry was removed rather than left pointing at a 404 — a stored selection of `ef-dai-team/gemma-4-E4B-wallet-ft` no longer resolves and falls back to the default, which is a 5.34 GB download and a 21.7-point improvement. The old GGUF is left on disk; delete it from Settings › Models to reclaim 5.34 GB.
+
+The better fine-tune is published, and the app deliberately does not offer it: [`ef-dai-team/gemma-4-E4B-wallet-ft-v5`](https://huggingface.co/ef-dai-team/gemma-4-E4B-wallet-ft-v5) scores ~95% against the default's 90.3% on the same 1000 cases. Paste that repo id into Settings › Models › **Add From Hugging Face** if you want it. It is not curated, so its checksum is not pinned in this repo and its memory fit is resolved from the Hub at add time rather than from a reviewed profile.
 
 ## Optional Hosted Bundler Endpoint
 

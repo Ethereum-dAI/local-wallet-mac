@@ -187,11 +187,11 @@ struct ModelRemovalPlannerTests {
     @Test func aCuratedFileWithNoRecordIsStillRemoved() {
         #expect(ModelRemovalPlanner.target(
             record: nil,
-            curated: .walletFineTune,
-            downloadedCopyPath: "/tmp/gemma-4-E4B-wallet-ft.Q4_K_M.gguf",
+            curated: .qwen3,
+            downloadedCopyPath: "/tmp/Qwen3-8B-Q4_K_M.gguf",
             bundledCopyPath: nil
-        ) == .untracked(path: "/tmp/gemma-4-E4B-wallet-ft.Q4_K_M.gguf",
-                        displayName: LocalAIModel.walletFineTune.name))
+        ) == .untracked(path: "/tmp/Qwen3-8B-Q4_K_M.gguf",
+                        displayName: LocalAIModel.qwen3.name))
     }
 
     /// Deleting the copy inside `Contents/Resources/Models` would damage the running

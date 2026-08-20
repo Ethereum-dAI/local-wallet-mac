@@ -73,32 +73,42 @@ struct SettingsWiringAuditTests {
         #expect(!url.contains("/resolve/main/"))
     }
 
-    /// The fine-tune is a merge into Gemma 4 E4B, not a different model: same
-    /// `gemma4` block/head shape and trained context, so the Gemma DSL parsing and
-    /// the context presets carry over untouched. Only the weights got bigger.
+    /// The default's `gemma4` shape, which the KV-cache arithmetic and the context
+    /// presets are both derived from. Read from the GGUF header of the pinned artifact,
+    /// so a wrong value here means the memory planner is sizing a different model.
     @Test func defaultModelKeepsTheGemma4Shape() {
         let base = LocalAIModel.recommended.memoryProfile
-        let tuned = LocalAIModel.walletFineTune.memoryProfile
-        #expect(tuned.blockCount == base.blockCount)
-        #expect(tuned.kvHeadCount == base.kvHeadCount)
-        #expect(tuned.keyLength == base.keyLength)
-        #expect(tuned.valueLength == base.valueLength)
-        #expect(tuned.trainedContextTokens == base.trainedContextTokens)
+        #expect(base.blockCount == 42)
+        #expect(base.kvHeadCount == 2)
+        #expect(base.keyLength == 512)
+        #expect(base.valueLength == 512)
+        #expect(base.trainedContextTokens == 131_072)
         #expect(base.weightBytes == 5_335_289_824)
-        #expect(tuned.weightBytes == 5_335_292_160)
     }
 
-    /// The fine-tune stays in the catalog, at its own pin. Dropping it would strand
-    /// every wallet that onboarded onto it: their stored `selectedModelID` would stop
-    /// resolving and silently fall back to a model they have not downloaded.
-    @Test func supersededFineTuneStaysCuratedAtItsOwnPin() {
-        let tuned = LocalAIModel.walletFineTune
-        #expect(tuned.id == "ef-dai-team/gemma-4-E4B-wallet-ft")
-        #expect(tuned.artifactFileName == "gemma-4-E4B-wallet-ft.Q4_K_M.gguf")
-        #expect(tuned.sha256 == "fdf5c30e86d83c0391bed5e005af85bd2af2eb1ef7455a64b9a463d4d8ced16b")
-        #expect(tuned.artifactURL == URL(string: "https://huggingface.co/ef-dai-team/gemma-4-E4B-wallet-ft/resolve/main/gemma-4-E4B-wallet-ft.Q4_K_M.gguf?download=true")!)
-        #expect(LocalAIModel.curated.contains { $0.id == tuned.id })
-        #expect(tuned.id != LocalAIModel.recommended.id)
+    /// Every curated artifact must be one somebody can still fetch.
+    ///
+    /// This replaces `supersededFineTuneStaysCuratedAtItsOwnPin`, which asserted the
+    /// opposite: the wallet fine-tune was kept in `curated` precisely so that installs
+    /// which onboarded onto it kept resolving their stored `selectedModelID`. That was
+    /// right while the repo existed. It has since been deleted, and a row pointing at a
+    /// deleted repo is worse than no row at all — it resolves, so the fallback to
+    /// `recommended` never fires, and the download 404s instead.
+    ///
+    /// The app now ships no first-party weights, so the invariant is simply that no
+    /// curated entry points into this org. Adding one back means also committing to
+    /// keeping that repo alive.
+    @Test func curatedModelsPointAtLiveUpstreamRepos() {
+        for model in LocalAIModel.curated {
+            #expect(
+                !model.artifactRepo.hasPrefix("ef-dai-team/"),
+                Comment(rawValue: "\(model.id) points at a first-party repo; the app "
+                                  + "ships upstream artifacts only")
+            )
+            #expect(model.artifactURL.host == "huggingface.co")
+            #expect(model.artifactURL.absoluteString.contains(model.artifactRepo))
+            #expect(model.sha256.count == 64)
+        }
     }
 
     /// Every curated id is distinct. `curated` is the lookup table a stored
@@ -130,13 +140,10 @@ struct SettingsWiringAuditTests {
     @Test func onboardingOffersTheDefaultAndQwen() {
         #expect(LocalAIModel.onboardingOptions.map(\.id)
                 == [LocalAIModel.recommended.id, LocalAIModel.qwen3.id])
-        #expect(LocalAIModel.curated.count > LocalAIModel.onboardingOptions.count)
-    }
-
-    /// The superseded fine-tune is retained, not offered. A new install that picked it
-    /// at onboarding would be choosing the model this change exists to demote.
-    @Test func onboardingDoesNotOfferTheSupersededFineTune() {
-        #expect(!LocalAIModel.onboardingOptions.contains { $0.id == LocalAIModel.walletFineTune.id })
+        // Onboarding may offer a subset of the catalog, never something outside it:
+        // an option that is not curated has no profile to resolve back to.
+        let curatedIDs = Set(LocalAIModel.curated.map(\.id))
+        #expect(LocalAIModel.onboardingOptions.allSatisfy { curatedIDs.contains($0.id) })
     }
 
     /// Same pin as the default model, for the same reason: an edited checksum or

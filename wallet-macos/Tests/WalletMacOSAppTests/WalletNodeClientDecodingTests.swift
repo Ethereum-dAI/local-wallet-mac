@@ -368,14 +368,6 @@ import Testing
             "lifecycle": "active",
             "createdAt": 1,
         ]
-        let duplicateKeyRef: [String: Any] = [
-            "ownerScope": "default",
-            "chainId": 11_155_111,
-            "eoa": "0xb000000000000000000000000000000000000002",
-            "keyRef": active["keyRef"]!,
-            "lifecycle": "retired",
-            "createdAt": 2,
-        ]
         let duplicateAddress: [String: Any] = [
             "ownerScope": "default",
             "chainId": 11_155_111,
@@ -388,7 +380,6 @@ import Testing
         for history: Any in [
             "not-an-array",
             [active, "not-an-entry"],
-            [active, duplicateKeyRef],
             [active, duplicateAddress],
         ] {
             var json = relayerJSON()
@@ -397,6 +388,45 @@ import Testing
                 _ = try WalletNodeClient.RelayerStatus(json: json)
             }
         }
+    }
+
+    /// `bundler_account_reconciliation.rs::rebind_active` retires a stale active
+    /// row and inserts a new active one under the *same* `keyRef` — only the
+    /// address changes. A wallet that has gone through this rebind (or a normal
+    /// rotation before its `keyRef` index policy existed) legitimately has
+    /// multiple `keyHistory` rows sharing one `keyRef`. Decoding must accept
+    /// this rather than treating `keyRef` as a per-row unique identifier.
+    @Test func relayerStatusAcceptsRetiredHistoryRowsSharingTheActiveKeyRef() throws {
+        let active: [String: Any] = [
+            "ownerScope": "default",
+            "chainId": 11_155_111,
+            "eoa": "0xa000000000000000000000000000000000000001",
+            "keyRef": "bundler-eoa:default:11155111:1",
+            "lifecycle": "active",
+            "createdAt": 3,
+        ]
+        let retiredSameKeyRefOne: [String: Any] = [
+            "ownerScope": "default",
+            "chainId": 11_155_111,
+            "eoa": "0xb000000000000000000000000000000000000002",
+            "keyRef": active["keyRef"]!,
+            "lifecycle": "retired",
+            "createdAt": 1,
+        ]
+        let retiredSameKeyRefTwo: [String: Any] = [
+            "ownerScope": "default",
+            "chainId": 11_155_111,
+            "eoa": "0xc000000000000000000000000000000000000003",
+            "keyRef": active["keyRef"]!,
+            "lifecycle": "retired",
+            "createdAt": 2,
+        ]
+
+        var json = relayerJSON()
+        json["keyHistory"] = [retiredSameKeyRefOne, retiredSameKeyRefTwo, active]
+        let decoded = try WalletNodeClient.RelayerStatus(json: json)
+        #expect(decoded.keyHistory.count == 3)
+        #expect(decoded.eoa == "0xa000000000000000000000000000000000000001")
     }
 
     @Test func relayerStatusRejectsMalformedReplacementAndRetiringState() {

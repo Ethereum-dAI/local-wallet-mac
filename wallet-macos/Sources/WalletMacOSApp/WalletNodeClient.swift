@@ -1268,17 +1268,19 @@ extension WalletNodeClient.RelayerStatus {
                 expectedChainID: chainID
             )
         }
-        guard Set(keyHistory.map(\.keyRef)).count == keyHistory.count,
-              Set(keyHistory.map(\.eoa)).count == keyHistory.count else {
+        // `eoa` is the daemon store's real per-row identity (its primary key is
+        // (ownerScope, chainId, address)); `keyRef` is not — a passive rebind
+        // (`bundler_account_reconciliation.rs::rebind_active`) retires the old
+        // row and inserts a new active one under the *same* `keyRef`, so a
+        // wallet that has been rebound legitimately has multiple keyHistory
+        // rows sharing one `keyRef`. Only assert uniqueness on `eoa`.
+        guard Set(keyHistory.map(\.eoa)).count == keyHistory.count else {
             throw WalletNodeClient.ClientError.invalidResponse
         }
         if let keyRef {
-            let currentRows = keyHistory.filter {
-                $0.keyRef == keyRef || $0.eoa == eoa || $0.lifecycle == "active"
-            }
+            let currentRows = keyHistory.filter { $0.eoa == eoa }
             guard currentRows.count == 1,
                   currentRows[0].keyRef == keyRef,
-                  currentRows[0].eoa == eoa,
                   currentRows[0].lifecycle == lifecycle else {
                 throw WalletNodeClient.ClientError.invalidResponse
             }

@@ -357,7 +357,16 @@ async fn estimate_account_call_gas(
         }
     }
 
-    match state.chain.eth_estimate_gas(tx, Some(block), None).await {
+    // Deliberately not pinned to `block` (unlike the eth_call above): several
+    // execution RPC providers (observed on both a public and a dedicated paid
+    // gateway) reject eth_estimateGas's optional block parameter when it is
+    // the EIP-1898 `{blockHash}` object form, returning a bare -32602 "invalid
+    // params" even though the identical object is accepted for eth_call. The
+    // eth_call above already pinned the revert check to `block`; this is only
+    // an approximate ceiling with a safety margin and a floor applied below,
+    // so estimating against the current head instead of that exact historical
+    // block is an acceptable trade for not failing closed on every send.
+    match state.chain.eth_estimate_gas(tx, None, None).await {
         Ok(gas) => Ok(with_safety_margin(U256::from(gas)).max(U256::from(ACCOUNT_CALL_GAS_FLOOR))),
         Err(ChainError::CallReverted(data)) => Err(call_reverted(&data)),
         Err(error) if is_execution_halted(&error) => Err(execution_halted()),
@@ -640,12 +649,7 @@ mod tests {
         );
 
         chain.set_call_revert(account_call_request(&op, entry_point), block, None, revert);
-        chain.set_gas_estimate(
-            account_call_request(&op, entry_point),
-            Some(block),
-            None,
-            21_000,
-        );
+        chain.set_gas_estimate(account_call_request(&op, entry_point), None, None, 21_000);
 
         let error =
             super::estimate_account_call_gas(&state, entry_point, &op, block, &test_policy(), None)
@@ -698,12 +702,7 @@ mod tests {
             None,
             Bytes::new(),
         );
-        chain.set_gas_estimate(
-            account_call_request(&op, entry_point),
-            Some(block),
-            None,
-            40_554,
-        );
+        chain.set_gas_estimate(account_call_request(&op, entry_point), None, None, 40_554);
 
         let gas =
             super::estimate_account_call_gas(&state, entry_point, &op, block, &test_policy(), None)
@@ -930,12 +929,7 @@ mod tests {
             None,
             Bytes::new(),
         );
-        chain.set_gas_estimate(
-            account_call_request(&op, entry_point),
-            Some(block),
-            None,
-            300_000,
-        );
+        chain.set_gas_estimate(account_call_request(&op, entry_point), None, None, 300_000);
 
         let gas = super::estimate_account_call_gas(
             &state,

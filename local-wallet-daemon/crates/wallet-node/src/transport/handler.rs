@@ -3917,7 +3917,7 @@ mod tests {
                 data: Some(op.call_data.clone()),
                 ..Default::default()
             },
-            Some(BlockTag::Hash(head.hash)),
+            None,
             None,
             0x12_000,
         );
@@ -4014,7 +4014,7 @@ mod tests {
                 data: Some(op.call_data.clone()),
                 ..Default::default()
             },
-            Some(BlockTag::Hash(head.hash)),
+            None,
             None,
             0x9e6a,
         );
@@ -4111,7 +4111,7 @@ mod tests {
                 data: Some(op.call_data.clone()),
                 ..Default::default()
             },
-            Some(BlockTag::Hash(head.hash)),
+            None,
             None,
             0x12_000,
         );
@@ -4205,7 +4205,7 @@ mod tests {
                 data: Some(op.call_data.clone()),
                 ..Default::default()
             },
-            Some(BlockTag::Hash(head.hash)),
+            None,
             None,
             0x12_000,
         );

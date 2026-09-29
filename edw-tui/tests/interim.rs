@@ -189,6 +189,18 @@ async fn sends_from_the_profile_the_harness_selected() {
     let bob = h.set_profile("bob").await.unwrap();
     assert_ne!(bob, default.to_string());
 
+    // Real addresses come from a tool, never from the model's imagination.
+    let turn = h.turn("show my addresses", true).await;
+    let listing = &turn.outputs[0];
+    assert!(
+        listing.contains(&format!("default (0/0)  {default}")),
+        "{listing}"
+    );
+    assert!(
+        listing.contains(&format!("bob (0/1)  {bob}  (sends transfers)")),
+        "{listing}"
+    );
+
     let turn = h.turn("balance", true).await;
     assert!(
         turn.outputs[0].contains("bob (0/1)") && turn.outputs[0].contains("0 ETH"),

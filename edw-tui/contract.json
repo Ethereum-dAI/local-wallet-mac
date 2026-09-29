@@ -167,6 +167,17 @@
     },
     {
       "function": {
+        "description": "Show every profile of the unlocked network with its 0x address, and which one sends transfers. Use it whenever the user asks for an address; never state an address that no tool returned.",
+        "name": "profile_addresses",
+        "parameters": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
         "description": "Send native ETH or an ERC-20 token from the user's smart account to a recipient.         Use this whenever the user expresses intent to send, transfer, pay, or move tokens         to an address, an ENS name (*.eth), or a saved contact name. If the recipient or         amount is missing or ambiguous, ask a clarifying question in natural language         instead of calling the tool.",
         "name": "transfer",
         "parameters": {

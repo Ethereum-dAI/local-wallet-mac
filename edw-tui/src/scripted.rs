@@ -59,6 +59,8 @@ pub fn script(prompt: &str) -> Script {
             ),
             _ => Script::Say("Say it as: send <amount> <token> to <0x address>.".into()),
         }
+    } else if has("address") || has("addresses") {
+        Script::Call("profile_addresses", json!({}))
     } else if has("balance") {
         Script::Call("balance", json!({}))
     } else if has("unlock") {

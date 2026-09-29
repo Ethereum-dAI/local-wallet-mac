@@ -32,9 +32,9 @@ use edw_core::{
     database::{
         Database, encrypted::EncryptedDatabase, file::FileDatabase, scoped::ScopedDatabaseExt,
     },
-    mnemonic::{db::MnemonicDb, resolve_mnemonic},
+    mnemonic::{MnemonicRecord, db::MnemonicDb, resolve_mnemonic},
     network::{SupportedNetwork, db::NetworkDb},
-    profile::simple::{db::SimpleProfileDb, resolve_profile},
+    profile::simple::{ProfileRecord, db::SimpleProfileDb, resolve_profile},
 };
 use guards::{Amount, TokenRef, format_units, parse_units};
 use reqwest::Url;
@@ -247,8 +247,8 @@ impl Interim {
     }
 
     /// The sending profile's account; `selector` overrides the harness's choice (for checks).
-    async fn account(&self, selector: Option<&str>) -> Result<Account, String> {
-        let selector = selector.map_or_else(|| self.profile(), str::to_owned);
+    /// The unlocked network, and edw's encrypted store for it, opened with the session password.
+    async fn open_store(&self) -> Result<(SupportedNetwork, Arc<dyn Database>), String> {
         let network = self.unlocked_network().await?;
         let dir = self.config.edw.data_dir.join(network.slug());
         let backend: Arc<dyn Database> = Arc::new(
@@ -260,29 +260,90 @@ impl Interim {
                 .await
                 .map_err(|e| format!("cannot unlock edw's store: {e}"))?,
         );
+        Ok((network, store))
+    }
 
+    async fn profiles(
+        store: &Arc<dyn Database>,
+    ) -> Result<(Vec<ProfileRecord>, Vec<MnemonicRecord>), String> {
         let profiles = store
             .clone()
             .scoped(b"profiles")
             .list_profiles()
             .await
             .map_err(|e| e.to_string())?;
-        let record = resolve_profile(&profiles, &selector).map_err(|e| {
-            format!(
-                "the sending profile `{selector}` is not in this wallet ({e}); change it with /profile"
-            )
-        })?;
-
         let mnemonics = store
             .clone()
             .scoped(b"mnemonics")
             .get_mnemonics()
             .await
             .map_err(|e| e.to_string())?;
-        let key = resolve_mnemonic(&mnemonics, record.mnemonic_index)
+        Ok((profiles, mnemonics))
+    }
+
+    /// A profile's signer: its first address, `m/44'/60'/<profile>'/0/0`.
+    fn signer(
+        mnemonics: &[MnemonicRecord],
+        record: &ProfileRecord,
+    ) -> Result<PrivateKeySigner, String> {
+        resolve_mnemonic(mnemonics, record.mnemonic_index)
             .and_then(|m| m.mnemonic())
             .and_then(|m| m.standard_address_key(0, record.profile_index))
-            .map_err(|e| format!("cannot derive the profile's key: {e}"))?;
+            .map(PrivateKeySigner::from_signing_key)
+            .map_err(|e| format!("cannot derive the profile's key: {e}"))
+    }
+
+    fn label(record: &ProfileRecord) -> String {
+        format!(
+            "{} ({}/{})",
+            record.display_name(),
+            record.mnemonic_index,
+            record.profile_index
+        )
+    }
+
+    /// Every profile of the unlocked network with its address; the sending one is marked.
+    pub async fn profile_addresses(&self) -> EdwResult {
+        let command = format!("interim profile-addresses --from {}", self.profile());
+        let listing = async {
+            let (network, store) = self.open_store().await?;
+            let (profiles, mnemonics) = Self::profiles(&store).await?;
+            let sender = resolve_profile(&profiles, &self.profile()).ok().cloned();
+            let mut lines = vec![format!("Profiles on {network}:")];
+            for record in &profiles {
+                let marker = if sender.as_ref() == Some(record) {
+                    "  (sends transfers)"
+                } else {
+                    ""
+                };
+                lines.push(format!(
+                    "  {}  {}{marker}",
+                    Self::label(record),
+                    Self::signer(&mnemonics, record)?.address()
+                ));
+            }
+            Ok::<_, String>(lines.join("\n"))
+        };
+        match listing.await {
+            Ok(output) => EdwResult {
+                command,
+                exit_code: 0,
+                output,
+            },
+            Err(error) => failed(&command, error),
+        }
+    }
+
+    async fn account(&self, selector: Option<&str>) -> Result<Account, String> {
+        let selector = selector.map_or_else(|| self.profile(), str::to_owned);
+        let (network, store) = self.open_store().await?;
+        let (profiles, mnemonics) = Self::profiles(&store).await?;
+        let record = resolve_profile(&profiles, &selector).map_err(|e| {
+            format!(
+                "the sending profile `{selector}` is not in this wallet ({e}); change it with /profile"
+            )
+        })?;
+        let signer = Self::signer(&mnemonics, record)?;
 
         let rpc = match &self.config.rpc_url {
             Some(url) => url.clone(),
@@ -291,15 +352,10 @@ impl Interim {
                 .unwrap_or_else(|| network.default_config().http_rpc_url()),
         };
         Ok(Account {
-            label: format!(
-                "{} ({}/{})",
-                record.display_name(),
-                record.mnemonic_index,
-                record.profile_index
-            ),
+            label: Self::label(record),
             chain_id: network.default_config().network_id.0,
             network,
-            signer: PrivateKeySigner::from_signing_key(key),
+            signer,
             rpc: rpc
                 .parse()
                 .map_err(|e| format!("invalid RPC URL `{rpc}`: {e}"))?,

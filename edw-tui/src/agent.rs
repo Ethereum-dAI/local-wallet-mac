@@ -118,6 +118,11 @@ impl Shared {
 
     async fn interim_call(&self, tool: &str, args: &Value) -> String {
         match tool {
+            "profile_addresses" => {
+                let result = self.interim.profile_addresses().await;
+                self.log(AgentEvent::ToolFinished(result.clone()));
+                result.to_model_json()
+            }
             "balance" => {
                 let command = interim::display_command(tool, args, &self.interim.profile());
                 self.log(AgentEvent::ToolStarted { command });
@@ -183,6 +188,20 @@ impl<const I: usize> Tool for EdwTool<I> {
     /// Arguments arrive with address aliases and are resolved first; the result goes back to
     /// the model with addresses aliased again. The UI always sees real addresses.
     async fn call(&self, _context: &mut ToolContext, args: Value) -> Result<String, Infallible> {
+        if TOOLS[I].moves_value
+            && let Some(to) = args.get("to").and_then(Value::as_str)
+            && let Some(invented) = self.0.addresses.invented(to)
+        {
+            let result = EdwResult {
+                command: interim::display_command(Self::NAME, &args, &self.0.interim.profile()),
+                exit_code: 1,
+                output: format!(
+                    "Refused: {invented} came from neither the user nor a tool, so it may be made up. Ask the user for the address; nothing was sent."
+                ),
+            };
+            self.0.log(AgentEvent::ToolFinished(result.clone()));
+            return Ok(result.to_model_json());
+        }
         let args = self.0.addresses.reveal_json(args);
         let output = self.0.run_tool::<I>(Self::NAME, &args).await;
         Ok(self.0.addresses.hide(&output))
@@ -283,7 +302,8 @@ pub fn build_agent(
         .tool(EdwTool::<7>(shared.clone()))
         .tool(EdwTool::<8>(shared.clone()))
         .tool(EdwTool::<9>(shared.clone()))
-        .tool(EdwTool::<10>(shared))
+        .tool(EdwTool::<10>(shared.clone()))
+        .tool(EdwTool::<11>(shared))
         .build()
 }
 
@@ -428,7 +448,9 @@ pub async fn run(
             Request::Prompt(prompt) => {
                 let addresses = &interim.addresses;
                 match agent.chat(addresses.hide(&prompt), &mut history).await {
-                    Ok(answer) => AgentEvent::Reply(addresses.reveal(&answer)),
+                    Ok(answer) => {
+                        AgentEvent::Reply(addresses.reveal(&addresses.flag_invented(&answer)))
+                    }
                     Err(error) => AgentEvent::Error(addresses.reveal(&error.to_string())),
                 }
             }
@@ -477,7 +499,7 @@ async fn switch_model(agent: &mut Agent, source: &ModelSource, name: &str) -> an
 }
 
 // Every `TOOLS` entry must be registered above; this fails to compile if one is added without it.
-const _: () = assert!(TOOLS.len() == 11);
+const _: () = assert!(TOOLS.len() == 12);
 
 #[cfg(test)]
 mod tests {

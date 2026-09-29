@@ -56,7 +56,7 @@ const CLI: ToolSpec = ToolSpec {
     parameters: no_params,
 };
 
-pub const TOOLS: [ToolSpec; 11] = [
+pub const TOOLS: [ToolSpec; 12] = [
     ToolSpec {
         name: "wallet_status",
         description: "Show the wallet configuration: data directory, which network is unlocked (or locked), and the RPC source.",
@@ -135,6 +135,12 @@ pub const TOOLS: [ToolSpec; 11] = [
                 "token": {"type": "string", "description": "Only this token: a symbol such as ETH or USDC, or a 0x-prefixed contract address. Omit to list all known tokens."}
             }})
         },
+        ..CLI
+    },
+    ToolSpec {
+        name: "profile_addresses",
+        description: "Show every profile of the unlocked network with its 0x address, and which one sends transfers. Use it whenever the user asks for an address; never state an address that no tool returned.",
+        backend: Backend::Interim,
         ..CLI
     },
     ToolSpec {

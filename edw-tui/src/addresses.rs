@@ -86,6 +86,39 @@ impl AddressBook {
             .into_owned()
     }
 
+    /// With aliases on, the model is never shown a raw address, so any raw address it writes is
+    /// one it made up (or recalled from training). Returns the first such address.
+    pub fn invented<'t>(&self, model_text: &'t str) -> Option<&'t str> {
+        if !self.enabled {
+            return None;
+        }
+        let seen = self.seen.lock().expect("not poisoned");
+        ADDRESS
+            .find_iter(model_text)
+            .map(|m| m.as_str())
+            .find(|address| !seen.iter().any(|a| a.eq_ignore_ascii_case(address)))
+    }
+
+    /// Flags every made-up address in a model reply, so the user never takes it for real.
+    pub fn flag_invented(&self, model_text: &str) -> String {
+        if !self.enabled {
+            return model_text.to_owned();
+        }
+        let seen = self.seen.lock().expect("not poisoned").clone();
+        ADDRESS
+            .replace_all(model_text, |caps: &regex::Captures| {
+                let address = &caps[0];
+                if seen.iter().any(|a| a.eq_ignore_ascii_case(address)) {
+                    address.to_owned()
+                } else {
+                    format!(
+                        "{address} [not from any tool or message: the model made this address up]"
+                    )
+                }
+            })
+            .into_owned()
+    }
+
     /// [`Self::reveal`] on every string inside a tool call's JSON arguments.
     pub fn reveal_json(&self, value: Value) -> Value {
         match value {
@@ -129,6 +162,25 @@ mod tests {
             book.reveal_json(json!({"to": "ADDR_1", "amount": "0.2", "nested": ["ADDR_2"]})),
             json!({"to": BEEF, "amount": "0.2", "nested": [ALICE]})
         );
+    }
+
+    #[test]
+    fn flags_addresses_the_model_made_up() {
+        let book = AddressBook::default();
+        book.hide(&format!("send to {ALICE}"));
+        let reply = format!("Sent to ADDR_1. Bob's address is {BEEF}.");
+        assert_eq!(book.invented(&reply), Some(BEEF));
+        assert!(book.invented("Sent to ADDR_1.").is_none());
+        let flagged = book.reveal(&book.flag_invented(&reply));
+        assert!(
+            flagged.starts_with(&format!("Sent to {ALICE}.")),
+            "{flagged}"
+        );
+        assert!(
+            flagged.contains(&format!("{BEEF} [not from any tool")),
+            "{flagged}"
+        );
+        assert!(AddressBook::new(false).invented(BEEF).is_none());
     }
 
     #[test]

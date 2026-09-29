@@ -40,7 +40,10 @@ use guards::{Amount, TokenRef, format_units, parse_units};
 use reqwest::Url;
 use serde_json::Value;
 
-use crate::edw::{self, EdwConfig, EdwResult};
+use crate::{
+    addresses::AddressBook,
+    edw::{self, EdwConfig, EdwResult},
+};
 
 sol! {
     interface IERC20 {
@@ -88,6 +91,9 @@ pub struct InterimConfig {
     pub rpc_url: Option<String>,
     pub allow_sepolia: bool,
     pub profile: SendingProfile,
+    /// Session state shared by the tools and the chat loop: the address ↔ alias table (see
+    /// `crate::addresses`). It rides along here because both ends already receive this config.
+    pub addresses: AddressBook,
 }
 
 impl InterimConfig {
@@ -99,6 +105,7 @@ impl InterimConfig {
             profile: SendingProfile::new(
                 std::env::var("EDW_TUI_PROFILE").unwrap_or_else(|_| DEFAULT_PROFILE.into()),
             ),
+            addresses: AddressBook::from_env(),
         }
     }
 }

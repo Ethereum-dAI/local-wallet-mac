@@ -63,17 +63,25 @@ pub fn is_burn(address: &Address) -> bool {
 
 pub fn recipient(value: &str) -> Result<Address, String> {
     if !is_hex_address(value) {
-        return Err(if value.to_lowercase().ends_with(".eth") {
-            format!(
-                "`{value}` is an ENS name, and edw-tui cannot resolve names yet; ask the user for the 0x address"
-            )
-        } else if value.starts_with("0x") {
-            format!("`{value}` is not a valid address: it must be 0x followed by 40 hex characters")
-        } else {
-            format!(
-                "`{value}` is not a 0x address; edw-tui can only send to 0x addresses for now (no contacts or other chains)"
-            )
-        });
+        return Err(
+            if value.to_uppercase().starts_with(crate::addresses::PREFIX) {
+                format!(
+                    "`{value}` is not an address from this conversation; ask the user for the address"
+                )
+            } else if value.to_lowercase().ends_with(".eth") {
+                format!(
+                    "`{value}` is an ENS name, and edw-tui cannot resolve names yet; ask the user for the 0x address"
+                )
+            } else if value.starts_with("0x") {
+                format!(
+                    "`{value}` is not a valid address: it must be 0x followed by 40 hex characters"
+                )
+            } else {
+                format!(
+                    "`{value}` is not a 0x address; edw-tui can only send to 0x addresses for now (no contacts or other chains)"
+                )
+            },
+        );
     }
     let address: Address = value
         .parse()
@@ -151,9 +159,15 @@ pub fn balance_args(args: &Value) -> Result<BalanceArgs, String> {
     let args = object(args)?;
     let token_text = text(&args, "token", false)?;
     Ok(BalanceArgs {
-        token: match token_text {
-            Some(t) => Some(token(Some(&t))?),
-            None => None,
+        token: match token_text.as_deref() {
+            // Models ask for "all" (or similar) when they mean every token.
+            None | Some("*") => None,
+            Some(t)
+                if ["all", "any", "every", "everything"].contains(&t.to_lowercase().as_str()) =>
+            {
+                None
+            }
+            Some(t) => Some(token(Some(t))?),
         },
     })
 }
@@ -253,6 +267,22 @@ mod tests {
         assert!(transfer_args(&json!({"amount": "1"})).is_err());
         assert!(
             transfer_args(&json!({"to": "0x000000000000000000000000000000000000bEEF"})).is_err()
+        );
+    }
+
+    #[test]
+    fn a_balance_for_all_tokens_lists_everything() {
+        for all in [
+            json!({}),
+            json!({"token": "all"}),
+            json!({"token": "ALL"}),
+            json!({"token": "*"}),
+        ] {
+            assert_eq!(balance_args(&all).unwrap().token, None, "{all}");
+        }
+        assert_eq!(
+            balance_args(&json!({"token": "usdc"})).unwrap().token,
+            Some(TokenRef::Symbol("USDC".into()))
         );
     }
 

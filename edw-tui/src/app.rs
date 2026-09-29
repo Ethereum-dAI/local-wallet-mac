@@ -11,7 +11,27 @@ use crate::{
     edw::EdwResult,
 };
 
-pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /help";
+pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /copy [reply|log|address] copies to the clipboard · Tab shows one panel at a time, for selecting text · /help";
+
+/// Which panels are on screen. A terminal selects whole screen rows, so text is copied
+/// cleanly only when one panel fills the width.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum View {
+    #[default]
+    Split,
+    Chat,
+    Log,
+}
+
+impl View {
+    fn next(self) -> Self {
+        match self {
+            View::Split => View::Chat,
+            View::Chat => View::Log,
+            View::Log => View::Split,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatLine {
@@ -40,6 +60,8 @@ pub struct PendingConfirm {
 pub enum Action {
     None,
     Send(Request),
+    /// Put this text on the system clipboard.
+    Copy(String),
     Quit,
 }
 
@@ -48,6 +70,9 @@ pub struct App {
     pub data_dir: String,
     /// The profile transfers are sent from (a selector such as `0/0` or `bob`).
     pub profile: String,
+    /// Its address, once `/profile` has looked it up.
+    pub profile_address: Option<String>,
+    pub view: View,
     pub chat: Vec<ChatLine>,
     pub log: Vec<LogEntry>,
     pub input: String,
@@ -64,6 +89,8 @@ impl App {
             model: model.into(),
             data_dir: data_dir.into(),
             profile: crate::interim::DEFAULT_PROFILE.into(),
+            profile_address: None,
+            view: View::default(),
             chat: Vec::new(),
             log: Vec::new(),
             input: String::new(),
@@ -95,6 +122,9 @@ impl App {
                     return Action::None;
                 }
                 self.chat.push(ChatLine::User(prompt.clone()));
+                if prompt.starts_with("/copy") {
+                    return self.copy(prompt.split_whitespace().nth(1));
+                }
                 let request = if prompt.starts_with('/') {
                     match self.command(&prompt) {
                         Some(request) => request,
@@ -105,6 +135,10 @@ impl App {
                 };
                 self.busy = true;
                 Action::Send(request)
+            }
+            KeyCode::Tab => {
+                self.view = self.view.next();
+                Action::None
             }
             KeyCode::Char(c) => {
                 self.input.push(c);
@@ -119,6 +153,51 @@ impl App {
                 Action::None
             }
             _ => Action::None,
+        }
+    }
+
+    /// Pasted text goes into the input as typed text; line breaks become spaces, so a paste
+    /// never submits half a message.
+    pub fn on_paste(&mut self, text: &str) {
+        if self.pending.is_empty() {
+            self.input
+                .push_str(&text.replace(['\r', '\n'], " ").replace('\t', " "));
+        }
+    }
+
+    /// `/copy` (the last reply), `/copy log` (the last command and its output), `/copy address`
+    /// (the sending profile's address).
+    fn copy(&mut self, what: Option<&str>) -> Action {
+        let text = match what.unwrap_or("reply") {
+            "reply" => self.chat.iter().rev().find_map(|line| match line {
+                ChatLine::Assistant(text) => Some(text.clone()),
+                _ => None,
+            }),
+            "log" => self.log.iter().rev().find_map(|entry| match entry {
+                LogEntry::Finished(result) => {
+                    Some(format!("$ {}\n{}", result.command, result.output))
+                }
+                _ => None,
+            }),
+            "address" => self.profile_address.clone(),
+            other => {
+                self.chat.push(ChatLine::Error(format!(
+                    "cannot copy `{other}`; use /copy, /copy log or /copy address"
+                )));
+                return Action::None;
+            }
+        };
+        match text {
+            Some(text) => Action::Copy(text),
+            None => {
+                let hint = if what == Some("address") {
+                    "no address yet; run /profile <name or 0/0> first"
+                } else {
+                    "nothing to copy yet"
+                };
+                self.chat.push(ChatLine::Error(hint.into()));
+                Action::None
+            }
         }
     }
 
@@ -198,9 +277,10 @@ impl App {
             AgentEvent::ProfileChanged { selector, address } => {
                 self.busy = false;
                 self.chat.push(ChatLine::Info(format!(
-                    "Transfers are now sent from profile {selector} ({address})."
+                    "Transfers are now sent from profile {selector} ({address}). /copy address copies it."
                 )));
                 self.profile = selector;
+                self.profile_address = Some(address);
             }
             AgentEvent::Reply(text) => {
                 self.busy = false;
@@ -392,5 +472,55 @@ mod tests {
         };
         app.on_agent(AgentEvent::ToolFinished(result.clone()));
         assert_eq!(app.log, [LogEntry::Finished(result)]);
+    }
+
+    #[test]
+    fn tab_cycles_views_for_clean_selection() {
+        let mut app = App::new("m", "d");
+        assert_eq!(app.view, View::Split);
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.view, View::Chat);
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.view, View::Log);
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.view, View::Split);
+    }
+
+    #[test]
+    fn copy_puts_the_reply_log_or_address_on_the_clipboard() {
+        let mut app = App::new("m", "d");
+        assert_eq!(submit(&mut app, "/copy"), Action::None, "nothing yet");
+        app.on_agent(AgentEvent::Reply("You have 10 ETH.".into()));
+        app.on_agent(AgentEvent::ToolFinished(EdwResult {
+            command: "interim balance --from 0/0".into(),
+            exit_code: 0,
+            output: "10 ETH".into(),
+        }));
+        assert_eq!(
+            submit(&mut app, "/copy"),
+            Action::Copy("You have 10 ETH.".into())
+        );
+        assert_eq!(
+            submit(&mut app, "/copy log"),
+            Action::Copy("$ interim balance --from 0/0\n10 ETH".into())
+        );
+        assert_eq!(submit(&mut app, "/copy address"), Action::None);
+        app.on_agent(AgentEvent::ProfileChanged {
+            selector: "0/0".into(),
+            address: "0xabc".into(),
+        });
+        assert_eq!(
+            submit(&mut app, "/copy address"),
+            Action::Copy("0xabc".into())
+        );
+        assert!(!app.busy, "copying never waits on the agent");
+    }
+
+    #[test]
+    fn a_paste_is_typed_text_and_never_submits() {
+        let mut app = App::new("m", "d");
+        app.on_paste("send 1 ETH to\n0xabc\r\n");
+        assert_eq!(app.input, "send 1 ETH to 0xabc  ");
+        assert!(!app.busy && app.chat.is_empty());
     }
 }

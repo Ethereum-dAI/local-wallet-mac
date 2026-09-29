@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::app::{App, ChatLine, LogEntry, PendingConfirm};
+use crate::app::{App, ChatLine, LogEntry, PendingConfirm, View};
 
 /// The input grows with its text up to this many rows, then scrolls to keep the end visible.
 const MAX_INPUT_ROWS: usize = 6;
@@ -38,11 +38,31 @@ pub fn render(frame: &mut Frame, app: &App) {
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    let [chat, log] =
-        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(main);
-
-    render_bottom_anchored(frame, chat, chat_text(app), " Chat ");
-    render_bottom_anchored(frame, log, log_text(app), " edw commands ");
+    match app.view {
+        View::Split => {
+            let [chat, log] =
+                Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+                    .areas(main);
+            render_bottom_anchored(frame, chat, chat_text(app), " Chat ", Borders::ALL);
+            render_bottom_anchored(frame, log, log_text(app), " edw commands ", Borders::ALL);
+        }
+        // One panel, full width, with no side borders: a terminal selection then copies only
+        // this panel's text.
+        View::Chat => render_bottom_anchored(
+            frame,
+            main,
+            chat_text(app),
+            " Chat · Tab: commands ",
+            Borders::TOP,
+        ),
+        View::Log => render_bottom_anchored(
+            frame,
+            main,
+            log_text(app),
+            " edw commands · Tab: both ",
+            Borders::TOP,
+        ),
+    }
 
     let prompt: Text = if app.busy {
         "thinking…".dark_gray().into()
@@ -70,7 +90,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     let hint = if !app.pending.is_empty() {
         "y run · n cancel"
     } else {
-        "Enter send · /models · Esc clear · Ctrl-C quit"
+        "Enter send · Tab one panel · /copy · /help · Ctrl-C quit"
     };
     frame.render_widget(
         Paragraph::new(format!(
@@ -87,14 +107,26 @@ pub fn render(frame: &mut Frame, app: &App) {
 }
 
 /// Keeps the newest lines visible: scrolls so the text ends at the bottom of the panel.
-fn render_bottom_anchored(frame: &mut Frame, area: Rect, text: Text<'static>, title: &'static str) {
+fn render_bottom_anchored(
+    frame: &mut Frame,
+    area: Rect,
+    text: Text<'static>,
+    title: &'static str,
+    borders: Borders,
+) {
+    let count = |sides: Borders| borders.intersection(sides).iter().count() as u16;
+    let (vertical, horizontal) = (
+        count(Borders::TOP | Borders::BOTTOM),
+        count(Borders::LEFT | Borders::RIGHT),
+    );
     let paragraph = Paragraph::new(text)
         .wrap(Wrap { trim: false })
-        .block(Block::bordered().title(title));
-    let inner_height = area.height.saturating_sub(2) as usize;
+        .block(Block::new().borders(borders).title(title));
+    let inner_height = area.height.saturating_sub(vertical) as usize;
+    // `line_count` includes the block's own top and bottom rows.
     let lines = paragraph
-        .line_count(area.width.saturating_sub(2))
-        .saturating_sub(2);
+        .line_count(area.width.saturating_sub(horizontal))
+        .saturating_sub(vertical as usize);
     let offset = lines.saturating_sub(inner_height).min(u16::MAX as usize) as u16;
     frame.render_widget(paragraph.scroll((offset, 0)), area);
 }
@@ -322,5 +354,32 @@ mod tests {
             screen.contains("edw lock #39") && !screen.contains("edw lock #0 "),
             "{screen}"
         );
+    }
+
+    #[test]
+    fn a_single_panel_view_has_no_side_borders_to_copy() {
+        let mut app = App::new("m", "d");
+        app.chat
+            .push(ChatLine::Assistant("You have 10 ETH.".into()));
+        app.on_agent(AgentEvent::ToolFinished(EdwResult {
+            command: "interim balance --from 0/0".into(),
+            exit_code: 0,
+            output: "10 ETH".into(),
+        }));
+        app.view = View::Chat;
+        let text = screen(&app);
+        let row = text
+            .lines()
+            .find(|l| l.contains("You have 10 ETH."))
+            .unwrap();
+        assert!(row.starts_with("edw: You have 10 ETH."), "{row:?}");
+        assert!(
+            !row.contains('│') && !text.contains("interim balance"),
+            "{text}"
+        );
+
+        app.view = View::Log;
+        let text = screen(&app);
+        assert!(text.contains("interim balance") && !text.contains("You have 10 ETH."));
     }
 }

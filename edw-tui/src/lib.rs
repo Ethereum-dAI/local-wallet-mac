@@ -1,3 +1,4 @@
+pub mod addresses;
 pub mod agent;
 pub mod app;
 pub mod app_contract;

@@ -32,6 +32,12 @@ The TUI warns at startup when the installed edw is not the pinned revision.
 | `EDW_TUI_PROFILE` | `0/0` | The profile balances and transfers use (a name or `mnemonic/profile`). Change it in the TUI with `/profile <name>`. The model never picks one. |
 | `EDW_TUI_RPC_URL` | the unlocked network's endpoint | Overrides the endpoint for the interim tools only, e.g. a local anvil fork. |
 | `EDW_TUI_INTERIM_SEPOLIA` | off | `1` allows interim sends on Sepolia. Mainnet is always refused. |
+| `EDW_TUI_ADDRESS_ALIASES` | on | The model sees `ADDR_1`, `ADDR_2`… instead of 0x addresses and never retypes one (8B models lose count in long hex; Ollama then aborts the reply). `0` shows it raw addresses, e.g. for evals. |
+
+In the TUI: **Tab** shows one panel at a time, full width and without side borders, so a
+mouse selection copies only that panel. `/copy` copies the last reply, `/copy log` the last
+command and its output, `/copy address` the sending profile's address. Pasting is safe:
+line breaks in a paste never send the message.
 
 ## Transfers (interim)
 

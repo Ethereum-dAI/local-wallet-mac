@@ -5,6 +5,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use edw_tui::{
+    addresses::AddressBook,
     agent::{self, AgentEvent, ModelSource, Request},
     edw::{self, EdwConfig, EdwResult},
     interim::{InterimConfig, SendingProfile},
@@ -62,6 +63,7 @@ impl TempWallet {
             rpc_url,
             allow_sepolia,
             profile: SendingProfile::default(),
+            addresses: AddressBook::default(),
         }
     }
 }

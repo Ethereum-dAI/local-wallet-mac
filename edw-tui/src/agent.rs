@@ -25,6 +25,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
+    addresses::AddressBook,
     app_contract::SAFETY_CLAUSE,
     edw::{self, Backend, EdwConfig, EdwResult, TOOLS},
     interim::{self, Interim, InterimConfig},
@@ -39,6 +40,7 @@ Rules:
 - One request may need several commands (for example: unlock a network, then add profiles, then list them). Call the tools one after another until the whole request is done, then answer once.
 - A new wallet for a network is created by the first `unlock` of that network; `local` is a local dev chain at 127.0.0.1:8545.
 - Only use arguments the user gave or that a previous tool result showed. If a required value is missing or ambiguous, ask one short question.
+- Addresses appear as ADDR_1, ADDR_2 and so on. Pass them to tools exactly as written; they stand for full 0x addresses the harness holds. Never ask the user to retype one.
 - Transfers and swaps are sent from the wallet's selected profile; never ask which profile to use. The user reviews every transfer before it is sent, so call the tool rather than asking for confirmation. Only say funds were sent when the tool result says the transaction succeeded.
 - edw cannot yet shield, unshield, or show history. If asked, say so plainly and do not call any tool or invent a result.
 - Never ask for, repeat, or accept a recovery phrase or password. Importing a phrase must be done in a terminal with `edw profile import`.
@@ -94,6 +96,7 @@ pub type Events = mpsc::UnboundedSender<AgentEvent>;
 struct Shared {
     config: EdwConfig,
     interim: Interim,
+    addresses: AddressBook,
     events: Events,
 }
 
@@ -177,20 +180,30 @@ impl<const I: usize> Tool for EdwTool<I> {
         (TOOLS[I].parameters)()
     }
 
+    /// Arguments arrive with address aliases and are resolved first; the result goes back to
+    /// the model with addresses aliased again. The UI always sees real addresses.
     async fn call(&self, _context: &mut ToolContext, args: Value) -> Result<String, Infallible> {
+        let args = self.0.addresses.reveal_json(args);
+        let output = self.0.run_tool::<I>(Self::NAME, &args).await;
+        Ok(self.0.addresses.hide(&output))
+    }
+}
+
+impl Shared {
+    async fn run_tool<const I: usize>(&self, name: &str, args: &Value) -> String {
         if TOOLS[I].backend == Backend::Interim {
-            return Ok(self.0.interim_call(Self::NAME, &args).await);
+            return self.interim_call(name, args).await;
         }
-        let argv = match edw::build_argv(Self::NAME, &args) {
+        let argv = match edw::build_argv(name, args) {
             Ok(argv) => argv,
-            Err(error) => return Ok(format!("Rejected before running edw: {error}")),
+            Err(error) => return format!("Rejected before running edw: {error}"),
         };
-        let _ = self.0.events.send(AgentEvent::ToolStarted {
+        self.log(AgentEvent::ToolStarted {
             command: edw::display_command(&argv),
         });
-        let result = edw::run(&self.0.config, &argv).await;
-        let _ = self.0.events.send(AgentEvent::ToolFinished(result.clone()));
-        Ok(result.to_model_json())
+        let result = edw::run(&self.config, &argv).await;
+        self.log(AgentEvent::ToolFinished(result.clone()));
+        result.to_model_json()
     }
 }
 
@@ -251,6 +264,7 @@ pub fn build_agent(
 ) -> Agent {
     let shared = Arc::new(Shared {
         config,
+        addresses: interim.addresses.clone(),
         interim: Interim::new(interim),
         events: events.clone(),
     });
@@ -411,10 +425,13 @@ pub async fn run(
     let mut history: Vec<Message> = Vec::new();
     while let Some(request) = requests.recv().await {
         let event = match request {
-            Request::Prompt(prompt) => match agent.chat(prompt, &mut history).await {
-                Ok(answer) => AgentEvent::Reply(answer),
-                Err(error) => AgentEvent::Error(error.to_string()),
-            },
+            Request::Prompt(prompt) => {
+                let addresses = &interim.addresses;
+                match agent.chat(addresses.hide(&prompt), &mut history).await {
+                    Ok(answer) => AgentEvent::Reply(addresses.reveal(&answer)),
+                    Err(error) => AgentEvent::Error(addresses.reveal(&error.to_string())),
+                }
+            }
             Request::ListModels => match source.list().await {
                 Ok(names) => AgentEvent::Models(names),
                 Err(error) => AgentEvent::Error(format!("cannot list Ollama models: {error}")),

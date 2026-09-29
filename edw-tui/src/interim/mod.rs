@@ -294,7 +294,7 @@ impl Interim {
         let args = guards::balance_args(args)?;
         let account = self.account(None).await?;
         let provider = ProviderBuilder::new().connect_http(account.rpc.clone());
-        check_chain(&provider, account.chain_id).await?;
+        check_chain(&provider, &account).await?;
         let owner = account.address();
         let mut lines = vec![account.describe()];
         let eth = provider.get_balance(owner).await.map_err(provider_error)?;
@@ -329,7 +329,7 @@ impl Interim {
         let args = guards::transfer_args(args)?;
         let account = self.account(None).await?;
         let provider = ProviderBuilder::new().connect_http(account.rpc.clone());
-        check_chain(&provider, account.chain_id).await?;
+        check_chain(&provider, &account).await?;
         let from = account.address();
         if from == args.to {
             return Err("the recipient is the sending profile itself".into());
@@ -510,11 +510,18 @@ async fn endpoint(store: &Arc<dyn Database>) -> Option<String> {
     Some(config.http_rpc_url())
 }
 
-async fn check_chain(provider: &impl Provider, expected: u64) -> Result<(), String> {
-    let actual = provider.get_chain_id().await.map_err(provider_error)?;
-    if actual != expected {
+/// Refuses to read or send through a node that serves another chain than the unlocked network.
+async fn check_chain(provider: &impl Provider, account: &Account) -> Result<(), String> {
+    let actual = provider.get_chain_id().await.map_err(|e| {
+        format!(
+            "cannot reach the {} node at {} ({e}); start it, or point EDW_TUI_RPC_URL at one",
+            account.network, account.rpc
+        )
+    })?;
+    if actual != account.chain_id {
         return Err(format!(
-            "the endpoint serves chain {actual}, but the unlocked network is chain {expected}; refusing to send"
+            "the node at {} is chain {actual}, but edw has `{}` (chain {}) unlocked, so edw-tui will not use it; run a {} node there, or point EDW_TUI_RPC_URL at one",
+            account.rpc, account.network, account.chain_id, account.network
         ));
     }
     Ok(())

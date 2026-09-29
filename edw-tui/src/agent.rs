@@ -273,48 +273,80 @@ pub fn build_agent(
         .build()
 }
 
-/// `nudge` wraps the model in [`AnswerAfterTools`]; models that answer after a tool result on
-/// their own do not need it.
+/// An Ollama model behind [`OllamaReplies`]. `nudge` turns on the empty-reply retry that
+/// gemma4 needs; the cut-off handling is always on.
 pub fn ollama_model(base_url: &str, model: &str, nudge: bool) -> anyhow::Result<ModelHandle> {
     let client = ollama::Client::builder()
         .api_key(Nothing)
         .base_url(base_url)
         .build()?;
-    let model = client.completion_model(model);
-    Ok(if nudge {
-        ModelHandle::named("ollama", AnswerAfterTools(model))
-    } else {
-        ModelHandle::named("ollama", model)
-    })
+    Ok(ModelHandle::named(
+        "ollama",
+        OllamaReplies {
+            inner: client.completion_model(model),
+            nudge,
+        },
+    ))
 }
 
 const SUMMARY_NUDGE: &str = "If my request still needs more commands, call the next tool now. Otherwise tell me the result in one short sentence.";
 const NO_SUMMARY: &str = "(The model gave no summary; the command and its output are in the log.)";
+const CUT_OFF_NUDGE: &str = "Your previous reply was cut off before it finished. Try again: if my request needs a tool, call it, copying any address from my message character by character.";
+pub const CUT_OFF_REPLY: &str = "(The model's reply was cut off before it finished, so nothing was run. Ollama does this with some long runs of repeated characters, such as an address full of zeros. Try again, rephrase, or switch model with /models.)";
 
-/// gemma4 on Ollama usually ends the turn right after a tool result with an empty message,
-/// which Rig reports as an error. Retry once with a one-line nudge, then fall back to a
-/// pointer at the command log, so a successful command never surfaces as a failure.
-#[derive(Clone)]
-struct AnswerAfterTools<M>(M);
-
-fn is_empty_response(error: &CompletionError) -> bool {
-    matches!(error, CompletionError::ResponseError(message) if message == EMPTY_RESPONSE_ERROR)
+/// Two ways an Ollama reply can fail without the request being at fault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hiccup {
+    /// gemma4 ends the turn right after a tool result with an empty message.
+    Empty,
+    /// Ollama 0.31 aborts some generations and answers with a placeholder
+    /// (`{"message":{"role":"",...},"done":false}`) that Rig cannot parse. Seen with qwen3:8b
+    /// writing `0x000…000bEEF`: generation stops inside the run of zeros.
+    CutOff,
 }
 
-impl<M: CompletionModel> CompletionModel for AnswerAfterTools<M> {
+fn hiccup(error: &CompletionError) -> Option<Hiccup> {
+    match error {
+        CompletionError::ResponseError(message) if message == EMPTY_RESPONSE_ERROR => {
+            Some(Hiccup::Empty)
+        }
+        CompletionError::JsonError(error) if error.to_string().contains("unknown variant ``") => {
+            Some(Hiccup::CutOff)
+        }
+        _ => None,
+    }
+}
+
+/// Retries a hiccup once with a one-line nudge, then falls back to a short explanation, so a
+/// model or Ollama quirk never surfaces as a raw parse error.
+#[derive(Clone)]
+struct OllamaReplies<M> {
+    inner: M,
+    nudge: bool,
+}
+
+impl<M: CompletionModel> CompletionModel for OllamaReplies<M> {
     async fn completion(
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, CompletionError> {
-        match self.0.completion(request.clone()).await {
-            Err(error) if is_empty_response(&error) => {}
-            other => return other,
-        }
+        let kind = match self.inner.completion(request.clone()).await {
+            Err(error) => match hiccup(&error) {
+                Some(Hiccup::Empty) if !self.nudge => return Err(error),
+                Some(kind) => kind,
+                None => return Err(error),
+            },
+            ok => return ok,
+        };
+        let (nudge, fallback) = match kind {
+            Hiccup::Empty => (SUMMARY_NUDGE, NO_SUMMARY),
+            Hiccup::CutOff => (CUT_OFF_NUDGE, CUT_OFF_REPLY),
+        };
         let mut nudged = request;
-        nudged.chat_history.push(Message::user(SUMMARY_NUDGE));
-        match self.0.completion(nudged).await {
-            Err(error) if is_empty_response(&error) => Ok(CompletionResponse::new(
-                vec![AssistantContent::text(NO_SUMMARY)],
+        nudged.chat_history.push(Message::user(nudge));
+        match self.inner.completion(nudged).await {
+            Err(error) if hiccup(&error).is_some() => Ok(CompletionResponse::new(
+                vec![AssistantContent::text(fallback)],
                 Usage::new(),
                 "ollama",
             )),
@@ -326,7 +358,7 @@ impl<M: CompletionModel> CompletionModel for AnswerAfterTools<M> {
         &self,
         request: CompletionRequest,
     ) -> Result<StreamingCompletionResponse, CompletionError> {
-        self.0.stream(request).await
+        self.inner.stream(request).await
     }
 }
 
@@ -429,3 +461,102 @@ async fn switch_model(agent: &mut Agent, source: &ModelSource, name: &str) -> an
 
 // Every `TOOLS` entry must be registered above; this fails to compile if one is added without it.
 const _: () = assert!(TOOLS.len() == 11);
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// The error Rig raises for Ollama's cut-off placeholder (`"role": ""`).
+    fn cut_off() -> CompletionError {
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        #[allow(dead_code)]
+        enum Role {
+            User,
+            Assistant,
+            System,
+            Tool,
+        }
+        CompletionError::JsonError(serde_json::from_str::<Role>("\"\"").unwrap_err())
+    }
+
+    fn empty() -> CompletionError {
+        CompletionError::ResponseError(EMPTY_RESPONSE_ERROR.into())
+    }
+
+    /// Fails the first `failures` calls with `error`, then answers "ok".
+    #[derive(Clone)]
+    struct Flaky {
+        failures: usize,
+        error: fn() -> CompletionError,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CompletionModel for Flaky {
+        async fn completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, CompletionError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) < self.failures {
+                return Err((self.error)());
+            }
+            Ok(CompletionResponse::new(
+                vec![AssistantContent::text("ok")],
+                Usage::new(),
+                "flaky",
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<StreamingCompletionResponse, CompletionError> {
+            Err(CompletionError::ResponseError("no streaming".into()))
+        }
+    }
+
+    async fn ask(
+        failures: usize,
+        error: fn() -> CompletionError,
+        nudge: bool,
+    ) -> (Result<String, String>, usize) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let model = OllamaReplies {
+            inner: Flaky {
+                failures,
+                error,
+                calls: calls.clone(),
+            },
+            nudge,
+        };
+        let agent = AgentBuilder::from_model_handle(ModelHandle::named("flaky", model)).build();
+        let answer = agent
+            .chat("hi", &mut Vec::new())
+            .await
+            .map_err(|e| e.to_string());
+        (answer, calls.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn a_cut_off_reply_is_retried_once_then_explained() {
+        assert!(hiccup(&cut_off()) == Some(Hiccup::CutOff));
+        assert_eq!(ask(1, cut_off, false).await, (Ok("ok".into()), 2));
+        assert_eq!(ask(2, cut_off, false).await, (Ok(CUT_OFF_REPLY.into()), 2));
+    }
+
+    #[tokio::test]
+    async fn an_empty_reply_is_nudged_only_when_asked() {
+        assert_eq!(ask(1, empty, true).await, (Ok("ok".into()), 2));
+        assert_eq!(ask(2, empty, true).await, (Ok(NO_SUMMARY.into()), 2));
+        let (answer, calls) = ask(1, empty, false).await;
+        assert!(answer.is_err() && calls == 1);
+    }
+
+    #[tokio::test]
+    async fn other_errors_pass_through_untouched() {
+        let (answer, calls) = ask(1, || CompletionError::ResponseError("boom".into()), true).await;
+        assert!(answer.unwrap_err().contains("boom") && calls == 1);
+    }
+}

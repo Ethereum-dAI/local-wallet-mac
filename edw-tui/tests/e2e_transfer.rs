@@ -9,7 +9,10 @@
 //! unlock seeds a random one), so every address and even the transaction hash are the same on
 //! every run. Screenshots of the review modal and the final screen are written to
 //! `target/e2e-screenshots/` (SVG for people, TXT for diffs) and compared as insta snapshots;
-//! only the temp dir is redacted. Skips when `edw` or `anvil` is missing, or when the installed
+//! only the temp dir is redacted.
+//!
+//! `EDW_TUI_E2E_RECORD=1` also records the whole session to
+//! `target/e2e-screenshots/transfer.mp4`; it needs `rsvg-convert` and `ffmpeg`. Skips when `edw` or `anvil` is missing, or when the installed
 //! edw is not the pinned one (its startup warning would change the screen).
 
 mod common;
@@ -128,7 +131,11 @@ async fn alice_sends_bob_one_tenth_of_an_eth() {
         ROWS,
         COLS,
     );
+    if std::env::var("EDW_TUI_E2E_RECORD").is_ok_and(|v| !v.is_empty() && v != "0") {
+        tui.start_recording();
+    }
     tui.wait_for("Ask in plain language");
+    tui.linger(800);
 
     // a. A wallet on the local chain, and two profiles in it.
     tui.submit("unlock local");
@@ -161,10 +168,15 @@ async fn alice_sends_bob_one_tenth_of_an_eth() {
         "{review}"
     );
     screenshot(&tui, "transfer_review");
+    tui.linger(2500); // time to read the dry run
     tui.press(b"y");
     tui.wait_for("succeeded");
     idle(&tui);
     screenshot(&tui, "transfer_final");
+    tui.linger(1500);
+    if let Some(video) = tui.finish_recording(&screenshots_dir(), "transfer") {
+        eprintln!("recorded {}", video.display());
+    }
 
     assert_eq!(eth(&rpc, bob).await, U256::from(ETHER / 10));
     assert!(eth(&rpc, alice).await < U256::from(10 * ETHER - ETHER / 10));

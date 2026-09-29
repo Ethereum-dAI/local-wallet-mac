@@ -73,6 +73,8 @@ cargo test --test interim           # real ETH sends on a throwaway anvil (needs
 cargo test --test e2e_transfer      # the real binary in a pseudo-terminal: alice sends bob 0.1 ETH;
                                     # screenshots in target/e2e-screenshots/, snapshots in tests/snapshots/
                                     # (review changes with `cargo insta review`)
+EDW_TUI_E2E_RECORD=1 cargo test --test e2e_transfer   # also records the session to
+                                    # target/e2e-screenshots/transfer.mp4 (needs rsvg-convert, ffmpeg)
 cargo test --test interim -- --ignored   # USDC on an anvil fork of Sepolia (network; EDW_TUI_SEPOLIA_RPC)
 cargo test --test agent_loop -- --ignored --nocapture   # real Ollama (EDW_TUI_MODEL, EDW_TUI_SWITCH_TO)
 ```

@@ -2,11 +2,13 @@
 //!
 //! Skips when `edw` is not installed (`cargo install --git https://github.com/ethereum/desktop-wallet edw`).
 
+mod common;
+
 use std::{path::PathBuf, time::Duration};
 
+use common::{TempWallet, edw_binary};
 use edw_tui::{
     agent::{self, AgentEvent, ModelSource, Request},
-    edw::EdwConfig,
     scripted::ScriptedModel,
 };
 use rig_agent::ModelHandle;
@@ -16,28 +18,10 @@ fn ollama_url() -> String {
     std::env::var("OLLAMA_HOST").unwrap_or("http://127.0.0.1:11434".into())
 }
 
-fn edw_binary() -> Option<PathBuf> {
-    let binary = PathBuf::from(std::env::var_os("EDW_BIN").unwrap_or_else(|| "edw".into()));
-    std::process::Command::new(&binary)
-        .arg("--help")
-        .output()
-        .ok()?
-        .status
-        .success()
-        .then_some(binary)
-}
-
 struct Harness {
     prompts: mpsc::UnboundedSender<Request>,
     events: mpsc::UnboundedReceiver<AgentEvent>,
-    _dir: TempDir,
-}
-
-struct TempDir(PathBuf);
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+    _wallet: TempWallet,
 }
 
 impl Harness {
@@ -62,17 +46,10 @@ impl Harness {
     }
 
     fn start_with(binary: PathBuf, name: &str, model: ModelHandle) -> Self {
-        let dir = std::env::temp_dir().join(format!("edw-tui-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let config = EdwConfig {
-            binary,
-            data_dir: dir.join("data"),
-            runtime_dir: dir.join("runtime"),
-            password: "test-password".into(),
-        };
+        let wallet = TempWallet::new(binary, name);
         let (event_tx, events) = mpsc::unbounded_channel();
         let (prompts, prompt_rx) = mpsc::unbounded_channel();
-        let agent = agent::build_agent(model, config, event_tx.clone());
+        let agent = agent::build_agent(model, wallet.config.clone(), event_tx.clone());
         let source = ModelSource {
             ollama_url: ollama_url(),
             nudge: true,
@@ -81,7 +58,7 @@ impl Harness {
         Self {
             prompts,
             events,
-            _dir: TempDir(dir),
+            _wallet: wallet,
         }
     }
 

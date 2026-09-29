@@ -144,6 +144,26 @@ impl Tui {
         self.wait_until(&format!("{text:?}"), |screen| screen.contains(text))
     }
 
+    /// [`Self::wait_until`] with a longer deadline, for steps that talk to a forked chain.
+    pub fn wait_for_within(
+        &self,
+        what: &str,
+        seconds: u64,
+        predicate: impl Fn(&str) -> bool,
+    ) -> String {
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        loop {
+            let screen = self.screen();
+            if predicate(&screen) {
+                return screen;
+            }
+            if Instant::now() > deadline {
+                panic!("timed out after {seconds}s waiting for {what}; the screen was:\n{screen}");
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     /// Types `text` one key at a time, as a person would.
     pub fn type_text(&mut self, text: &str) {
         let pause = if self.recorder.is_some() { 35 } else { 2 };
@@ -195,6 +215,8 @@ impl Tui {
     }
 }
 
+/// The longest a single unchanged screen is shown in a recording.
+const MAX_STILL: Duration = Duration::from_secs(3);
 const CELL_W: f32 = 8.4;
 const CELL_H: f32 = 18.0;
 const DEFAULT_FG: &str = "#d8dee9";
@@ -265,7 +287,9 @@ fn encode(frames: &[(Duration, String)], dir: &Path, name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).unwrap();
 
-    // The concat demuxer shows each frame until the next one; the last is held for 3 s.
+    // The concat demuxer shows each frame until the next one; the last is held for 3 s. A
+    // screen that does not change for longer (waiting on a forked chain) is cut to 3 s, so the
+    // video stays watchable; the test itself still waited the real time.
     let mut list = String::new();
     for (i, (at, svg)) in frames.iter().enumerate() {
         let (svg_path, png_path) = (
@@ -280,7 +304,7 @@ fn encode(frames: &[(Duration, String)], dir: &Path, name: &str) -> PathBuf {
         list.push_str(&format!(
             "file '{}'\nduration {:.3}\n",
             path(&png_path),
-            (until - *at).as_secs_f64()
+            (until - *at).min(MAX_STILL).as_secs_f64()
         ));
     }
     // The demuxer ignores the last duration unless the final file is listed once more.

@@ -8,8 +8,10 @@
 //! The wallet is seeded with Foundry's well-known test mnemonic (the way edw's own first
 //! unlock seeds a random one), so every address and even the transaction hash are the same on
 //! every run. Screenshots of the review modal and the final screen are written to
-//! `target/e2e-screenshots/` (SVG for people, TXT for diffs) and compared as insta snapshots;
-//! only the temp dir is redacted.
+//! `target/e2e-screenshots/` (SVG for people, TXT for diffs) for a person to look at; they are
+//! NOT asserted. What the test asserts is the chain: bob's balance rises by exactly 0.1 ETH,
+//! alice's falls by exactly 0.1 ETH plus the fee in the transaction's own receipt, and the one
+//! mined transaction went from alice to bob and succeeded.
 //!
 //! `EDW_TUI_E2E_RECORD=1` also records the whole session to
 //! `target/e2e-screenshots/transfer.mp4`; it needs `rsvg-convert` and `ffmpeg`. Skips when `edw` or `anvil` is missing, or when the installed
@@ -22,6 +24,7 @@ use std::path::PathBuf;
 use alloy_node_bindings::Anvil;
 use alloy_primitives::{Address, U256};
 use alloy_provider::{Provider, ProviderBuilder};
+use alloy_rpc_types_eth::BlockNumberOrTag;
 use common::{TempWallet, edw_binary, pty::Tui};
 use edw_tui::{
     edw::{self, Pin},
@@ -38,17 +41,12 @@ fn screenshots_dir() -> PathBuf {
     dir
 }
 
-/// Saves the screen as SVG and text, and compares it with the committed snapshot.
+/// Saves the screen as SVG and text for a person to look at. Not asserted: the screen's layout is
+/// not the behaviour under test, and the chain state at the end of `alice_sends_bob_…` is.
 fn screenshot(tui: &Tui, name: &str) {
     let dir = screenshots_dir();
     std::fs::write(dir.join(format!("{name}.svg")), tui.screenshot_svg()).unwrap();
-    let text = tui.screen();
-    std::fs::write(dir.join(format!("{name}.txt")), &text).unwrap();
-    insta::with_settings!({
-        filters => vec![(r"/\S*edw-tui-e2e-\d+/\S*", "[TMP DIR]")],
-    }, {
-        insta::assert_snapshot!(name, text);
-    });
+    std::fs::write(dir.join(format!("{name}.txt")), tui.screen()).unwrap();
 }
 
 /// Waits until the agent has answered and the input is free again.
@@ -160,6 +158,10 @@ async fn alice_sends_bob_one_tenth_of_an_eth() {
         .await
         .unwrap();
 
+    let alice_before = eth(&rpc, alice).await;
+    let bob_before = eth(&rpc, bob).await;
+    assert_eq!(alice_before, U256::from(10 * ETHER));
+
     // c. Alice sends 0.1 ETH to bob; the review modal shows the dry run first.
     tui.submit(&format!("send 0.1 ETH to {bob}"));
     let review = tui.wait_for("Send this transaction?");
@@ -178,7 +180,39 @@ async fn alice_sends_bob_one_tenth_of_an_eth() {
         eprintln!("recorded {}", video.display());
     }
 
-    assert_eq!(eth(&rpc, bob).await, U256::from(ETHER / 10));
-    assert!(eth(&rpc, alice).await < U256::from(10 * ETHER - ETHER / 10));
+    // The chain is the verdict. anvil mines one block per transaction and funding alice was a
+    // state override, not a transaction, so the latest block holds exactly the transfer.
+    let block = provider
+        .get_block_by_number(BlockNumberOrTag::Latest)
+        .await
+        .unwrap()
+        .expect("anvil has a latest block");
+    let hashes: Vec<_> = block.transactions.hashes().collect();
+    assert_eq!(
+        hashes.len(),
+        1,
+        "exactly one transaction was mined: {hashes:?}"
+    );
+    let receipt = provider
+        .get_transaction_receipt(hashes[0])
+        .await
+        .unwrap()
+        .expect("the transfer has a receipt");
+    assert!(receipt.status(), "the transfer succeeded on chain");
+    assert_eq!(receipt.from, alice, "sent from alice");
+    assert_eq!(receipt.to, Some(bob), "sent to bob");
+    let fee = U256::from(receipt.gas_used) * U256::from(receipt.effective_gas_price);
+
+    let value = U256::from(ETHER / 10);
+    assert_eq!(
+        eth(&rpc, bob).await - bob_before,
+        value,
+        "bob gains exactly 0.1 ETH"
+    );
+    assert_eq!(
+        alice_before - eth(&rpc, alice).await,
+        value + fee,
+        "alice pays exactly 0.1 ETH plus the fee in the receipt"
+    );
     assert!(tui.quit(), "edw-tui exits cleanly on Ctrl-C");
 }

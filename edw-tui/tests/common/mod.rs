@@ -3,6 +3,7 @@
 #![allow(dead_code)] // each test binary uses a different part
 
 pub mod pty;
+pub mod scenario;
 
 use std::{path::PathBuf, time::Duration};
 

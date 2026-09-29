@@ -31,7 +31,6 @@ alloy-sol-types = "1.6.1"
 
 [dev-dependencies]
 alloy-node-bindings = "2.3.0"
-insta = { version = "1.48.0", features = ["filters"] }
 portable-pty = "0.9.0"
 vt100 = "0.16.2"
 zeroize = "1"

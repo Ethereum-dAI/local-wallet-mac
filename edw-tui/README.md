@@ -1,0 +1,55 @@
+# edw-tui
+
+A terminal chat UI over [desktop-wallet](https://github.com/ethereum/desktop-wallet)'s `edw` CLI.
+A local Ollama model turns plain language into `edw` commands through
+[Rig](https://github.com/0xPlaygrounds/rig), which owns the whole tool-call loop. Commands
+that change wallet state wait for a y/n in the UI, and recovery phrases never reach the model.
+
+It is an experiment in intent-driven wallet UX, separate from the macOS app: it shares no
+crates with it and drives edw only.
+
+## Setup
+
+```bash
+# edw, at the revision the tool mapping is tested against (edw::EDW_PINNED_REV):
+cargo install --git https://github.com/ethereum/desktop-wallet \
+  --rev 038c9944c0efff46082a9d85fdc216fe5e6c738e --locked edw
+
+ollama pull qwen3:8b
+cargo run
+```
+
+The TUI warns at startup when the installed edw is not the pinned revision.
+
+| Variable | Default | |
+|---|---|---|
+| `EDW_TUI_MODEL` | `qwen3:8b` | Any installed Ollama model, or `scripted` (a fixed fake, for tests). Switch in the TUI with `/models` and `/model <n>`. |
+| `OLLAMA_HOST` | `http://127.0.0.1:11434` | |
+| `EDW_TUI_NUDGE` | on | Retries once when a model goes silent after a tool result (gemma4 does). `0` turns it off. |
+| `EDW_BIN` | `edw` | |
+| `EDW_DATA_DIR`, `EDW_RUNTIME_DIR` | `.edw/data`, `.edw/runtime` | A throwaway wallet, never your real edw data. |
+| `EDW_DECRYPTION_PASSWORD` | `edw-tui-demo` | |
+
+## The model-facing contract
+
+```bash
+cargo run -- tools-dump
+```
+
+prints everything the model is given (preamble, tool schemas in the exact Ollama wire format,
+request settings) with a `contract_version`. Evals should read this output, never a copy.
+`contract.json` is the committed snapshot; a test fails when the two differ, so any change to
+what the model sees shows up in review. Regenerate with `cargo run -- tools-dump > contract.json`.
+
+## Tests
+
+```bash
+cargo test                          # unit + integration; edw-backed tests skip without edw
+cargo test --test edw_contract      # every tool against the pinned edw
+cargo test --test agent_loop -- --ignored --nocapture   # real Ollama (EDW_TUI_MODEL, EDW_TUI_SWITCH_TO)
+```
+
+`edw_contract` is what should break when edw changes. To bump the pin: change
+`EDW_PINNED_REV` and the install command above, reinstall edw, then fix `build_argv` in
+`src/edw.rs` until `edw_contract` passes. Bump `CONTRACT_VERSION` only if what a correct
+answer is has changed.

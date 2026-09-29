@@ -7,7 +7,12 @@
 //! Only commands `edw` implements today are exposed. `profile import` is left out on purpose:
 //! it reads a recovery phrase from stdin, and a phrase must never pass through a chat.
 
-use std::{path::PathBuf, process::Stdio, sync::LazyLock, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::LazyLock,
+    time::Duration,
+};
 
 use regex::Regex;
 use serde_json::{Map, Value, json};
@@ -235,6 +240,90 @@ impl EdwConfig {
     }
 }
 
+pub const EDW_REPO: &str = "https://github.com/ethereum/desktop-wallet";
+/// The edw revision the tool mapping is written and tested against. Bumping it means
+/// re-running `cargo test --test edw_contract` and fixing [`build_argv`] until it passes.
+pub const EDW_PINNED_REV: &str = "038c9944c0efff46082a9d85fdc216fe5e6c738e";
+
+pub fn install_command() -> String {
+    format!("cargo install --git {EDW_REPO} --rev {EDW_PINNED_REV} --locked edw")
+}
+
+/// Whether the `edw` binary in use is the pinned revision.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Pin {
+    Matches,
+    Differs(String),
+    /// The binary was not installed by `cargo install --git`, so its revision is unknown.
+    Unverified(String),
+}
+
+impl Pin {
+    pub fn warning(&self) -> Option<String> {
+        let pinned = &EDW_PINNED_REV[..7];
+        match self {
+            Pin::Matches => None,
+            Pin::Differs(rev) => Some(format!(
+                "edw is at {}, but edw-tui is tested against {pinned}. Install the pinned build: {}",
+                &rev[..7.min(rev.len())],
+                install_command()
+            )),
+            Pin::Unverified(reason) => Some(format!(
+                "Cannot verify the edw revision ({reason}); edw-tui is tested against {pinned}."
+            )),
+        }
+    }
+}
+
+/// The git revision `cargo install` recorded for edw, from `$CARGO_HOME/.crates.toml`.
+pub fn installed_rev(crates_toml: &str) -> Option<String> {
+    static LINE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#""edw [^ ]+ \(git\+https://github\.com/ethereum/desktop-wallet(?:\?[^#)]*)?#([0-9a-f]{40})\)""#,
+        )
+        .expect("valid regex")
+    });
+    LINE.captures(crates_toml).map(|c| c[1].to_owned())
+}
+
+/// A bare name is looked up on `PATH`, like `Command` does.
+fn resolve_binary(binary: &Path) -> Option<PathBuf> {
+    if binary.components().count() > 1 {
+        return Some(binary.to_owned());
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(binary))
+        .find(|path| path.is_file())
+}
+
+pub fn check_pin(binary: &Path) -> Pin {
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")));
+    let Some(cargo_home) = cargo_home else {
+        return Pin::Unverified("cannot locate CARGO_HOME".into());
+    };
+    let Some(resolved) = resolve_binary(binary) else {
+        return Pin::Unverified(format!("`{}` is not on PATH", binary.display()));
+    };
+    let canonical = |path: &Path| std::fs::canonicalize(path).ok();
+    if canonical(&resolved) != canonical(&cargo_home.join("bin").join("edw")) {
+        return Pin::Unverified(format!(
+            "{} was not installed by `cargo install`",
+            resolved.display()
+        ));
+    }
+    match std::fs::read_to_string(cargo_home.join(".crates.toml"))
+        .ok()
+        .as_deref()
+        .and_then(installed_rev)
+    {
+        Some(rev) if rev == EDW_PINNED_REV => Pin::Matches,
+        Some(rev) => Pin::Differs(rev),
+        None => Pin::Unverified("cargo has no git install of edw recorded".into()),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EdwResult {
     pub command: String,
@@ -383,6 +472,28 @@ mod tests {
         for (name, args) in cases {
             assert!(argv(name, args.clone()).is_err(), "{name} {args}");
         }
+    }
+
+    #[test]
+    fn reads_the_installed_rev_from_cargo_metadata() {
+        let crates = format!(
+            "[v1]\n\"cargo-edit 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)\" = [\"cargo-add\"]\n\"edw 0.0.1 (git+{EDW_REPO}#{EDW_PINNED_REV})\" = [\"edw\"]\n"
+        );
+        assert_eq!(installed_rev(&crates).as_deref(), Some(EDW_PINNED_REV));
+        let branch =
+            format!("\"edw 0.0.1 (git+{EDW_REPO}?branch=main#{EDW_PINNED_REV})\" = [\"edw\"]");
+        assert_eq!(installed_rev(&branch).as_deref(), Some(EDW_PINNED_REV));
+        assert_eq!(
+            installed_rev("\"edw 0.0.1 (path+file:///src)\" = [\"edw\"]"),
+            None
+        );
+        assert!(Pin::Matches.warning().is_none());
+        assert!(
+            Pin::Differs("a".repeat(40))
+                .warning()
+                .unwrap()
+                .contains("--rev 038c994")
+        );
     }
 
     #[test]

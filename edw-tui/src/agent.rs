@@ -43,7 +43,7 @@ Rules:
 - Keep answers short.";
 
 /// Model calls per user message; each tool round-trip uses one.
-const MAX_TURNS: usize = 10;
+pub const MAX_TURNS: usize = 10;
 
 /// Everything the agent tells the UI.
 #[derive(Debug)]
@@ -152,6 +152,12 @@ impl AgentHook for ConfirmHook {
     }
 }
 
+/// Extra request fields sent with every model call. Ollama: skip gemma4's thinking phase, a
+/// tool call does not need it.
+pub fn additional_params() -> Value {
+    serde_json::json!({"think": false})
+}
+
 pub fn build_agent(model: ModelHandle, config: EdwConfig, events: Events) -> Agent {
     let shared = Arc::new(Shared {
         config,
@@ -160,8 +166,7 @@ pub fn build_agent(model: ModelHandle, config: EdwConfig, events: Events) -> Age
     AgentBuilder::from_model_handle(model)
         .preamble(PREAMBLE)
         .default_max_turns(MAX_TURNS)
-        // Ollama: skip gemma4's thinking phase, a tool call does not need it.
-        .additional_params(serde_json::json!({"think": false}))
+        .additional_params(additional_params())
         .add_hook(ConfirmHook { events })
         .tool(EdwTool::<0>(shared.clone()))
         .tool(EdwTool::<1>(shared.clone()))

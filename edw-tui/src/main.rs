@@ -1,15 +1,33 @@
 use edw_tui::{
     agent::{self, AgentEvent, ModelSource, Request},
-    app::{Action, App},
-    edw::EdwConfig,
+    app::{Action, App, ChatLine},
+    contract,
+    edw::{self, EdwConfig},
     ui,
 };
 use futures::StreamExt;
 use ratatui::crossterm::event::{Event, EventStream, KeyEventKind};
 use tokio::sync::mpsc;
 
+const USAGE: &str = "usage: edw-tui [tools-dump]
+  (no command)  start the chat TUI
+  tools-dump    print the model-facing contract (preamble, tool schemas) as JSON";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    match std::env::args().nth(1).as_deref() {
+        None => {}
+        Some("tools-dump") => {
+            print!("{}", contract::dump_pretty());
+            return Ok(());
+        }
+        Some("-h" | "--help") => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        Some(other) => anyhow::bail!("unknown command `{other}`\n{USAGE}"),
+    }
+
     let model_name = std::env::var("EDW_TUI_MODEL").unwrap_or_else(|_| "qwen3:8b".into());
     let source = ModelSource {
         ollama_url: std::env::var("OLLAMA_HOST")
@@ -23,6 +41,9 @@ async fn main() -> anyhow::Result<()> {
     let (event_tx, mut events) = mpsc::unbounded_channel::<AgentEvent>();
     let (requests, request_rx) = mpsc::unbounded_channel::<Request>();
     let mut app = App::new(&model_name, config.data_dir.display().to_string());
+    if let Some(warning) = edw::check_pin(&config.binary).warning() {
+        app.chat.push(ChatLine::Info(warning));
+    }
     let agent = agent::build_agent(model, config, event_tx.clone());
     tokio::spawn(agent::run(agent, request_rx, event_tx, source));
 

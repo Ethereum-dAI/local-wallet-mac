@@ -1,0 +1,147 @@
+{
+  "confirmation_required": [
+    "unlock",
+    "new_mnemonic",
+    "add_profile",
+    "rename_profile"
+  ],
+  "contract_version": 1,
+  "preamble": "You are the chat interface of edw, a privacy-first Ethereum desktop wallet.\nYou act only through the provided tools; each one runs one real `edw` CLI command.\n\nRules:\n- When the user asks for something a tool does, call the tool. Do not describe the command instead.\n- One request may need several commands (for example: unlock a network, then add profiles, then list them). Call the tools one after another until the whole request is done, then answer once.\n- A new wallet for a network is created by the first `unlock` of that network; `local` is a local dev chain at 127.0.0.1:8545.\n- Only use arguments the user gave or that a previous tool result showed. If a required value is missing or ambiguous, ask one short question.\n- edw cannot yet transfer, send, swap, shield, or show balances or history. If asked, say so plainly and do not call any tool or invent a result.\n- Never ask for, repeat, or accept a recovery phrase or password. Importing a phrase must be done in a terminal with `edw profile import`.\n- If a tool fails, explain the error in one sentence and suggest the next step (for example, \"the wallet is locked, unlock it first\").\n- Keep answers short.",
+  "request": {
+    "additional_params": {
+      "think": false
+    },
+    "max_turns": 10
+  },
+  "tools": [
+    {
+      "function": {
+        "description": "Show the wallet configuration: data directory, which network is unlocked (or locked), and the RPC source.",
+        "name": "wallet_status",
+        "parameters": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Unlock one network; every other network is locked. The first unlock of a network creates its encrypted store with mnemonic 0 and profile 0.",
+        "name": "unlock",
+        "parameters": {
+          "properties": {
+            "network": {
+              "description": "Defaults to sepolia.",
+              "enum": [
+                "mainnet",
+                "sepolia",
+                "local"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Lock the wallet.",
+        "name": "lock",
+        "parameters": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "List the wallet's profiles, grouped by mnemonic.",
+        "name": "list_profiles",
+        "parameters": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Generate a brand-new mnemonic (a separate seed) with one profile on it. Only use this when the user explicitly asks for a new seed or mnemonic; to add profiles to the current wallet use add_profile.",
+        "name": "new_mnemonic",
+        "parameters": {
+          "properties": {
+            "long_seed": {
+              "description": "24 words instead of 12. Only when the user asks for it.",
+              "type": "boolean"
+            },
+            "name": {
+              "description": "Optional profile name.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Add a profile to the current wallet (on an existing mnemonic, at the next unused index). This is the default way to add or create profiles.",
+        "name": "add_profile",
+        "parameters": {
+          "properties": {
+            "mnemonic": {
+              "description": "Mnemonic index. Required when the wallet has more than one mnemonic.",
+              "type": "integer"
+            },
+            "name": {
+              "description": "Optional profile name.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Set or clear a profile's name.",
+        "name": "rename_profile",
+        "parameters": {
+          "properties": {
+            "new_name": {
+              "description": "The new name. An empty string clears it.",
+              "type": "string"
+            },
+            "profile": {
+              "description": "The profile as `mnemonic/profile` (e.g. `0/1`) or its current unique name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile",
+            "new_name"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Show the unlocked network's networkConfigs (RPC providers); the active one is marked with *.",
+        "name": "list_networks",
+        "parameters": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

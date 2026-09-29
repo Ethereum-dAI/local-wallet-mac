@@ -17,3 +17,17 @@ rig-core = "0.42.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["full"] }
+
+# INTERIM (src/interim): edw-core signs balance/transfer/swap until desktop-wallet ships
+# those commands. The rev must equal edw::EDW_PINNED_REV (a test checks it); the alloy
+# versions follow edw-core's own workspace so there is one copy of each.
+edw-core = { git = "https://github.com/ethereum/desktop-wallet", rev = "038c9944c0efff46082a9d85fdc216fe5e6c738e" }
+alloy-network = "2.3.0"
+alloy-primitives = "1.6.1"
+alloy-provider = "2.3.0"
+alloy-rpc-types-eth = "2.3.0"
+alloy-signer-local = "2.3.0"
+alloy-sol-types = "1.6.1"
+
+[dev-dependencies]
+alloy-node-bindings = "2.3.0"

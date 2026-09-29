@@ -1,0 +1,300 @@
+//! The interim executor end to end: scripted model → Rig → dry run → review → real send, on
+//! anvil. Skips when `edw` or `anvil` is missing.
+//!
+//! The Sepolia-fork test is ignored by default because it needs the network:
+//! `cargo test --test interim -- --ignored` (RPC: `EDW_TUI_SEPOLIA_RPC`, default a
+//! no-tracking endpoint from chainlist).
+
+mod common;
+
+use alloy_node_bindings::{Anvil, AnvilInstance};
+use alloy_primitives::{Address, B256, U256, address, keccak256};
+use alloy_provider::{Provider, ProviderBuilder};
+use common::{Harness, TempWallet, edw_binary};
+use edw_tui::{interim::Interim, scripted::ScriptedModel};
+use rig_agent::ModelHandle;
+
+const BEEF: Address = address!("0x000000000000000000000000000000000000bEEF");
+const SEPOLIA_USDC: Address = address!("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238");
+const ETHER: u128 = 1_000_000_000_000_000_000;
+
+fn anvil(fork: Option<String>) -> Option<AnvilInstance> {
+    let anvil = match fork {
+        Some(url) => Anvil::new().fork(url),
+        None => Anvil::new(),
+    };
+    match anvil.try_spawn() {
+        Ok(instance) => Some(instance),
+        Err(error) => {
+            eprintln!("skipping: cannot start anvil ({error})");
+            None
+        }
+    }
+}
+
+/// A wallet unlocked on `network`, and a harness whose interim tools use `rpc`.
+async fn start(
+    name: &str,
+    network: &str,
+    rpc: Option<String>,
+    allow_sepolia: bool,
+) -> Option<Harness> {
+    let binary = edw_binary().or_else(|| {
+        eprintln!("skipping: edw is not installed");
+        None
+    })?;
+    let wallet = TempWallet::new(binary, name);
+    wallet.edw(&["unlock", "--network", network]).await;
+    let interim = wallet.interim(rpc, allow_sepolia);
+    Some(Harness::start_with(
+        wallet,
+        ModelHandle::named("scripted", ScriptedModel::default()),
+        Some(interim),
+    ))
+}
+
+async fn sender(h: &Harness, rpc: &str, allow_sepolia: bool) -> Address {
+    Interim::new(h.wallet.interim(Some(rpc.into()), allow_sepolia))
+        .address(None)
+        .await
+        .unwrap()
+}
+
+async fn fund(rpc: &str, who: Address, wei: U256) {
+    let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap());
+    let _: () = provider
+        .raw_request("anvil_setBalance".into(), (who, wei))
+        .await
+        .unwrap();
+}
+
+async fn eth(rpc: &str, who: Address) -> U256 {
+    ProviderBuilder::new()
+        .connect_http(rpc.parse().unwrap())
+        .get_balance(who)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn sends_eth_only_after_a_reviewed_dry_run() {
+    let Some(node) = anvil(None) else { return };
+    let rpc = node.endpoint();
+    let Some(mut h) = start("interim-eth", "local", Some(rpc.clone()), false).await else {
+        return;
+    };
+    let from = sender(&h, &rpc, false).await;
+    fund(&rpc, from, U256::from(10 * ETHER)).await;
+
+    let turn = h.turn("what is my balance", true).await;
+    assert!(
+        turn.outputs[0].contains("default (0/0)") && turn.outputs[0].contains("10 ETH"),
+        "{turn:?}"
+    );
+
+    // Declined: the dry run was shown, nothing was sent.
+    let send = format!("send 0.1 ETH to {BEEF}");
+    let turn = h.turn(&send, false).await;
+    let preview = &turn.previews[0];
+    for needle in [
+        "Send     0.1 ETH",
+        &BEEF.to_string(),
+        "chain 31337",
+        "Max fee",
+    ] {
+        assert!(preview.contains(needle), "missing {needle:?} in {preview}");
+    }
+    assert!(turn.confirms[0].starts_with("interim transfer --to"));
+    assert_eq!(eth(&rpc, BEEF).await, U256::ZERO);
+
+    // Approved: exactly 0.1 ETH arrives.
+    let turn = h.turn(&send, true).await;
+    assert!(
+        turn.outputs.last().unwrap().contains("succeeded"),
+        "{turn:?}"
+    );
+    assert_eq!(eth(&rpc, BEEF).await, U256::from(ETHER / 10));
+
+    // Guards and failed dry runs never reach the confirmation.
+    for (prompt, reason) in [
+        (
+            "send 1 ETH to 0x000000000000000000000000000000000000dEaD",
+            "burn",
+        ),
+        (
+            "send 1 ETH to 0x0000000000000000000000000000000000000000",
+            "burn",
+        ),
+        (
+            "send 100 ETH to 0x000000000000000000000000000000000000bEEF",
+            "not enough ETH",
+        ),
+        (
+            "send -1 ETH to 0x000000000000000000000000000000000000bEEF",
+            "positive number",
+        ),
+        ("send 1 ETH to vitalik.eth", "ENS"),
+        (
+            "send 1 DAI to 0x000000000000000000000000000000000000bEEF",
+            "does not know DAI",
+        ),
+    ] {
+        let turn = h.turn(prompt, true).await;
+        assert!(turn.confirms.is_empty(), "{prompt}: {turn:?}");
+        assert!(turn.outputs[0].contains(reason), "{prompt}: {turn:?}");
+    }
+
+    // "all" leaves only dust: the fee reserve that was not spent.
+    let turn = h.turn(&format!("send all ETH to {BEEF}"), true).await;
+    assert!(
+        turn.outputs.last().unwrap().contains("succeeded"),
+        "{turn:?}"
+    );
+    assert!(eth(&rpc, from).await < U256::from(ETHER / 1000));
+}
+
+#[tokio::test]
+async fn sends_from_the_profile_the_harness_selected() {
+    let Some(node) = anvil(None) else { return };
+    let rpc = node.endpoint();
+    let Some(mut h) = start("interim-profile", "local", Some(rpc.clone()), false).await else {
+        return;
+    };
+    h.wallet
+        .edw(&["profile", "add", "--next", "--name", "bob"])
+        .await;
+    let default = sender(&h, &rpc, false).await;
+    fund(&rpc, default, U256::from(ETHER)).await;
+
+    assert!(
+        h.set_profile("carol").await.is_err(),
+        "unknown profiles are refused"
+    );
+    let bob = h.set_profile("bob").await.unwrap();
+    assert_ne!(bob, default.to_string());
+
+    let turn = h.turn("balance", true).await;
+    assert!(
+        turn.outputs[0].contains("bob (0/1)") && turn.outputs[0].contains("0 ETH"),
+        "{turn:?}"
+    );
+    let turn = h.turn(&format!("send 0.1 ETH to {BEEF}"), true).await;
+    assert!(
+        turn.confirms.is_empty() && turn.outputs[0].contains("not enough ETH"),
+        "{turn:?}"
+    );
+
+    h.set_profile("0/0").await.unwrap();
+    let turn = h.turn(&format!("send 0.1 ETH to {BEEF}"), true).await;
+    assert!(turn.confirms[0].ends_with("--from 0/0"), "{turn:?}");
+    assert_eq!(eth(&rpc, BEEF).await, U256::from(ETHER / 10));
+}
+
+#[tokio::test]
+async fn refuses_mainnet_and_sepolia_unless_allowed() {
+    let send = format!("send 0.1 ETH to {BEEF}");
+    let Some(mut h) = start("interim-mainnet", "mainnet", None, true).await else {
+        return;
+    };
+    let turn = h.turn(&send, true).await;
+    assert!(
+        turn.confirms.is_empty() && turn.outputs[0].contains("mainnet is disabled"),
+        "{turn:?}"
+    );
+
+    let Some(mut h) = start("interim-sepolia", "sepolia", None, false).await else {
+        return;
+    };
+    let turn = h.turn(&send, true).await;
+    assert!(
+        turn.outputs[0].contains("EDW_TUI_INTERIM_SEPOLIA=1"),
+        "{turn:?}"
+    );
+}
+
+/// Gives `who` `amount` of Sepolia USDC by writing Circle's FiatToken v2.2 balance slot (9).
+async fn deal_usdc(rpc: &str, who: Address, amount: U256) {
+    let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap());
+    let mut key = [0u8; 64];
+    key[12..32].copy_from_slice(who.as_slice());
+    key[63] = 9;
+    let _: bool = provider
+        .raw_request(
+            "anvil_setStorageAt".into(),
+            (SEPOLIA_USDC, keccak256(key), B256::from(amount)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        usdc(rpc, who).await,
+        amount,
+        "USDC's balance slot moved; update deal_usdc"
+    );
+}
+
+async fn usdc(rpc: &str, who: Address) -> U256 {
+    let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap());
+    let mut data = vec![0x70, 0xa0, 0x82, 0x31]; // balanceOf(address)
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(who.as_slice());
+    let tx = alloy_rpc_types_eth::TransactionRequest::default()
+        .to(SEPOLIA_USDC)
+        .input(data.into());
+    U256::from_be_slice(&provider.call(tx).await.unwrap())
+}
+
+#[tokio::test]
+#[ignore = "forks Sepolia over the network"]
+async fn sends_usdc_on_a_sepolia_fork() {
+    let upstream = std::env::var("EDW_TUI_SEPOLIA_RPC")
+        .unwrap_or_else(|_| "https://ethereum-sepolia-rpc.publicnode.com".into());
+    let Some(node) = anvil(Some(upstream)) else {
+        return;
+    };
+    let rpc = node.endpoint();
+    let Some(mut h) = start("interim-usdc", "sepolia", Some(rpc.clone()), true).await else {
+        return;
+    };
+    let from = sender(&h, &rpc, true).await;
+    fund(&rpc, from, U256::from(ETHER)).await;
+    deal_usdc(&rpc, from, U256::from(5_000_000u64)).await;
+    let before = usdc(&rpc, BEEF).await;
+
+    let turn = h.turn("balance", true).await;
+    assert!(
+        turn.outputs[0].contains("chain 11155111") && turn.outputs[0].contains("5 USDC"),
+        "{turn:?}"
+    );
+
+    let turn = h.turn(&format!("send 1.5 USDC to {BEEF}"), true).await;
+    let preview = &turn.previews[0];
+    assert!(
+        preview.contains("Send     1.5 USDC  (1500000 base units)")
+            && preview.contains(&format!("Token    {SEPOLIA_USDC}")),
+        "{preview}"
+    );
+    assert!(
+        turn.outputs.last().unwrap().contains("succeeded"),
+        "{turn:?}"
+    );
+    assert_eq!(usdc(&rpc, BEEF).await - before, U256::from(1_500_000u64));
+    assert_eq!(usdc(&rpc, from).await, U256::from(3_500_000u64));
+
+    // The same token by address, and more decimals than USDC has.
+    let turn = h
+        .turn(&format!("send 0.5 {SEPOLIA_USDC} to {BEEF}"), true)
+        .await;
+    assert!(turn.previews[0].contains("0.5 USDC"), "{turn:?}");
+    let turn = h
+        .turn(&format!("send 0.0000001 USDC to {BEEF}"), true)
+        .await;
+    assert!(
+        turn.confirms.is_empty() && turn.outputs[0].contains("decimal places"),
+        "{turn:?}"
+    );
+    let turn = h.turn(&format!("send 1 WETH to {BEEF}"), true).await;
+    assert!(
+        turn.confirms.is_empty() && turn.outputs[0].contains("not enough WETH"),
+        "{turn:?}"
+    );
+}

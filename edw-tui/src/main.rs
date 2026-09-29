@@ -3,6 +3,7 @@ use edw_tui::{
     app::{Action, App, ChatLine},
     contract,
     edw::{self, EdwConfig},
+    interim::InterimConfig,
     ui,
 };
 use futures::StreamExt;
@@ -36,16 +37,18 @@ async fn main() -> anyhow::Result<()> {
         nudge: std::env::var("EDW_TUI_NUDGE").map_or(true, |v| v != "0"),
     };
     let config = EdwConfig::from_env();
+    let interim = InterimConfig::from_env(config.clone());
     let model = source.handle(&model_name)?;
 
     let (event_tx, mut events) = mpsc::unbounded_channel::<AgentEvent>();
     let (requests, request_rx) = mpsc::unbounded_channel::<Request>();
     let mut app = App::new(&model_name, config.data_dir.display().to_string());
+    app.profile = interim.profile.get();
     if let Some(warning) = edw::check_pin(&config.binary).warning() {
         app.chat.push(ChatLine::Info(warning));
     }
-    let agent = agent::build_agent(model, config, event_tx.clone());
-    tokio::spawn(agent::run(agent, request_rx, event_tx, source));
+    let agent = agent::build_agent(model, config, interim.clone(), event_tx.clone());
+    tokio::spawn(agent::run(agent, request_rx, event_tx, source, interim));
 
     let mut terminal = ratatui::init();
     let mut keys = EventStream::new();

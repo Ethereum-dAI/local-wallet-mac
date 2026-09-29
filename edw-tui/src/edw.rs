@@ -4,8 +4,10 @@
 //! argv list (never a shell string), runs `edw` with no stdin so it can never block on a prompt,
 //! and redacts recovery phrases before output reaches the model or the screen.
 //!
-//! Only commands `edw` implements today are exposed. `profile import` is left out on purpose:
-//! it reads a recovery phrase from stdin, and a phrase must never pass through a chat.
+//! Only commands `edw` implements today map onto the CLI. `profile import` is left out on
+//! purpose: it reads a recovery phrase from stdin, and a phrase must never pass through a chat.
+//! `balance`, `transfer` and `swap` are in [`TOOLS`] too, but edw has no such commands yet, so
+//! they run on the interim executor in `crate::interim` until it does.
 
 use std::{
     path::{Path, PathBuf},
@@ -21,11 +23,23 @@ use tokio::process::Command;
 pub const NETWORKS: [&str; 3] = ["mainnet", "sepolia", "local"];
 const MAX_TEXT: usize = 64;
 
+/// Who carries out a tool call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    /// Mapped onto an `edw` command by [`build_argv`].
+    Cli,
+    /// Not in edw yet; run by `crate::interim` until it is.
+    Interim,
+}
+
 pub struct ToolSpec {
     pub name: &'static str,
     pub description: &'static str,
+    pub backend: Backend,
     /// Changes wallet state, so the user confirms it before it runs.
     pub mutating: bool,
+    /// Moves funds: a dry run is shown for review, and only a "yes" sends it.
+    pub moves_value: bool,
     pub parameters: fn() -> Value,
 }
 
@@ -33,12 +47,20 @@ fn no_params() -> Value {
     json!({"type": "object", "properties": {}})
 }
 
-pub const TOOLS: [ToolSpec; 8] = [
+const CLI: ToolSpec = ToolSpec {
+    name: "",
+    description: "",
+    backend: Backend::Cli,
+    mutating: false,
+    moves_value: false,
+    parameters: no_params,
+};
+
+pub const TOOLS: [ToolSpec; 11] = [
     ToolSpec {
         name: "wallet_status",
         description: "Show the wallet configuration: data directory, which network is unlocked (or locked), and the RPC source.",
-        mutating: false,
-        parameters: no_params,
+        ..CLI
     },
     ToolSpec {
         name: "unlock",
@@ -49,18 +71,17 @@ pub const TOOLS: [ToolSpec; 8] = [
                 "network": {"type": "string", "enum": NETWORKS, "description": "Defaults to sepolia."}
             }})
         },
+        ..CLI
     },
     ToolSpec {
         name: "lock",
         description: "Lock the wallet.",
-        mutating: false,
-        parameters: no_params,
+        ..CLI
     },
     ToolSpec {
         name: "list_profiles",
         description: "List the wallet's profiles, grouped by mnemonic.",
-        mutating: false,
-        parameters: no_params,
+        ..CLI
     },
     ToolSpec {
         name: "new_mnemonic",
@@ -72,6 +93,7 @@ pub const TOOLS: [ToolSpec; 8] = [
                 "long_seed": {"type": "boolean", "description": "24 words instead of 12. Only when the user asks for it."}
             }})
         },
+        ..CLI
     },
     ToolSpec {
         name: "add_profile",
@@ -83,6 +105,7 @@ pub const TOOLS: [ToolSpec; 8] = [
                 "mnemonic": {"type": "integer", "description": "Mnemonic index. Required when the wallet has more than one mnemonic."}
             }})
         },
+        ..CLI
     },
     ToolSpec {
         name: "rename_profile",
@@ -94,12 +117,41 @@ pub const TOOLS: [ToolSpec; 8] = [
                 "new_name": {"type": "string", "description": "The new name. An empty string clears it."}
             }, "required": ["profile", "new_name"]})
         },
+        ..CLI
     },
     ToolSpec {
         name: "list_networks",
         description: "Show the unlocked network's networkConfigs (RPC providers); the active one is marked with *.",
-        mutating: false,
-        parameters: no_params,
+        ..CLI
+    },
+    // Interim: edw has no balance, transfer or swap command yet. Sent from the profile the
+    // harness has selected (the default profile unless changed), so the model never names one.
+    ToolSpec {
+        name: "balance",
+        description: "Show how much ETH and which known tokens the wallet holds on the unlocked network. Use it when the user asks for a balance, or to check funds before sending.",
+        backend: Backend::Interim,
+        parameters: || {
+            json!({"type": "object", "properties": {
+                "token": {"type": "string", "description": "Only this token: a symbol such as ETH or USDC, or a 0x-prefixed contract address. Omit to list all known tokens."}
+            }})
+        },
+        ..CLI
+    },
+    ToolSpec {
+        name: "transfer",
+        description: crate::app_contract::TRANSFER_DESCRIPTION,
+        backend: Backend::Interim,
+        moves_value: true,
+        parameters: crate::app_contract::transfer_parameters,
+        ..CLI
+    },
+    ToolSpec {
+        name: "swap",
+        description: crate::app_contract::SWAP_DESCRIPTION,
+        backend: Backend::Interim,
+        moves_value: true,
+        parameters: crate::app_contract::swap_parameters,
+        ..CLI
     },
 ];
 
@@ -107,7 +159,11 @@ pub fn spec(name: &str) -> Option<&'static ToolSpec> {
     TOOLS.iter().find(|tool| tool.name == name)
 }
 
-fn text(args: &Map<String, Value>, key: &str, required: bool) -> Result<Option<String>, String> {
+pub(crate) fn text(
+    args: &Map<String, Value>,
+    key: &str,
+    required: bool,
+) -> Result<Option<String>, String> {
     let value = match args.get(key) {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) if s.trim().is_empty() => None,
@@ -497,8 +553,17 @@ mod tests {
     }
 
     #[test]
+    fn the_interim_edw_core_dependency_is_the_pinned_rev() {
+        let manifest = include_str!("../Cargo.toml");
+        assert!(
+            manifest.contains(&format!("rev = \"{EDW_PINNED_REV}\"")),
+            "Cargo.toml's edw-core rev must equal EDW_PINNED_REV"
+        );
+    }
+
+    #[test]
     fn every_spec_maps() {
-        for tool in &TOOLS {
+        for tool in TOOLS.iter().filter(|t| t.backend == Backend::Cli) {
             let args = if tool.name == "rename_profile" {
                 json!({"profile": "0/0", "new_name": "x"})
             } else {

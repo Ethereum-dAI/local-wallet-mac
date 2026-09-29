@@ -11,7 +11,7 @@ mod common;
 use std::collections::BTreeSet;
 
 use common::{TempWallet, edw_binary};
-use edw_tui::edw::{self, EdwResult, PHRASE_PLACEHOLDER, Pin, TOOLS};
+use edw_tui::edw::{self, Backend, EdwResult, PHRASE_PLACEHOLDER, Pin, TOOLS};
 use serde_json::{Value, json};
 
 #[test]
@@ -138,6 +138,11 @@ async fn every_tool_maps_onto_the_pinned_edw() {
     s.ok("lock", json!({}), &[]).await;
     s.fails("list_profiles", json!({}), "locked").await;
 
-    let all: BTreeSet<&str> = TOOLS.iter().map(|tool| tool.name).collect();
+    // Interim tools have their own tests (tests/interim.rs).
+    let all: BTreeSet<&str> = TOOLS
+        .iter()
+        .filter(|tool| tool.backend == Backend::Cli)
+        .map(|tool| tool.name)
+        .collect();
     assert_eq!(s.used, all, "every tool needs a contract check here");
 }

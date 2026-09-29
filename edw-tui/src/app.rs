@@ -11,8 +11,7 @@ use crate::{
     edw::EdwResult,
 };
 
-pub const HELP: &str =
-    "/models lists installed models · /model <name or number> switches (history is kept) · /help";
+pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /help";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatLine {
@@ -32,6 +31,8 @@ pub enum LogEntry {
 
 pub struct PendingConfirm {
     pub command: String,
+    /// A transfer's dry run, shown above the command.
+    pub preview: Option<String>,
     reply: oneshot::Sender<bool>,
 }
 
@@ -45,6 +46,8 @@ pub enum Action {
 pub struct App {
     pub model: String,
     pub data_dir: String,
+    /// The profile transfers are sent from (a selector such as `0/0` or `bob`).
+    pub profile: String,
     pub chat: Vec<ChatLine>,
     pub log: Vec<LogEntry>,
     pub input: String,
@@ -60,6 +63,7 @@ impl App {
         Self {
             model: model.into(),
             data_dir: data_dir.into(),
+            profile: crate::interim::DEFAULT_PROFILE.into(),
             chat: Vec::new(),
             log: Vec::new(),
             input: String::new(),
@@ -140,6 +144,14 @@ impl App {
                     (None, Err(_)) => Some(Request::SetModel(choice.to_owned())),
                 }
             }
+            (Some("/profile"), None) => {
+                self.chat.push(ChatLine::Info(format!(
+                    "Transfers are sent from profile {}. Change it with /profile <name or 0/1>.",
+                    self.profile
+                )));
+                None
+            }
+            (Some("/profile"), Some(selector)) => Some(Request::SetProfile(selector.to_owned())),
             (Some("/help"), _) => {
                 self.chat.push(ChatLine::Info(HELP.into()));
                 None
@@ -174,8 +186,21 @@ impl App {
                     None => self.log.push(LogEntry::Finished(result)),
                 }
             }
-            AgentEvent::Confirm { command, reply } => {
-                self.pending.push_back(PendingConfirm { command, reply })
+            AgentEvent::Confirm {
+                command,
+                preview,
+                reply,
+            } => self.pending.push_back(PendingConfirm {
+                command,
+                preview,
+                reply,
+            }),
+            AgentEvent::ProfileChanged { selector, address } => {
+                self.busy = false;
+                self.chat.push(ChatLine::Info(format!(
+                    "Transfers are now sent from profile {selector} ({address})."
+                )));
+                self.profile = selector;
             }
             AgentEvent::Reply(text) => {
                 self.busy = false;
@@ -260,6 +285,7 @@ mod tests {
         let (reply, mut answer) = oneshot::channel();
         app.on_agent(AgentEvent::Confirm {
             command: "edw lock".into(),
+            preview: None,
             reply,
         });
         app.on_key(key(KeyCode::Char('x')));
@@ -274,6 +300,7 @@ mod tests {
         let (reply, mut answer) = oneshot::channel();
         app.on_agent(AgentEvent::Confirm {
             command: "edw lock".into(),
+            preview: None,
             reply,
         });
         app.on_key(key(KeyCode::Char('y')));
@@ -287,10 +314,12 @@ mod tests {
         let (second, mut second_answer) = oneshot::channel();
         app.on_agent(AgentEvent::Confirm {
             command: "edw unlock --network local".into(),
+            preview: None,
             reply: first,
         });
         app.on_agent(AgentEvent::Confirm {
             command: "edw profile add --next".into(),
+            preview: None,
             reply: second,
         });
         assert_eq!(

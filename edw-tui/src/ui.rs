@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::app::{App, ChatLine, LogEntry};
+use crate::app::{App, ChatLine, LogEntry, PendingConfirm};
 
 /// The input grows with its text up to this many rows, then scrolls to keep the end visible.
 const MAX_INPUT_ROWS: usize = 6;
@@ -74,15 +74,15 @@ pub fn render(frame: &mut Frame, app: &App) {
     };
     frame.render_widget(
         Paragraph::new(format!(
-            " model {} · data {} · {hint}",
-            app.model, app.data_dir
+            " model {} · from {} · data {} · {hint}",
+            app.model, app.profile, app.data_dir
         ))
         .style(Style::new().reversed()),
         status,
     );
 
     if let Some(pending) = app.pending.front() {
-        render_confirm(frame, &pending.command, app.pending.len());
+        render_confirm(frame, pending, app.pending.len());
     }
 }
 
@@ -104,7 +104,7 @@ fn chat_text(app: &App) -> Text<'static> {
         return Text::from(vec![
             Line::from("Ask in plain language, e.g.".dark_gray()),
             Line::from("  unlock sepolia · show my profiles · add a profile named bob".dark_gray()),
-            Line::from("edw cannot transfer yet.".dark_gray()),
+            Line::from("  balance · send 0.1 ETH to 0x… (you review every transfer)".dark_gray()),
             Line::from("Switch LLM: /models, then /model <number>.".dark_gray()),
         ]);
     }
@@ -163,35 +163,59 @@ fn log_text(app: &App) -> Text<'static> {
     Text::from(lines)
 }
 
-fn render_confirm(frame: &mut Frame, command: &str, queued: usize) {
+fn render_confirm(frame: &mut Frame, pending: &PendingConfirm, queued: usize) {
     let area = frame.area();
-    let width = (command.chars().count() as u16 + 8).clamp(40, area.width.saturating_sub(4));
+    let preview: Vec<&str> = pending
+        .preview
+        .as_deref()
+        .map_or_else(Vec::new, |p| p.lines().collect());
+    let widest = preview
+        .iter()
+        .map(|l| l.chars().count())
+        .chain([pending.command.chars().count()])
+        .max()
+        .unwrap_or(0);
+    let width = (widest as u16 + 8).clamp(40, area.width.saturating_sub(4));
+    let extra = if preview.is_empty() {
+        0
+    } else {
+        preview.len() + 1
+    };
     let [popup] = Layout::horizontal([Constraint::Length(width)])
         .flex(ratatui::layout::Flex::Center)
         .areas(area);
-    let [popup] = Layout::vertical([Constraint::Length(7)])
+    let [popup] = Layout::vertical([Constraint::Length(7 + extra as u16)])
         .flex(ratatui::layout::Flex::Center)
         .areas(popup);
-    let text = Text::from(vec![
-        Line::default(),
-        Line::from(format!("  {command}")).add_modifier(Modifier::BOLD),
-        Line::default(),
-        Line::from(vec![
-            "  [y] ".green().bold(),
-            "run   ".into(),
-            "[n] ".red().bold(),
-            "cancel".into(),
-        ]),
-    ]);
+    let mut lines = vec![Line::default()];
+    for line in &preview {
+        lines.push(Line::from(format!("  {line}")));
+    }
+    if !preview.is_empty() {
+        lines.push(Line::default());
+    }
+    lines.push(Line::from(format!("  {}", pending.command)).add_modifier(Modifier::BOLD));
+    lines.push(Line::default());
+    let (yes, title) = if preview.is_empty() {
+        ("run   ", "Run this command?")
+    } else {
+        ("send  ", "Send this transaction?")
+    };
+    lines.push(Line::from(vec![
+        "  [y] ".green().bold(),
+        yes.into(),
+        "[n] ".red().bold(),
+        "cancel".into(),
+    ]));
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(text).block(
+        Paragraph::new(Text::from(lines)).block(
             Block::new()
                 .borders(Borders::ALL)
                 .title(if queued > 1 {
-                    format!(" Run this command? (1 of {queued}) ")
+                    format!(" {title} (1 of {queued}) ")
                 } else {
-                    " Run this command? ".to_owned()
+                    format!(" {title} ")
                 })
                 .yellow(),
         ),
@@ -249,6 +273,7 @@ mod tests {
         let (reply, _answer) = oneshot::channel();
         app.on_agent(AgentEvent::Confirm {
             command: "edw unlock --network sepolia".into(),
+            preview: None,
             reply,
         });
         let screen = screen(&app);

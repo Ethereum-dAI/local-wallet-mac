@@ -25,22 +25,30 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    edw::{self, EdwConfig, EdwResult, TOOLS},
+    app_contract::SAFETY_CLAUSE,
+    edw::{self, Backend, EdwConfig, EdwResult, TOOLS},
+    interim::{self, Interim, InterimConfig},
     scripted::ScriptedModel,
 };
 
-pub const PREAMBLE: &str = "You are the chat interface of edw, a privacy-first Ethereum desktop wallet.
-You act only through the provided tools; each one runs one real `edw` CLI command.
+const RULES: &str = "You are the chat interface of edw, a privacy-first Ethereum desktop wallet.
+You act only through the provided tools; each one runs one real wallet command.
 
 Rules:
 - When the user asks for something a tool does, call the tool. Do not describe the command instead.
 - One request may need several commands (for example: unlock a network, then add profiles, then list them). Call the tools one after another until the whole request is done, then answer once.
 - A new wallet for a network is created by the first `unlock` of that network; `local` is a local dev chain at 127.0.0.1:8545.
 - Only use arguments the user gave or that a previous tool result showed. If a required value is missing or ambiguous, ask one short question.
-- edw cannot yet transfer, send, swap, shield, or show balances or history. If asked, say so plainly and do not call any tool or invent a result.
+- Transfers and swaps are sent from the wallet's selected profile; never ask which profile to use. The user reviews every transfer before it is sent, so call the tool rather than asking for confirmation. Only say funds were sent when the tool result says the transaction succeeded.
+- edw cannot yet shield, unshield, or show history. If asked, say so plainly and do not call any tool or invent a result.
 - Never ask for, repeat, or accept a recovery phrase or password. Importing a phrase must be done in a terminal with `edw profile import`.
 - If a tool fails, explain the error in one sentence and suggest the next step (for example, \"the wallet is locked, unlock it first\").
 - Keep answers short.";
+
+/// The system turn: edw-tui's rules, then the app's safety clause unchanged.
+pub fn preamble() -> String {
+    format!("{RULES}\n\n{SAFETY_CLAUSE}")
+}
 
 /// Model calls per user message; each tool round-trip uses one.
 pub const MAX_TURNS: usize = 10;
@@ -52,9 +60,11 @@ pub enum AgentEvent {
         command: String,
     },
     ToolFinished(EdwResult),
-    /// A state-changing command waits for the user's yes/no.
+    /// A state-changing command waits for the user's yes/no. A transfer carries the dry run's
+    /// `preview`, written by the executor, never by the model.
     Confirm {
         command: String,
+        preview: Option<String>,
         reply: oneshot::Sender<bool>,
     },
     Reply(String),
@@ -62,6 +72,11 @@ pub enum AgentEvent {
     /// Models available to switch to, as listed by Ollama (plus the scripted stand-in).
     Models(Vec<String>),
     ModelChanged(String),
+    /// The sending profile changed: its selector, and a line describing it.
+    ProfileChanged {
+        selector: String,
+        address: String,
+    },
 }
 
 /// What the UI asks the agent task to do. Handled one at a time, in order.
@@ -70,13 +85,78 @@ pub enum Request {
     Prompt(String),
     ListModels,
     SetModel(String),
+    /// Send from this profile (a name or `mnemonic/profile`), after checking it exists.
+    SetProfile(String),
 }
 
 pub type Events = mpsc::UnboundedSender<AgentEvent>;
 
 struct Shared {
     config: EdwConfig,
+    interim: Interim,
     events: Events,
+}
+
+impl Shared {
+    fn log(&self, event: AgentEvent) {
+        let _ = self.events.send(event);
+    }
+
+    /// Asks the user and waits; `false` if they decline or the UI is gone.
+    async fn confirm(&self, command: &str, preview: Option<String>) -> bool {
+        let (reply, answer) = oneshot::channel();
+        let asked = self.events.send(AgentEvent::Confirm {
+            command: command.to_owned(),
+            preview,
+            reply,
+        });
+        asked.is_ok() && answer.await.unwrap_or(false)
+    }
+
+    async fn interim_call(&self, tool: &str, args: &Value) -> String {
+        match tool {
+            "balance" => {
+                let command = interim::display_command(tool, args, &self.interim.profile());
+                self.log(AgentEvent::ToolStarted { command });
+                let result = self.interim.balance(args).await;
+                self.log(AgentEvent::ToolFinished(result.clone()));
+                result.to_model_json()
+            }
+            "transfer" => {
+                let prepared = match self.interim.prepare_transfer(args).await {
+                    Ok(prepared) => prepared,
+                    Err(result) => {
+                        self.log(AgentEvent::ToolFinished(result.clone()));
+                        return result.to_model_json();
+                    }
+                };
+                self.log(AgentEvent::ToolFinished(EdwResult {
+                    command: format!("{} (dry run)", prepared.command),
+                    exit_code: 0,
+                    output: prepared.preview.clone(),
+                }));
+                let command = prepared.command.clone();
+                if !self.confirm(&command, Some(prepared.preview.clone())).await {
+                    return format!("The user declined `{command}`; nothing was sent.");
+                }
+                self.log(AgentEvent::ToolStarted {
+                    command: command.clone(),
+                });
+                let result = self.interim.broadcast(prepared).await;
+                self.log(AgentEvent::ToolFinished(result.clone()));
+                result.to_model_json()
+            }
+            _ => {
+                let result = EdwResult {
+                    command: interim::display_command(tool, args, &self.interim.profile()),
+                    exit_code: 1,
+                    output: "Swaps are not available in edw-tui yet; nothing was done.".into(),
+                };
+                self.log(AgentEvent::ToolFinished(result.clone()));
+                result.to_model_json()
+            }
+        }
+    }
 }
 
 /// `TOOLS[I]` as a Rig tool. The const index gives each command its own type and `NAME`.
@@ -98,6 +178,9 @@ impl<const I: usize> Tool for EdwTool<I> {
     }
 
     async fn call(&self, _context: &mut ToolContext, args: Value) -> Result<String, Infallible> {
+        if TOOLS[I].backend == Backend::Interim {
+            return Ok(self.0.interim_call(Self::NAME, &args).await);
+        }
         let argv = match edw::build_argv(Self::NAME, &args) {
             Ok(argv) => argv,
             Err(error) => return Ok(format!("Rejected before running edw: {error}")),
@@ -122,7 +205,8 @@ impl AgentHook for ConfirmHook {
         let Some(spec) = edw::spec(event.tool_name) else {
             return ToolCallAction::Run;
         };
-        if !spec.mutating {
+        // Value-moving tools confirm inside the tool, after the dry run, with its preview.
+        if !spec.mutating || spec.moves_value {
             return ToolCallAction::Run;
         }
         let args: Value = serde_json::from_str(event.args).unwrap_or(Value::Null);
@@ -137,6 +221,7 @@ impl AgentHook for ConfirmHook {
             .events
             .send(AgentEvent::Confirm {
                 command: command.clone(),
+                preview: None,
                 reply,
             })
             .is_err()
@@ -158,13 +243,19 @@ pub fn additional_params() -> Value {
     serde_json::json!({"think": false})
 }
 
-pub fn build_agent(model: ModelHandle, config: EdwConfig, events: Events) -> Agent {
+pub fn build_agent(
+    model: ModelHandle,
+    config: EdwConfig,
+    interim: InterimConfig,
+    events: Events,
+) -> Agent {
     let shared = Arc::new(Shared {
         config,
+        interim: Interim::new(interim),
         events: events.clone(),
     });
     AgentBuilder::from_model_handle(model)
-        .preamble(PREAMBLE)
+        .preamble(&preamble())
         .default_max_turns(MAX_TURNS)
         .additional_params(additional_params())
         .add_hook(ConfirmHook { events })
@@ -175,7 +266,10 @@ pub fn build_agent(model: ModelHandle, config: EdwConfig, events: Events) -> Age
         .tool(EdwTool::<4>(shared.clone()))
         .tool(EdwTool::<5>(shared.clone()))
         .tool(EdwTool::<6>(shared.clone()))
-        .tool(EdwTool::<7>(shared))
+        .tool(EdwTool::<7>(shared.clone()))
+        .tool(EdwTool::<8>(shared.clone()))
+        .tool(EdwTool::<9>(shared.clone()))
+        .tool(EdwTool::<10>(shared))
         .build()
 }
 
@@ -280,6 +374,7 @@ pub async fn run(
     mut requests: mpsc::UnboundedReceiver<Request>,
     events: Events,
     source: ModelSource,
+    interim: InterimConfig,
 ) {
     let mut history: Vec<Message> = Vec::new();
     while let Some(request) = requests.recv().await {
@@ -296,6 +391,19 @@ pub async fn run(
                 Ok(()) => AgentEvent::ModelChanged(name),
                 Err(error) => AgentEvent::Error(error.to_string()),
             },
+            // Checked against the unlocked wallet first, so a typo never becomes the sender.
+            Request::SetProfile(selector) => {
+                match Interim::new(interim.clone()).address(Some(&selector)).await {
+                    Ok(address) => {
+                        interim.profile.set(&selector);
+                        AgentEvent::ProfileChanged {
+                            selector,
+                            address: address.to_string(),
+                        }
+                    }
+                    Err(error) => AgentEvent::Error(error),
+                }
+            }
         };
         if events.send(event).is_err() {
             return;
@@ -320,4 +428,4 @@ async fn switch_model(agent: &mut Agent, source: &ModelSource, name: &str) -> an
 }
 
 // Every `TOOLS` entry must be registered above; this fails to compile if one is added without it.
-const _: () = assert!(TOOLS.len() == 8);
+const _: () = assert!(TOOLS.len() == 11);

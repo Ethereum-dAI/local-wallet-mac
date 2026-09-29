@@ -13,14 +13,17 @@ use rig_core::{completion::ToolDefinition, providers::ollama};
 use serde_json::{Value, json};
 
 use crate::{
-    agent::{MAX_TURNS, PREAMBLE, additional_params},
+    agent::{MAX_TURNS, additional_params, preamble},
     edw::TOOLS,
 };
 
 /// Bump when a change alters what a correct answer is (a tool's meaning, or a removed or
 /// renamed tool), so eval results from before and after are never compared as equals.
 /// Rewording a description or adding a tool does not need a bump; the diff shows it.
-pub const CONTRACT_VERSION: u32 = 1;
+///
+/// 2: `transfer`/`swap` (the app's schemas) and `balance` added, and the app's safety clause
+/// appended. "send 1 ETH to 0x…" is now a call, where under 1 it was a refusal.
+pub const CONTRACT_VERSION: u32 = 2;
 
 pub fn dump() -> Value {
     // Rig's own conversion, so the tool list is exactly what the Ollama request carries.
@@ -37,9 +40,10 @@ pub fn dump() -> Value {
         .collect();
     json!({
         "contract_version": CONTRACT_VERSION,
-        "preamble": PREAMBLE,
+        "preamble": preamble(),
         "tools": tools,
-        "confirmation_required": TOOLS.iter().filter(|t| t.mutating).map(|t| t.name).collect::<Vec<_>>(),
+        "confirmation_required": TOOLS.iter().filter(|t| t.mutating || t.moves_value).map(|t| t.name).collect::<Vec<_>>(),
+        "reviewed_dry_run": TOOLS.iter().filter(|t| t.moves_value).map(|t| t.name).collect::<Vec<_>>(),
         "request": {"max_turns": MAX_TURNS, "additional_params": additional_params()},
     })
 }

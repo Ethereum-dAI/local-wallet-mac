@@ -29,6 +29,23 @@ The TUI warns at startup when the installed edw is not the pinned revision.
 | `EDW_BIN` | `edw` | |
 | `EDW_DATA_DIR`, `EDW_RUNTIME_DIR` | `.edw/data`, `.edw/runtime` | A throwaway wallet, never your real edw data. |
 | `EDW_DECRYPTION_PASSWORD` | `edw-tui-demo` | |
+| `EDW_TUI_PROFILE` | `0/0` | The profile balances and transfers use (a name or `mnemonic/profile`). Change it in the TUI with `/profile <name>`. The model never picks one. |
+| `EDW_TUI_RPC_URL` | the unlocked network's endpoint | Overrides the endpoint for the interim tools only, e.g. a local anvil fork. |
+| `EDW_TUI_INTERIM_SEPOLIA` | off | `1` allows interim sends on Sepolia. Mainnet is always refused. |
+
+## Transfers (interim)
+
+edw has no `balance`, `transfer` or `swap` command yet, so `src/interim/` does the work until it
+does, signing with the pinned `edw-core` from edw's own encrypted store. The tools the model
+sees are the SwiftUI app's `transfer` and `swap`, byte for byte (a test compares them with
+`wallet-macos/.../ToolDefinitions.swift`), plus the app's safety clause, so switching to edw's
+commands later changes no evals.
+
+Every transfer is simulated first. The modal shows that dry run (sender, amount, recipient, max
+fee), written by the executor rather than the model, and only `y` sends that exact transaction.
+Before any of that, guards refuse burn and zero addresses, malformed addresses and amounts, ENS
+names (not resolved yet) and unknown token symbols. Known tokens: USDC and WETH on Sepolia; any
+other ERC-20 works by its 0x address. Swap is in the contract but not executed yet.
 
 ## The model-facing contract
 
@@ -46,6 +63,8 @@ what the model sees shows up in review. Regenerate with `cargo run -- tools-dump
 ```bash
 cargo test                          # unit + integration; edw-backed tests skip without edw
 cargo test --test edw_contract      # every tool against the pinned edw
+cargo test --test interim           # real ETH sends on a throwaway anvil (needs anvil)
+cargo test --test interim -- --ignored   # USDC on an anvil fork of Sepolia (network; EDW_TUI_SEPOLIA_RPC)
 cargo test --test agent_loop -- --ignored --nocapture   # real Ollama (EDW_TUI_MODEL, EDW_TUI_SWITCH_TO)
 ```
 

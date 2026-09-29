@@ -43,10 +43,32 @@ pub fn script(prompt: &str) -> Script {
             .map(|w| w.to_string())
     };
 
-    if has("transfer") || has("send") {
-        Script::Say("edw cannot transfer yet, so there is nothing I can run for that.".into())
+    if has("shield") {
+        Script::Say("edw cannot shield yet, so there is nothing I can run for that.".into())
+    } else if has("transfer") || has("send") {
+        // "send <amount> <token> to <recipient>"
+        let words: Vec<&str> = prompt.split_whitespace().collect();
+        let at = words.iter().position(|w| w.eq_ignore_ascii_case("to"));
+        match (
+            at,
+            words.iter().position(|w| w.eq_ignore_ascii_case("send")),
+        ) {
+            (Some(to), Some(send)) if to == send + 3 && to + 1 < words.len() => Script::Call(
+                "transfer",
+                json!({"to": words[to + 1], "amount": words[send + 1], "token": words[send + 2]}),
+            ),
+            _ => Script::Say("Say it as: send <amount> <token> to <0x address>.".into()),
+        }
+    } else if has("balance") {
+        Script::Call("balance", json!({}))
     } else if has("unlock") {
-        let network = if has("mainnet") { "mainnet" } else { "sepolia" };
+        let network = if has("mainnet") {
+            "mainnet"
+        } else if has("local") {
+            "local"
+        } else {
+            "sepolia"
+        };
         Script::Call("unlock", json!({ "network": network }))
     } else if has("lock") {
         Script::Call("lock", json!({}))
@@ -148,9 +170,17 @@ mod tests {
             script("add a profile named bob"),
             Script::Call("add_profile", json!({"name": "bob"}))
         );
-        assert!(matches!(
-            script("send 1 ETH to vitalik.eth"),
-            Script::Say(_)
-        ));
+        assert_eq!(
+            script("send 0.1 ETH to 0x000000000000000000000000000000000000bEEF"),
+            Script::Call(
+                "transfer",
+                json!({"to": "0x000000000000000000000000000000000000bEEF", "amount": "0.1", "token": "ETH"})
+            )
+        );
+        assert_eq!(
+            script("what is my balance"),
+            Script::Call("balance", json!({}))
+        );
+        assert!(matches!(script("shield 1 ETH"), Script::Say(_)));
     }
 }

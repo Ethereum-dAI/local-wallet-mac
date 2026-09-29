@@ -41,7 +41,7 @@ Rules:
 - A new wallet for a network is created by the first `unlock` of that network; `local` is a local dev chain at 127.0.0.1:8545.
 - Only use arguments the user gave or that a previous tool result showed. If a required value is missing or ambiguous, ask one short question.
 - Addresses appear as ADDR_1, ADDR_2 and so on. Pass them to tools exactly as written; they stand for full 0x addresses the harness holds. Never ask the user to retype one.
-- Transfers and swaps are sent from the wallet's selected profile; never ask which profile to use. The user reviews every transfer before it is sent, so call the tool rather than asking for confirmation. Only say funds were sent when the tool result says the transaction succeeded.
+- Transfers and swaps are sent from the wallet's selected profile. When the user names a sender (\"from bob\"), call use_profile first, then the transfer; otherwise never ask which profile to use. The user reviews every transfer before it is sent, so call the tool rather than asking for confirmation. Only say funds were sent when the tool result says the transaction succeeded.
 - edw cannot yet shield, unshield, or show history. If asked, say so plainly and do not call any tool or invent a result.
 - Never ask for, repeat, or accept a recovery phrase or password. Importing a phrase must be done in a terminal with `edw profile import`.
 - If a tool fails, explain the error in one sentence and suggest the next step (for example, \"the wallet is locked, unlock it first\").
@@ -74,10 +74,12 @@ pub enum AgentEvent {
     /// Models available to switch to, as listed by Ollama (plus the scripted stand-in).
     Models(Vec<String>),
     ModelChanged(String),
-    /// The sending profile changed: its selector, and a line describing it.
+    /// The sending profile changed: its selector and address. `by_model` when the model's
+    /// `use_profile` did it mid-turn (the turn goes on), not the user's `/profile`.
     ProfileChanged {
         selector: String,
         address: String,
+        by_model: bool,
     },
 }
 
@@ -118,6 +120,39 @@ impl Shared {
 
     async fn interim_call(&self, tool: &str, args: &Value) -> String {
         match tool {
+            "use_profile" => {
+                let selector = args
+                    .get("profile")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                let command = format!("interim use-profile {selector}");
+                let result = match self.interim.address(Some(&selector)).await {
+                    Err(error) => EdwResult {
+                        command,
+                        exit_code: 1,
+                        output: format!("{error}; the sender is still {}", self.interim.profile()),
+                    },
+                    Ok(address) => {
+                        self.interim.set_profile(&selector);
+                        self.log(AgentEvent::ProfileChanged {
+                            selector: selector.clone(),
+                            address: address.to_string(),
+                            by_model: true,
+                        });
+                        EdwResult {
+                            command,
+                            exit_code: 0,
+                            output: format!(
+                                "Transfers, swaps and balances now use profile {selector} ({address}) until changed."
+                            ),
+                        }
+                    }
+                };
+                self.log(AgentEvent::ToolFinished(result.clone()));
+                result.to_model_json()
+            }
             "profile_addresses" => {
                 let result = self.interim.profile_addresses().await;
                 self.log(AgentEvent::ToolFinished(result.clone()));
@@ -303,7 +338,8 @@ pub fn build_agent(
         .tool(EdwTool::<8>(shared.clone()))
         .tool(EdwTool::<9>(shared.clone()))
         .tool(EdwTool::<10>(shared.clone()))
-        .tool(EdwTool::<11>(shared))
+        .tool(EdwTool::<11>(shared.clone()))
+        .tool(EdwTool::<12>(shared))
         .build()
 }
 
@@ -470,6 +506,7 @@ pub async fn run(
                         AgentEvent::ProfileChanged {
                             selector,
                             address: address.to_string(),
+                            by_model: false,
                         }
                     }
                     Err(error) => AgentEvent::Error(error),
@@ -499,7 +536,7 @@ async fn switch_model(agent: &mut Agent, source: &ModelSource, name: &str) -> an
 }
 
 // Every `TOOLS` entry must be registered above; this fails to compile if one is added without it.
-const _: () = assert!(TOOLS.len() == 12);
+const _: () = assert!(TOOLS.len() == 13);
 
 #[cfg(test)]
 mod tests {

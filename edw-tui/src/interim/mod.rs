@@ -242,6 +242,10 @@ impl Interim {
         }
     }
 
+    pub fn set_profile(&self, selector: &str) {
+        self.config.profile.set(selector);
+    }
+
     pub fn profile(&self) -> String {
         self.config.profile.get()
     }

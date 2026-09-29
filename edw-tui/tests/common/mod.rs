@@ -81,6 +81,8 @@ pub struct Turn {
     pub confirms: Vec<String>,
     pub previews: Vec<String>,
     pub outputs: Vec<String>,
+    /// Sending-profile switches the model made with `use_profile`.
+    pub switched: Vec<String>,
     pub reply: String,
 }
 
@@ -176,6 +178,7 @@ impl Harness {
                     "{} => {}: {}",
                     result.command, result.exit_code, result.output
                 )),
+                AgentEvent::ProfileChanged { selector, .. } => turn.switched.push(selector),
                 AgentEvent::Reply(reply) => {
                     turn.reply = reply;
                     return turn;

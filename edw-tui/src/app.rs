@@ -274,8 +274,15 @@ impl App {
                 preview,
                 reply,
             }),
-            AgentEvent::ProfileChanged { selector, address } => {
-                self.busy = false;
+            AgentEvent::ProfileChanged {
+                selector,
+                address,
+                by_model,
+            } => {
+                // The model's switch happens mid-turn; only the user's /profile ends a request.
+                if !by_model {
+                    self.busy = false;
+                }
                 self.chat.push(ChatLine::Info(format!(
                     "Transfers are now sent from profile {selector} ({address}). /copy address copies it."
                 )));
@@ -508,6 +515,7 @@ mod tests {
         app.on_agent(AgentEvent::ProfileChanged {
             selector: "0/0".into(),
             address: "0xabc".into(),
+            by_model: false,
         });
         assert_eq!(
             submit(&mut app, "/copy address"),

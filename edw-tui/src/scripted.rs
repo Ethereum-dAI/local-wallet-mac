@@ -59,6 +59,10 @@ pub fn script(prompt: &str) -> Script {
             ),
             _ => Script::Say("Say it as: send <amount> <token> to <0x address>.".into()),
         }
+    } else if has("use") || has("switch") {
+        // "use bob", "switch to profile 1/0": the last word names the profile.
+        let profile = prompt.split_whitespace().last().unwrap_or_default();
+        Script::Call("use_profile", json!({ "profile": profile }))
     } else if has("address") || has("addresses") {
         Script::Call("profile_addresses", json!({}))
     } else if has("balance") {

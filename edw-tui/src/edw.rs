@@ -56,7 +56,7 @@ const CLI: ToolSpec = ToolSpec {
     parameters: no_params,
 };
 
-pub const TOOLS: [ToolSpec; 12] = [
+pub const TOOLS: [ToolSpec; 13] = [
     ToolSpec {
         name: "wallet_status",
         description: "Show the wallet configuration: data directory, which network is unlocked (or locked), and the RPC source.",
@@ -141,6 +141,17 @@ pub const TOOLS: [ToolSpec; 12] = [
         name: "profile_addresses",
         description: "Show every profile of the unlocked network with its 0x address, and which one sends transfers. Use it whenever the user asks for an address; never state an address that no tool returned.",
         backend: Backend::Interim,
+        ..CLI
+    },
+    ToolSpec {
+        name: "use_profile",
+        description: "Switch which profile sends transfers and swaps, and whose balance is shown. Call it first whenever the user names a sender (\"from bob\", \"with profile 0/1\"); it stays in effect until changed.",
+        backend: Backend::Interim,
+        parameters: || {
+            json!({"type": "object", "properties": {
+                "profile": {"type": "string", "description": "The profile's name or `mnemonic/profile` (e.g. `1/0`), as the user said it."}
+            }, "required": ["profile"]})
+        },
         ..CLI
     },
     ToolSpec {

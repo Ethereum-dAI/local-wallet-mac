@@ -29,7 +29,7 @@ The TUI warns at startup when the installed edw is not the pinned revision.
 | `EDW_BIN` | `edw` | |
 | `EDW_DATA_DIR`, `EDW_RUNTIME_DIR` | `.edw/data`, `.edw/runtime` | A throwaway wallet, never your real edw data. |
 | `EDW_DECRYPTION_PASSWORD` | `edw-tui-demo` | |
-| `EDW_TUI_PROFILE` | `0/0` | The profile balances and transfers use (a name or `mnemonic/profile`). Change it in the TUI with `/profile <name>`. The model never picks one. |
+| `EDW_TUI_PROFILE` | `0/0` | The profile balances and transfers use (a name or `mnemonic/profile`). Change it with `/profile <name>`, or say "send … from bob": the model then calls `use_profile`. Either way the switch stays until changed and shows in the status bar and the review modal. |
 | `EDW_TUI_RPC_URL` | the unlocked network's endpoint | Overrides the endpoint for the interim tools only, e.g. a local anvil fork. |
 | `EDW_TUI_INTERIM_SEPOLIA` | off | `1` allows interim sends on Sepolia. Mainnet is always refused. |
 | `EDW_TUI_ADDRESS_ALIASES` | on | The model sees `ADDR_1`, `ADDR_2`… instead of 0x addresses and never retypes one (8B models lose count in long hex; Ollama then aborts the reply). `0` shows it raw addresses, e.g. for evals. |

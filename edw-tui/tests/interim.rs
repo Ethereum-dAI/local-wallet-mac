@@ -216,6 +216,22 @@ async fn sends_from_the_profile_the_harness_selected() {
     let turn = h.turn(&format!("send 0.1 ETH to {BEEF}"), true).await;
     assert!(turn.confirms[0].ends_with("--from 0/0"), "{turn:?}");
     assert_eq!(eth(&rpc, BEEF).await, U256::from(ETHER / 10));
+
+    // The model switches the sender when the user names one; it sticks until changed.
+    let turn = h.turn("use bob", true).await;
+    assert_eq!(turn.switched, ["bob"], "{turn:?}");
+    let turn = h.turn(&format!("send 0.1 ETH to {BEEF}"), true).await;
+    assert!(
+        turn.outputs[0].contains("--from bob") && turn.outputs[0].contains("not enough ETH"),
+        "{turn:?}"
+    );
+    let turn = h.turn("use carol", true).await;
+    assert!(
+        turn.switched.is_empty() && turn.outputs[0].contains("still bob"),
+        "{turn:?}"
+    );
+    let turn = h.turn("switch to 0/0", true).await;
+    assert_eq!(turn.switched, ["0/0"], "{turn:?}");
 }
 
 #[tokio::test]

@@ -165,8 +165,13 @@ impl Shared {
                 self.log(AgentEvent::ToolFinished(result.clone()));
                 result.to_model_json()
             }
-            "transfer" => {
-                let prepared = match self.interim.prepare_transfer(args).await {
+            "transfer" | "swap" => {
+                let prepared = if tool == "swap" {
+                    self.interim.prepare_swap(args).await
+                } else {
+                    self.interim.prepare_transfer(args).await
+                };
+                let prepared = match prepared {
                     Ok(prepared) => prepared,
                     Err(result) => {
                         self.log(AgentEvent::ToolFinished(result.clone()));
@@ -189,11 +194,11 @@ impl Shared {
                 self.log(AgentEvent::ToolFinished(result.clone()));
                 result.to_model_json()
             }
-            _ => {
+            other => {
                 let result = EdwResult {
-                    command: interim::display_command(tool, args, &self.interim.profile()),
+                    command: interim::display_command(other, args, &self.interim.profile()),
                     exit_code: 1,
-                    output: "Swaps are not available in edw-tui yet; nothing was done.".into(),
+                    output: format!("`{other}` is not an interim tool; nothing was done."),
                 };
                 self.log(AgentEvent::ToolFinished(result.clone()));
                 result.to_model_json()

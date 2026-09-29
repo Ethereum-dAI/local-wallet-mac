@@ -342,3 +342,76 @@ async fn sends_usdc_on_a_sepolia_fork() {
         "{turn:?}"
     );
 }
+
+#[tokio::test]
+#[ignore = "forks Sepolia over the network"]
+async fn swaps_on_a_sepolia_fork() {
+    let upstream = std::env::var("EDW_TUI_SEPOLIA_RPC")
+        .unwrap_or_else(|_| "https://ethereum-sepolia-rpc.publicnode.com".into());
+    let Some(node) = anvil(Some(upstream)) else {
+        return;
+    };
+    let rpc = node.endpoint();
+    let Some(mut h) = start("interim-swap", "sepolia", Some(rpc.clone()), true).await else {
+        return;
+    };
+    let from = sender(&h, &rpc, true).await;
+    fund(&rpc, from, U256::from(ETHER)).await;
+
+    // ETH in: one transaction, ETH sent as msg.value to the router.
+    let turn = h.turn("swap 0.01 ETH for USDC", true).await;
+    let preview = &turn.previews[0];
+    assert!(
+        preview.contains("Swap     0.01 ETH → about")
+            && preview.contains("USDC")
+            && preview.contains("Route    WETH"),
+        "{preview}"
+    );
+    assert!(
+        turn.outputs.last().unwrap().contains("succeeded"),
+        "{turn:?}"
+    );
+    assert!(usdc(&rpc, from).await > U256::ZERO, "no USDC arrived");
+
+    // ERC-20 in and ETH out: an exact approval first, then multicall(exactInput, unwrapWETH9).
+    deal_usdc(&rpc, from, U256::from(5_000_000u64)).await;
+    let eth_before = eth(&rpc, from).await;
+    let turn = h.turn("swap 1 USDC for ETH", true).await;
+    let preview = &turn.previews[0];
+    assert!(
+        preview.contains("Sends    2 transactions: 1. approve 1 USDC for the router  2. swap"),
+        "{preview}"
+    );
+    assert!(
+        turn.outputs
+            .last()
+            .unwrap()
+            .contains("Sent 2 transactions, all succeeded"),
+        "{turn:?}"
+    );
+    assert_eq!(
+        usdc(&rpc, from).await,
+        U256::from(4_000_000u64),
+        "exactly 1 USDC was spent"
+    );
+    assert!(
+        eth(&rpc, from).await > eth_before - U256::from(ETHER / 100),
+        "ETH came back, less gas"
+    );
+
+    // Guards: unknown token, "all", and the same token twice.
+    for (prompt, reason) in [
+        (
+            "swap 1 USDC for 0x000000000000000000000000000000000000bEEF",
+            "known tokens",
+        ),
+        ("swap all ETH for USDC", "exact amount"),
+        ("swap 1 USDC for USDC", "two different tokens"),
+    ] {
+        let turn = h.turn(prompt, true).await;
+        assert!(
+            turn.confirms.is_empty() && turn.outputs[0].contains(reason),
+            "{prompt}: {turn:?}"
+        );
+    }
+}

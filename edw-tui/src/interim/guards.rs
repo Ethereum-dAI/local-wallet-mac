@@ -155,6 +155,39 @@ pub fn transfer_args(args: &Value) -> Result<TransferArgs, String> {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwapArgs {
+    pub from: TokenRef,
+    pub to: TokenRef,
+    /// A positive decimal in the input token's units.
+    pub amount: String,
+}
+
+/// The app's `swap` schema: exact input only, both tokens required and different.
+pub fn swap_args(args: &Value) -> Result<SwapArgs, String> {
+    let args = object(args)?;
+    let side = text(&args, "amount_side", false)?;
+    if side.as_deref().is_some_and(|s| s != "input") {
+        return Err("only exact-input swaps are supported: say how much to spend".into());
+    }
+    let from = token(text(&args, "from_token", true)?.as_deref())?;
+    let to = token(text(&args, "to_token", true)?.as_deref())?;
+    if from == to {
+        return Err("the swap needs two different tokens".into());
+    }
+    let amount_text = match args.get("amount") {
+        Some(Value::Number(n)) => n.to_string(),
+        _ => text(&args, "amount", true)?.unwrap_or_default(),
+    };
+    let amount = match amount(&amount_text)? {
+        Amount::Exact(amount) => amount,
+        Amount::All => {
+            return Err("a swap takes an exact amount to spend, not \"all\"".into());
+        }
+    };
+    Ok(SwapArgs { from, to, amount })
+}
+
 pub fn balance_args(args: &Value) -> Result<BalanceArgs, String> {
     let args = object(args)?;
     let token_text = text(&args, "token", false)?;
@@ -268,6 +301,23 @@ mod tests {
         assert!(
             transfer_args(&json!({"to": "0x000000000000000000000000000000000000bEEF"})).is_err()
         );
+    }
+
+    #[test]
+    fn maps_swap_arguments() {
+        let args = swap_args(&json!({"from_token": "ETH", "to_token": "usdc", "amount": "0.01", "amount_side": "input"})).unwrap();
+        assert_eq!(args.from, TokenRef::Native);
+        assert_eq!(args.to, TokenRef::Symbol("USDC".into()));
+        assert_eq!(args.amount, "0.01");
+        for bad in [
+            json!({"from_token": "ETH", "to_token": "ETH", "amount": "1"}),
+            json!({"from_token": "ETH", "to_token": "USDC", "amount": "all"}),
+            json!({"from_token": "ETH", "to_token": "USDC", "amount": "1", "amount_side": "output"}),
+            json!({"from_token": "ETH", "amount": "1"}),
+            json!({"from_token": "ETH", "to_token": "USDC", "amount": "-1"}),
+        ] {
+            assert!(swap_args(&bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

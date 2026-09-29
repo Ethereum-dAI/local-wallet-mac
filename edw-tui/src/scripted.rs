@@ -59,6 +59,16 @@ pub fn script(prompt: &str) -> Script {
             ),
             _ => Script::Say("Say it as: send <amount> <token> to <0x address>.".into()),
         }
+    } else if has("swap") {
+        // "swap <amount> <token> for|to|into <token>"
+        let words: Vec<&str> = prompt.split_whitespace().collect();
+        match words.iter().position(|w| w.eq_ignore_ascii_case("swap")) {
+            Some(at) if words.len() > at + 4 => Script::Call(
+                "swap",
+                json!({"from_token": words[at + 2], "to_token": words[at + 4], "amount": words[at + 1], "amount_side": "input"}),
+            ),
+            _ => Script::Say("Say it as: swap <amount> <token> for <token>.".into()),
+        }
     } else if has("use") || has("switch") {
         // "use bob", "switch to profile 1/0": the last word names the profile.
         let profile = prompt.split_whitespace().last().unwrap_or_default();
@@ -188,5 +198,12 @@ mod tests {
             Script::Call("balance", json!({}))
         );
         assert!(matches!(script("shield 1 ETH"), Script::Say(_)));
+        assert_eq!(
+            script("swap 0.01 ETH for USDC"),
+            Script::Call(
+                "swap",
+                json!({"from_token": "ETH", "to_token": "USDC", "amount": "0.01", "amount_side": "input"})
+            )
+        );
     }
 }

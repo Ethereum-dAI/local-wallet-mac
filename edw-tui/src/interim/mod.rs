@@ -14,6 +14,7 @@
 //! mainnet never.
 
 pub mod guards;
+pub mod swap;
 pub mod tokens;
 
 use std::{
@@ -94,6 +95,8 @@ pub struct InterimConfig {
     /// Session state shared by the tools and the chat loop: the address ↔ alias table (see
     /// `crate::addresses`). It rides along here because both ends already receive this config.
     pub addresses: AddressBook,
+    /// Swap slippage tolerance in basis points (the app's default is 100, 1%; at most 5000).
+    pub swap_slippage_bps: u64,
 }
 
 impl InterimConfig {
@@ -106,22 +109,42 @@ impl InterimConfig {
                 std::env::var("EDW_TUI_PROFILE").unwrap_or_else(|_| DEFAULT_PROFILE.into()),
             ),
             addresses: AddressBook::from_env(),
+            swap_slippage_bps: std::env::var("EDW_TUI_SWAP_SLIPPAGE_BPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(swap::DEFAULT_SLIPPAGE_BPS)
+                .min(swap::MAX_SLIPPAGE_BPS),
         }
     }
 }
 
-/// A transfer that passed its dry run: exactly this transaction is sent if the user says yes.
+/// One transaction of a prepared action.
+struct Step {
+    label: String,
+    tx: TransactionRequest,
+    /// Its gas can only be estimated once the steps before it are mined (a swap after its
+    /// approval); everything else about it is fixed at the dry run.
+    estimate_on_send: bool,
+}
+
+/// An action that passed its dry run: exactly these transactions are sent, in order, if the
+/// user says yes. A transfer is one; a swap may add approvals before it.
 pub struct Prepared {
     pub command: String,
     pub preview: String,
-    tx: TransactionRequest,
+    steps: Vec<Step>,
     signer: PrivateKeySigner,
     rpc: Url,
 }
 
 impl Prepared {
+    /// The first transaction (a transfer's only one).
     pub fn transaction(&self) -> &TransactionRequest {
-        &self.tx
+        &self.steps[0].tx
+    }
+
+    pub fn transactions(&self) -> usize {
+        self.steps.len()
     }
 }
 
@@ -549,61 +572,339 @@ impl Interim {
         Ok(Prepared {
             command: command.to_owned(),
             preview: preview.join("\n"),
-            tx,
+            steps: vec![Step {
+                label: "transfer".into(),
+                tx,
+                estimate_on_send: false,
+            }],
             signer: account.signer,
             rpc: account.rpc,
         })
     }
 
-    /// Sends exactly the prepared transaction and waits for its receipt.
+    /// Quotes, simulates and prices a Uniswap v3 exact-input swap without sending anything:
+    /// any approval it needs, then the swap. `Err` means nothing will be asked or sent.
+    pub async fn prepare_swap(&self, args: &Value) -> Result<Prepared, EdwResult> {
+        let command = display_command("swap", args, &self.profile());
+        self.try_prepare_swap(args, &command)
+            .await
+            .map_err(|error| failed(&command, error))
+    }
+
+    async fn try_prepare_swap(&self, args: &Value, command: &str) -> Result<Prepared, String> {
+        let args = guards::swap_args(args)?;
+        let account = self.account(None).await?;
+        let chain = account.chain_id;
+        let contracts = swap::contracts(chain).ok_or_else(|| {
+            format!(
+                "swaps use Uniswap v3, which edw-tui knows on Sepolia only (or an anvil fork of it); the unlocked network is chain {chain}"
+            )
+        })?;
+        let wrapped =
+            tokens::wrapped_native(chain).ok_or("no wrapped ETH is known on this chain")?;
+        // ETH is quoted and routed as WETH, like the app does.
+        let side = |token: &TokenRef| -> Result<(tokens::Token, bool), String> {
+            match token {
+                TokenRef::Native => Ok((tokens::Token { symbol: "ETH", ..wrapped }, true)),
+                TokenRef::Symbol(symbol) => tokens::by_symbol(chain, symbol)
+                    .map(|t| (t, false))
+                    .ok_or_else(|| format!("{symbol} is not one of the wallet's known tokens on this chain")),
+                TokenRef::Address(address) => tokens::by_address(chain, *address).map(|t| (t, false)).ok_or_else(|| {
+                    format!("{address} is not one of the wallet's known tokens, and edw-tui only trades known tokens")
+                }),
+            }
+        };
+        let (token_in, in_is_native) = side(&args.from)?;
+        let (token_out, out_is_native) = side(&args.to)?;
+        if token_in.address == token_out.address {
+            return Err("ETH and WETH are the same token here; wrapping is not a swap".into());
+        }
+
+        let provider = ProviderBuilder::new().connect_http(account.rpc.clone());
+        check_chain(&provider, &account).await?;
+        let owner = account.address();
+        let amount_in = parse_units(&args.amount, token_in.decimals)?;
+        let eth = provider.get_balance(owner).await.map_err(provider_error)?;
+        let held = if in_is_native {
+            eth
+        } else {
+            erc20_balance(&provider, token_in.address, owner).await?
+        };
+        if amount_in > held {
+            return Err(format!(
+                "not enough {}: the profile holds {}, the swap needs {}",
+                token_in.symbol,
+                format_units(held, token_in.decimals),
+                args.amount
+            ));
+        }
+
+        let slippage = self.config.swap_slippage_bps;
+        let intermediates: Vec<Address> = tokens::swap_intermediates(chain)
+            .iter()
+            .map(|t| t.address)
+            .filter(|a| *a != token_in.address && *a != token_out.address)
+            .collect();
+        let quote = swap::quote_best_route(
+            &provider,
+            contracts,
+            token_in.address,
+            token_out.address,
+            amount_in,
+            slippage,
+            &intermediates,
+        )
+        .await?
+        .ok_or_else(|| {
+            format!(
+                "no Uniswap v3 pool with liquidity connects {} and {} on chain {chain}, directly or through WETH, USDC, USDT or DAI",
+                token_in.symbol, token_out.symbol
+            )
+        })?;
+
+        // Approvals: exactly the amount in, reset to zero first if some other amount is set.
+        let mut calls: Vec<(String, Address, U256, Bytes)> = Vec::new();
+        if !in_is_native {
+            let current =
+                swap::allowance(&provider, token_in.address, owner, contracts.router).await?;
+            if current < amount_in {
+                if !current.is_zero() {
+                    calls.push((
+                        format!("reset the {} allowance to 0", token_in.symbol),
+                        token_in.address,
+                        U256::ZERO,
+                        swap::approve_calldata(contracts.router, U256::ZERO),
+                    ));
+                }
+                calls.push((
+                    format!("approve {} {} for the router", args.amount, token_in.symbol),
+                    token_in.address,
+                    U256::ZERO,
+                    swap::approve_calldata(contracts.router, amount_in),
+                ));
+            }
+        }
+        let needs_approval = !calls.is_empty();
+        calls.push((
+            "swap".into(),
+            contracts.router,
+            if in_is_native { amount_in } else { U256::ZERO },
+            swap::router_calldata(&quote, amount_in, owner, contracts.router, out_is_native),
+        ));
+
+        let fees = provider
+            .estimate_eip1559_fees()
+            .await
+            .map_err(provider_error)?;
+        let nonce = provider
+            .get_transaction_count(owner)
+            .await
+            .map_err(provider_error)?;
+        let mut steps = Vec::new();
+        let mut max_cost = U256::ZERO;
+        for (index, (label, to, value, data)) in calls.into_iter().enumerate() {
+            let is_swap = label == "swap";
+            let tx = TransactionRequest::default()
+                .with_from(owner)
+                .with_to(to)
+                .with_value(value)
+                .with_input(data)
+                .with_nonce(nonce + index as u64)
+                .with_chain_id(chain)
+                .with_max_fee_per_gas(fees.max_fee_per_gas)
+                .with_max_priority_fee_per_gas(fees.max_priority_fee_per_gas);
+            // A swap behind an approval cannot be simulated until the approval is mined, so its
+            // gas is estimated right before it is sent; the quoter's figure prices it here.
+            let (tx, gas, later) = if is_swap && needs_approval {
+                let gas = (quote.gas_estimate.saturating_to::<u64>() + 100_000) * 3 / 2;
+                (tx.with_gas_limit(gas), gas, true)
+            } else {
+                let gas = match provider.estimate_gas(tx.clone()).await {
+                    Ok(gas) => gas,
+                    Err(error) => {
+                        let reason = evm_reason(&error.to_string()).to_owned();
+                        return Err(format!(
+                            "the {label} would fail in simulation ({reason}), so nothing was sent"
+                        ));
+                    }
+                };
+                (tx.with_gas_limit(gas), gas, false)
+            };
+            max_cost += U256::from(gas) * U256::from(fees.max_fee_per_gas);
+            steps.push(Step {
+                label,
+                tx,
+                estimate_on_send: later,
+            });
+        }
+        let needed_eth = max_cost + if in_is_native { amount_in } else { U256::ZERO };
+        if needed_eth > eth {
+            return Err(format!(
+                "not enough ETH for this swap and its fees: the profile holds {} ETH, it needs up to {} ETH",
+                format_units(eth, 18),
+                format_units(needed_eth, 18)
+            ));
+        }
+
+        let symbol_of = |address: &Address| {
+            tokens::by_address(chain, *address)
+                .map_or_else(|| address.to_string(), |t| t.symbol.to_owned())
+        };
+        let mut route = symbol_of(&quote.route.tokens[0]);
+        for (fee, token) in quote.route.fees.iter().zip(&quote.route.tokens[1..]) {
+            route.push_str(&format!(
+                " ─{}%→ {}",
+                *fee as f64 / 10_000.0,
+                symbol_of(token)
+            ));
+        }
+        let out = |amount: U256| {
+            format!(
+                "{} {}",
+                format_units(amount, token_out.decimals),
+                token_out.symbol
+            )
+        };
+        let mut preview = vec![
+            format!("From     {}", account.describe()),
+            format!(
+                "Swap     {} {} → about {}",
+                args.amount,
+                token_in.symbol,
+                out(quote.amount_out)
+            ),
+            format!(
+                "At least {}  ({}% slippage)",
+                out(quote.amount_out_minimum),
+                slippage as f64 / 100.0
+            ),
+            format!(
+                "Route    {route}  (Uniswap v3, router {})",
+                contracts.router
+            ),
+        ];
+        if steps.len() > 1 {
+            let list = steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("{}. {}", i + 1, s.label))
+                .collect::<Vec<_>>()
+                .join("  ");
+            preview.push(format!("Sends    {} transactions: {list}", steps.len()));
+        }
+        preview.push(format!(
+            "Max fee  {} ETH{}",
+            format_units(max_cost, 18),
+            if needs_approval {
+                " (swap gas estimated from the quote until the approval lands)"
+            } else {
+                ""
+            }
+        ));
+        preview.push("Signed by edw-tui's interim executor (edw-core), not edw's CLI".into());
+
+        Ok(Prepared {
+            command: command.to_owned(),
+            preview: preview.join("\n"),
+            steps,
+            signer: account.signer,
+            rpc: account.rpc,
+        })
+    }
+
+    /// Sends the prepared transactions in order, each after the previous one succeeded, and
+    /// stops at the first failure.
     pub async fn broadcast(&self, prepared: Prepared) -> EdwResult {
         let command = prepared.command.clone();
         let provider = ProviderBuilder::new()
             .wallet(EthereumWallet::from(prepared.signer))
             .connect_http(prepared.rpc);
-        let pending = match provider.send_transaction(prepared.tx).await {
-            Ok(pending) => pending,
-            Err(error) => {
-                return failed(
-                    &command,
-                    format!("sending failed, nothing was sent: {error}"),
-                );
-            }
+        let total = prepared.steps.len();
+        let mut done: Vec<String> = Vec::new();
+        let report = |done: &[String], last: String| {
+            let mut lines = done.to_vec();
+            lines.push(last);
+            lines.join("\n")
         };
-        let hash = *pending.tx_hash();
-        let receipt = tokio::time::timeout(RECEIPT_TIMEOUT, pending.get_receipt()).await;
-        match receipt {
-            Err(_) => failed(
-                &command,
-                format!(
-                    "sent as {hash}, but no receipt arrived within {RECEIPT_TIMEOUT:?}; check it before retrying"
-                ),
-            ),
-            Ok(Err(error)) => failed(
-                &command,
-                format!("sent as {hash}, but the receipt could not be read: {error}"),
-            ),
-            Ok(Ok(receipt)) => {
-                let block = receipt.block_number.map_or("?".into(), |b| b.to_string());
-                if receipt.status() {
-                    EdwResult {
+        for step in prepared.steps {
+            let mut tx = step.tx;
+            if step.estimate_on_send {
+                match provider.estimate_gas(tx.clone()).await {
+                    Ok(gas) => tx.set_gas_limit(gas),
+                    Err(error) => {
+                        let reason = evm_reason(&error.to_string()).to_owned();
+                        return failed(
+                            &command,
+                            report(
+                                &done,
+                                format!(
+                                    "{}: the simulation now fails ({reason}), so it was not sent",
+                                    step.label
+                                ),
+                            ),
+                        );
+                    }
+                }
+            }
+            match send_and_wait(&provider, tx).await {
+                Ok(line) if total == 1 => {
+                    return EdwResult {
                         command,
                         exit_code: 0,
-                        output: format!(
-                            "Sent. Transaction {hash} was included in block {block} and succeeded (gas used {}).",
-                            receipt.gas_used
-                        ),
-                    }
-                } else {
-                    failed(
-                        &command,
-                        format!(
-                            "Transaction {hash} was included in block {block} but reverted; no funds moved."
-                        ),
-                    )
+                        output: format!("Sent. {line}"),
+                    };
+                }
+                Ok(line) => done.push(format!("{}: {line}", step.label)),
+                Err(error) => {
+                    let nothing = if done.is_empty() && error.starts_with("sending failed") {
+                        ", nothing was sent"
+                    } else {
+                        ""
+                    };
+                    let line = if total == 1 {
+                        format!("{error}{nothing}")
+                    } else {
+                        format!("{}: {error}{nothing}", step.label)
+                    };
+                    return failed(&command, report(&done, line));
                 }
             }
         }
+        EdwResult {
+            command,
+            exit_code: 0,
+            output: format!(
+                "Sent {total} transactions, all succeeded:\n{}",
+                done.join("\n")
+            ),
+        }
+    }
+}
+
+/// Sends one transaction and waits for its receipt: `Ok` with a line describing the included,
+/// successful transaction, `Err` otherwise.
+async fn send_and_wait(provider: &impl Provider, tx: TransactionRequest) -> Result<String, String> {
+    let pending = provider
+        .send_transaction(tx)
+        .await
+        .map_err(|error| format!("sending failed: {error}"))?;
+    let hash = *pending.tx_hash();
+    let receipt = tokio::time::timeout(RECEIPT_TIMEOUT, pending.get_receipt())
+        .await
+        .map_err(|_| {
+            format!("sent as {hash}, but no receipt arrived within {RECEIPT_TIMEOUT:?}; check it before retrying")
+        })?
+        .map_err(|error| format!("sent as {hash}, but the receipt could not be read: {error}"))?;
+    let block = receipt.block_number.map_or("?".into(), |b| b.to_string());
+    if receipt.status() {
+        Ok(format!(
+            "Transaction {hash} was included in block {block} and succeeded (gas used {}).",
+            receipt.gas_used
+        ))
+    } else {
+        Err(format!(
+            "transaction {hash} was included in block {block} but reverted; no funds moved"
+        ))
     }
 }
 

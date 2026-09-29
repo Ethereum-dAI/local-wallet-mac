@@ -50,8 +50,16 @@ commands later changes no evals.
 Every transfer is simulated first. The modal shows that dry run (sender, amount, recipient, max
 fee), written by the executor rather than the model, and only `y` sends that exact transaction.
 Before any of that, guards refuse burn and zero addresses, malformed addresses and amounts, ENS
-names (not resolved yet) and unknown token symbols. Known tokens: USDC and WETH on Sepolia; any
-other ERC-20 works by its 0x address. Swap is in the contract but not executed yet.
+names (not resolved yet) and unknown token symbols. Known tokens are the app's Sepolia list (WETH,
+USDC, USDT, DAI, AAVE, UNI); transfers take any other ERC-20 by its 0x address.
+
+Swaps follow the SwiftUI app and its daemon (`src/interim/swap.rs`): Uniswap v3 on Sepolia,
+the direct pair or one hop through WETH/USDC/USDT/DAI across all fee tiers, the best QuoterV2
+quote, and a minimum output after `EDW_TUI_SWAP_SLIPPAGE_BPS` (default 100 = 1%, at most 5000).
+ETH is routed as WETH (sent as `msg.value`, or unwrapped to you with `multicall`). An ERC-20
+input first gets an approval for exactly the amount, so a swap may be two or three
+transactions; the review lists them all, and they are sent in order, stopping at the first
+failure. Only known tokens are traded.
 
 ## The model-facing contract
 

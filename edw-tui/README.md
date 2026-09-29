@@ -70,6 +70,9 @@ what the model sees shows up in review. Regenerate with `cargo run -- tools-dump
 cargo test                          # unit + integration; edw-backed tests skip without edw
 cargo test --test edw_contract      # every tool against the pinned edw
 cargo test --test interim           # real ETH sends on a throwaway anvil (needs anvil)
+cargo test --test e2e_transfer      # the real binary in a pseudo-terminal: alice sends bob 0.1 ETH;
+                                    # screenshots in target/e2e-screenshots/, snapshots in tests/snapshots/
+                                    # (review changes with `cargo insta review`)
 cargo test --test interim -- --ignored   # USDC on an anvil fork of Sepolia (network; EDW_TUI_SEPOLIA_RPC)
 cargo test --test agent_loop -- --ignored --nocapture   # real Ollama (EDW_TUI_MODEL, EDW_TUI_SWITCH_TO)
 ```

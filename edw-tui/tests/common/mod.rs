@@ -2,6 +2,8 @@
 //! wallet, and drive the real agent loop.
 #![allow(dead_code)] // each test binary uses a different part
 
+pub mod pty;
+
 use std::{path::PathBuf, time::Duration};
 
 use edw_tui::{

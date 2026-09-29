@@ -1,0 +1,3 @@
+/target/
+# Throwaway wallet created by `cargo run` (EDW_DATA_DIR / EDW_RUNTIME_DIR defaults).
+/.edw/

@@ -144,6 +144,22 @@ async fn sends_eth_only_after_a_reviewed_dry_run() {
         assert!(turn.outputs[0].contains(reason), "{prompt}: {turn:?}");
     }
 
+    // A contract that rejects ETH (code starting with INVALID, like an ERC-5202 blueprint)
+    // fails the dry run with an explanation, and nothing is asked or sent.
+    let blueprint = address!("0xbFcF63294aD7105dEa65aA58F8AE5BE2D9d0952A");
+    let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap());
+    let _: () = provider
+        .raw_request("anvil_setCode".into(), (blueprint, "0xfe71"))
+        .await
+        .unwrap();
+    let turn = h.turn(&format!("send 0.1 ETH to {blueprint}"), true).await;
+    assert!(turn.confirms.is_empty(), "{turn:?}");
+    assert!(
+        turn.outputs[0].contains("has contract code")
+            && turn.outputs[0].contains("nothing was sent"),
+        "{turn:?}"
+    );
+
     // "all" leaves only dust: the fee reserve that was not spent.
     let turn = h.turn(&format!("send all ETH to {BEEF}"), true).await;
     assert!(

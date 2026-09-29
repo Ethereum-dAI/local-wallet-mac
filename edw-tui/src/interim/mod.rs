@@ -176,7 +176,33 @@ fn failed(command: &str, output: impl Into<String>) -> EdwResult {
 }
 
 fn provider_error(error: impl std::fmt::Display) -> String {
+    let error = error.to_string();
+    if is_stale_fork(&error) {
+        return format!(
+            "the node cannot serve this chain state. This happens with an anvil fork whose upstream RPC has dropped the forked block (non-archive nodes keep recent state only); restart anvil, or fork from an archive RPC. ({error})"
+        );
+    }
     format!("the network endpoint returned an error: {error}")
+}
+
+fn is_stale_fork(error: &str) -> bool {
+    [
+        "historical state",
+        "missing trie node",
+        "state is not available",
+    ]
+    .iter()
+    .any(|needle| error.contains(needle))
+}
+
+/// The EVM's own words from a failed simulation, e.g. `InvalidFEOpcode` or a revert reason.
+fn evm_reason(error: &str) -> &str {
+    error
+        .rsplit_once("error code")
+        .map_or(error, |(_, tail)| {
+            tail.split_once(": ").map_or(tail, |(_, r)| r)
+        })
+        .trim()
 }
 
 pub struct Interim {
@@ -316,9 +342,15 @@ impl Interim {
         if !matches!(args.token, Some(TokenRef::Symbol(_) | TokenRef::Address(_))) {
             lines.push(format!("  {} ETH", format_units(eth, 18)));
         }
+        // One unreadable token does not hide the others.
         for (symbol, address, decimals) in tokens {
-            let balance = erc20_balance(&provider, address, owner).await?;
-            lines.push(format!("  {} {symbol}", format_units(balance, decimals)));
+            lines.push(match erc20_balance(&provider, address, owner).await {
+                Ok(balance) => format!("  {} {symbol}", format_units(balance, decimals)),
+                Err(error) if error.contains("cannot serve this chain state") => format!(
+                    "  ? {symbol} (unavailable: the node dropped this state; restart the anvil fork)"
+                ),
+                Err(error) => format!("  ? {symbol} (unavailable: {error})"),
+            });
         }
         Ok(lines.join("\n"))
     }
@@ -402,10 +434,19 @@ impl Interim {
             }
         }
         .with_from(from);
-        let gas = provider
-            .estimate_gas(tx.clone())
-            .await
-            .map_err(|e| format!("the transfer would fail: {e}"))?;
+        let gas = match provider.estimate_gas(tx.clone()).await {
+            Ok(gas) => gas,
+            Err(error) => {
+                return Err(simulation_failed(
+                    &provider,
+                    &args.to,
+                    token,
+                    &symbol,
+                    &error.to_string(),
+                )
+                .await);
+            }
+        };
         let max_cost = U256::from(gas) * max_fee;
         let needed_eth = max_cost + if token.is_none() { value } else { U256::ZERO };
         if needed_eth > eth {
@@ -506,6 +547,36 @@ impl Interim {
     }
 }
 
+/// Why a simulated transfer failed, said in terms of the recipient or the token rather than
+/// the RPC error, and always saying that nothing was sent.
+async fn simulation_failed(
+    provider: &impl Provider,
+    to: &Address,
+    token: Option<Address>,
+    symbol: &str,
+    error: &str,
+) -> String {
+    if is_stale_fork(error) {
+        return provider_error(error);
+    }
+    let reason = evm_reason(error);
+    match token {
+        Some(address) => format!(
+            "the {symbol} contract ({address}) rejected this transfer in simulation ({reason}), so nothing was sent; check the amount and the recipient"
+        ),
+        None if provider
+            .get_code_at(*to)
+            .await
+            .is_ok_and(|code| !code.is_empty()) =>
+        {
+            format!(
+                "{to} has contract code, and it rejected the ETH in simulation ({reason}), so nothing was sent. Sending to it would fail; double-check the address."
+            )
+        }
+        None => format!("the transfer failed in simulation ({reason}), so nothing was sent"),
+    }
+}
+
 /// The unlocked network's active endpoint, as edw would pick it.
 async fn endpoint(store: &Arc<dyn Database>) -> Option<String> {
     let preferences = store.clone().scoped(b"preferences");
@@ -601,6 +672,22 @@ mod tests {
             display_command("balance", &json!({}), DEFAULT_PROFILE),
             "interim balance --from 0/0"
         );
+    }
+
+    #[test]
+    fn explains_rpc_failures_in_plain_words() {
+        assert_eq!(
+            evm_reason(
+                "server returned an error response: error code -32603: EVM error InvalidFEOpcode"
+            ),
+            "EVM error InvalidFEOpcode"
+        );
+        let stale = "error code -32000: historical state f5599e0b is not available";
+        assert!(is_stale_fork(stale));
+        assert!(provider_error(stale).contains("restart anvil"));
+        assert!(!is_stale_fork(
+            "error code -32603: EVM error InvalidFEOpcode"
+        ));
     }
 
     #[test]

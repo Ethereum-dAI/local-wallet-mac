@@ -4,6 +4,7 @@ pub mod abi;
 pub mod catalog;
 pub mod lock;
 pub mod manifest;
+pub mod plan;
 
 /// The one built-in skill tool: loads a skill (and what it requires) for the conversation.
 pub const LOAD_SKILL: &str = "load_skill";

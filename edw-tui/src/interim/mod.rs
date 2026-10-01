@@ -56,6 +56,8 @@ sol! {
 }
 
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Prices an approval that can only be estimated once an earlier step is mined.
+const APPROVE_GAS_CEILING: u64 = 100_000;
 
 /// edw's default profile: mnemonic 0, profile 0, created by the first unlock.
 pub const DEFAULT_PROFILE: &str = "0/0";
@@ -481,6 +483,11 @@ impl Interim {
         let simple_gas = U256::from(21_000u64);
         let value = match (&args.amount, token) {
             (Amount::Exact(text), _) => parse_units(text, decimals)?,
+            (Amount::All, Some(_)) if held.is_zero() => {
+                return Err(format!(
+                    "the profile holds no {symbol}, so there is nothing to send"
+                ));
+            }
             (Amount::All, Some(_)) => held,
             (Amount::All, None) => held
                 .checked_sub(simple_gas * max_fee)
@@ -531,6 +538,24 @@ impl Interim {
             }
         };
         let max_cost = U256::from(gas) * max_fee;
+        // "All" ETH was sized with a plain 21 000-gas fee. A contract recipient that accepts ETH
+        // costs more gas, so the amount is what is left after the real fee.
+        let value = match (&args.amount, token) {
+            (Amount::All, None) if max_cost > simple_gas * max_fee => {
+                let value = eth
+                    .checked_sub(max_cost)
+                    .filter(|v| !v.is_zero())
+                    .ok_or_else(|| {
+                        format!(
+                            "the balance ({} ETH) does not cover the fee",
+                            format_units(eth, 18)
+                        )
+                    })?;
+                tx.set_value(value);
+                value
+            }
+            _ => value,
+        };
         let needed_eth = max_cost + if token.is_none() { value } else { U256::ZERO };
         if needed_eth > eth {
             return Err(format!(
@@ -713,10 +738,17 @@ impl Interim {
                 .with_chain_id(chain)
                 .with_max_fee_per_gas(fees.max_fee_per_gas)
                 .with_max_priority_fee_per_gas(fees.max_priority_fee_per_gas);
-            // A swap behind an approval cannot be simulated until the approval is mined, so its
-            // gas is estimated right before it is sent; the quoter's figure prices it here.
-            let (tx, gas, later) = if is_swap && needs_approval {
-                let gas = (quote.gas_estimate.saturating_to::<u64>() + 100_000) * 3 / 2;
+            // Only the first step can be simulated now: every later one depends on the state the
+            // earlier ones leave (a swap needs its approval; an approval after a reset writes a
+            // zeroed slot, which costs far more gas than the non-zero one the dry run would see,
+            // and USDT-style tokens refuse it outright). Later steps are estimated right before
+            // they are sent; here they are priced with a generous ceiling.
+            let (tx, gas, later) = if index > 0 {
+                let gas = if is_swap {
+                    (quote.gas_estimate.saturating_to::<u64>() + 100_000) * 3 / 2
+                } else {
+                    APPROVE_GAS_CEILING
+                };
                 (tx.with_gas_limit(gas), gas, true)
             } else {
                 let gas = match provider.estimate_gas(tx.clone()).await {
@@ -796,7 +828,7 @@ impl Interim {
             "Max fee  {} ETH{}",
             format_units(max_cost, 18),
             if needs_approval {
-                " (swap gas estimated from the quote until the approval lands)"
+                " (steps after the first are estimated as they are sent)"
             } else {
                 ""
             }

@@ -341,6 +341,12 @@ async fn sends_usdc_on_a_sepolia_fork() {
         turn.confirms.is_empty() && turn.outputs[0].contains("not enough WETH"),
         "{turn:?}"
     );
+    // PR #98 review: "all" of a token the profile does not hold is refused, not a 0-token send.
+    let turn = h.turn(&format!("send all WETH to {BEEF}"), true).await;
+    assert!(
+        turn.confirms.is_empty() && turn.outputs[0].contains("holds no WETH"),
+        "{turn:?}"
+    );
 }
 
 #[tokio::test]
@@ -399,6 +405,60 @@ async fn swaps_on_a_sepolia_fork() {
         "ETH came back, less gas"
     );
 
+    // PR #98 review: with a smaller allowance already set, the swap resets it to 0, approves the
+    // exact amount, then swaps. The approval is estimated only after the reset is mined, so it
+    // has the gas a zero-to-non-zero write needs.
+    let router = edw_tui::interim::swap::contracts(11_155_111)
+        .unwrap()
+        .router;
+    let mut approve = vec![0x09, 0x5e, 0xa7, 0xb3]; // approve(address,uint256)
+    approve.extend_from_slice(&[0u8; 12]);
+    approve.extend_from_slice(router.as_slice());
+    approve.extend_from_slice(&U256::from(100_000u64).to_be_bytes::<32>()); // 0.1 USDC
+    let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap());
+    let _: () = provider
+        .raw_request("anvil_impersonateAccount".into(), (from,))
+        .await
+        .unwrap();
+    let tx = alloy_rpc_types_eth::TransactionRequest::default()
+        .from(from)
+        .to(SEPOLIA_USDC)
+        .input(approve.into());
+    let hash: alloy_primitives::B256 = provider
+        .raw_request("eth_sendTransaction".into(), (tx,))
+        .await
+        .unwrap();
+    assert!(
+        provider
+            .get_transaction_receipt(hash)
+            .await
+            .unwrap()
+            .is_some_and(|r| r.status()),
+        "the setup approval landed"
+    );
+    let _: () = provider
+        .raw_request("anvil_stopImpersonatingAccount".into(), (from,))
+        .await
+        .unwrap();
+    let turn = h.turn("swap 2 USDC for ETH", true).await;
+    let preview = &turn.previews[0];
+    assert!(
+        preview.contains("Sends    3 transactions: 1. reset the USDC allowance to 0  2. approve 2 USDC for the router  3. swap"),
+        "{preview}"
+    );
+    assert!(
+        turn.outputs
+            .last()
+            .unwrap()
+            .contains("Sent 3 transactions, all succeeded"),
+        "{turn:?}"
+    );
+    assert_eq!(
+        usdc(&rpc, from).await,
+        U256::from(2_000_000u64),
+        "exactly 2 more USDC were spent"
+    );
+
     // Guards: unknown token, "all", and the same token twice.
     for (prompt, reason) in [
         (
@@ -414,4 +474,37 @@ async fn swaps_on_a_sepolia_fork() {
             "{prompt}: {turn:?}"
         );
     }
+}
+
+/// PR #98 review: "all" ETH to a contract that accepts ETH but costs more than 21 000 gas used
+/// to be refused as "not enough ETH". The amount is now the balance less the real fee.
+#[tokio::test]
+async fn sends_all_eth_to_a_contract_that_accepts_it() {
+    let Some(node) = anvil(None) else { return };
+    let rpc = node.endpoint();
+    let Some(mut h) = start("interim-all-contract", "local", Some(rpc.clone()), false).await else {
+        return;
+    };
+    let from = sender(&h, &rpc, false).await;
+    fund(&rpc, from, U256::from(ETHER)).await;
+    // PUSH1 1, PUSH1 0, SSTORE, STOP: accepts ETH and writes a fresh slot (~22k extra gas).
+    let vault = address!("0x00000000000000000000000000000000000Ca5e5");
+    let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap());
+    let _: () = provider
+        .raw_request("anvil_setCode".into(), (vault, "0x600160005500"))
+        .await
+        .unwrap();
+
+    let turn = h.turn(&format!("send all ETH to {vault}"), true).await;
+    assert!(
+        turn.outputs.last().unwrap().contains("succeeded"),
+        "{turn:?}"
+    );
+    let left = eth(&rpc, from).await;
+    assert!(left < U256::from(ETHER / 1000), "only dust is left: {left}");
+    let received = eth(&rpc, vault).await;
+    assert!(
+        received > U256::from(ETHER * 999 / 1000),
+        "the contract got the balance less the fee: {received}"
+    );
 }

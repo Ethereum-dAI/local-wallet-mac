@@ -110,7 +110,7 @@ impl Scenario {
         self.tui
             .wait_for_within("a confirmation", 240, |s| s.contains("[y] "));
         self.tui.linger(2500); // time to read the review in a recording
-        self.tui.press(b"y");
+        self.tui.answer(b"y");
         self.tui.wait_for_within(done, 240, |s| s.contains(done));
         self.idle();
     }

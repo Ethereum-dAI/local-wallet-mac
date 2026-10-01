@@ -1,7 +1,10 @@
 //! UI state. Pure: keys and agent events go in, state and actions come out, so it is testable
 //! without a terminal.
 
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::oneshot;
@@ -12,6 +15,9 @@ use crate::{
 };
 
 pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /copy [reply|log|address] copies to the clipboard · Tab shows one panel at a time, for selecting text · /help";
+
+/// How long a confirmation must be on screen before y or n counts.
+pub const CONFIRM_GRACE: Duration = Duration::from_millis(400);
 
 /// Which panels are on screen. A terminal selects whole screen rows, so text is copied
 /// cleanly only when one panel fills the width.
@@ -81,6 +87,9 @@ pub struct App {
     pub models: Vec<String>,
     /// Confirmations in arrival order; the model may emit several state changes in one turn.
     pub pending: VecDeque<PendingConfirm>,
+    /// When the front confirmation appeared; keys are ignored until `confirm_grace` has passed.
+    confirm_shown: Option<Instant>,
+    pub confirm_grace: Duration,
 }
 
 impl App {
@@ -97,6 +106,8 @@ impl App {
             busy: false,
             models: Vec::new(),
             pending: VecDeque::new(),
+            confirm_shown: None,
+            confirm_grace: CONFIRM_GRACE,
         }
     }
 
@@ -107,9 +118,14 @@ impl App {
             return Action::Quit;
         }
         if !self.pending.is_empty() {
+            // Only an explicit y or n answers, and only once the modal has been on screen for a
+            // moment: an Enter or a "y" typed for the next message must never approve a send.
+            let settled = self
+                .confirm_shown
+                .is_none_or(|shown| shown.elapsed() >= self.confirm_grace);
             match key.code {
-                KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.answer(true),
-                KeyCode::Char('n' | 'N') | KeyCode::Esc => self.answer(false),
+                KeyCode::Char('y' | 'Y') if settled => self.answer(true),
+                KeyCode::Char('n' | 'N') | KeyCode::Esc if settled => self.answer(false),
                 _ => {}
             }
             return Action::None;
@@ -250,6 +266,8 @@ impl App {
             }
             let _ = pending.reply.send(run);
         }
+        // The next queued confirmation gets its own grace period.
+        self.confirm_shown = (!self.pending.is_empty()).then(Instant::now);
     }
 
     pub fn on_agent(&mut self, event: AgentEvent) {
@@ -269,11 +287,16 @@ impl App {
                 command,
                 preview,
                 reply,
-            } => self.pending.push_back(PendingConfirm {
-                command,
-                preview,
-                reply,
-            }),
+            } => {
+                if self.pending.is_empty() {
+                    self.confirm_shown = Some(Instant::now());
+                }
+                self.pending.push_back(PendingConfirm {
+                    command,
+                    preview,
+                    reply,
+                });
+            }
             AgentEvent::ProfileChanged {
                 selector,
                 address,
@@ -369,6 +392,7 @@ mod tests {
     #[test]
     fn confirm_prompt_takes_y_or_n_and_logs_a_decline() {
         let mut app = App::new("m", "d");
+        app.confirm_grace = Duration::ZERO;
         let (reply, mut answer) = oneshot::channel();
         app.on_agent(AgentEvent::Confirm {
             command: "edw lock".into(),
@@ -395,8 +419,31 @@ mod tests {
     }
 
     #[test]
+    fn only_a_deliberate_y_sends() {
+        let mut app = App::new("m", "d");
+        let (reply, mut answer) = oneshot::channel();
+        app.on_agent(AgentEvent::Confirm {
+            command: "interim transfer --to 0xabc --amount 0.5 --token ETH --from 0/0".into(),
+            preview: Some("Send     0.5 ETH".into()),
+            reply,
+        });
+        // Typed for the next message as the modal appeared: neither Enter nor a "y" answers.
+        app.on_key(key(KeyCode::Enter));
+        app.on_key(key(KeyCode::Char('y')));
+        assert!(answer.try_recv().is_err() && app.pending.len() == 1);
+
+        // Once the modal has settled, Enter still does not send; y does.
+        app.confirm_grace = Duration::ZERO;
+        app.on_key(key(KeyCode::Enter));
+        assert!(answer.try_recv().is_err(), "Enter never approves");
+        app.on_key(key(KeyCode::Char('y')));
+        assert_eq!(answer.try_recv(), Ok(true));
+    }
+
+    #[test]
     fn confirmations_queue_instead_of_replacing_each_other() {
         let mut app = App::new("m", "d");
+        app.confirm_grace = Duration::ZERO;
         let (first, mut first_answer) = oneshot::channel();
         let (second, mut second_answer) = oneshot::channel();
         app.on_agent(AgentEvent::Confirm {

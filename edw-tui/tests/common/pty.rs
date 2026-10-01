@@ -174,6 +174,13 @@ impl Tui {
         }
     }
 
+    /// Answers a confirmation modal, after the moment the TUI waits before it accepts an
+    /// answer (`app::CONFIRM_GRACE`), the way a person would read it first.
+    pub fn answer(&mut self, key: &[u8]) {
+        thread::sleep(edw_tui::app::CONFIRM_GRACE + Duration::from_millis(200));
+        self.press(key);
+    }
+
     pub fn press(&mut self, key: &[u8]) {
         self.writer.write_all(key).unwrap();
         self.writer.flush().unwrap();

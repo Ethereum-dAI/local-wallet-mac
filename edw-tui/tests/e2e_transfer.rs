@@ -57,7 +57,7 @@ fn idle(tui: &Tui) {
 /// Answers a confirmation modal with `y` and waits for `done` on screen.
 fn confirm(tui: &mut Tui, done: &str) {
     tui.wait_for("[y] run");
-    tui.press(b"y");
+    tui.answer(b"y");
     tui.wait_for(done);
     idle(tui);
 }
@@ -171,7 +171,7 @@ async fn alice_sends_bob_one_tenth_of_an_eth() {
     );
     screenshot(&tui, "transfer_review");
     tui.linger(2500); // time to read the dry run
-    tui.press(b"y");
+    tui.answer(b"y");
     tui.wait_for("succeeded");
     idle(&tui);
     screenshot(&tui, "transfer_final");

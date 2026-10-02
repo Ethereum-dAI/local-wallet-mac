@@ -15,7 +15,7 @@ use crate::{
     skills::consent::ConsentRequest,
 };
 
-pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /skills lists skills · /copy [reply|log|address] copies to the clipboard · PgUp/PgDn scroll the chat, Shift+PgUp/PgDn the command log, End jumps to the newest · Tab shows one panel at a time, for selecting text · /help";
+pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /skills lists skills · /copy [reply|log|address] copies to the clipboard · ↑↓ scroll the chat, Shift+↑↓ the command log (PgUp/PgDn too) · ←→ Home End move in the message · Tab shows one panel at a time, for selecting text · /help";
 
 /// How long a confirmation must be on screen before y or n counts.
 pub const CONFIRM_GRACE: Duration = Duration::from_millis(400);
@@ -127,6 +127,17 @@ impl PanelScroll {
     pub fn follow(&mut self) {
         self.top = None;
     }
+
+    /// `rows` up (negative) or down; reaching the bottom follows the newest lines again.
+    pub fn by(&mut self, rows: isize) {
+        let (last_top, _) = self.page();
+        if last_top == 0 {
+            return;
+        }
+        let from = self.top.unwrap_or(last_top).min(last_top);
+        let to = from.saturating_add_signed(rows).min(last_top);
+        self.top = (to < last_top).then_some(to);
+    }
 }
 
 pub struct App {
@@ -143,8 +154,11 @@ pub struct App {
     pub busy: bool,
     /// The last `/models` listing, so `/model 2` can pick by number.
     pub models: Vec<String>,
-    /// PgUp/PgDn scroll the chat, Shift+PgUp/PgDn the command log, End returns both.
+    /// ↑↓ (or PgUp/PgDn) scroll the chat, Shift+↑↓ the command log; scrolling to the bottom,
+    /// or sending a message, follows the newest lines again.
     pub chat_scroll: PanelScroll,
+    /// Where typing goes in `input`, in characters.
+    pub cursor: usize,
     pub log_scroll: PanelScroll,
     /// Skills waiting for the user's approval, shown one card at a time before chatting.
     pub consents: VecDeque<ConsentRequest>,
@@ -176,6 +190,7 @@ impl App {
             busy: false,
             models: Vec::new(),
             chat_scroll: PanelScroll::default(),
+            cursor: 0,
             log_scroll: PanelScroll::default(),
             consents: VecDeque::new(),
             consent_scroll: 0,
@@ -256,6 +271,10 @@ impl App {
             KeyCode::Enter if !self.busy => {
                 let prompt = self.input.trim().to_owned();
                 self.input.clear();
+                self.cursor = 0;
+                // A new message: both panels show the newest lines again.
+                self.chat_scroll.follow();
+                self.log_scroll.follow();
                 if prompt.is_empty() {
                     return Action::None;
                 }
@@ -278,34 +297,75 @@ impl App {
                 self.view = self.view.next();
                 Action::None
             }
-            KeyCode::PageUp | KeyCode::PageDown => {
-                let panel = if key.modifiers.contains(KeyModifiers::SHIFT) {
+            // Scrolling. Mac terminals keep PageUp/PageDown for their own scrollback, so the
+            // arrows do it too: ↑↓ the chat, Shift+↑↓ the command log; a single-panel view
+            // scrolls the panel on screen.
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                let log = match self.view {
+                    View::Log => true,
+                    View::Chat => false,
+                    View::Split => key.modifiers.contains(KeyModifiers::SHIFT),
+                };
+                let panel = if log {
                     &mut self.log_scroll
                 } else {
                     &mut self.chat_scroll
                 };
-                if key.code == KeyCode::PageUp {
-                    panel.up();
-                } else {
-                    panel.down();
+                match key.code {
+                    KeyCode::Up => panel.by(-1),
+                    KeyCode::Down => panel.by(1),
+                    KeyCode::PageUp => panel.up(),
+                    _ => panel.down(),
                 }
                 Action::None
             }
+            // Editing the message at the cursor.
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cursor = 0;
+                Action::None
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cursor = self.input.chars().count();
+                Action::None
+            }
+            KeyCode::Home => {
+                self.cursor = 0;
+                Action::None
+            }
             KeyCode::End => {
-                self.chat_scroll.follow();
-                self.log_scroll.follow();
+                self.cursor = self.input.chars().count();
+                Action::None
+            }
+            KeyCode::Left => {
+                self.cursor = self.cursor.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Right => {
+                self.cursor = (self.cursor + 1).min(self.input.chars().count());
                 Action::None
             }
             KeyCode::Char(c) => {
-                self.input.push(c);
+                self.insert(&c.to_string());
                 Action::None
             }
             KeyCode::Backspace => {
-                self.input.pop();
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                    let at = self.byte_at(self.cursor);
+                    self.input.remove(at);
+                }
+                Action::None
+            }
+            KeyCode::Delete => {
+                if self.cursor < self.input.chars().count() {
+                    let at = self.byte_at(self.cursor);
+                    self.input.remove(at);
+                }
                 Action::None
             }
             KeyCode::Esc => {
                 self.input.clear();
+                self.cursor = 0;
                 Action::None
             }
             _ => Action::None,
@@ -315,10 +375,23 @@ impl App {
     /// Pasted text goes into the input as typed text; line breaks become spaces, so a paste
     /// never submits half a message.
     pub fn on_paste(&mut self, text: &str) {
-        if self.pending.is_empty() {
-            self.input
-                .push_str(&text.replace(['\r', '\n'], " ").replace('\t', " "));
+        if self.pending.is_empty() && self.consents.is_empty() {
+            self.insert(&text.replace(['\r', '\n'], " ").replace('\t', " "));
         }
+    }
+
+    /// The byte offset of character `index` in the input (its end when past the last).
+    fn byte_at(&self, index: usize) -> usize {
+        self.input
+            .char_indices()
+            .nth(index)
+            .map_or(self.input.len(), |(at, _)| at)
+    }
+
+    fn insert(&mut self, text: &str) {
+        let at = self.byte_at(self.cursor);
+        self.input.insert_str(at, text);
+        self.cursor += text.chars().count();
     }
 
     /// `/copy` (the last reply), `/copy log` (the last command and its output), `/copy address`
@@ -605,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn page_keys_scroll_chat_shift_page_keys_scroll_the_log_end_returns() {
+    fn page_keys_scroll_chat_and_shift_page_keys_scroll_the_log() {
         let mut app = App::new("m", "d");
         // As the last render saw them: 100 rows of chat, 50 of log, 20 visible each.
         app.chat_scroll.observe(100, 20);
@@ -634,10 +707,78 @@ mod tests {
             "paging down to the end follows again"
         );
 
-        app.on_key(key(KeyCode::PageUp));
-        app.on_key(key(KeyCode::End));
+        app.on_key(shifted(KeyCode::PageDown));
+        app.on_key(shifted(KeyCode::PageDown));
         assert!(app.chat_scroll.following() && app.log_scroll.following());
         assert!(app.input.is_empty(), "scroll keys type nothing");
+    }
+
+    #[test]
+    fn the_cursor_moves_and_edits_in_the_middle_of_a_message() {
+        let mut app = App::new("m", "d");
+        type_text(&mut app, "helo");
+        app.on_key(key(KeyCode::Left));
+        type_text(&mut app, "l");
+        assert_eq!((app.input.as_str(), app.cursor), ("hello", 4));
+        app.on_key(key(KeyCode::Home));
+        type_text(&mut app, "é ");
+        assert_eq!(app.input, "é hello");
+        app.on_key(key(KeyCode::Delete));
+        assert_eq!(app.input, "é ello");
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!((app.input.as_str(), app.cursor), ("éello", 1));
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.cursor, 3);
+        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(app.cursor, 5, "Ctrl+E goes to the end");
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.cursor, 5, "not past the end");
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(app.cursor, 0, "Ctrl+A goes to the start");
+        app.on_paste("pasted ");
+        assert_eq!((app.input.as_str(), app.cursor), ("pasted éello", 7));
+        app.on_key(key(KeyCode::End));
+        assert_eq!(app.cursor, 12);
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!((app.input.as_str(), app.cursor), ("", 0));
+    }
+
+    /// Mac terminals keep PageUp/PageDown (and Shift+PageUp) for their own scrollback, so the
+    /// arrows scroll: ↑↓ the chat, Shift+↑↓ the command log.
+    #[test]
+    fn arrows_scroll_chat_and_shift_arrows_scroll_the_log() {
+        let mut app = App::new("m", "d");
+        app.chat_scroll.observe(100, 20);
+        app.log_scroll.observe(100, 20);
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.chat_scroll.top(), Some(79), "one row at a time");
+        assert!(app.log_scroll.following());
+        app.on_key(shifted(KeyCode::Up));
+        app.on_key(shifted(KeyCode::Up));
+        assert_eq!(app.log_scroll.top(), Some(78));
+        app.on_key(key(KeyCode::Down));
+        assert!(
+            app.chat_scroll.following(),
+            "down to the bottom follows again"
+        );
+        // In a single-panel view the arrows scroll the panel on screen.
+        app.view = View::Log;
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.log_scroll.top(), Some(77));
+        assert!(app.chat_scroll.following());
+    }
+
+    #[test]
+    fn sending_a_message_shows_the_newest_lines_again() {
+        let mut app = App::new("m", "d");
+        app.chat_scroll.observe(100, 20);
+        app.log_scroll.observe(100, 20);
+        app.on_key(key(KeyCode::Up));
+        app.on_key(shifted(KeyCode::Up));
+        type_text(&mut app, "hi");
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.chat_scroll.following() && app.log_scroll.following());
     }
 
     #[test]

@@ -34,6 +34,11 @@ pub fn render(frame: &mut Frame, app: &App) {
     let inner_width = frame.area().width.saturating_sub(2) as usize;
     let rows = wrap_input(&format!("{PROMPT}{}", app.input), inner_width);
     let visible = rows.len().min(MAX_INPUT_ROWS);
+    // Where the cursor is in the wrapped rows, and the window of rows that keeps it on screen
+    // (the last rows, unless the cursor is above them).
+    let at = PROMPT.chars().count() + app.cursor;
+    let (cursor_row, cursor_col) = (at / inner_width.max(1), at % inner_width.max(1));
+    let first = (rows.len() - visible).min(cursor_row);
 
     let [main, input, status] = Layout::vertical([
         Constraint::Min(5),
@@ -86,10 +91,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     let prompt: Text = if app.busy {
         "thinking…".dark_gray().into()
     } else {
-        let shown = &rows[rows.len() - visible..];
+        let shown = &rows[first..first + visible];
         let mut lines: Vec<Line> = shown.iter().map(|row| Line::from(row.clone())).collect();
         // Bold the prompt marker when the first row is on screen.
-        if visible == rows.len()
+        if first == 0
             && let Some(first) = lines.first_mut()
         {
             let rest = shown[0].chars().skip(PROMPT.len()).collect::<String>();
@@ -102,8 +107,10 @@ pub fn render(frame: &mut Frame, app: &App) {
         input,
     );
     if !app.busy && app.pending.is_empty() {
-        let last = rows.last().map_or(0, |row| row.chars().count()) as u16;
-        frame.set_cursor_position((input.x + 1 + last, input.y + visible as u16));
+        frame.set_cursor_position((
+            input.x + 1 + cursor_col as u16,
+            input.y + 1 + (cursor_row - first) as u16,
+        ));
     }
 
     let hint = if !app.consents.is_empty() {
@@ -271,7 +278,7 @@ fn render_bottom_anchored(
     let title = if scroll.following() || lines <= inner_height {
         title.to_owned()
     } else {
-        format!("{title}↑ older · PgDn/End ")
+        format!("{title}↑ older · ↓ newer ")
     };
     let paragraph = wrapped.block(Block::new().borders(borders).title(title));
     let offset = top.min(u16::MAX as usize) as u16;
@@ -450,6 +457,44 @@ mod tests {
         }
     }
 
+    fn cursor_at(app: &App) -> (u16, u16) {
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let p = terminal.get_cursor_position().unwrap();
+        (p.x, p.y)
+    }
+
+    #[test]
+    fn the_terminal_cursor_follows_the_edit_position() {
+        let mut app = App::new("m", "d");
+        app.on_paste("hello");
+        let end = cursor_at(&app);
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(cursor_at(&app), (end.0 - 2, end.1));
+
+        // A message long enough to wrap: the cursor goes back to the first row.
+        let mut app = App::new("m", "d");
+        app.on_paste(&"x".repeat(250));
+        app.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        let (x, y) = cursor_at(&app);
+        let (_, end_y) = {
+            let mut copy = App::new("m", "d");
+            copy.on_paste(&"x".repeat(250));
+            cursor_at(&copy)
+        };
+        assert_eq!(
+            x,
+            1 + PROMPT.len() as u16,
+            "after the prompt, inside the border"
+        );
+        assert_eq!(
+            y,
+            end_y - 2,
+            "two rows above the end of a three-row message"
+        );
+    }
+
     #[test]
     fn shows_the_confirmation_modal() {
         let mut app = App::new("m", "d");
@@ -550,7 +595,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         let scrolled = screen(&app);
         assert!(!scrolled.contains("message 59"), "{scrolled}");
-        assert!(scrolled.contains("↑ older · PgDn/End"), "{scrolled}");
+        assert!(scrolled.contains("↑ older · ↓ newer"), "{scrolled}");
         let oldest_shown = (0..60)
             .find(|n| scrolled.contains(&format!("message {n:02}")))
             .unwrap();
@@ -564,7 +609,9 @@ mod tests {
         );
         assert!(!after.contains("message 60"), "{after}");
 
-        app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        for _ in 0..10 {
+            app.on_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
         let end = screen(&app);
         assert!(
             end.contains("message 60") && !end.contains("↑ older"),

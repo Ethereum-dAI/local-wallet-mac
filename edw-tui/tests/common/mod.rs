@@ -68,6 +68,7 @@ impl TempWallet {
             profile: SendingProfile::default(),
             addresses: AddressBook::default(),
             swap_slippage_bps: edw_tui::interim::swap::DEFAULT_SLIPPAGE_BPS,
+            mainnet_fork: false,
         }
     }
 }

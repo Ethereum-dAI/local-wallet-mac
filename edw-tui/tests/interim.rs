@@ -508,3 +508,75 @@ async fn sends_all_eth_to_a_contract_that_accepts_it() {
         "the contract got the balance less the fee: {received}"
     );
 }
+
+/// A skill's checked plan goes through the same dry run → review → send path as transfers:
+/// simulated as a whole, described from the simulation, sent in order.
+#[tokio::test]
+async fn a_checked_skill_plan_is_simulated_reviewed_and_sent_in_order() {
+    use edw_tui::skills::plan::{CheckedPlan, CheckedStep};
+    let Some(node) = anvil(None) else { return };
+    let rpc = node.endpoint();
+    let Some(h) = start("interim-plan", "local", Some(rpc.clone()), false).await else {
+        return;
+    };
+    let interim = Interim::new(h.wallet.interim(Some(rpc.clone()), false));
+    let context = interim.skill_context().await.unwrap();
+    assert_eq!(context.chain_id, 31337);
+    fund(&rpc, context.me, U256::from(10 * ETHER)).await;
+
+    let send = |wei: u128, label: &str| CheckedStep {
+        label: label.into(),
+        to: BEEF,
+        value: U256::from(wei),
+        data: Default::default(),
+        approval: None,
+    };
+    let plan = |steps: Vec<CheckedStep>| CheckedPlan {
+        total_value: steps.iter().map(|s| s.value).sum(),
+        steps,
+    };
+    let header = vec!["Skill    demo 1 (sha256 abc)".to_owned()];
+    let names = Default::default();
+
+    let prepared = interim
+        .prepare_plan(
+            "skill demo_send".into(),
+            header.clone(),
+            plan(vec![
+                send(ETHER / 5, "first"),
+                send(ETHER * 3 / 10, "second"),
+            ]),
+            &names,
+        )
+        .await
+        .unwrap();
+    for needle in [
+        "Skill    demo 1",
+        "Step 1   first",
+        "Step 2   second",
+        "Changes  −0.5 ETH (simulated)",
+        "Max fee",
+    ] {
+        assert!(
+            prepared.preview.contains(needle),
+            "missing {needle:?} in\n{}",
+            prepared.preview
+        );
+    }
+    assert_eq!(eth(&rpc, BEEF).await, U256::ZERO, "a dry run sends nothing");
+    let result = interim.broadcast(prepared).await;
+    assert!(result.ok(), "{result:?}");
+    assert_eq!(eth(&rpc, BEEF).await, U256::from(ETHER / 2));
+
+    let error = interim
+        .prepare_plan(
+            "skill demo_send".into(),
+            header,
+            plan(vec![send(100 * ETHER, "too much")]),
+            &names,
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(error.contains("not enough ETH"), "{error}");
+}

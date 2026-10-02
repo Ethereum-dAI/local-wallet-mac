@@ -10,15 +10,25 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::oneshot;
 
 use crate::{
-    agent::{AgentEvent, Request},
+    agent::{AgentEvent, Request, SkillOp},
     edw::EdwResult,
     skills::{SkillRow, consent::ConsentRequest},
 };
 
-pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /skills lists skills · /copy [reply|log|address] copies to the clipboard · ↑↓ scroll the chat, Shift+↑↓ the command log (PgUp/PgDn too) · ←→ Home End move in the message · Tab shows one panel at a time, for selecting text · /help";
+pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /skills (or Tab) opens the Skills tab: enable, disable, add, delete · /copy [reply|log|address] copies to the clipboard · ↑↓ scroll the chat, Shift+↑↓ the command log (PgUp/PgDn too) · ←→ Home End move in the message · Tab shows one panel at a time, for selecting text · /help";
 
 /// How long a confirmation must be on screen before y or n counts.
 pub const CONFIRM_GRACE: Duration = Duration::from_millis(400);
+
+/// `~/x` as `$HOME/x`, so a skill folder can be typed the way it is in a shell.
+fn expand_home(path: &str) -> std::path::PathBuf {
+    match (path.strip_prefix('~'), std::env::var("HOME")) {
+        (Some(rest), Ok(home)) if rest.is_empty() || rest.starts_with('/') => {
+            std::path::PathBuf::from(format!("{home}{rest}"))
+        }
+        _ => std::path::PathBuf::from(path),
+    }
+}
 
 /// Which panels are on screen. A terminal selects whole screen rows, so text is copied
 /// cleanly only when one panel fills the width.
@@ -28,6 +38,8 @@ pub enum View {
     Split,
     Chat,
     Log,
+    /// Installed skills: enable, disable, add, delete.
+    Skills,
 }
 
 impl View {
@@ -35,7 +47,8 @@ impl View {
         match self {
             View::Split => View::Chat,
             View::Chat => View::Log,
-            View::Log => View::Split,
+            View::Log => View::Skills,
+            View::Skills => View::Split,
         }
     }
 }
@@ -172,6 +185,12 @@ pub struct App {
     /// The Skills tab: every installed skill, and which one is selected.
     pub skill_rows: Vec<SkillRow>,
     pub skill_selected: usize,
+    /// One line under the list: what is happening, or what went wrong.
+    pub skill_notice: Option<String>,
+    /// A delete waiting for y or n.
+    pub skill_delete: Option<String>,
+    /// The folder path being typed after `a`.
+    pub skill_add: Option<String>,
     /// Confirmations in arrival order; the model may emit several state changes in one turn.
     pub pending: VecDeque<PendingConfirm>,
     /// When the front confirmation appeared; keys are ignored until `confirm_grace` has passed.
@@ -203,6 +222,9 @@ impl App {
             skills: Vec::new(),
             skill_rows: Vec::new(),
             skill_selected: 0,
+            skill_notice: None,
+            skill_delete: None,
+            skill_add: None,
             pending: VecDeque::new(),
             confirm_shown: None,
             confirm_grace: CONFIRM_GRACE,
@@ -272,6 +294,9 @@ impl App {
             }
             return Action::None;
         }
+        if self.view == View::Skills {
+            return self.on_skills_key(key.code);
+        }
         match key.code {
             KeyCode::Enter if !self.busy => {
                 let prompt = self.input.trim().to_owned();
@@ -308,7 +333,7 @@ impl App {
             KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
                 let log = match self.view {
                     View::Log => true,
-                    View::Chat => false,
+                    View::Chat | View::Skills => false,
                     View::Split => key.modifiers.contains(KeyModifiers::SHIFT),
                 };
                 let panel = if log {
@@ -377,10 +402,99 @@ impl App {
         }
     }
 
+    /// The Skills tab: letters are commands here, the message box is not typed into.
+    fn on_skills_key(&mut self, code: KeyCode) -> Action {
+        let send = |op: SkillOp| Action::Send(Request::Skill(op));
+        // Typing a folder path after `a`.
+        if let Some(path) = &mut self.skill_add {
+            match code {
+                KeyCode::Enter => {
+                    let typed = self.skill_add.take().unwrap_or_default();
+                    let typed = typed.trim();
+                    if typed.is_empty() {
+                        return Action::None;
+                    }
+                    let folder = expand_home(typed);
+                    self.skill_notice = Some(format!("Checking {}…", folder.display()));
+                    return send(SkillOp::Add(folder));
+                }
+                KeyCode::Esc => self.skill_add = None,
+                KeyCode::Backspace => {
+                    path.pop();
+                }
+                KeyCode::Char(c) => path.push(c),
+                _ => {}
+            }
+            return Action::None;
+        }
+        // A delete waiting for its answer.
+        if let Some(name) = self.skill_delete.clone() {
+            return match code {
+                KeyCode::Char('y' | 'Y') => {
+                    self.skill_delete = None;
+                    self.skill_notice = Some(format!("Deleting {name}…"));
+                    send(SkillOp::Delete(name))
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    self.skill_delete = None;
+                    Action::None
+                }
+                _ => Action::None,
+            };
+        }
+        let selected = self.skill_rows.get(self.skill_selected).cloned();
+        match code {
+            KeyCode::Tab => self.view = self.view.next(),
+            KeyCode::Up => self.skill_selected = self.skill_selected.saturating_sub(1),
+            KeyCode::Down => {
+                self.skill_selected =
+                    (self.skill_selected + 1).min(self.skill_rows.len().saturating_sub(1));
+            }
+            KeyCode::Char('a') => {
+                self.skill_add = Some(String::new());
+                self.skill_notice = None;
+            }
+            KeyCode::Char('d') => {
+                if let Some(row) = selected
+                    && row.state != "disabled"
+                {
+                    self.skill_notice = Some(format!("Disabling {}…", row.name));
+                    return send(SkillOp::Disable(row.name));
+                }
+            }
+            KeyCode::Char('e') => {
+                if let Some(row) = selected
+                    && matches!(row.state.as_str(), "disabled" | "declined")
+                {
+                    self.skill_notice = Some(format!("Enabling {}…", row.name));
+                    return send(SkillOp::Enable(row.name));
+                }
+            }
+            KeyCode::Char('x') => {
+                if let Some(row) = selected {
+                    if row.origin == crate::skills::Origin::Added {
+                        self.skill_delete = Some(row.name);
+                    } else {
+                        self.skill_notice = Some(format!(
+                            "{} is shipped with edw-tui, so it cannot be deleted; disable it instead (d).",
+                            row.name
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
     /// Pasted text goes into the input as typed text; line breaks become spaces, so a paste
     /// never submits half a message.
     pub fn on_paste(&mut self, text: &str) {
-        if self.pending.is_empty() && self.consents.is_empty() {
+        if let Some(path) = &mut self.skill_add {
+            path.push_str(text.trim());
+            return;
+        }
+        if self.pending.is_empty() && self.consents.is_empty() && self.view != View::Skills {
             self.insert(&text.replace(['\r', '\n'], " ").replace('\t', " "));
         }
     }
@@ -466,9 +580,7 @@ impl App {
             }
             (Some("/profile"), Some(selector)) => Some(Request::SetProfile(selector.to_owned())),
             (Some("/skills"), None) => {
-                let mut text = vec!["Skills:".to_owned()];
-                text.extend(self.skills.iter().map(|line| format!("  {line}")));
-                self.chat.push(ChatLine::Info(text.join("\n")));
+                self.view = View::Skills;
                 None
             }
             (Some("/help"), _) => {
@@ -496,10 +608,14 @@ impl App {
 
     pub fn on_agent(&mut self, event: AgentEvent) {
         match event {
-            AgentEvent::Consents(requests) => self.ask_consents(requests),
+            AgentEvent::Consents(requests) => {
+                self.skill_notice = None;
+                self.ask_consents(requests);
+            }
             AgentEvent::SkillsReady { lines, notes, rows } => {
                 self.skills = lines;
                 self.skill_rows = rows;
+                self.skill_notice = (!notes.is_empty()).then(|| notes.join(" "));
                 self.skill_selected = self
                     .skill_selected
                     .min(self.skill_rows.len().saturating_sub(1));
@@ -557,6 +673,10 @@ impl App {
             }
             AgentEvent::Error(error) => {
                 self.busy = false;
+                // A failed Skills-tab change is shown where it was made, too.
+                if self.view == View::Skills {
+                    self.skill_notice = Some(error.clone());
+                }
                 self.chat.push(ChatLine::Error(error));
             }
             AgentEvent::Models(names) => {
@@ -792,6 +912,148 @@ mod tests {
         assert!(app.chat_scroll.following() && app.log_scroll.following());
     }
 
+    fn row(name: &str, state: &str, origin: crate::skills::Origin) -> SkillRow {
+        SkillRow {
+            name: name.into(),
+            version: "1".into(),
+            state: state.into(),
+            note: None,
+            description: format!("about {name}"),
+            origin,
+            dir: std::path::PathBuf::from(format!("/skills/{name}")),
+            details: None,
+        }
+    }
+
+    fn skills_tab() -> App {
+        use crate::skills::Origin::*;
+        let mut app = App::new("m", "d");
+        app.on_agent(AgentEvent::SkillsReady {
+            lines: vec![],
+            notes: vec![],
+            rows: vec![
+                row("aave", "ready", Shipped),
+                row("lp", "disabled", Added),
+                row("data", "ready", Added),
+            ],
+        });
+        app.view = View::Skills;
+        app
+    }
+
+    fn skill_op(action: Action) -> Option<SkillOp> {
+        match action {
+            Action::Send(Request::Skill(op)) => Some(op),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn tab_and_slash_skills_reach_the_skills_tab() {
+        let mut app = App::new("m", "d");
+        for expected in [View::Chat, View::Log, View::Skills, View::Split] {
+            app.on_key(key(KeyCode::Tab));
+            assert_eq!(app.view, expected);
+        }
+        type_text(&mut app, "/skills");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.view, View::Skills);
+        assert!(!app.busy, "opening the tab sends nothing");
+    }
+
+    #[test]
+    fn the_skills_tab_selects_and_disables_or_enables() {
+        let mut app = skills_tab();
+        type_text(&mut app, "q");
+        assert!(
+            app.input.is_empty(),
+            "letters are commands here, not typing"
+        );
+        assert_eq!(
+            skill_op(app.on_key(key(KeyCode::Char('d')))),
+            Some(SkillOp::Disable("aave".into()))
+        );
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.skill_selected, 1);
+        assert_eq!(
+            skill_op(app.on_key(key(KeyCode::Char('e')))),
+            Some(SkillOp::Enable("lp".into()))
+        );
+        assert_eq!(
+            skill_op(app.on_key(key(KeyCode::Char('d')))),
+            None,
+            "already disabled"
+        );
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.skill_selected, 2, "stops at the last skill");
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.skill_selected, 0);
+        assert!(!app.busy, "skill changes do not block the chat");
+    }
+
+    #[test]
+    fn deleting_asks_first_and_only_added_skills() {
+        let mut app = skills_tab();
+        assert_eq!(skill_op(app.on_key(key(KeyCode::Char('x')))), None);
+        assert!(
+            app.skill_notice
+                .as_deref()
+                .unwrap()
+                .contains("disable it instead")
+        );
+
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(
+            skill_op(app.on_key(key(KeyCode::Char('x')))),
+            None,
+            "asks first"
+        );
+        assert_eq!(app.skill_delete.as_deref(), Some("lp"));
+        assert_eq!(skill_op(app.on_key(key(KeyCode::Char('n')))), None);
+        assert!(app.skill_delete.is_none(), "n cancels");
+        app.on_key(key(KeyCode::Char('x')));
+        assert_eq!(
+            skill_op(app.on_key(key(KeyCode::Char('y')))),
+            Some(SkillOp::Delete("lp".into()))
+        );
+    }
+
+    #[test]
+    fn adding_takes_a_folder_path_with_a_home_shortcut() {
+        let mut app = skills_tab();
+        app.on_key(key(KeyCode::Char('a')));
+        assert_eq!(app.skill_add.as_deref(), Some(""));
+        type_text(&mut app, "~/Downloads/lpx");
+        app.on_key(key(KeyCode::Backspace));
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            skill_op(app.on_key(key(KeyCode::Enter))),
+            Some(SkillOp::Add(std::path::PathBuf::from(format!(
+                "{home}/Downloads/lp"
+            ))))
+        );
+        assert!(app.skill_add.is_none());
+
+        app.on_key(key(KeyCode::Char('a')));
+        type_text(&mut app, "x");
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.skill_add.is_none(), "Esc cancels");
+        assert_eq!(skill_op(app.on_key(key(KeyCode::Enter))), None);
+    }
+
+    #[test]
+    fn a_skills_tab_error_shows_in_the_tab() {
+        let mut app = skills_tab();
+        app.on_agent(AgentEvent::Error("lp is shipped with edw-tui".into()));
+        assert_eq!(
+            app.skill_notice.as_deref(),
+            Some("lp is shipped with edw-tui")
+        );
+    }
+
     #[test]
     fn a_short_panel_does_not_scroll() {
         let mut app = App::new("m", "d");
@@ -956,6 +1218,8 @@ mod tests {
         assert_eq!(app.view, View::Chat);
         app.on_key(key(KeyCode::Tab));
         assert_eq!(app.view, View::Log);
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.view, View::Skills);
         app.on_key(key(KeyCode::Tab));
         assert_eq!(app.view, View::Split);
     }

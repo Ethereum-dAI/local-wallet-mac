@@ -86,6 +86,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             Borders::TOP,
             &app.log_scroll,
         ),
+        View::Skills => render_skills(frame, main, app),
     }
 
     let prompt: Text = if app.busy {
@@ -106,7 +107,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Paragraph::new(prompt).block(Block::bordered().title(" Message ")),
         input,
     );
-    if !app.busy && app.pending.is_empty() {
+    if !app.busy && app.pending.is_empty() && app.view != View::Skills {
         frame.set_cursor_position((
             input.x + 1 + cursor_col as u16,
             input.y + 1 + (cursor_row - first) as u16,
@@ -117,6 +118,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         "y allow · n decline · ↑↓ scroll"
     } else if !app.pending.is_empty() {
         "y run · n cancel"
+    } else if app.view == View::Skills {
+        "Tab: chat"
     } else if app.busy && app.skills.is_empty() {
         "Preparing skills…"
     } else {
@@ -137,6 +140,129 @@ pub fn render(frame: &mut Frame, app: &App) {
     } else if let Some(pending) = app.pending.front() {
         render_confirm(frame, pending, app.pending.len());
     }
+}
+
+/// The Skills tab: every installed skill with its state, the selected one's details below,
+/// and the keys (or the folder being typed, or a delete waiting for y/n) at the bottom.
+fn render_skills(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .title(" Skills · Tab: chat ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let list_height = (app.skill_rows.len().max(1) as u16).min(inner.height / 2);
+    let [list, rule, details, notice, keys] = Layout::vertical([
+        Constraint::Length(list_height),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    let mut rows: Vec<Line> = Vec::new();
+    if app.skill_rows.is_empty() {
+        rows.push(Line::from("  No skills. Press a to add one from a folder.").dark_gray());
+    }
+    for (index, row) in app.skill_rows.iter().enumerate() {
+        let icon = match row.state.as_str() {
+            "ready" => "●".green(),
+            "disabled" | "declined" => "○".dark_gray(),
+            "needs approval" => "?".yellow(),
+            _ => "!".red(),
+        };
+        let marker = if index == app.skill_selected {
+            "▶ "
+        } else {
+            "  "
+        };
+        let about = row.note.clone().unwrap_or_else(|| row.description.clone());
+        let mut line = Line::from(vec![
+            Span::from(marker),
+            icon,
+            Span::from(format!(
+                " {:<16} {:<7} {:<14} ",
+                row.name, row.version, row.state
+            )),
+            Span::from(about).dark_gray(),
+        ]);
+        if index == app.skill_selected {
+            line = line.bold();
+        }
+        rows.push(line);
+    }
+    // Keep the selected row in view when there are more skills than rows.
+    let scroll = app
+        .skill_selected
+        .saturating_sub(list_height.saturating_sub(1) as usize) as u16;
+    frame.render_widget(Paragraph::new(rows).scroll((scroll, 0)), list);
+    frame.render_widget(
+        Paragraph::new("─".repeat(rule.width as usize)).dark_gray(),
+        rule,
+    );
+
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(row) = app.skill_rows.get(app.skill_selected) {
+        let origin = match row.origin {
+            crate::skills::Origin::Shipped => "shipped",
+            crate::skills::Origin::Added => "added",
+        };
+        lines.push(Line::from(format!("{} · {origin} ({})", row.name, row.dir.display())).bold());
+        if let Some(note) = &row.note {
+            lines.push(Line::from(format!("Unavailable: {note}")).red());
+        }
+        if let Some(request) = &row.details {
+            let or = |items: &[String], none: &str| {
+                if items.is_empty() {
+                    none.to_owned()
+                } else {
+                    items.join(", ")
+                }
+            };
+            lines.push(Line::from(format!(
+                "NEEDS {} · WEB {} · TOOLS {}",
+                or(&request.requires, "no other skill"),
+                or(&request.hosts, "none"),
+                or(&request.tools, "none")
+            )));
+            for chain in &request.chains {
+                for (label, address, functions) in &chain.calls {
+                    lines.push(Line::from(format!(
+                        "{}  {label} {address}  {}",
+                        chain.name,
+                        functions.join(", ")
+                    )));
+                }
+                for approval in &chain.approvals {
+                    lines.push(Line::from(format!("{}  approve: {approval}", chain.name)));
+                }
+            }
+        } else if row.note.is_none() && !row.description.is_empty() {
+            lines.push(Line::from(row.description.clone()));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), details);
+
+    if let Some(text) = &app.skill_notice {
+        frame.render_widget(Paragraph::new(text.clone()).yellow(), notice);
+    }
+    let footer: Line = if let Some(path) = &app.skill_add {
+        Line::from(vec![
+            "Skill folder: ".cyan().bold(),
+            Span::from(path.clone()),
+            "▏  Enter add · Esc cancel".dark_gray(),
+        ])
+    } else if let Some(name) = &app.skill_delete {
+        Line::from(vec![
+            Span::from(format!("Delete {name} from disk? ")).bold(),
+            "[y] delete".red().bold(),
+            "  ".into(),
+            "[n] keep".green().bold(),
+        ])
+    } else {
+        Line::from("↑↓ select · d disable · e enable · x delete · a add · Tab back").dark_gray()
+    };
+    frame.render_widget(Paragraph::new(footer), keys);
 }
 
 /// The approval card for one skill: what it is, then everything it could touch, by chain.
@@ -580,6 +706,80 @@ mod tests {
         let scrolled = tall_screen(&app, 12);
         assert!(scrolled.contains("Sepolia (11155111)"), "{scrolled}");
         assert!(scrolled.contains("[y] allow"), "{scrolled}");
+    }
+
+    #[test]
+    fn the_skills_tab_lists_skills_and_details_the_selected_one() {
+        use crate::skills::{Origin, SkillRow};
+        let details = aave_request();
+        let mut app = App::new("m", "d");
+        app.on_agent(AgentEvent::SkillsReady {
+            lines: vec![],
+            notes: vec![],
+            rows: vec![
+                SkillRow {
+                    name: "defi-data".into(),
+                    version: "0.2.0".into(),
+                    state: "ready".into(),
+                    note: None,
+                    description: "Look up past yields".into(),
+                    origin: Origin::Shipped,
+                    dir: "/repo/skills/defi-data".into(),
+                    details: None,
+                },
+                SkillRow {
+                    name: "aave-v3-lend".into(),
+                    version: "0.1.0".into(),
+                    state: "disabled".into(),
+                    note: None,
+                    description: "Earn interest on idle USDC".into(),
+                    origin: Origin::Added,
+                    dir: "/home/me/.config/edw-tui/skills/aave-v3-lend".into(),
+                    details: Some(details),
+                },
+                SkillRow {
+                    name: "broken".into(),
+                    version: String::new(),
+                    state: "unavailable".into(),
+                    note: Some("requires `x`, which is not installed".into()),
+                    description: String::new(),
+                    origin: Origin::Shipped,
+                    dir: "/repo/skills/broken".into(),
+                    details: None,
+                },
+            ],
+        });
+        app.view = View::Skills;
+        app.skill_selected = 1;
+        let screen = tall_screen(&app, 30);
+        for needle in [
+            "Skills · Tab: chat",
+            "defi-data",
+            "0.2.0",
+            "ready",
+            "▶ ○ aave-v3-lend",
+            "disabled",
+            "! broken",
+            "requires `x`",
+            "aave-v3-lend · added (/home/me/.config/edw-tui/skills/aave-v3-lend)",
+            "NEEDS defi-data",
+            "Aave Pool 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+            "↑↓ select · d disable · e enable · x delete · a add · Tab back",
+        ] {
+            assert!(screen.contains(needle), "missing {needle:?} in\n{screen}");
+        }
+
+        app.skill_add = Some("~/Downloads/lp".into());
+        let screen = tall_screen(&app, 30);
+        assert!(screen.contains("Skill folder: ~/Downloads/lp"), "{screen}");
+        assert!(screen.contains("Enter add · Esc cancel"), "{screen}");
+        app.skill_add = None;
+        app.skill_delete = Some("aave-v3-lend".into());
+        let screen = tall_screen(&app, 30);
+        assert!(
+            screen.contains("Delete aave-v3-lend from disk? [y] delete  [n] keep"),
+            "{screen}"
+        );
     }
 
     #[test]

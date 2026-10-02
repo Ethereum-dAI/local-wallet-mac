@@ -201,3 +201,46 @@ async fn the_skills_tab_adds_disables_enables_and_deletes_live() {
         other => panic!("{other:?}"),
     }
 }
+
+/// A skill declined this session is not asked about again on every Skills-tab change, only
+/// when the user enables it.
+#[tokio::test]
+async fn a_declined_skill_is_not_asked_again_until_enabled() {
+    let Some(binary) = edw_binary() else {
+        eprintln!("skipping: edw is not installed");
+        return;
+    };
+    let wallet = TempWallet::new(binary, "skills-declined");
+    let root = tempfile::tempdir().unwrap();
+    knowledge_skill(&root.path().join("skills"), "alpha");
+    knowledge_skill(&root.path().join("skills"), "beta");
+    let paths = Paths {
+        dirs: vec![root.path().join("skills")],
+        user_dir: root.path().join("user"),
+        lock: root.path().join("skills.lock"),
+    };
+    let mut s = start(&wallet, paths, Recorder::new(vec![]));
+    assert!(matches!(s.settle().await, AgentEvent::Consents(c) if c.len() == 2));
+    s.send(Request::SkillsAnswered(BTreeMap::from([
+        ("alpha".into(), true),
+        ("beta".into(), false),
+    ])));
+    assert!(matches!(s.settle().await, AgentEvent::SkillsReady { .. }));
+
+    s.send(Request::Skill(SkillOp::Disable("alpha".into())));
+    match s.settle().await {
+        AgentEvent::SkillsReady { rows, .. } => assert_eq!(
+            names(&rows),
+            [
+                ("alpha".into(), "disabled".into()),
+                ("beta".into(), "declined".into())
+            ]
+        ),
+        other => panic!("beta must not be asked about again: {other:?}"),
+    }
+    s.send(Request::Skill(SkillOp::Enable("beta".into())));
+    match s.settle().await {
+        AgentEvent::Consents(cards) => assert_eq!(cards[0].name, "beta"),
+        other => panic!("enabling asks: {other:?}"),
+    }
+}

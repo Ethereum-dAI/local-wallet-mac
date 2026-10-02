@@ -5,7 +5,12 @@
 //! - one Rig `Tool` per `edw` command, each a thin wrapper over [`crate::edw`];
 //! - an `AgentHook` that holds state-changing calls until the user confirms them in the UI.
 
-use std::{collections::BTreeMap, convert::Infallible, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use rig_agent::{
     Agent, AgentBuilder, ModelHandle,
@@ -859,6 +864,7 @@ pub async fn run_session(
         agent: None,
         set: Arc::new(SkillSet::empty()),
         pending: None,
+        declined: BTreeSet::new(),
         history: Vec::new(),
     };
     state.begin(None).await;
@@ -902,6 +908,9 @@ struct SessionState {
     /// Cards sent to the TUI and not answered yet, and a skill just added (deleted again if
     /// it is not approved).
     pending: Option<(skills_mod::Discovery, Option<String>)>,
+    /// (name, folder hash) of cards declined this session: not shown again on every change,
+    /// only when the user enables the skill (or its folder changes).
+    declined: BTreeSet<(String, String)>,
     history: Vec<Message>,
 }
 
@@ -917,7 +926,10 @@ impl SessionState {
             });
             return;
         };
-        let discovery = skills_mod::discover(paths);
+        let mut discovery = skills_mod::discover(paths);
+        discovery
+            .requests
+            .retain(|r| !self.declined.contains(&(r.name.clone(), r.hash.clone())));
         if discovery.requests.is_empty() {
             self.settle(discovery, &BTreeMap::new(), added).await;
         } else {
@@ -944,11 +956,20 @@ impl SessionState {
         let done = match op {
             SkillOp::Add(source) => skills_mod::add(&paths, &source).map(Some),
             SkillOp::Disable(name) => skills_mod::disable(&paths, &name).map(|()| None),
-            SkillOp::Enable(name) => skills_mod::enable(&paths, &name).map(|()| None),
+            SkillOp::Enable(name) => {
+                self.declined.retain(|(declined, _)| *declined != name);
+                skills_mod::enable(&paths, &name).map(|()| None)
+            }
             SkillOp::Delete(name) => skills_mod::delete(&paths, &name).map(|()| None),
         };
         match done {
-            Ok(added) => self.begin(added).await,
+            Ok(added) => {
+                // Adding a skill again is asking for its card again.
+                if let Some(name) = &added {
+                    self.declined.retain(|(declined, _)| declined != name);
+                }
+                self.begin(added).await
+            }
             Err(error) => {
                 let _ = self.events.send(AgentEvent::Error(error));
             }
@@ -964,6 +985,12 @@ impl SessionState {
         let Some(paths) = self.session.paths.clone() else {
             return;
         };
+        for request in &discovery.requests {
+            if answers.get(&request.name) != Some(&true) {
+                self.declined
+                    .insert((request.name.clone(), request.hash.clone()));
+            }
+        }
         let startup = skills_mod::finish(discovery, answers).await;
         let mut notes = startup.notes;
         let mut installed = startup.installed;

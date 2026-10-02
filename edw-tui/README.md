@@ -102,7 +102,21 @@ reads) and, optionally, `skill.toml`, which is what edw-tui enforces:
 (its folder hash differs from `skills.lock`) or asks for more hosts. The card lists what it
 needs, its web hosts and tools, and, per chain, every contract with its functions and the
 tokens it may approve. Only `y` lets it in (`n` or Esc declines, ↑↓ scroll); chat waits until
-every card is answered. `/skills` shows each skill's state.
+every card is answered.
+
+**The Skills tab** (Tab, or `/skills`) lists every installed skill with its state, and below it
+what the selected one can touch. Changes apply at once: the agent is rebuilt with the new set,
+and the conversation, model and loaded skills carry over.
+
+| Key | |
+|---|---|
+| ↑↓ | select |
+| `d` | disable: off and never asked about until enabled (recorded in `skills.lock`) |
+| `e` | enable a disabled or declined skill; its approval card comes up first |
+| `a` | add: type a folder path (`~/` works); it is checked, shown on its approval card, and copied to `~/.config/edw-tui/skills/<name>` (`EDW_TUI_SKILLS_USER_DIR`). Declined means not kept. |
+| `x` | delete a skill you added, after a y/n. Shipped skills (`./skills`) can only be disabled. |
+
+A card you decline is not shown again this session, until you enable that skill.
 
 **Scripts run in Docker** (`skills/_sdk/edw_skill.py` is the protocol helper), one throwaway
 container per call: no network, read-only root and mounts, no capabilities, the `nobody` user,

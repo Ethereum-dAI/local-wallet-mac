@@ -18,11 +18,15 @@ fn knowledge_skill(root: &std::path::Path, name: &str) {
 }
 
 #[test]
-fn new_skills_are_approved_on_cards_in_the_tui() {
+fn skills_are_approved_on_cards_and_managed_in_the_skills_tab() {
     let root = tempfile::tempdir().unwrap();
     let skills = root.path().join("skills");
     knowledge_skill(&skills, "alpha");
     knowledge_skill(&skills, "beta");
+    let downloads = root.path().join("downloads");
+    knowledge_skill(&downloads, "gamma");
+    let gamma = downloads.join("gamma");
+    let added = root.path().join("config/user-skills");
     let lock = root.path().join("config/skills.lock");
 
     let mut tui = Tui::spawn(
@@ -39,6 +43,7 @@ fn new_skills_are_approved_on_cards_in_the_tui() {
             ),
             ("EDW_TUI_SKILLS_DIR", skills.display().to_string()),
             ("EDW_TUI_SKILLS_LOCK", lock.display().to_string()),
+            ("EDW_TUI_SKILLS_USER_DIR", added.display().to_string()),
         ],
         30,
         110,
@@ -72,13 +77,45 @@ fn new_skills_are_approved_on_cards_in_the_tui() {
     assert!(!tui.screen().contains("Allow skill"), "{}", tui.screen());
     thread::sleep(Duration::from_millis(500));
 
+    let lock_text = fs::read_to_string(&lock).unwrap();
+    assert!(lock_text.contains("\"name\": \"alpha\""), "{lock_text}");
+    assert!(!lock_text.contains("beta"), "{lock_text}");
+
+    // The Skills tab: /skills opens it.
     tui.type_text("/skills");
     tui.press(b"\r");
-    let screen = tui.wait_for("declined this session");
-    assert!(screen.contains("alpha (ready)"), "{screen}");
-    assert!(screen.contains("beta (declined this session)"), "{screen}");
+    let screen = tui.wait_for("Skills · Tab: chat");
+    assert!(screen.contains("alpha"), "{screen}");
+    assert!(screen.contains("declined"), "{screen}");
+    assert!(screen.contains("↑↓ select · d disable"), "{screen}");
 
-    let lock = fs::read_to_string(&lock).unwrap();
-    assert!(lock.contains("\"name\": \"alpha\""), "{lock}");
-    assert!(!lock.contains("beta"), "{lock}");
+    // d disables the selected skill (alpha, the first).
+    tui.press(b"d");
+    tui.wait_for("disabled");
+
+    // a adds a folder: its approval card comes up in the TUI, y keeps it.
+    tui.press(b"a");
+    tui.wait_for("Skill folder:");
+    tui.type_text(&gamma.display().to_string());
+    tui.press(b"\r");
+    tui.wait_for("Allow skill gamma?");
+    thread::sleep(Duration::from_millis(600));
+    tui.press(b"y");
+    let screen = tui.wait_for("gamma");
+    assert!(added.join("gamma/SKILL.md").exists(), "{screen}");
+
+    // x deletes it again, after a y/n.
+    tui.press(b"\x1b[B");
+    tui.press(b"\x1b[B");
+    tui.wait_for("▶ ● gamma");
+    tui.press(b"x");
+    tui.wait_for("Delete gamma from disk?");
+    tui.press(b"y");
+    for _ in 0..50 {
+        if !added.join("gamma").exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!added.join("gamma").exists(), "{}", tui.screen());
 }

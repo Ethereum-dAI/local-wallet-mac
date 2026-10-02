@@ -87,9 +87,14 @@ async fn a_skills_tools_are_offered_only_after_it_is_loaded() {
         "{offered:?}"
     );
     assert!(offered[1].contains(&"probe_echo".to_owned()), "{offered:?}");
+    // The log says what was loaded; the SKILL.md text is for the model, not the log.
     assert!(
-        turn.outputs[0].contains("call probe_echo with a mode"),
-        "load_skill returns the SKILL.md body: {turn:?}"
+        turn.outputs[0].contains("Loaded probe (tools: probe_echo, probe_act)"),
+        "{turn:?}"
+    );
+    assert!(
+        !turn.outputs[0].contains("call probe_echo with a mode"),
+        "{turn:?}"
     );
     if docker {
         assert!(

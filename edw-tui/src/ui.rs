@@ -341,7 +341,12 @@ fn render_consent(
 
     let area = frame.area();
     let width = area.width.saturating_sub(4).min(100);
-    let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(2));
+    // Long lines (many web hosts, say) wrap; the card is as tall as the wrapped text.
+    let paragraph = Paragraph::new(Text::from(lines))
+        .reset()
+        .wrap(Wrap { trim: false });
+    let rows = paragraph.line_count(width.saturating_sub(4)) as u16;
+    let height = (rows + 4).min(area.height.saturating_sub(2));
     let [popup] = Layout::horizontal([Constraint::Length(width)])
         .flex(ratatui::layout::Flex::Center)
         .areas(area);
@@ -363,13 +368,8 @@ fn render_consent(
             vertical: 0,
         }),
     );
-    let max_scroll = (lines.len() as u16).saturating_sub(body.height);
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .reset()
-            .scroll((scroll.min(max_scroll), 0)),
-        body,
-    );
+    let max_scroll = rows.saturating_sub(body.height);
+    frame.render_widget(paragraph.scroll((scroll.min(max_scroll), 0)), body);
     let mut key_line = vec![
         "  [y] ".green().bold(),
         "allow   ".into(),
@@ -693,6 +693,20 @@ mod tests {
         ] {
             assert!(screen.contains(needle), "missing {needle:?} in\n{screen}");
         }
+    }
+
+    /// A line wider than the card (defi-data's five web hosts) wraps instead of being cut off.
+    #[test]
+    fn long_card_lines_wrap_instead_of_running_off_the_card() {
+        use crate::skills::{consent::*, lock::hash_dir, manifest};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/defi-data");
+        let skill = manifest::load(&dir).unwrap();
+        let request = ConsentRequest::new(&skill, &hash_dir(&skill.dir).unwrap(), Reason::New);
+        let mut app = App::new("m", "d");
+        app.ask_consents(vec![request]);
+        let screen = tall_screen(&app, 30);
+        assert!(screen.contains("api.dexscreener.com"), "{screen}");
+        assert!(screen.contains("[y] allow"), "{screen}");
     }
 
     #[test]

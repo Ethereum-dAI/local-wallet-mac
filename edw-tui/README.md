@@ -183,6 +183,10 @@ cargo test --test skills_agent      # load_skill gating in the Rig loop (edw, an
 cargo test --test skills_defi_data  # defi-data on recorded API responses (Docker); -- --ignored adds a live run
 cargo test --test skills_aave -- --ignored --nocapture   # pinned Aave addresses vs Aave's registry, then
                                     # supply + withdraw on a mainnet fork (network; ETH_RPC_URL, Docker, edw)
+EDW_TUI_E2E_RECORD=1 cargo test --test e2e_aave -- --ignored --nocapture   # the same through the real
+                                    # terminal: approve the skills, look up rates, supply, withdraw;
+                                    # asserts the mined receipts and balances, records
+                                    # target/e2e-screenshots/aave.mp4
 ```
 
 `edw_contract` is what should break when edw changes. To bump the pin: change

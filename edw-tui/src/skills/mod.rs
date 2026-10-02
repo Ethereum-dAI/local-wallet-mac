@@ -10,3 +10,4 @@ pub mod plan;
 pub const LOAD_SKILL: &str = "load_skill";
 pub mod host;
 pub mod sandbox;
+pub mod simulate;

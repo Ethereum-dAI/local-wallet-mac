@@ -547,6 +547,7 @@ async fn a_checked_skill_plan_is_simulated_reviewed_and_sent_in_order() {
                 send(ETHER * 3 / 10, "second"),
             ]),
             &names,
+            &context,
         )
         .await
         .unwrap();
@@ -571,12 +572,30 @@ async fn a_checked_skill_plan_is_simulated_reviewed_and_sent_in_order() {
     let error = interim
         .prepare_plan(
             "skill demo_send".into(),
-            header,
+            header.clone(),
             plan(vec![send(100 * ETHER, "too much")]),
             &names,
+            &context,
         )
         .await
         .err()
         .unwrap();
     assert!(error.contains("not enough ETH"), "{error}");
+
+    // The plan was checked for one sender; if the wallet's sender changed while the skill ran,
+    // `$self` in it means someone else, so nothing is built.
+    let mut stale = context.clone();
+    stale.me = BEEF;
+    let error = interim
+        .prepare_plan(
+            "skill demo_send".into(),
+            header,
+            plan(vec![send(ETHER / 5, "first")]),
+            &names,
+            &stale,
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(error.contains("changed while the skill ran"), "{error}");
 }

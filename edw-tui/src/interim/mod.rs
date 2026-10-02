@@ -886,8 +886,20 @@ impl Interim {
         header: Vec<String>,
         plan: CheckedPlan,
         names: &BTreeMap<Address, (String, u8)>,
+        checked_for: &SkillContext,
     ) -> Result<Prepared, String> {
         let account = self.account(None).await?;
+        // The plan's `$self` and contract ids were resolved for `checked_for`; if the session's
+        // network or sender changed while the script ran, they would mean something else.
+        if account.chain_id != checked_for.chain_id || account.address() != checked_for.me {
+            return Err(format!(
+                "the wallet changed while the skill ran (it was {} on chain {}, now {} on chain {}); nothing was sent",
+                checked_for.me,
+                checked_for.chain_id,
+                account.address(),
+                account.chain_id
+            ));
+        }
         let provider = ProviderBuilder::new().connect_http(account.rpc.clone());
         check_chain(&provider, &account).await?;
         let me = account.address();

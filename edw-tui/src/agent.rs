@@ -403,7 +403,7 @@ impl Shared {
         let names = self.skills.names(&skill, at.chain_id);
         let prepared = match self
             .interim
-            .prepare_plan(command.clone(), header, checked, &names)
+            .prepare_plan(command.clone(), header, checked, &names, &at)
             .await
         {
             Ok(prepared) => prepared,

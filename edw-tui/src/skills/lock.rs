@@ -105,6 +105,9 @@ pub struct LockEntry {
     pub version: String,
     pub hash: String,
     pub hosts: Vec<String>,
+    /// Turned off in the Skills tab: never offered, never asked about, until enabled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +118,8 @@ pub enum Status {
     Changed,
     /// Same content as agreed, but it declares an HTTP host that was not.
     MoreHosts,
+    /// Turned off by the user.
+    Disabled,
 }
 
 /// Agreed-to skills, keyed by each skill folder's absolute path: approval is for that folder,
@@ -155,6 +160,7 @@ impl Lock {
     pub fn status(&self, skill: &Skill, hash: &str) -> Status {
         match self.entries.get(&key(skill)) {
             None => Status::New,
+            Some(entry) if entry.disabled => Status::Disabled,
             Some(entry) if entry.hash != hash => Status::Changed,
             Some(_) if !self.is_trusted(skill, hash) => Status::MoreHosts,
             Some(_) => Status::Trusted,
@@ -163,7 +169,8 @@ impl Lock {
 
     pub fn is_trusted(&self, skill: &Skill, hash: &str) -> bool {
         self.entries.get(&key(skill)).is_some_and(|entry| {
-            entry.hash == hash
+            !entry.disabled
+                && entry.hash == hash
                 && skill
                     .manifest
                     .hosts
@@ -180,8 +187,40 @@ impl Lock {
                 version: skill.manifest.version.clone(),
                 hash,
                 hosts: skill.manifest.hosts.clone(),
+                disabled: false,
             },
         );
+        self.save()
+    }
+
+    /// Off until [`Lock::enable`]; its approval is gone too.
+    pub fn disable(&mut self, skill: &Skill) -> io::Result<()> {
+        self.entries.insert(
+            key(skill),
+            LockEntry {
+                name: skill.name.clone(),
+                version: skill.manifest.version.clone(),
+                hash: String::new(),
+                hosts: Vec::new(),
+                disabled: true,
+            },
+        );
+        self.save()
+    }
+
+    /// Forgets the skill, so the next start asks about it as new.
+    pub fn enable(&mut self, skill: &Skill) -> io::Result<()> {
+        self.entries.remove(&key(skill));
+        self.save()
+    }
+
+    /// Forgets a deleted folder.
+    pub fn forget(&mut self, dir: &Path) -> io::Result<()> {
+        self.entries.remove(&dir.display().to_string());
+        self.save()
+    }
+
+    fn save(&self) -> io::Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -329,6 +368,21 @@ mod tests {
         assert_eq!(lock.status(&skill, "h2"), Status::Changed);
         skill.manifest.hosts.push("example.com".into());
         assert_eq!(lock.status(&skill, "h1"), Status::MoreHosts);
+    }
+
+    #[test]
+    fn a_disabled_skill_is_not_trusted_and_enabling_forgets_it() {
+        let root = tempfile::tempdir().unwrap();
+        let skill = manifest::load(&skill_dir(root.path())).unwrap();
+        let path = root.path().join("skills.lock");
+        let mut lock = Lock::open(&path);
+        lock.trust(&skill, "h1".into()).unwrap();
+        lock.disable(&skill).unwrap();
+        let mut lock = Lock::open(&path);
+        assert_eq!(lock.status(&skill, "h1"), Status::Disabled);
+        assert!(!lock.is_trusted(&skill, "h1"));
+        lock.enable(&skill).unwrap();
+        assert_eq!(Lock::open(&path).status(&skill, "h1"), Status::New);
     }
 
     #[test]

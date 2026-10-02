@@ -17,6 +17,8 @@ pub enum SkillState {
     /// New, changed, or asking for more hosts than the user agreed to.
     NeedsConsent,
     Declined,
+    /// Turned off by the user in the Skills tab.
+    Disabled,
     /// Has scripts, and Docker is not available.
     NeedsDocker,
     Broken(String),
@@ -25,6 +27,8 @@ pub enum SkillState {
 #[derive(Clone, Debug)]
 pub struct Installed {
     pub skill: Option<Skill>,
+    /// The folder, also for a skill whose manifest does not load.
+    pub dir: PathBuf,
     pub name: String,
     pub hash: String,
     pub state: SkillState,
@@ -62,6 +66,7 @@ pub fn discover(dirs: &[PathBuf]) -> Vec<Installed> {
 fn inspect(path: &Path, name: String) -> Installed {
     let broken = |why: String| Installed {
         skill: None,
+        dir: path.to_owned(),
         name: name.clone(),
         hash: String::new(),
         state: SkillState::Broken(why),
@@ -72,6 +77,7 @@ fn inspect(path: &Path, name: String) -> Installed {
     };
     match hash_dir(path) {
         Ok(hash) => Installed {
+            dir: skill.dir.clone(),
             skill: Some(skill),
             name,
             hash,
@@ -84,11 +90,14 @@ fn inspect(path: &Path, name: String) -> Installed {
 /// Skills the lock already trusts become ready; the rest keep needing consent.
 pub fn apply_lock(installed: &mut [Installed], lock: &Lock) {
     for i in installed.iter_mut() {
-        if i.state == SkillState::NeedsConsent
-            && let Some(skill) = &i.skill
-            && lock.is_trusted(skill, &i.hash)
-        {
-            i.state = SkillState::Ready;
+        if i.state != SkillState::NeedsConsent {
+            continue;
+        }
+        let Some(skill) = &i.skill else { continue };
+        match lock.status(skill, &i.hash) {
+            super::lock::Status::Trusted => i.state = SkillState::Ready,
+            super::lock::Status::Disabled => i.state = SkillState::Disabled,
+            _ => {}
         }
     }
 }

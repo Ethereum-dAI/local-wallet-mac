@@ -1,7 +1,8 @@
 //! Skills: folders the agent loads on demand (see the README section "Skills").
 //!
-//! [`start`] finds them, asks the user about any that are new or changed, and returns the
-//! ready ones as a [`tools::SkillSet`] for the agent.
+//! [`discover`] finds them and lays out approval cards for any that are new or changed;
+//! [`finish`] applies the answers and returns the ready ones as a [`tools::SkillSet`].
+//! [`add`], [`disable`], [`enable`] and [`delete`] back the TUI's Skills tab.
 
 pub mod abi;
 pub mod catalog;
@@ -14,7 +15,12 @@ pub mod sandbox;
 pub mod simulate;
 pub mod tools;
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use catalog::{Installed, SkillState};
 
@@ -25,13 +31,17 @@ pub const LOAD_SKILL: &str = "load_skill";
 /// protocol helper is not here: it is compiled in (`sandbox::SDK`).
 #[derive(Clone, Debug)]
 pub struct Paths {
+    /// Shipped skills (the repo's `skills/`); never deleted from the TUI.
     pub dirs: Vec<PathBuf>,
+    /// Skills the user added from the Skills tab are copied here.
+    pub user_dir: PathBuf,
     pub lock: PathBuf,
 }
 
 impl Paths {
-    /// `EDW_TUI_SKILLS_DIR` (`:`-separated, default `skills`) and `EDW_TUI_SKILLS_LOCK`
-    /// (default `~/.config/edw-tui/skills.lock`, see [`lock::default_path`]).
+    /// `EDW_TUI_SKILLS_DIR` (`:`-separated, default `skills`), `EDW_TUI_SKILLS_USER_DIR`
+    /// (default `~/.config/edw-tui/skills`) and `EDW_TUI_SKILLS_LOCK` (default
+    /// `~/.config/edw-tui/skills.lock`, see [`lock::default_path`]).
     pub fn from_env() -> Self {
         let dirs: Vec<PathBuf> = std::env::var("EDW_TUI_SKILLS_DIR")
             .unwrap_or_else(|_| "skills".into())
@@ -47,7 +57,163 @@ impl Paths {
                     std::env::var("HOME").ok().as_deref(),
                 )
             });
-        Self { dirs, lock }
+        let user_dir = std::env::var("EDW_TUI_SKILLS_USER_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| lock.with_file_name("skills"));
+        Self {
+            dirs,
+            user_dir,
+            lock,
+        }
+    }
+
+    /// Shipped folders first, then the user's.
+    fn all_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = self.dirs.clone();
+        dirs.push(self.user_dir.clone());
+        dirs
+    }
+
+    fn origin(&self, dir: &Path) -> Origin {
+        let user = fs::canonicalize(&self.user_dir).unwrap_or_else(|_| self.user_dir.clone());
+        if dir.starts_with(&user) || dir.starts_with(&self.user_dir) {
+            Origin::Added
+        } else {
+            Origin::Shipped
+        }
+    }
+}
+
+/// Where a skill came from: shipped with edw-tui, or added by the user (and deletable).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Shipped,
+    Added,
+}
+
+/// One line of the Skills tab, with the details shown for the selected one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillRow {
+    pub name: String,
+    pub version: String,
+    /// ready, disabled, declined, needs approval, needs Docker, unavailable
+    pub state: String,
+    /// Why a skill is unavailable.
+    pub note: Option<String>,
+    pub description: String,
+    pub origin: Origin,
+    pub dir: PathBuf,
+    pub details: Option<consent::ConsentRequest>,
+}
+
+pub fn rows(installed: &[Installed], paths: &Paths) -> Vec<SkillRow> {
+    installed
+        .iter()
+        .map(|i| {
+            let (state, note) = match &i.state {
+                SkillState::Ready => ("ready", None),
+                SkillState::NeedsConsent => ("needs approval", None),
+                SkillState::Declined => ("declined", None),
+                SkillState::Disabled => ("disabled", None),
+                SkillState::NeedsDocker => ("needs Docker", None),
+                SkillState::Broken(why) => ("unavailable", Some(why.clone())),
+            };
+            SkillRow {
+                name: i.name.clone(),
+                version: i
+                    .skill
+                    .as_ref()
+                    .map_or(String::new(), |s| plan::one_line(&s.manifest.version)),
+                state: state.to_owned(),
+                note,
+                description: i
+                    .skill
+                    .as_ref()
+                    .map_or(String::new(), |s| plan::one_line(&s.description)),
+                origin: paths.origin(&i.dir),
+                dir: i.dir.clone(),
+                details: i
+                    .skill
+                    .as_ref()
+                    .map(|s| consent::ConsentRequest::new(s, &i.hash, consent::Reason::New)),
+            }
+        })
+        .collect()
+}
+
+fn installed_named(paths: &Paths, name: &str) -> Result<Installed, String> {
+    catalog::discover(&paths.all_dirs())
+        .into_iter()
+        .find(|i| i.name == name)
+        .ok_or_else(|| format!("there is no skill named {name}"))
+}
+
+/// Turns a skill off: no longer offered or asked about, until [`enable`].
+pub fn disable(paths: &Paths, name: &str) -> Result<(), String> {
+    let installed = installed_named(paths, name)?;
+    let skill = installed
+        .skill
+        .ok_or_else(|| format!("{name} does not load, so there is nothing to disable"))?;
+    lock::Lock::open(&paths.lock)
+        .disable(&skill)
+        .map_err(|e| format!("cannot write {}: {e}", paths.lock.display()))
+}
+
+/// Turns a disabled skill back on; its approval card is shown again before it may run.
+pub fn enable(paths: &Paths, name: &str) -> Result<(), String> {
+    let installed = installed_named(paths, name)?;
+    let skill = installed
+        .skill
+        .ok_or_else(|| format!("{name} does not load: {}", describe_state(&installed.state)))?;
+    lock::Lock::open(&paths.lock)
+        .enable(&skill)
+        .map_err(|e| format!("cannot write {}: {e}", paths.lock.display()))
+}
+
+/// Copies the skill folder at `source` into the user's skills folder, after the same checks
+/// a skill gets on start (it loads, no symlinks, no compiled code). It is not trusted: its
+/// approval card comes next. Returns its name.
+pub fn add(paths: &Paths, source: &Path) -> Result<String, String> {
+    let skill = manifest::load(source)?;
+    lock::hash_dir(&skill.dir).map_err(|e| format!("{}: {e}", skill.name))?;
+    if installed_named(paths, &skill.name).is_ok() {
+        return Err(format!("a skill named {} is already installed", skill.name));
+    }
+    let target = paths.user_dir.join(&skill.name);
+    if target.exists() {
+        return Err(format!("{} already exists", target.display()));
+    }
+    fs::create_dir_all(&target).map_err(|e| format!("cannot create {}: {e}", target.display()))?;
+    if let Err(error) = lock::snapshot(&skill.dir, &target) {
+        let _ = fs::remove_dir_all(&target);
+        return Err(format!("{}: {error}", skill.name));
+    }
+    Ok(skill.name)
+}
+
+/// Deletes a skill the user added (never a shipped one) and forgets its approval.
+pub fn delete(paths: &Paths, name: &str) -> Result<(), String> {
+    let installed = installed_named(paths, name)?;
+    if paths.origin(&installed.dir) != Origin::Added {
+        return Err(format!(
+            "{name} is shipped with edw-tui, so it is not deleted; disable it instead"
+        ));
+    }
+    fs::remove_dir_all(&installed.dir)
+        .map_err(|e| format!("cannot delete {}: {e}", installed.dir.display()))?;
+    lock::Lock::open(&paths.lock)
+        .forget(&installed.dir)
+        .map_err(|e| format!("cannot write {}: {e}", paths.lock.display()))
+}
+
+fn describe_state(state: &SkillState) -> String {
+    match state {
+        SkillState::Ready => "ready".to_owned(),
+        SkillState::NeedsConsent => "needs consent (restart to be asked)".to_owned(),
+        SkillState::Declined => "declined this session".to_owned(),
+        SkillState::Disabled => "disabled (enable it in the Skills tab)".to_owned(),
+        SkillState::NeedsDocker => "needs Docker".to_owned(),
+        SkillState::Broken(why) => format!("unavailable: {why}"),
     }
 }
 
@@ -69,7 +235,7 @@ pub struct Discovery {
 
 /// Finds skills and checks them against the lock, without asking anything yet.
 pub fn discover(paths: &Paths) -> Discovery {
-    let mut installed = catalog::discover(&paths.dirs);
+    let mut installed = catalog::discover(&paths.all_dirs());
     let lock = lock::Lock::open(&paths.lock);
     catalog::apply_lock(&mut installed, &lock);
     let requests = installed
@@ -163,13 +329,7 @@ pub fn describe(installed: &[Installed]) -> Vec<String> {
     installed
         .iter()
         .map(|i| {
-            let state = match &i.state {
-                SkillState::Ready => "ready".to_owned(),
-                SkillState::NeedsConsent => "needs consent (restart to be asked)".to_owned(),
-                SkillState::Declined => "declined this session".to_owned(),
-                SkillState::NeedsDocker => "needs Docker".to_owned(),
-                SkillState::Broken(why) => format!("unavailable: {why}"),
-            };
+            let state = describe_state(&i.state);
             let description = i
                 .skill
                 .as_ref()
@@ -203,6 +363,7 @@ mod tests {
         knowledge_skill(root.path(), "beta");
         let paths = Paths {
             dirs: vec![root.path().to_owned()],
+            user_dir: root.path().join("user"),
             lock: root.path().join("state/skills.lock"),
         };
         let found = discover(&paths);
@@ -237,10 +398,147 @@ mod tests {
         knowledge_skill(root.path(), "alpha");
         let paths = Paths {
             dirs: vec![root.path().to_owned()],
+            user_dir: root.path().join("user"),
             lock: root.path().join("skills.lock"),
         };
         let startup = finish(discover(&paths), &BTreeMap::new()).await;
         assert!(startup.set.catalog.skills.is_empty());
         assert!(!paths.lock.exists());
+    }
+
+    /// A shipped skill folder, a user folder for added ones, and a lock, all throwaway.
+    fn layout(root: &std::path::Path) -> Paths {
+        knowledge_skill(&root.join("skills"), "alpha");
+        Paths {
+            dirs: vec![root.join("skills")],
+            user_dir: root.join("user"),
+            lock: root.join("skills.lock"),
+        }
+    }
+
+    async fn ready_names(paths: &Paths, answers: &[(&str, bool)]) -> Vec<String> {
+        let answers = answers.iter().map(|(n, a)| (n.to_string(), *a)).collect();
+        let startup = finish(discover(paths), &answers).await;
+        startup
+            .set
+            .catalog
+            .skills
+            .iter()
+            .map(|s| s.name.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_disabled_skill_stays_out_until_enabled_and_approved_again() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = layout(root.path());
+        assert_eq!(ready_names(&paths, &[("alpha", true)]).await, ["alpha"]);
+
+        disable(&paths, "alpha").unwrap();
+        let found = discover(&paths);
+        assert!(
+            found.requests.is_empty(),
+            "a disabled skill is not asked about"
+        );
+        let startup = finish(found, &BTreeMap::new()).await;
+        assert!(startup.set.catalog.skills.is_empty());
+        assert!(
+            describe(&startup.installed)[0].contains("disabled"),
+            "{:?}",
+            describe(&startup.installed)
+        );
+
+        enable(&paths, "alpha").unwrap();
+        let asked: Vec<String> = discover(&paths)
+            .requests
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(asked, ["alpha"], "enabling asks for approval again");
+        assert_eq!(ready_names(&paths, &[("alpha", true)]).await, ["alpha"]);
+        assert!(disable(&paths, "nope").unwrap_err().contains("nope"));
+    }
+
+    #[test]
+    fn adding_copies_a_checked_folder_into_the_user_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = layout(root.path());
+        let elsewhere = root.path().join("downloads");
+        knowledge_skill(&elsewhere, "gamma");
+
+        assert_eq!(add(&paths, &elsewhere.join("gamma")).unwrap(), "gamma");
+        assert!(paths.user_dir.join("gamma/SKILL.md").exists());
+        let found = discover(&paths);
+        let request = found.requests.iter().find(|r| r.name == "gamma").unwrap();
+        assert_eq!(request.reason, Reason::New);
+
+        assert!(
+            add(&paths, &elsewhere.join("gamma"))
+                .unwrap_err()
+                .contains("already")
+        );
+        knowledge_skill(&elsewhere, "alpha");
+        assert!(
+            add(&paths, &elsewhere.join("alpha"))
+                .unwrap_err()
+                .contains("already")
+        );
+
+        // Refused folders are not copied.
+        std::fs::create_dir_all(elsewhere.join("empty")).unwrap();
+        assert!(
+            add(&paths, &elsewhere.join("empty"))
+                .unwrap_err()
+                .contains("SKILL.md")
+        );
+        knowledge_skill(&elsewhere, "linked");
+        std::os::unix::fs::symlink("/etc/hosts", elsewhere.join("linked/hosts")).unwrap();
+        assert!(
+            add(&paths, &elsewhere.join("linked"))
+                .unwrap_err()
+                .contains("symlink")
+        );
+        assert!(!paths.user_dir.join("linked").exists());
+        assert!(!paths.user_dir.join("empty").exists());
+    }
+
+    #[test]
+    fn only_added_skills_can_be_deleted() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = layout(root.path());
+        knowledge_skill(&root.path().join("downloads"), "gamma");
+        add(&paths, &root.path().join("downloads/gamma")).unwrap();
+
+        assert!(delete(&paths, "alpha").unwrap_err().contains("shipped"));
+        assert!(root.path().join("skills/alpha").exists());
+        delete(&paths, "gamma").unwrap();
+        assert!(!paths.user_dir.join("gamma").exists());
+        assert!(delete(&paths, "gamma").unwrap_err().contains("gamma"));
+    }
+
+    #[tokio::test]
+    async fn rows_list_every_skill_with_where_it_comes_from() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = layout(root.path());
+        knowledge_skill(&root.path().join("downloads"), "gamma");
+        add(&paths, &root.path().join("downloads/gamma")).unwrap();
+        let startup = finish(discover(&paths), &BTreeMap::from([("alpha".into(), true)])).await;
+        let rows = rows(&startup.installed, &paths);
+        let summary: Vec<(&str, &str, Origin)> = rows
+            .iter()
+            .map(|r| (r.name.as_str(), r.state.as_str(), r.origin))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("alpha", "ready", Origin::Shipped),
+                ("gamma", "declined", Origin::Added)
+            ]
+        );
+        assert_eq!(rows[0].description, "about alpha");
+        assert!(
+            rows[0].details.is_some(),
+            "details for the selected skill's panel"
+        );
     }
 }

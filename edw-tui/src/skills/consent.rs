@@ -15,7 +15,7 @@ pub enum Reason {
 impl Reason {
     pub fn from_status(status: Status) -> Option<Self> {
         match status {
-            Status::Trusted => None,
+            Status::Trusted | Status::Disabled => None,
             Status::New => Some(Self::New),
             Status::Changed => Some(Self::Changed),
             Status::MoreHosts => Some(Self::MoreHosts),

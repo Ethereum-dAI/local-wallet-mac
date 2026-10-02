@@ -168,6 +168,10 @@ struct RawTool {
 
 /// Reads and validates one skill folder. Errors name the file and the field at fault.
 pub fn load(dir: &Path) -> Result<Skill, String> {
+    // Absolute from here on: it is mounted into Docker, which reads a relative `-v` source as
+    // a volume name.
+    let dir = &fs::canonicalize(dir)
+        .map_err(|e| format!("{}: cannot open the skill folder ({e})", dir.display()))?;
     let folder = dir
         .file_name()
         .and_then(|n| n.to_str())

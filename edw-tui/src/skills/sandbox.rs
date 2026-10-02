@@ -51,7 +51,8 @@ impl Runner {
     pub fn from_env(sdk: std::path::PathBuf) -> Self {
         Self {
             image: std::env::var("EDW_TUI_SKILL_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.into()),
-            sdk,
+            // Docker needs an absolute mount source (see `manifest::load`).
+            sdk: std::fs::canonicalize(&sdk).unwrap_or(sdk),
             timeout: TIMEOUT,
         }
     }

@@ -121,6 +121,29 @@ fn every_lockdown_flag_is_passed() {
     assert!(args.last().unwrap().ends_with("/skill/scripts/probe.py"));
 }
 
+/// The README's defaults are relative (`skills`, `skills/_sdk`); Docker reads a relative `-v`
+/// source as a volume name, so every mount must be absolute by the time it is passed.
+#[tokio::test]
+async fn relative_skill_and_sdk_paths_still_mount_the_real_folders() {
+    // cargo runs integration tests from the crate root.
+    let skill = manifest::load(Path::new("tests/fixtures/skills/probe")).unwrap();
+    let runner = Runner::from_env(PathBuf::from("skills/_sdk"));
+    let args = runner.docker_args(&skill, "scripts/probe.py", "edw-skill-test");
+    let mounts: Vec<&String> = args
+        .windows(2)
+        .filter(|w| w[0] == "-v")
+        .map(|w| &w[1])
+        .collect();
+    assert_eq!(mounts.len(), 2, "{args:?}");
+    assert!(mounts.iter().all(|m| m.starts_with('/')), "{mounts:?}");
+    if !docker().await {
+        return;
+    }
+    let invoke = json!({"type": "invoke", "tool": "probe_echo", "args": {"mode": "echo"}, "context": {}});
+    let value = result(runner.run(&skill, "scripts/probe.py", invoke, &host(&[])).await);
+    assert_eq!(value["args"]["mode"], "echo");
+}
+
 #[tokio::test]
 async fn a_script_round_trips_invoke_and_result() {
     if !docker().await {

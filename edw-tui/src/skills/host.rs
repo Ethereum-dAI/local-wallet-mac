@@ -198,16 +198,36 @@ impl Host {
             .rpc
             .clone()
             .ok_or("no RPC endpoint: unlock a network first")?;
-        let response: Value = self
+        // Errors never name the URL: RPC URLs often carry an API key, and this text goes back
+        // to the script, which may send it to one of its declared hosts.
+        let mut answer = self
             .http
             .post(url)
             .json(&json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
             .send()
             .await
-            .map_err(|e| format!("{method}: {e}"))?
-            .json()
-            .await
-            .map_err(|e| format!("{method}: {e}"))?;
+            .map_err(|e| {
+                format!(
+                    "{method}: the RPC node could not be reached ({})",
+                    e.without_url()
+                )
+            })?;
+        let status = answer.status();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = answer.chunk().await.map_err(|e| {
+            format!(
+                "{method}: reading the RPC answer failed ({})",
+                e.without_url()
+            )
+        })? {
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() > MAX_BODY {
+                return Err(format!("{method}: the RPC answer is over 16 MiB"));
+            }
+        }
+        let response: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            format!("{method}: the RPC node answered HTTP {status} without JSON-RPC")
+        })?;
         if let Some(error) = response.get("error") {
             return Err(format!("{method}: {error}"));
         }
@@ -425,6 +445,53 @@ mod tests {
             .await;
         assert_eq!(reply["ok"], false);
         assert!(reply["error"].as_str().unwrap().contains("10000"));
+    }
+
+    /// RPC URLs often carry an API key in the path; a script must never see it, not even in
+    /// an error. This node answers with something that is not JSON-RPC.
+    #[tokio::test]
+    async fn rpc_errors_never_carry_the_rpc_url() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 4\r\n\r\nnope")
+                    .await;
+            }
+        });
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let sink = log.clone();
+        let host = Host::new(
+            HostConfig {
+                skill: "demo".into(),
+                hosts: vec![],
+                cache: BTreeMap::new(),
+                rpc: Some(
+                    format!("http://127.0.0.1:{port}/v2/SECRETKEY")
+                        .parse()
+                        .unwrap(),
+                ),
+                fixtures: None,
+                log: Arc::new(move |line| sink.lock().unwrap().push(line)),
+            },
+            SharedCache::default(),
+        );
+        for request in [
+            json!({"type": "eth_chainId", "id": 1}),
+            json!({"type": "eth_call", "id": 2, "to": "0x000000000000000000000000000000000000bEEF", "data": "0x"}),
+        ] {
+            let reply = host.handle(&request).await;
+            assert_eq!(reply["ok"], false, "{reply}");
+            assert!(!reply.to_string().contains("SECRETKEY"), "{reply}");
+            assert!(!reply.to_string().contains(&port.to_string()), "{reply}");
+        }
     }
 
     #[test]

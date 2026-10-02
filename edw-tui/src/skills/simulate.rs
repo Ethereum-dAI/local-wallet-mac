@@ -73,11 +73,14 @@ pub async fn simulate(
         .json(&request)
         .send()
         .await
-        .map_err(|e| format!("cannot reach the node at {rpc}: {e}"))?
+        .map_err(|e| format!("cannot reach the node ({})", e.without_url()))?
         .json()
         .await
         .map_err(|e| {
-            format!("the node at {rpc} answered with something that is not JSON-RPC: {e}")
+            format!(
+                "the node answered with something that is not JSON-RPC ({})",
+                e.without_url()
+            )
         })?;
     if let Some(error) = response.get("error") {
         return Err(rpc_error(error));

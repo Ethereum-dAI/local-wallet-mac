@@ -53,6 +53,8 @@ impl Host {
     pub fn new(config: HostConfig, cache: SharedCache) -> Self {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Some APIs (CoinGecko) answer 403 to a request with no User-Agent.
+            .user_agent(concat!("edw-tui/", env!("CARGO_PKG_VERSION")))
             .timeout(HTTP_TIMEOUT)
             .build()
             .expect("a client with static settings builds");
@@ -537,6 +539,49 @@ mod tests {
             assert!(!reply.to_string().contains("SECRETKEY"), "{reply}");
             assert!(!reply.to_string().contains(&port.to_string()), "{reply}");
         }
+    }
+
+    /// Some APIs (CoinGecko) refuse requests without a User-Agent with a 403.
+    #[tokio::test]
+    async fn http_requests_identify_edw_tui() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (seen_tx, seen) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            let _ = seen_tx.send(String::from_utf8_lossy(&buf[..n]).to_lowercase());
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#;
+            let _ = socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+        });
+        let host = Host::new(
+            HostConfig {
+                skill: "demo".into(),
+                hosts: vec![],
+                cache: BTreeMap::new(),
+                rpc: Some(format!("http://127.0.0.1:{port}/").parse().unwrap()),
+                fixtures: None,
+                log: Arc::new(|_| {}),
+            },
+            SharedCache::default(),
+        );
+        let reply = host.handle(&json!({"type": "eth_chainId", "id": 1})).await;
+        assert_eq!(reply["ok"], true, "{reply}");
+        let request = seen.await.unwrap();
+        assert!(request.contains("user-agent: edw-tui/"), "{request}");
     }
 
     #[test]

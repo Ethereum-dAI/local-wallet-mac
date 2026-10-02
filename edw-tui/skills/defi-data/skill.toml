@@ -1,12 +1,14 @@
-version = "0.1.0"
-hosts = ["yields.llama.fi", "api.geckoterminal.com", "api.dexscreener.com"]
+version = "0.2.0"
+# yields.llama.fi: pools and their history. api.llama.fi and api.coingecko.com: chain lists, so
+# any way of naming a chain resolves. GeckoTerminal and DexScreener: live DEX pool numbers.
+hosts = ["yields.llama.fi", "api.llama.fi", "api.coingecko.com", "api.geckoterminal.com", "api.dexscreener.com"]
 
 [[read_tool]]
 name = "top_yields"
 run = "scripts/top_yields.py"
-description = "The best DeFi pools or lending markets by recent yield (DefiLlama): project, symbol, APY, 30-day mean APY, TVL, 7-day volume, impermanent-loss risk, pool_id."
-cache = { "https://yields.llama.fi/pools" = "15m" }
-schema = { type = "object", required = ["chain"], properties = { chain = { type = "string", description = "e.g. Ethereum, Base, Arbitrum." }, project = { type = "string", description = "e.g. uniswap-v3, aave-v3, lido." }, symbol = { type = "string", description = "A token the pool holds, e.g. USDC." }, kind = { type = "string", enum = ["lend", "lp", "stake"] }, min_tvl_usd = { type = "number", description = "Defaults to 1000000." }, limit = { type = "integer", description = "At most 10; defaults to 5." } } }
+description = "The best DeFi pools or lending markets by recent yield (DefiLlama): project, symbol, APY, 30-day mean APY, TVL, 7-day volume, impermanent-loss risk, pool_id. chain may be any name, short name or chain id; it defaults to the wallet's chain."
+cache = { "https://yields.llama.fi/pools" = "15m", "https://api.coingecko.com/api/v3/asset_platforms" = "24h", "https://api.llama.fi/v2/chains" = "24h" }
+schema = { type = "object", properties = { chain = { type = "string", description = "e.g. Ethereum, Base, Arbitrum, or a chain id. Omit for the wallet's chain." }, project = { type = "string", description = "e.g. uniswap-v3, aave-v3, lido." }, symbol = { type = "string", description = "A token the pool holds, e.g. USDC." }, kind = { type = "string", enum = ["lend", "lp", "stake"], description = "Omit for all kinds." }, min_tvl_usd = { type = "number", description = "Defaults to 1000000." }, limit = { type = "integer", description = "At most 10; defaults to 5." } } }
 
 [[read_tool]]
 name = "yield_history"
@@ -19,4 +21,5 @@ schema = { type = "object", required = ["pool_id"], properties = { pool_id = { t
 name = "dex_pool"
 run = "scripts/dex_pool.py"
 description = "Live price, liquidity and 24h volume of one DEX pool by its contract address (GeckoTerminal, DexScreener as fallback)."
-schema = { type = "object", required = ["chain", "address"], properties = { chain = { type = "string", description = "e.g. Ethereum, Base." }, address = { type = "string", description = "The pool's 0x address." } } }
+cache = { "https://api.coingecko.com/api/v3/asset_platforms" = "24h", "https://api.llama.fi/v2/chains" = "24h" }
+schema = { type = "object", required = ["address"], properties = { chain = { type = "string", description = "e.g. Ethereum, Base. Omit for the wallet's chain." }, address = { type = "string", description = "The pool's 0x address." } } }

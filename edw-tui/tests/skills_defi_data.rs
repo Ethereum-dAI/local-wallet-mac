@@ -35,6 +35,14 @@ fn fixtures() -> BTreeMap<String, String> {
     BTreeMap::from([
         (format!("GET {POOLS}"), fixture("pools_trimmed.json")),
         (
+            "GET https://api.coingecko.com/api/v3/asset_platforms".into(),
+            fixture("asset_platforms.json"),
+        ),
+        (
+            "GET https://api.llama.fi/v2/chains".into(),
+            fixture("llama_chains.json"),
+        ),
+        (
             "GET https://yields.llama.fi/chart/fc9f488e-8183-416f-a61e-4e5c571d4395".into(),
             fixture("chart.json"),
         ),
@@ -50,6 +58,16 @@ fn fixtures() -> BTreeMap<String, String> {
 }
 
 async fn call(
+    tool: &str,
+    args: Value,
+    fixtures: Option<BTreeMap<String, String>>,
+) -> Result<Value, String> {
+    call_on(1, tool, args, fixtures).await
+}
+
+/// As [`call`], with the wallet on `chain_id`.
+async fn call_on(
+    chain_id: u64,
     tool: &str,
     args: Value,
     fixtures: Option<BTreeMap<String, String>>,
@@ -73,7 +91,7 @@ async fn call(
         timeout: Duration::from_secs(60),
         ..Runner::from_env()
     };
-    let invoke = sandbox::invoke_message(tool, &args, json!({"chain_id": 1, "network": "mainnet"}));
+    let invoke = sandbox::invoke_message(tool, &args, json!({"chain_id": chain_id}));
     match runner.run(&skill, &def.run, invoke, &host).await? {
         Output::Result(value) => Ok(value),
         Output::Plan(plan) => panic!("a read tool returned a plan: {plan}"),
@@ -104,12 +122,14 @@ fn symbols(value: &Value) -> Vec<String> {
 }
 
 #[test]
-fn the_skill_declares_only_its_three_hosts_and_no_contracts() {
+fn the_skill_declares_only_its_hosts_and_no_contracts() {
     let skill = skill();
     assert_eq!(
         skill.manifest.hosts,
         [
             "yields.llama.fi",
+            "api.llama.fi",
+            "api.coingecko.com",
             "api.geckoterminal.com",
             "api.dexscreener.com"
         ]
@@ -280,4 +300,123 @@ async fn live_top_yields() {
     .unwrap();
     eprintln!("{value:#}");
     assert!(!value["rows"].as_array().unwrap().is_empty());
+}
+
+/// The model writes chains every way: names, "mainnet", ids, short names. All resolve through
+/// CoinGecko's platform list and DefiLlama's chain list to the names DefiLlama's pools use.
+#[tokio::test]
+async fn chains_resolve_however_they_are_written() {
+    if !docker().await {
+        return;
+    }
+    let ethereum = call(
+        "top_yields",
+        json!({"chain": "Ethereum", "project": "uniswap-v3", "limit": 3}),
+        Some(fixtures()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !ethereum["rows"].as_array().unwrap().is_empty(),
+        "{ethereum}"
+    );
+    for asked in ["Ethereum Mainnet", "mainnet", "1", "ETH", "ethereum"] {
+        let value = call(
+            "top_yields",
+            json!({"chain": asked, "project": "uniswap-v3", "limit": 3}),
+            Some(fixtures()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(value["rows"], ethereum["rows"], "{asked}: {value}");
+        assert_eq!(value["chain"]["name"], "Ethereum", "{asked}");
+        assert_eq!(value["chain"]["chain_id"], 1, "{asked}");
+    }
+    let base = call(
+        "top_yields",
+        json!({"chain": "base mainnet"}),
+        Some(fixtures()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(base["chain"]["name"], "Base", "{base}");
+    assert!(
+        base["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["project"] == "aerodrome-slipstream"),
+        "{base}"
+    );
+}
+
+#[tokio::test]
+async fn no_chain_means_the_wallets_chain_and_a_testnet_falls_back_to_ethereum() {
+    if !docker().await {
+        return;
+    }
+    let base = call_on(8453, "top_yields", json!({}), Some(fixtures()))
+        .await
+        .unwrap();
+    assert_eq!(base["chain"]["name"], "Base", "{base}");
+    let sepolia = call_on(
+        11_155_111,
+        "top_yields",
+        json!({"kind": "lend"}),
+        Some(fixtures()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sepolia["chain"]["name"], "Ethereum", "{sepolia}");
+    assert!(
+        sepolia["chain"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("testnet"),
+        "{sepolia}"
+    );
+}
+
+/// CoinGecko down or rate-limited: names still resolve through DefiLlama's own chain list.
+#[tokio::test]
+async fn chains_still_resolve_when_coingecko_is_unavailable() {
+    if !docker().await {
+        return;
+    }
+    let mut limited = fixtures();
+    limited.insert(
+        "GET https://api.coingecko.com/api/v3/asset_platforms".into(),
+        "status:429\n{}".into(),
+    );
+    let value = call(
+        "top_yields",
+        json!({"chain": "Ethereum Mainnet", "project": "uniswap-v3"}),
+        Some(limited),
+    )
+    .await
+    .unwrap();
+    assert_eq!(value["chain"]["name"], "Ethereum", "{value}");
+    assert!(!value["rows"].as_array().unwrap().is_empty(), "{value}");
+}
+
+#[tokio::test]
+async fn an_unknown_chain_suggests_the_closest_ones() {
+    if !docker().await {
+        return;
+    }
+    let error = call("top_yields", json!({"chain": "Etherium"}), Some(fixtures()))
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("Etherium") && error.contains("Ethereum"),
+        "{error}"
+    );
+    let dex = call(
+        "dex_pool",
+        json!({"chain": "Ethereum Mainnet", "address": WETH_USDC}),
+        Some(fixtures()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(dex["source"], "GeckoTerminal", "{dex}");
 }

@@ -2,6 +2,7 @@
 
 import json
 
+import chains
 import edw_skill
 
 SOURCE = "DefiLlama yields (yields.llama.fi)"
@@ -37,10 +38,9 @@ def apy_of(pool):
 
 
 def main():
-    _, args, _ = edw_skill.invoke()
-    chain = str(args.get("chain", "")).strip()
-    if not chain:
-        edw_skill.fail("top_yields needs a chain, e.g. Ethereum")
+    _, args, context = edw_skill.invoke()
+    chain = chains.resolve(args.get("chain"), context)
+    names = set(chain["names"])
     project = args.get("project")
     symbol = args.get("symbol")
     kind = args.get("kind")
@@ -50,7 +50,7 @@ def main():
     pools = json.loads(edw_skill.http_get("https://yields.llama.fi/pools"))["data"]
     rows = []
     for pool in pools:
-        if str(pool.get("chain", "")).lower() != chain.lower():
+        if pool.get("chain") not in names:
             continue
         if project and pool.get("project") != project:
             continue
@@ -67,6 +67,7 @@ def main():
     rows.sort(key=lambda row: row[0], reverse=True)
     edw_skill.result({
         "source": SOURCE,
+        "chain": {k: v for k, v in chain.items() if k != "names"},
         "note": "APY is past performance over DefiLlama's window, not a promise.",
         "matched": len(rows),
         "rows": [

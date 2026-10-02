@@ -3,15 +3,18 @@
 import json
 import re
 
+import chains
 import edw_skill
 
-# chain name → (GeckoTerminal network, DexScreener chain)
-CHAINS = {
-    "ethereum": ("eth", "ethereum"),
-    "base": ("base", "base"),
-    "arbitrum": ("arbitrum", "arbitrum"),
-    "optimism": ("optimism", "optimism"),
-    "polygon": ("polygon_pos", "polygon"),
+# chain id → (GeckoTerminal network, DexScreener chain)
+NETWORKS = {
+    1: ("eth", "ethereum"),
+    8453: ("base", "base"),
+    42161: ("arbitrum", "arbitrum"),
+    10: ("optimism", "optimism"),
+    137: ("polygon_pos", "polygon"),
+    56: ("bsc", "bsc"),
+    43114: ("avax", "avalanche"),
 }
 
 
@@ -23,14 +26,15 @@ def number(value):
 
 
 def main():
-    _, args, _ = edw_skill.invoke()
-    chain = str(args.get("chain", ""))
+    _, args, context = edw_skill.invoke()
     address = str(args.get("address", "")).lower()
     if not re.fullmatch(r"0x[0-9a-f]{40}", address):
         edw_skill.fail("dex_pool needs the pool's 0x address (40 hex characters)")
-    networks = CHAINS.get(chain.lower())
+    resolved = chains.resolve(args.get("chain"), context)
+    chain = resolved["name"]
+    networks = NETWORKS.get(resolved["chain_id"])
     if networks is None:
-        edw_skill.fail(f"dex_pool has no data for {chain}; it knows {', '.join(sorted(CHAINS))}")
+        edw_skill.fail(f"dex_pool has no pool data for {chain}")
     gecko, screener = networks
 
     status, body = edw_skill.http_get_status(

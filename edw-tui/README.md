@@ -78,7 +78,10 @@ skills. The system prompt lists each skill's name and one-line description; the 
 `load_skill` to read its instructions, and only then are its tools offered. Two ship here:
 
 - `defi-data`: past yields, TVL and volume of DeFi pools and lending markets, from
-  DefiLlama, GeckoTerminal and DexScreener (no API keys). Read-only.
+  DefiLlama, GeckoTerminal and DexScreener (no API keys). Read-only. A chain may be written
+  any way ("Ethereum Mainnet", "mainnet", "Arbitrum One", "1"): CoinGecko's platform list and
+  DefiLlama's chain list resolve it, and with none given it is the wallet's chain (Ethereum
+  when the wallet is on a testnet).
 - `aave-v3-lend`: supply USDC, USDT or DAI to Aave v3 and withdraw it, on Sepolia (Aave's faucet
   tokens) or an anvil mainnet fork. Requires `defi-data`.
 

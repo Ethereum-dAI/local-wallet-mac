@@ -195,6 +195,8 @@ mod tests {
             request.hosts,
             [
                 "yields.llama.fi",
+                "api.llama.fi",
+                "api.coingecko.com",
                 "api.geckoterminal.com",
                 "api.dexscreener.com"
             ]

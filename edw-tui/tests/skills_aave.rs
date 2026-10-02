@@ -236,7 +236,7 @@ async fn supplies_and_withdraws_usdc_on_a_mainnet_fork() {
     for needle in [
         "Skill    aave-v3-lend",
         "approve 100 USDC for Aave Pool",
-        "Aave Pool.supply(asset=USDC, amount=100000000, onBehalfOf=you, referralCode=0)",
+        "Aave Pool.supply(asset=USDC, amount=100 USDC (100000000), onBehalfOf=you, referralCode=0)",
         "−100 USDC",
         "aUSDC",
     ] {

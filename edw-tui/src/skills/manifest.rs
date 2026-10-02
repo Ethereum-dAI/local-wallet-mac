@@ -45,6 +45,9 @@ pub struct ContractDef {
     pub label: String,
     pub functions: Vec<Function>,
     pub address: BTreeMap<u64, Address>,
+    /// function → uint parameter → the address parameter holding its token, so the review can
+    /// show that amount in the token's units (`amount=2.5 USDC (2500000)`).
+    pub amounts: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// An ERC-20 the skill names. `movable` tokens may be approved by a plan; the others are only
@@ -135,6 +138,8 @@ struct RawContract {
     label: Option<String>,
     functions: Vec<String>,
     address: BTreeMap<String, String>,
+    #[serde(default)]
+    amounts: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize)]
@@ -363,6 +368,45 @@ fn sidesteps_the_checker(function: &Function) -> Option<String> {
     })
 }
 
+/// Every `amounts` entry names a listed function, one of its uint parameters, and one of its
+/// address parameters (the token).
+fn check_amounts(
+    contract: &str,
+    functions: &[Function],
+    amounts: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Result<(), String> {
+    for (name, params) in amounts {
+        let function = functions.iter().find(|f| &f.name == name).ok_or_else(|| {
+            format!("{contract}: amounts names {name}, which is not in functions")
+        })?;
+        let ty = |param: &str| {
+            function
+                .inputs
+                .iter()
+                .find(|p| p.name == param)
+                .map(|p| p.ty.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "{contract}: amounts.{name} names `{param}`, which {name} does not take"
+                    )
+                })
+        };
+        for (amount, token) in params {
+            if !ty(amount)?.starts_with("uint") {
+                return Err(format!(
+                    "{contract}: amounts.{name}.{amount} must be a uint parameter"
+                ));
+            }
+            if ty(token)? != "address" {
+                return Err(format!(
+                    "{contract}: amounts.{name}.{amount} must point at an address parameter, not `{token}`"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Text shown on the consent screen or in the review must be one line, with no terminal
 /// escapes: a control character could fake or hide lines there.
 fn single_line(raw: &RawManifest) -> Result<(), String> {
@@ -411,7 +455,9 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
+        check_amounts(&c.id, &functions, &c.amounts)?;
         contracts.push(ContractDef {
+            amounts: c.amounts,
             label: c.label.unwrap_or_else(|| c.id.clone()),
             address: addresses(&c.id, c.address)?,
             id: c.id,
@@ -619,6 +665,18 @@ approves = ["pool"]
         assert!(bad("name = \"demo_supply\"", "name = \"demo_read\"").contains("duplicate"));
         assert!(bad("11155111 = ", "sepolia = ").contains("chain"));
         assert!(bad("\"15m\"", "\"soon\"").contains("cache"));
+        // `amounts` must name a listed function, a uint parameter, and an address parameter
+        // holding the token.
+        let amounts = |decl: &str| {
+            bad(
+                "label = \"Aave Pool\"",
+                &format!("label = \"Aave Pool\"\namounts = {{ {decl} }}"),
+            )
+        };
+        assert!(amounts("borrow = { amount = \"asset\" }").contains("borrow"));
+        assert!(amounts("supply = { amount = \"nope\" }").contains("nope"));
+        assert!(amounts("supply = { amount = \"referralCode\" }").contains("address"));
+        assert!(amounts("supply = { asset = \"onBehalfOf\" }").contains("uint"));
         // Functions that would get around the plan checker's approval and recipient rules.
         let supply =
             "function supply(address asset,uint256 amount,address onBehalfOf,uint16 referralCode)";

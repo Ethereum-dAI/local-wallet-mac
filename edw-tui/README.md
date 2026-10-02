@@ -82,6 +82,9 @@ reads) and, optionally, `skill.toml`, which is what edw-tui enforces:
 
 - `[[contract]]`: the only contracts its plans may call, pinned by address per chain, with the
   functions allowed as signatures (`"function supply(address asset,uint256 amount,…)"`).
+  Functions that approve or move tokens themselves (`approve`, `permit`, `transfer`…) or take
+  raw `bytes` are refused. `amounts = { supply = { amount = "asset" } }` makes the review show
+  that amount in the asset's units.
 - `[[token]]`: tokens it names; `movable = false` ones are never approved.
 - `[[read_tool]]` and `[[action]]`: scripts, their JSON schemas, and for actions the contracts
   they may `approves`.
@@ -110,10 +113,10 @@ from the ABI and the simulated asset changes, never from the skill. An RPC witho
 `eth_simulateV1` refuses skill actions. After `y`, the steps are sent in order like a swap's.
 
 ```text
-Skill    aave-v3-lend 0.1.0 (sha256 38490bbd651b)
+Skill    aave-v3-lend 0.1.0 (sha256 cdeb94c7f8e2)
 From     default (0/0) 0x08ba…F543 on mainnet (chain 1)
 Step 1   approve 100 USDC for Aave Pool
-Step 2   Aave Pool.supply(asset=USDC, amount=100000000, onBehalfOf=you, referralCode=0)
+Step 2   Aave Pool.supply(asset=USDC, amount=100 USDC (100000000), onBehalfOf=you, referralCode=0)
 Changes  +99.999999 aUSDC, −100 USDC (simulated)
 Max fee  0.00007854597108402 ETH
 ```

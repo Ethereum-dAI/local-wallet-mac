@@ -12,6 +12,8 @@ functions = [
   "function supply(address asset,uint256 amount,address onBehalfOf,uint16 referralCode)",
   "function withdraw(address asset,uint256 amount,address to) returns (uint256)",
 ]
+# The review shows these amounts in the asset's own units.
+amounts = { supply = { amount = "asset" }, withdraw = { amount = "asset" } }
 address = { 1 = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2", 11155111 = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951" }
 
 # On Sepolia these are Aave's own faucet tokens, not Circle's or Tether's.

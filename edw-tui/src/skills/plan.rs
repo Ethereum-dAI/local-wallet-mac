@@ -271,7 +271,15 @@ impl Ctx<'_> {
                 .addresses(&ty, arg)
                 .map_err(|e| format!("{name}({label}): {e}"))?;
             let value = abi::coerce(&ty, &resolved).map_err(|e| format!("{name}({label}): {e}"))?;
-            shown.push(format!("{label}={}", self.show(&ty, arg)));
+            let in_token = contract
+                .amounts
+                .get(name)
+                .and_then(|declared| declared.get(&param.name))
+                .and_then(|token_param| self.in_token(function, token_param, &args, arg));
+            shown.push(format!(
+                "{label}={}",
+                in_token.unwrap_or_else(|| self.show(&ty, arg))
+            ));
             values.push(value);
         }
         let value = match step.get("value") {
@@ -339,6 +347,28 @@ impl Ctx<'_> {
         }
     }
 
+    /// A declared amount in its token's units, `2.5 USDC (2500000)`, when the argument it points
+    /// at is one of this skill's tokens; `None` (base units) otherwise, and for "all".
+    fn in_token(
+        &self,
+        function: &Function,
+        token_param: &str,
+        args: &[Value],
+        amount: &Value,
+    ) -> Option<String> {
+        let index = function.inputs.iter().position(|p| p.name == token_param)?;
+        let token = self.skill.manifest.token(args.get(index)?.as_str()?)?;
+        let raw: U256 = amount.as_str()?.parse().ok()?;
+        if raw == U256::MAX {
+            return None;
+        }
+        Some(format!(
+            "{} {} ({raw})",
+            format_units(raw, token.decimals),
+            one_line(&token.symbol)
+        ))
+    }
+
     /// How an argument reads in the review: ids by name, the sender as "you", the maximum
     /// uint as "all".
     fn show(&self, ty: &DynSolType, value: &Value) -> String {
@@ -401,6 +431,7 @@ functions = [
   "function deposit() payable",
   "function setNote(string memo, bytes32 tag, int256 delta)",
 ]
+amounts = { withdraw = { amount = "asset" } }
 address = { 11155111 = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951" }
 
 [[contract]]
@@ -502,6 +533,26 @@ approves = ["pool"]
             "Aave Pool.supply(asset=USDC, amount=100000000, onBehalfOf=you, referralCode=0)"
         );
         assert!(s.approval.is_none());
+    }
+
+    #[test]
+    /// An amount the manifest declares as "in the token of argument X" reads in that token's
+    /// units, with the encoded base units beside it; undeclared ones stay in base units.
+    fn declared_amounts_read_in_their_token() {
+        let plan = run(json!({"steps": [
+            {"call": {"contract": "pool", "function": "withdraw", "args": ["usdc", "2500000", "$self"]}},
+            supply(json!(["usdc", "100000000", "$self", "0"])),
+        ]}))
+        .unwrap();
+        assert_eq!(
+            plan.steps[0].label,
+            "Aave Pool.withdraw(asset=USDC, amount=2.5 USDC (2500000), to=you)"
+        );
+        assert!(
+            plan.steps[1].label.contains("amount=100000000,"),
+            "supply declares nothing in this fixture: {}",
+            plan.steps[1].label
+        );
     }
 
     #[test]

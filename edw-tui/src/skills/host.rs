@@ -20,6 +20,8 @@ use super::abi;
 
 /// The largest HTTP body a script is given; DefiLlama's full pool list is ~12 MB.
 pub const MAX_BODY: usize = 16 * 1024 * 1024;
+/// All cached HTTP bodies together, across skills: a few full DefiLlama pool lists.
+pub const MAX_CACHE: usize = 64 * 1024 * 1024;
 /// The widest `eth_getLogs` block range a script may ask for.
 pub const MAX_LOG_BLOCKS: u64 = 10_000;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -146,10 +148,12 @@ impl Host {
             }
         };
         if status == 200 && ttl.is_some() && !post {
-            self.cache
-                .lock()
-                .expect("cache lock")
-                .insert(url.to_owned(), (Instant::now(), body.clone()));
+            store(
+                &mut self.cache.lock().expect("cache lock"),
+                url,
+                body.clone(),
+                MAX_CACHE,
+            );
         }
         Ok(json!({"status": status, "body": body}))
     }
@@ -318,6 +322,30 @@ impl Host {
     }
 }
 
+/// Keeps `body` for `url`, evicting the oldest entries until everything fits in `cap` bytes;
+/// a body bigger than `cap` is not cached. Without a cap, a script varying a query string under
+/// a cached prefix would grow the harness without limit.
+fn store(cache: &mut HashMap<String, (Instant, String)>, url: &str, body: String, cap: usize) {
+    cache.remove(url);
+    if body.len() > cap {
+        return;
+    }
+    let mut total: usize = cache.values().map(|(_, b)| b.len()).sum();
+    while total + body.len() > cap {
+        let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, (at, _))| *at)
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        if let Some((_, gone)) = cache.remove(&oldest) {
+            total -= gone.len();
+        }
+    }
+    cache.insert(url.to_owned(), (Instant::now(), body));
+}
+
 fn result(value: Value) -> Value {
     json!({ "result": value })
 }
@@ -365,6 +393,23 @@ mod tests {
             SharedCache::default(),
         );
         (host, log)
+    }
+
+    /// The cache never holds more than its cap: the oldest entries go first, and a body larger
+    /// than the whole cap is not kept at all.
+    #[test]
+    fn the_cache_is_bounded_and_drops_the_oldest_first() {
+        let mut cache = HashMap::new();
+        for (i, url) in ["a", "b", "c"].into_iter().enumerate() {
+            store(&mut cache, url, "x".repeat(40), 100);
+            std::thread::sleep(Duration::from_millis(2 * (i as u64 + 1)));
+        }
+        let mut kept: Vec<&str> = cache.keys().map(String::as_str).collect();
+        kept.sort();
+        assert_eq!(kept, ["b", "c"], "a, the oldest, makes room");
+        store(&mut cache, "huge", "x".repeat(101), 100);
+        assert!(!cache.contains_key("huge"));
+        assert!(cache.values().map(|(_, b)| b.len()).sum::<usize>() <= 100);
     }
 
     #[tokio::test]

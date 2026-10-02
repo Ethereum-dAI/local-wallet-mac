@@ -60,7 +60,8 @@ def resolve(asked, context):
             )
             return _by_id(1, chains, "the wallet's chain", note)
         if chain_id is None:
-            edw_skill.fail("say which chain, e.g. Ethereum, Base or Arbitrum")
+            note = "The wallet is locked, so no chain was given; these are Ethereum mainnet numbers."
+            return _by_id(1, chains, "the wallet's chain", note)
         return _by_id(chain_id, chains, "the wallet's chain")
     if asked.isdigit():
         return _by_id(int(asked), chains, asked)

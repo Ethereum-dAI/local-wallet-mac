@@ -30,7 +30,7 @@
       "requires": [
         "defi-data"
       ],
-      "sha256": "cdeb94c7f8e2958f4cb087b4a9a61c45b96cf862e82d08f7a31600eac7fb9c9d",
+      "sha256": "472e7d9cdca9f692c59fee3c8d72601195c578d8dd135bd8f79bc283cecfb9d5",
       "tools": [
         {
           "function": {
@@ -104,10 +104,10 @@
     },
     {
       "actions": [],
-      "body": "Use these tools to compare where money could earn, before any action:\n\n- top_yields: the best pools or markets by recent yield. `chain` may be any name or chain id\n  (\"Ethereum\", \"mainnet\", \"Base\", \"Arbitrum One\", \"1\"); leave it out for the wallet's chain.\n  Narrow it with `project` (uniswap-v3, aave-v3, lido…), `symbol` (a token, e.g. USDC) or\n  `kind` (lend, lp or stake) only when the user asked for that; \"top pools\" means no kind.\n  Show the user at most 3 rows: project, symbol, APY, 30-day mean APY, TVL. If the result has\n  a chain note (e.g. the wallet is on a testnet), say it.\n- yield_history: how one pool's APY moved, by the `pool_id` top_yields returned.\n- dex_pool: live price, liquidity and 24h volume of one DEX pool by its address.\n\nRules:\n- APY is past performance, not a promise. Say so, and name the source and its time.\n- LP pools (kind lp) carry impermanent-loss risk; say so when il_risk is \"yes\".\n- Never use these numbers as transaction amounts. Actions read amounts from the chain.\n- These are mainnet numbers. On a testnet they only describe mainnet.\n",
+      "body": "Use these tools to compare where money could earn, before any action:\n\n- top_yields: the best pools or markets by recent yield. `chain` may be any name or chain id\n  (\"Ethereum\", \"mainnet\", \"Base\", \"Arbitrum One\", \"1\"); leave it out for the wallet's chain\n  (Ethereum when the wallet is locked). These lookups never need the wallet unlocked.\n  Narrow it with `project` (uniswap-v3, aave-v3, lido…), `symbol` (a token, e.g. USDC) or\n  `kind` (lend, lp or stake) only when the user asked for that; \"top pools\" means no kind.\n  Show the user at most 3 rows: project, symbol, APY, 30-day mean APY, TVL. If the result has\n  a chain note (e.g. the wallet is on a testnet), say it.\n- yield_history: how one pool's APY moved, by the `pool_id` top_yields returned.\n- dex_pool: live price, liquidity and 24h volume of one DEX pool by its address.\n\nRules:\n- APY is past performance, not a promise. Say so, and name the source and its time.\n- LP pools (kind lp) carry impermanent-loss risk; say so when il_risk is \"yes\".\n- Never use these numbers as transaction amounts. Actions read amounts from the chain.\n- These are mainnet numbers. On a testnet they only describe mainnet.\n",
       "name": "defi-data",
       "requires": [],
-      "sha256": "654585c94521f88a013853613eb56cf1ef4dff401b39d0d56f8535d0b546817e",
+      "sha256": "7e1c1feab50bffa2b6f0d529a6918528e60e6a977a5d84050156f972f28b62f4",
       "tools": [
         {
           "function": {

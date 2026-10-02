@@ -4,6 +4,8 @@ import aave_common as aave
 import edw_skill
 
 _, args, context = edw_skill.invoke()
+if not context.get("me"):
+    edw_skill.fail("the wallet is locked; unlock a network first (Aave needs its chain and address)")
 pool = context.get("contracts", {}).get("pool")
 if not pool:
     edw_skill.fail(f"this skill does not know Aave v3 on chain {context.get('chain_id')}")

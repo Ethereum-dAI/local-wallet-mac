@@ -420,3 +420,42 @@ async fn an_unknown_chain_suggests_the_closest_ones() {
     .unwrap();
     assert_eq!(dex["source"], "GeckoTerminal", "{dex}");
 }
+
+/// The wallet is locked (no chain in the context): no chain given means Ethereum, said so.
+#[tokio::test]
+async fn a_locked_wallet_with_no_chain_given_means_ethereum() {
+    if !docker().await {
+        return;
+    }
+    let skill = skill();
+    let def = skill.read_tool("top_yields").unwrap();
+    let host = Host::new(
+        HostConfig {
+            skill: skill.name.clone(),
+            hosts: skill.manifest.hosts.clone(),
+            cache: def.cache.clone(),
+            rpc: None,
+            fixtures: Some(Arc::new(fixtures())),
+            log: Arc::new(|_| {}),
+        },
+        SharedCache::default(),
+    );
+    let invoke = sandbox::invoke_message(
+        "top_yields",
+        &json!({"project": "uniswap-v3"}),
+        json!({"chain_id": null, "me": null, "wallet": "locked"}),
+    );
+    let value = match Runner::from_env()
+        .run(&skill, &def.run, invoke, &host)
+        .await
+        .unwrap()
+    {
+        Output::Result(value) => value,
+        Output::Plan(plan) => panic!("{plan}"),
+    };
+    assert_eq!(value["chain"]["name"], "Ethereum", "{value}");
+    assert!(
+        value["chain"]["note"].as_str().unwrap().contains("locked"),
+        "{value}"
+    );
+}

@@ -157,7 +157,19 @@ impl SkillSet {
 
     /// What a script is told besides its arguments: where it runs, and the manifest's
     /// addresses for this chain so it can read them without hard-coding any.
-    pub fn context(&self, skill: &Skill, at: &SkillContext) -> Value {
+    /// With the wallet locked (`at` is `None`) there is no chain, sender or RPC: only read
+    /// tools run then, and they see `"wallet": "locked"`.
+    pub fn context(&self, skill: &Skill, at: Option<&SkillContext>) -> Value {
+        let Some(at) = at else {
+            return json!({
+                "chain_id": null,
+                "me": null,
+                "network": null,
+                "wallet": "locked",
+                "contracts": {},
+                "tokens": {},
+            });
+        };
         let m = &skill.manifest;
         let contracts: serde_json::Map<String, Value> = m
             .contracts
@@ -182,6 +194,7 @@ impl SkillSet {
             "chain_id": at.chain_id,
             "me": at.me.to_string(),
             "network": at.network,
+            "wallet": "unlocked",
             "contracts": contracts,
             "tokens": tokens,
         })

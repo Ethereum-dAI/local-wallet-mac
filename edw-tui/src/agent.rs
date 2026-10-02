@@ -331,9 +331,12 @@ impl Shared {
         self.log(AgentEvent::ToolStarted {
             command: command.clone(),
         });
+        // Read tools need no wallet: with it locked they run without a sender or RPC (a
+        // lookup such as defi-data's needs neither). Actions build transactions, so they do.
         let at = match self.interim.skill_context().await {
-            Ok(at) => at,
-            Err(error) => return fail(&command, error),
+            Ok(at) => Some(at),
+            Err(_) if skill.action(tool).is_none() => None,
+            Err(error) => return fail(&command, format!("{error}; skill actions need the wallet")),
         };
         let events = self.events.clone();
         let log: Log = Arc::new(move |line| {
@@ -343,14 +346,16 @@ impl Shared {
                 output: String::new(),
             }));
         });
-        let host = self.skills.host(&skill, Some(at.rpc.clone()), log);
+        let host = self
+            .skills
+            .host(&skill, at.as_ref().map(|at| at.rpc.clone()), log);
         let action = skill.action(tool);
         let run = match (action, skill.read_tool(tool)) {
             (Some(action), _) => action.tool.run.clone(),
             (None, Some(read)) => read.run.clone(),
             (None, None) => return fail(&command, format!("`{tool}` is not in {}", skill.name)),
         };
-        let invoke = sandbox::invoke_message(tool, &args, self.skills.context(&skill, &at));
+        let invoke = sandbox::invoke_message(tool, &args, self.skills.context(&skill, at.as_ref()));
         // Runs from a snapshot whose hash must still be the one the user agreed to.
         let (snapshot, _run_dir) = match self.skills.prepare_run(&skill) {
             Ok(prepared) => prepared,
@@ -396,6 +401,12 @@ impl Shared {
             }
         };
         let (plan, action) = plan;
+        let Some(at) = at else {
+            return fail(
+                &command,
+                "the wallet is locked; unlock a network first".into(),
+            );
+        };
         let checked = match plan::check(&plan, &skill, action, at.chain_id, at.me) {
             Ok(checked) => checked,
             Err(error) => {

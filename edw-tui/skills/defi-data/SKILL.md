@@ -5,7 +5,8 @@ description: Look up past yields, TVL and volume of DeFi pools and lending marke
 Use these tools to compare where money could earn, before any action:
 
 - top_yields: the best pools or markets by recent yield. `chain` may be any name or chain id
-  ("Ethereum", "mainnet", "Base", "Arbitrum One", "1"); leave it out for the wallet's chain.
+  ("Ethereum", "mainnet", "Base", "Arbitrum One", "1"); leave it out for the wallet's chain
+  (Ethereum when the wallet is locked). These lookups never need the wallet unlocked.
   Narrow it with `project` (uniswap-v3, aave-v3, lido…), `symbol` (a token, e.g. USDC) or
   `kind` (lend, lp or stake) only when the user asked for that; "top pools" means no kind.
   Show the user at most 3 rows: project, symbol, APY, 30-day mean APY, TVL. If the result has

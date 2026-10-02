@@ -37,6 +37,14 @@ async fn start(
     name: &str,
     model: Recorder,
 ) -> Option<(Harness, alloy_node_bindings::AnvilInstance)> {
+    start_with(name, model, true).await
+}
+
+async fn start_with(
+    name: &str,
+    model: Recorder,
+    unlock: bool,
+) -> Option<(Harness, alloy_node_bindings::AnvilInstance)> {
     let binary = edw_binary().or_else(|| {
         eprintln!("skipping: edw is not installed");
         None
@@ -46,7 +54,9 @@ async fn start(
         None
     })?;
     let wallet = TempWallet::new(binary, name);
-    wallet.edw(&["unlock", "--network", "local"]).await;
+    if unlock {
+        wallet.edw(&["unlock", "--network", "local"]).await;
+    }
     let interim = wallet.interim(Some(node.endpoint()), false);
     let h = Harness::start_with_skills(
         wallet,
@@ -156,4 +166,40 @@ async fn a_made_up_address_never_reaches_a_skill_action() {
             .any(|o| o.contains("made up") && o.contains("nothing was sent")),
         "{turn:?}"
     );
+}
+
+/// Looking things up needs no wallet: a read tool runs while the wallet is locked, with no
+/// sender or RPC in its context. An action still needs the wallet unlocked.
+#[tokio::test]
+async fn read_tools_run_with_the_wallet_locked_and_actions_do_not() {
+    if !sandbox::docker_available().await {
+        eprintln!("skipping: Docker is not running");
+        return;
+    }
+    let model = Recorder::new(vec![
+        call("load_skill", json!({"name": "probe"})),
+        call("probe_echo", json!({"mode": "echo"})),
+        call("probe_act", json!({"mode": "plan"})),
+    ]);
+    let Some((mut h, _node)) = start_with("skills-locked", model, false).await else {
+        return;
+    };
+    let turn = h.turn("look something up", true).await;
+    let read = turn
+        .outputs
+        .iter()
+        .find(|o| o.contains("probe/probe_echo"))
+        .unwrap_or_else(|| panic!("{turn:?}"));
+    assert!(read.contains("=> 0:"), "the read tool ran: {read}");
+    assert!(
+        read.contains("\"chain_id\":null"),
+        "no wallet context: {read}"
+    );
+    let act = turn
+        .outputs
+        .iter()
+        .find(|o| o.contains("probe/probe_act"))
+        .unwrap_or_else(|| panic!("{turn:?}"));
+    assert!(act.contains("locked"), "an action needs the wallet: {act}");
+    assert!(turn.confirms.is_empty(), "{turn:?}");
 }

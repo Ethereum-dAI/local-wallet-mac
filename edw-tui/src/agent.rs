@@ -14,7 +14,7 @@ use rig_agent::{
         Chat, CompletionError, CompletionModel, CompletionRequest, CompletionResponse, Usage,
     },
     streaming::StreamingCompletionResponse,
-    tool::{Tool, ToolContext},
+    tool::{DynamicTool, Tool, ToolContext, ToolOutput},
 };
 use rig_core::{
     client::{CompletionClient, Nothing},
@@ -30,6 +30,14 @@ use crate::{
     edw::{self, Backend, EdwConfig, EdwResult, TOOLS},
     interim::{self, Interim, InterimConfig},
     scripted::ScriptedModel,
+    skills::{
+        LOAD_SKILL,
+        catalog::Catalog,
+        host::Log,
+        plan,
+        sandbox::{self, Output},
+        tools::{self as skill_tools, SkillGate, SkillSet},
+    },
 };
 
 const RULES: &str = "You are the chat interface of edw, a privacy-first Ethereum desktop wallet.
@@ -47,10 +55,24 @@ Rules:
 - If a tool fails, explain the error in one sentence and suggest the next step (for example, \"the wallet is locked, unlock it first\").
 - Keep answers short.";
 
-/// The system turn: edw-tui's rules, then the app's safety clause unchanged.
+/// The system turn without skills: edw-tui's rules, then the app's safety clause unchanged.
 pub fn preamble() -> String {
-    format!("{RULES}\n\n{SAFETY_CLAUSE}")
+    preamble_with(&Catalog::default())
 }
+
+/// The system turn: edw-tui's rules, the skills the model may load (if any), then the app's
+/// safety clause unchanged, so it stays last and overrides everything above it.
+pub fn preamble_with(catalog: &Catalog) -> String {
+    let block = catalog.preamble_block();
+    if block.is_empty() {
+        format!("{RULES}\n\n{SAFETY_CLAUSE}")
+    } else {
+        format!("{RULES}\n\n{block}\n\n{SAFETY_CLAUSE}")
+    }
+}
+
+/// The most of a read tool's result the model is given.
+pub const MAX_SKILL_RESULT: usize = 8 * 1024;
 
 /// Model calls per user message; each tool round-trip uses one.
 pub const MAX_TURNS: usize = 10;
@@ -100,6 +122,7 @@ struct Shared {
     interim: Interim,
     addresses: AddressBook,
     events: Events,
+    skills: Arc<SkillSet>,
 }
 
 impl Shared {
@@ -249,6 +272,154 @@ impl<const I: usize> Tool for EdwTool<I> {
 }
 
 impl Shared {
+    fn load_skill(&self, args: &Value) -> String {
+        let name = args.get("name").and_then(Value::as_str).unwrap_or_default();
+        let text = self.skills.load(name);
+        let loaded = self.skills.is_loaded(name);
+        self.log(AgentEvent::ToolFinished(EdwResult {
+            command: format!("{LOAD_SKILL} {name}"),
+            exit_code: if loaded { 0 } else { 1 },
+            output: text.clone(),
+        }));
+        text
+    }
+
+    /// Runs one skill tool: a read tool's result goes back to the model; an action's plan is
+    /// checked, simulated, reviewed and only then sent.
+    async fn skill_call(&self, tool: &str, args: Value) -> String {
+        let Some(skill) = self.skills.catalog.skill_of_tool(tool).cloned() else {
+            return format!("`{tool}` is not a tool of any loaded skill; nothing was run.");
+        };
+        let fail = |command: &str, output: String| {
+            let result = EdwResult {
+                command: command.to_owned(),
+                exit_code: 1,
+                output,
+            };
+            self.log(AgentEvent::ToolFinished(result.clone()));
+            result.to_model_json()
+        };
+        let short = format!("skill {}/{tool}", skill.name);
+        if !self.skills.is_loaded(&skill.name) {
+            return fail(
+                &short,
+                format!("call load_skill {} first; nothing was run.", skill.name),
+            );
+        }
+        if let Some(invented) = first_invented(&self.addresses, &args) {
+            return fail(
+                &short,
+                format!(
+                    "Refused: {invented} came from neither the user nor a tool, so it may be made up. Ask the user for the address; nothing was run."
+                ),
+            );
+        }
+        let args = self.addresses.reveal_json(args);
+        let command = format!("{short} {args}");
+        self.log(AgentEvent::ToolStarted {
+            command: command.clone(),
+        });
+        let at = match self.interim.skill_context().await {
+            Ok(at) => at,
+            Err(error) => return fail(&command, error),
+        };
+        let events = self.events.clone();
+        let log: Log = Arc::new(move |line| {
+            let _ = events.send(AgentEvent::ToolFinished(EdwResult {
+                command: line,
+                exit_code: 0,
+                output: String::new(),
+            }));
+        });
+        let host = self.skills.host(&skill, Some(at.rpc.clone()), log);
+        let action = skill.action(tool);
+        let run = match (action, skill.read_tool(tool)) {
+            (Some(action), _) => action.tool.run.clone(),
+            (None, Some(read)) => read.run.clone(),
+            (None, None) => return fail(&command, format!("`{tool}` is not in {}", skill.name)),
+        };
+        let invoke = sandbox::invoke_message(tool, &args, self.skills.context(&skill, &at));
+        let output = match self.skills.runner.run(&skill, &run, invoke, &host).await {
+            Ok(output) => output,
+            Err(error) => return fail(&command, format!("{short} failed: {error}")),
+        };
+        let plan = match (output, action) {
+            (Output::Result(value), None) => {
+                let mut text = value.to_string();
+                if text.len() > MAX_SKILL_RESULT {
+                    let mut end = MAX_SKILL_RESULT;
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    text.truncate(end);
+                    text.push_str(" …(truncated at 8 KiB)");
+                }
+                let result = EdwResult {
+                    command,
+                    exit_code: 0,
+                    output: text,
+                };
+                self.log(AgentEvent::ToolFinished(result.clone()));
+                return result.to_model_json();
+            }
+            (Output::Plan(plan), Some(action)) => (plan, action),
+            (Output::Result(_), Some(_)) => {
+                return fail(
+                    &command,
+                    format!("{short} returned no plan; nothing was sent."),
+                );
+            }
+            (Output::Plan(_), None) => {
+                return fail(
+                    &command,
+                    format!(
+                        "{short} is a read tool and may not propose transactions; nothing was sent."
+                    ),
+                );
+            }
+        };
+        let (plan, action) = plan;
+        let checked = match plan::check(&plan, &skill, action, at.chain_id, at.me) {
+            Ok(checked) => checked,
+            Err(error) => {
+                return fail(
+                    &command,
+                    format!("the plan was refused ({error}); nothing was sent."),
+                );
+            }
+        };
+        let hash = self.skills.hash(&skill.name);
+        let header = vec![format!(
+            "Skill    {} {} (sha256 {})",
+            skill.name,
+            skill.manifest.version,
+            &hash[..hash.len().min(12)]
+        )];
+        let names = self.skills.names(&skill, at.chain_id);
+        let prepared = match self
+            .interim
+            .prepare_plan(command.clone(), header, checked, &names)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => return fail(&command, error),
+        };
+        self.log(AgentEvent::ToolFinished(EdwResult {
+            command: format!("{command} (dry run)"),
+            exit_code: 0,
+            output: prepared.preview.clone(),
+        }));
+        if !self.confirm(&command, Some(prepared.preview.clone())).await {
+            return format!("The user declined `{short}`; nothing was sent.");
+        }
+        self.log(AgentEvent::ToolStarted {
+            command: command.clone(),
+        });
+        let result = self.interim.broadcast(prepared).await;
+        self.log(AgentEvent::ToolFinished(result.clone()));
+        result.to_model_json()
+    }
+
     async fn run_tool<const I: usize>(&self, name: &str, args: &Value) -> String {
         if TOOLS[I].backend == Backend::Interim {
             return self.interim_call(name, args).await;
@@ -263,6 +434,16 @@ impl Shared {
         let result = edw::run(&self.config, &argv).await;
         self.log(AgentEvent::ToolFinished(result.clone()));
         result.to_model_json()
+    }
+}
+
+/// The first address in any string of `args` that neither the user nor a tool produced.
+fn first_invented(addresses: &AddressBook, args: &Value) -> Option<String> {
+    match args {
+        Value::String(text) => addresses.invented(text).map(str::to_owned),
+        Value::Array(items) => items.iter().find_map(|v| first_invented(addresses, v)),
+        Value::Object(map) => map.values().find_map(|v| first_invented(addresses, v)),
+        _ => None,
     }
 }
 
@@ -320,15 +501,18 @@ pub fn build_agent(
     config: EdwConfig,
     interim: InterimConfig,
     events: Events,
+    skills: Arc<SkillSet>,
 ) -> Agent {
     let shared = Arc::new(Shared {
         config,
         addresses: interim.addresses.clone(),
         interim: Interim::new(interim),
         events: events.clone(),
+        skills: skills.clone(),
     });
-    AgentBuilder::from_model_handle(model)
-        .preamble(&preamble())
+    let dynamic = dynamic_tools(&shared);
+    let builder = AgentBuilder::from_model_handle(model)
+        .preamble(&preamble_with(&skills.catalog))
         .default_max_turns(MAX_TURNS)
         .additional_params(additional_params())
         .add_hook(ConfirmHook { events })
@@ -344,8 +528,57 @@ pub fn build_agent(
         .tool(EdwTool::<9>(shared.clone()))
         .tool(EdwTool::<10>(shared.clone()))
         .tool(EdwTool::<11>(shared.clone()))
-        .tool(EdwTool::<12>(shared))
+        .tool(EdwTool::<12>(shared));
+    if skills.is_empty() {
+        return builder.build();
+    }
+    builder
+        .dynamic_tools(dynamic)
+        .add_hook(SkillGate {
+            builtin: skill_tools::builtin_tools(&skills),
+            set: skills,
+        })
         .build()
+}
+
+/// `load_skill`, and one tool per read tool and action of every ready skill. They are all
+/// registered; [`SkillGate`] decides which ones a request offers.
+fn dynamic_tools(shared: &Arc<Shared>) -> Vec<DynamicTool> {
+    let mut tools = Vec::new();
+    if shared.skills.is_empty() {
+        return tools;
+    }
+    let s = shared.clone();
+    tools.push(DynamicTool::new(
+        LOAD_SKILL,
+        skill_tools::LOAD_SKILL_DESCRIPTION,
+        skill_tools::load_skill_parameters(),
+        move |_context, args| {
+            let s = s.clone();
+            Box::pin(async move { Ok(ToolOutput::text(s.load_skill(&args))) })
+        },
+    ));
+    for skill in &shared.skills.catalog.skills {
+        let m = &skill.manifest;
+        for tool in m.read_tools.iter().chain(m.actions.iter().map(|a| &a.tool)) {
+            let s = shared.clone();
+            let name = tool.name.clone();
+            tools.push(DynamicTool::new(
+                tool.name.clone(),
+                tool.description.clone(),
+                tool.schema.clone(),
+                move |_context, args| {
+                    let s = s.clone();
+                    let name = name.clone();
+                    Box::pin(async move {
+                        let output = s.skill_call(&name, args).await;
+                        Ok(ToolOutput::text(s.addresses.hide(&output)))
+                    })
+                },
+            ));
+        }
+    }
+    tools
 }
 
 /// An Ollama model behind [`OllamaReplies`]. `nudge` turns on the empty-reply retry that

@@ -5,7 +5,7 @@
 pub mod pty;
 pub mod scenario;
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use edw_tui::{
     addresses::AddressBook,
@@ -13,6 +13,7 @@ use edw_tui::{
     edw::{self, EdwConfig, EdwResult},
     interim::{InterimConfig, SendingProfile},
     scripted::ScriptedModel,
+    skills::tools::SkillSet,
 };
 use rig_agent::ModelHandle;
 use tokio::sync::mpsc;
@@ -111,6 +112,15 @@ impl Harness {
         model: ModelHandle,
         interim: Option<InterimConfig>,
     ) -> Self {
+        Self::start_with_skills(wallet, model, interim, Arc::new(SkillSet::empty()))
+    }
+
+    pub fn start_with_skills(
+        wallet: TempWallet,
+        model: ModelHandle,
+        interim: Option<InterimConfig>,
+        skills: Arc<SkillSet>,
+    ) -> Self {
         let interim = interim.unwrap_or_else(|| wallet.interim(None, false));
         let (event_tx, events) = mpsc::unbounded_channel();
         let (prompts, prompt_rx) = mpsc::unbounded_channel();
@@ -119,6 +129,7 @@ impl Harness {
             wallet.config.clone(),
             interim.clone(),
             event_tx.clone(),
+            skills,
         );
         let source = ModelSource {
             ollama_url: ollama_url(),

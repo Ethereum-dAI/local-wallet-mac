@@ -14,7 +14,7 @@ use crate::{
     edw::EdwResult,
 };
 
-pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /copy [reply|log|address] copies to the clipboard · Tab shows one panel at a time, for selecting text · /help";
+pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /skills lists skills · /copy [reply|log|address] copies to the clipboard · Tab shows one panel at a time, for selecting text · /help";
 
 /// How long a confirmation must be on screen before y or n counts.
 pub const CONFIRM_GRACE: Duration = Duration::from_millis(400);
@@ -85,6 +85,8 @@ pub struct App {
     pub busy: bool,
     /// The last `/models` listing, so `/model 2` can pick by number.
     pub models: Vec<String>,
+    /// `/skills`: one line per installed skill and its state, from startup.
+    pub skills: Vec<String>,
     /// Confirmations in arrival order; the model may emit several state changes in one turn.
     pub pending: VecDeque<PendingConfirm>,
     /// When the front confirmation appeared; keys are ignored until `confirm_grace` has passed.
@@ -105,6 +107,7 @@ impl App {
             input: String::new(),
             busy: false,
             models: Vec::new(),
+            skills: Vec::new(),
             pending: VecDeque::new(),
             confirm_shown: None,
             confirm_grace: CONFIRM_GRACE,
@@ -247,6 +250,12 @@ impl App {
                 None
             }
             (Some("/profile"), Some(selector)) => Some(Request::SetProfile(selector.to_owned())),
+            (Some("/skills"), None) => {
+                let mut text = vec!["Skills:".to_owned()];
+                text.extend(self.skills.iter().map(|line| format!("  {line}")));
+                self.chat.push(ChatLine::Info(text.join("\n")));
+                None
+            }
             (Some("/help"), _) => {
                 self.chat.push(ChatLine::Info(HELP.into()));
                 None

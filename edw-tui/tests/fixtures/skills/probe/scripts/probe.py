@@ -20,7 +20,9 @@ elif mode == "net":
 elif mode == "env":
     edw_skill.result({"env": dict(os.environ)})
 elif mode == "files":
-    readable = {p: os.path.exists(p) for p in ["/Users", "/home", "/root/.ssh", "/skill/SKILL.md"]}
+    paths = args.get("paths") or []
+    readable = {p: os.path.exists(p) for p in paths + ["/skill/SKILL.md"]}
+    home_entries = os.listdir("/home") if os.path.isdir("/home") else []
     try:
         open("/skill/new.txt", "w").write("x")
         skill_writable = True
@@ -31,7 +33,7 @@ elif mode == "files":
         tmp_writable = True
     except OSError:
         tmp_writable = False
-    edw_skill.result({"exists": readable, "skill_writable": skill_writable, "tmp_writable": tmp_writable})
+    edw_skill.result({"exists": readable, "home_entries": home_entries, "skill_writable": skill_writable, "tmp_writable": tmp_writable})
 elif mode == "sleep":
     time.sleep(60)
 elif mode == "flood":

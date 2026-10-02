@@ -58,7 +58,15 @@ async fn docker() -> bool {
 }
 
 async fn run(mode: &str, timeout: Duration, fixtures: &[(&str, &str)]) -> Result<Output, String> {
-    let invoke = json!({"type": "invoke", "tool": "probe_echo", "args": {"mode": mode}, "context": {"chain_id": 11155111}});
+    run_with(json!({ "mode": mode }), timeout, fixtures).await
+}
+
+async fn run_with(
+    args: Value,
+    timeout: Duration,
+    fixtures: &[(&str, &str)],
+) -> Result<Output, String> {
+    let invoke = json!({"type": "invoke", "tool": "probe_echo", "args": args, "context": {"chain_id": 11155111}});
     runner(timeout)
         .run(&probe(), "scripts/probe.py", invoke, &host(fixtures))
         .await
@@ -148,9 +156,24 @@ async fn a_script_sees_no_host_env_or_files() {
         env.get("HOME").and_then(Value::as_str),
         std::env::var("HOME").ok().as_deref()
     );
-    let files = result(run("files", Duration::from_secs(20), &[]).await);
-    assert_eq!(files["exists"]["/Users"], false, "{files}");
-    assert_eq!(files["exists"]["/home"], false, "{files}");
+    // The image has an empty /home of its own; what matters is that nothing of the host's
+    // shows up: not its home folder, not the edw data next to this crate.
+    let home = std::env::var("HOME").unwrap();
+    let data = root().join(".edw").display().to_string();
+    let files = result(
+        run_with(
+            json!({"mode": "files", "paths": [home, data, "/Users", "/root/.ssh"]}),
+            Duration::from_secs(20),
+            &[],
+        )
+        .await,
+    );
+    for path in files["exists"].as_object().unwrap().keys() {
+        if path != "/skill/SKILL.md" {
+            assert_eq!(files["exists"][path], false, "{path} is visible: {files}");
+        }
+    }
+    assert_eq!(files["home_entries"], json!([]), "{files}");
     assert_eq!(files["exists"]["/skill/SKILL.md"], true, "{files}");
     assert_eq!(files["skill_writable"], false, "{files}");
     assert_eq!(files["tmp_writable"], true, "{files}");

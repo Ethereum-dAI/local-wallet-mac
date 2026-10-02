@@ -4,6 +4,7 @@ use edw_tui::{
     contract,
     edw::{self, EdwConfig},
     interim::InterimConfig,
+    skills::{self, tools::SkillSet},
     ui,
 };
 use futures::StreamExt;
@@ -47,6 +48,22 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     Err("no clipboard tool found (pbcopy, wl-copy or xclip)".into())
 }
 
+/// Asks on the plain terminal (before the TUI starts) whether a skill may be used. Anything
+/// but y, or a stdin that is not a terminal, is a no.
+fn ask_consent(summary: &str) -> bool {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        eprintln!("{summary}\nNot allowed: stdin is not a terminal, so no one can agree to it.");
+        return false;
+    }
+    println!("{summary}");
+    print!("Allow this skill? Its plans are still reviewed before anything is sent. [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut line);
+    matches!(line.trim(), "y" | "Y" | "yes")
+}
+
 const USAGE: &str = "usage: edw-tui [tools-dump]
   (no command)  start the chat TUI
   tools-dump    print the model-facing contract (preamble, tool schemas) as JSON";
@@ -77,6 +94,21 @@ async fn main() -> anyhow::Result<()> {
     let interim = InterimConfig::from_env(config.clone());
     let model = source.handle(&model_name)?;
 
+    // Before the TUI takes the terminal: new or changed skills are agreed to here.
+    let startup = if std::env::var("EDW_TUI_SKILLS").is_ok_and(|v| v == "off") {
+        None
+    } else {
+        Some(skills::start(&skills::Paths::from_env(), ask_consent).await)
+    };
+    let (skill_set, skill_lines, skill_notes) = match startup {
+        Some(s) => (s.set, skills::describe(&s.installed), s.notes),
+        None => (
+            std::sync::Arc::new(SkillSet::empty()),
+            vec!["Skills are off (EDW_TUI_SKILLS=off).".into()],
+            Vec::new(),
+        ),
+    };
+
     let (event_tx, mut events) = mpsc::unbounded_channel::<AgentEvent>();
     let (requests, request_rx) = mpsc::unbounded_channel::<Request>();
     let mut app = App::new(&model_name, config.data_dir.display().to_string());
@@ -84,7 +116,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(warning) = edw::check_pin(&config.binary).warning() {
         app.chat.push(ChatLine::Info(warning));
     }
-    let agent = agent::build_agent(model, config, interim.clone(), event_tx.clone());
+    app.skills = skill_lines;
+    app.chat.extend(skill_notes.into_iter().map(ChatLine::Info));
+    let agent = agent::build_agent(model, config, interim.clone(), event_tx.clone(), skill_set);
     tokio::spawn(agent::run(agent, request_rx, event_tx, source, interim));
 
     let mut terminal = ratatui::init();

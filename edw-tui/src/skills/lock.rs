@@ -100,14 +100,32 @@ fn hex(bytes: &[u8]) -> String {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LockEntry {
+    /// For people reading the file; entries are keyed by the folder's absolute path.
+    pub name: String,
     pub version: String,
     pub hash: String,
     pub hosts: Vec<String>,
 }
 
+/// Agreed-to skills, keyed by each skill folder's absolute path: approval is for that folder,
+/// so the same skill copied elsewhere (a cloned repo, say) is asked about again.
 pub struct Lock {
     path: PathBuf,
     entries: BTreeMap<String, LockEntry>,
+}
+
+/// `$XDG_CONFIG_HOME/edw-tui/skills.lock`, else `~/.config/edw-tui/skills.lock`: per user and
+/// outside any repo, so no checkout can ship approvals of its own.
+pub fn default_path(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
+    let base = match xdg_config_home.filter(|x| !x.is_empty()) {
+        Some(xdg) => PathBuf::from(xdg),
+        None => PathBuf::from(home.unwrap_or(".")).join(".config"),
+    };
+    base.join("edw-tui").join("skills.lock")
+}
+
+fn key(skill: &Skill) -> String {
+    skill.dir.display().to_string()
 }
 
 impl Lock {
@@ -124,7 +142,7 @@ impl Lock {
     }
 
     pub fn is_trusted(&self, skill: &Skill, hash: &str) -> bool {
-        self.entries.get(&skill.name).is_some_and(|entry| {
+        self.entries.get(&key(skill)).is_some_and(|entry| {
             entry.hash == hash
                 && skill
                     .manifest
@@ -136,8 +154,9 @@ impl Lock {
 
     pub fn trust(&mut self, skill: &Skill, hash: String) -> io::Result<()> {
         self.entries.insert(
-            skill.name.clone(),
+            key(skill),
             LockEntry {
+                name: skill.name.clone(),
                 version: skill.manifest.version.clone(),
                 hash,
                 hosts: skill.manifest.hosts.clone(),
@@ -241,6 +260,41 @@ mod tests {
         assert!(
             !lock.is_trusted(&skill, "h1"),
             "a new host needs consent again"
+        );
+    }
+
+    /// Approval is for one folder: the same skill copied elsewhere (a cloned repo that also
+    /// ships a lock file, say) is a different skill until agreed to.
+    #[test]
+    fn trust_is_for_one_folder_not_a_name() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let first = manifest::load(&skill_dir(a.path())).unwrap();
+        let copy = manifest::load(&skill_dir(b.path())).unwrap();
+        let hash = hash_dir(&first.dir).unwrap();
+        assert_eq!(hash, hash_dir(&copy.dir).unwrap(), "same bytes");
+        let path = a.path().join("skills.lock");
+        let mut lock = Lock::open(&path);
+        lock.trust(&first, hash.clone()).unwrap();
+        let lock = Lock::open(&path);
+        assert!(lock.is_trusted(&first, &hash));
+        assert!(!lock.is_trusted(&copy, &hash));
+    }
+
+    #[test]
+    fn the_lock_lives_in_the_users_config_folder() {
+        assert_eq!(
+            default_path(Some("/x/config"), Some("/home/me")),
+            PathBuf::from("/x/config/edw-tui/skills.lock")
+        );
+        assert_eq!(
+            default_path(None, Some("/home/me")),
+            PathBuf::from("/home/me/.config/edw-tui/skills.lock")
+        );
+        assert_eq!(
+            default_path(Some(""), Some("/home/me")),
+            PathBuf::from("/home/me/.config/edw-tui/skills.lock"),
+            "an empty XDG_CONFIG_HOME is unset"
         );
     }
 

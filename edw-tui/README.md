@@ -35,7 +35,7 @@ The TUI warns at startup when the installed edw is not the pinned revision.
 | `EDW_TUI_MAINNET_FORK` | off | `1` lets `mainnet` through, but only when `EDW_TUI_RPC_URL` is a loopback anvil fork (`anvil_nodeInfo` reports a fork URL). Real mainnet is always refused. |
 | `EDW_TUI_SKILLS` | on | `off` disables skills entirely. |
 | `EDW_TUI_SKILLS_DIR` | `skills` | Where skills are found, `:`-separated. |
-| `EDW_TUI_SKILLS_LOCK` | `.edw/skills.lock` | The skills you agreed to, with each folder's hash. |
+| `EDW_TUI_SKILLS_LOCK` | `~/.config/edw-tui/skills.lock` | The skill folders you agreed to (by absolute path), with each folder's hash. Per user, so no repo can ship approvals. |
 | `EDW_TUI_SKILL_IMAGE` | `python:3.12-slim@sha256:f77ac9e…` | The Docker image skill scripts run in, pinned by digest. |
 | `EDW_TUI_ADDRESS_ALIASES` | on | The model sees `ADDR_1`, `ADDR_2`… instead of 0x addresses and never retypes one (8B models lose count in long hex; Ollama then aborts the reply). `0` shows it raw addresses, e.g. for evals. |
 

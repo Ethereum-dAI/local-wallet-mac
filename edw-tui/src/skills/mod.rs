@@ -30,7 +30,7 @@ pub struct Paths {
 
 impl Paths {
     /// `EDW_TUI_SKILLS_DIR` (`:`-separated, default `skills`) and `EDW_TUI_SKILLS_LOCK`
-    /// (default `.edw/skills.lock`).
+    /// (default `~/.config/edw-tui/skills.lock`, see [`lock::default_path`]).
     pub fn from_env() -> Self {
         let dirs: Vec<PathBuf> = std::env::var("EDW_TUI_SKILLS_DIR")
             .unwrap_or_else(|_| "skills".into())
@@ -40,7 +40,12 @@ impl Paths {
             .collect();
         let lock = std::env::var("EDW_TUI_SKILLS_LOCK")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(".edw/skills.lock"));
+            .unwrap_or_else(|_| {
+                lock::default_path(
+                    std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+                    std::env::var("HOME").ok().as_deref(),
+                )
+            });
         Self { dirs, lock }
     }
 }

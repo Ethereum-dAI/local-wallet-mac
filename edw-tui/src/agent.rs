@@ -309,10 +309,33 @@ impl Shared {
         let name = args.get("name").and_then(Value::as_str).unwrap_or_default();
         let text = self.skills.load(name);
         let loaded = self.skills.is_loaded(name);
+        // The SKILL.md text is for the model; the log only says what was loaded, so the
+        // results that follow stay in view.
+        let output = if loaded {
+            match self.skills.catalog.closure(name) {
+                Some(skills) => {
+                    let parts: Vec<String> = skills
+                        .iter()
+                        .map(|s| {
+                            let tools = s.tool_names();
+                            if tools.is_empty() {
+                                format!("{} (instructions only)", s.name)
+                            } else {
+                                format!("{} (tools: {})", s.name, tools.join(", "))
+                            }
+                        })
+                        .collect();
+                    format!("Loaded {}", parts.join(", "))
+                }
+                None => text.clone(),
+            }
+        } else {
+            text.clone()
+        };
         self.log(AgentEvent::ToolFinished(EdwResult {
             command: format!("{LOAD_SKILL} {name}"),
             exit_code: if loaded { 0 } else { 1 },
-            output: text.clone(),
+            output,
         }));
         text
     }

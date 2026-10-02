@@ -101,7 +101,11 @@ fn skills_are_approved_on_cards_and_managed_in_the_skills_tab() {
     tui.wait_for("Allow skill gamma?");
     thread::sleep(Duration::from_millis(600));
     tui.press(b"y");
-    let screen = tui.wait_for("gamma");
+    // Its row in the list, not the card's title: keys pressed while the card is still up
+    // would scroll the card instead of moving the selection.
+    let screen = tui.wait_until("gamma's row", |s| {
+        s.contains("● gamma") && !s.contains("Allow skill")
+    });
     assert!(added.join("gamma/SKILL.md").exists(), "{screen}");
 
     // x deletes it again, after a y/n.

@@ -98,6 +98,42 @@ struct Ctx<'a> {
     me: Address,
 }
 
+/// Only digits (and a leading `-` for signed types): what the review shows is then exactly the
+/// number encoded. alloy's own parser would also take `1ether`, `1e6` or hex.
+fn plain_decimal(value: &Value, signed: bool) -> Result<Value, String> {
+    let ok = match value {
+        Value::Number(n) => n.is_u64() || (signed && n.is_i64()),
+        Value::String(s) => {
+            let digits = if signed {
+                s.strip_prefix('-').unwrap_or(s)
+            } else {
+                s
+            };
+            !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+        }
+        _ => false,
+    };
+    if ok {
+        Ok(value.clone())
+    } else {
+        Err(format!("`{value}` is not a plain decimal integer"))
+    }
+}
+
+/// One review line: control characters (newlines, terminal escapes) are shown escaped, so no
+/// text from a script or manifest can add or rewrite lines of the review.
+pub fn one_line(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
 fn text<'a>(step: &'a Value, key: &str) -> Result<&'a str, String> {
     step.get(key)
         .and_then(Value::as_str)
@@ -248,7 +284,7 @@ impl Ctx<'_> {
         let data = function
             .abi_encode_input(&values)
             .map_err(|e| format!("{name}: {e}"))?;
-        let mut label = format!("{}.{name}({})", contract.label, shown.join(", "));
+        let mut label = one_line(&format!("{}.{name}({})", contract.label, shown.join(", ")));
         if !value.is_zero() {
             label.push_str(&format!(" with {} ETH", format_units(value, 18)));
         }
@@ -294,6 +330,8 @@ impl Ctx<'_> {
                     .map(|v| self.addresses(inner, v))
                     .collect::<Result<_, _>>()?,
             )),
+            DynSolType::Uint(_) => plain_decimal(value, false),
+            DynSolType::Int(_) => plain_decimal(value, true),
             _ if value.as_str() == Some(SELF) => {
                 Err(format!("`$self` stands for an address, but this is a {ty}"))
             }
@@ -313,7 +351,8 @@ impl Ctx<'_> {
                 .or_else(|| m.contract(id).map(|c| c.label.clone()))
                 .unwrap_or_else(|| id.to_owned()),
             (DynSolType::Uint(_), Some(text)) if text == U256::MAX.to_string() => "all".into(),
-            (_, Some(text)) => text.to_owned(),
+            (DynSolType::String, Some(text)) => format!("{text:?}"),
+            (_, Some(text)) => one_line(text),
             _ => value.to_string(),
         }
     }
@@ -360,6 +399,7 @@ functions = [
   "function supply(address asset,uint256 amount,address onBehalfOf,uint16 referralCode)",
   "function withdraw(address asset,uint256 amount,address to) returns (uint256)",
   "function deposit() payable",
+  "function setNote(string memo, bytes data, int256 delta)",
 ]
 address = { 11155111 = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951" }
 
@@ -539,6 +579,35 @@ approves = ["pool"]
             "aUSDC",
         );
         refused(one(json!({"teleport": {}})), "approve or call");
+    }
+
+    /// alloy's string coercion reads `1ether`, `0.5 gwei`, `1e6` and hex as numbers; the review
+    /// would then show the script's text while the calldata holds something else.
+    #[test]
+    fn integers_must_be_plain_decimals() {
+        for amount in ["0.000001 ether", "1ether", "1e6", "0x10", "1_000", " 1", ""] {
+            refused(
+                json!({"steps": [supply(json!(["usdc", amount, "$self", "0"]))]}),
+                "plain decimal",
+            );
+        }
+        let note = |delta: &str| json!({"steps": [{"call": {"contract": "pool", "function": "setNote", "args": ["memo", "0x", delta]}}]});
+        assert!(run(note("-5")).is_ok(), "a signed int may be negative");
+        refused(note("-0x5"), "plain decimal");
+    }
+
+    /// Text from a script must not add lines to the review.
+    #[test]
+    fn script_text_cannot_forge_review_lines() {
+        let plan = run(
+            json!({"steps": [{"call": {"contract": "pool", "function": "setNote",
+            "args": ["x\nStep 2   approve 1 USDC for Aave Pool", "0xdeadbeef", "1"]}}]}),
+        )
+        .unwrap();
+        let label = &plan.steps[0].label;
+        assert!(!label.contains('\n'), "{label}");
+        assert!(label.contains(r#"memo="x\nStep 2"#), "{label}");
+        assert!(label.contains("data=0xdeadbeef"), "{label}");
     }
 
     #[test]

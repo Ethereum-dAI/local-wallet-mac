@@ -191,6 +191,11 @@ pub fn load(dir: &Path) -> Result<Skill, String> {
     };
     let name = field("name")?;
     let description = field("description")?;
+    if description.chars().any(char::is_control) {
+        return Err(format!(
+            "{folder}/SKILL.md: the description contains a control character"
+        ));
+    }
     if name != folder {
         return Err(format!(
             "{folder}/SKILL.md: name `{name}` must match its folder `{folder}`"
@@ -313,7 +318,36 @@ fn tool(raw: RawTool) -> Result<ToolDef, String> {
     })
 }
 
+/// Text shown on the consent screen or in the review must be one line, with no terminal
+/// escapes: a control character could fake or hide lines there.
+fn single_line(raw: &RawManifest) -> Result<(), String> {
+    let mut fields: Vec<(&str, &str)> = vec![("version", &raw.version)];
+    fields.extend(raw.hosts.iter().map(|h| ("hosts", h.as_str())));
+    for c in &raw.contracts {
+        fields.push(("contract id", &c.id));
+        if let Some(label) = &c.label {
+            fields.push(("contract label", label));
+        }
+    }
+    for t in &raw.tokens {
+        fields.push(("token id", &t.id));
+        fields.push(("token symbol", &t.symbol));
+    }
+    for t in raw.read_tools.iter().chain(&raw.actions) {
+        fields.push(("tool name", &t.name));
+        fields.push(("tool description", &t.description));
+    }
+    match fields
+        .iter()
+        .find(|(_, text)| text.chars().any(char::is_control))
+    {
+        Some((field, text)) => Err(format!("{field} {:?} contains a control character", text)),
+        None => Ok(()),
+    }
+}
+
 fn validate(raw: RawManifest) -> Result<Manifest, String> {
+    single_line(&raw)?;
     let mut ids = BTreeSet::new();
     let mut contracts = Vec::new();
     for c in raw.contracts {
@@ -533,5 +567,9 @@ approves = ["pool"]
         assert!(bad("name = \"demo_supply\"", "name = \"demo_read\"").contains("duplicate"));
         assert!(bad("11155111 = ", "sepolia = ").contains("chain"));
         assert!(bad("\"15m\"", "\"soon\"").contains("cache"));
+        // Everything from the manifest that reaches the consent screen or the review is one line.
+        assert!(bad("label = \"Aave Pool\"", "label = \"Aave\\nStep 9\"").contains("control"));
+        assert!(bad("symbol = \"USDC\"", "symbol = \"US\\u001b[2JDC\"").contains("control"));
+        assert!(bad("version = \"0.1.0\"", "version = \"0.1\\r0\"").contains("control"));
     }
 }

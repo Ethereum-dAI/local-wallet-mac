@@ -4,79 +4,20 @@
 
 mod common;
 
-use std::{
-    collections::VecDeque,
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::{path::Path, sync::Arc};
 
 use alloy_node_bindings::Anvil;
-use common::{Harness, TempWallet, edw_binary};
+use common::{
+    Harness, TempWallet, edw_binary,
+    recorder::{Recorder, call},
+};
 use edw_tui::skills::{
     catalog::{self, Catalog, SkillState},
     sandbox::{self, Runner},
     tools::SkillSet,
 };
-use rig_agent::{
-    ModelHandle,
-    completion::{CompletionError, CompletionModel, CompletionRequest, CompletionResponse, Usage},
-    streaming::StreamingCompletionResponse,
-};
-use rig_core::message::{AssistantContent, ToolCall, ToolFunction};
-use serde_json::{Value, json};
-
-/// Plays back a fixed list of replies and records the tool names each request offered.
-#[derive(Clone)]
-struct Recorder {
-    replies: Arc<Mutex<VecDeque<AssistantContent>>>,
-    offered: Arc<Mutex<Vec<Vec<String>>>>,
-}
-
-impl Recorder {
-    fn new(replies: Vec<AssistantContent>) -> Self {
-        Self {
-            replies: Arc::new(Mutex::new(replies.into())),
-            offered: Arc::default(),
-        }
-    }
-}
-
-fn call(name: &str, args: Value) -> AssistantContent {
-    AssistantContent::ToolCall(ToolCall::from_wire(
-        format!("rec-{name}"),
-        ToolFunction::new(name.to_owned(), args),
-    ))
-}
-
-impl CompletionModel for Recorder {
-    async fn completion(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<CompletionResponse, CompletionError> {
-        self.offered
-            .lock()
-            .unwrap()
-            .push(request.tools.iter().map(|t| t.name.clone()).collect());
-        let reply = self
-            .replies
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_else(|| AssistantContent::text("done"));
-        Ok(CompletionResponse::new(
-            vec![reply],
-            Usage::new(),
-            "recorder",
-        ))
-    }
-
-    async fn stream(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<StreamingCompletionResponse, CompletionError> {
-        Err(CompletionError::ResponseError("no streaming".into()))
-    }
-}
+use rig_agent::ModelHandle;
+use serde_json::json;
 
 fn probe_skills() -> Arc<SkillSet> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));

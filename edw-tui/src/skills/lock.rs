@@ -12,8 +12,18 @@ use sha2::{Digest, Sha256};
 
 use super::manifest::Skill;
 
-/// Never part of a skill: editor and interpreter litter.
-const IGNORED: [&str; 2] = ["__pycache__", ".DS_Store"];
+/// Never part of a skill, and never run: Finder litter.
+const IGNORED: [&str; 1] = [".DS_Store"];
+
+/// Compiled Python is refused rather than skipped: the interpreter imports a `.pyc` from
+/// `__pycache__` even when the `.py` next to it differs, so it would be code that runs without
+/// being part of the hash the user agreed to.
+fn compiled_python(name: &std::ffi::OsStr) -> bool {
+    name == "__pycache__"
+        || Path::new(name)
+            .extension()
+            .is_some_and(|e| e == "pyc" || e == "pyo")
+}
 
 /// sha256 over every file under `dir`, in sorted path order: `path \0 len \0 bytes`.
 /// A symlink anywhere is refused, so the hash always covers what actually runs.
@@ -47,6 +57,12 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String
             .map_err(|e| format!("{}: {e}", path.display()))?
             .file_type();
         let relative = path.strip_prefix(root).unwrap_or(&path).to_owned();
+        if compiled_python(&name) {
+            return Err(format!(
+                "{}: compiled Python is not allowed in a skill folder; delete it",
+                relative.display()
+            ));
+        }
         if kind.is_symlink() {
             return Err(format!(
                 "{}: symlinks are not allowed in a skill folder",
@@ -159,6 +175,22 @@ mod tests {
         fs::rename(db.join("scripts/a.py"), db.join("scripts/b.py")).unwrap();
         fs::write(db.join("scripts/b.py"), "print(1)\n").unwrap();
         assert_ne!(hash_dir(&da).unwrap(), hash_dir(&db).unwrap());
+    }
+
+    /// Python imports a `.pyc` from `__pycache__` even when the `.py` next to it says something
+    /// else, so compiled code would run without ever being part of what the user agreed to.
+    #[test]
+    fn compiled_python_is_refused_not_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = skill_dir(root.path());
+        fs::create_dir_all(dir.join("scripts/__pycache__")).unwrap();
+        fs::write(dir.join("scripts/__pycache__/a.cpython-312.pyc"), b"\x00evil").unwrap();
+        assert!(hash_dir(&dir).unwrap_err().contains("compiled Python"));
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = skill_dir(root.path());
+        fs::write(dir.join("scripts/a.pyc"), b"\x00evil").unwrap();
+        assert!(hash_dir(&dir).unwrap_err().contains("compiled Python"));
     }
 
     #[test]

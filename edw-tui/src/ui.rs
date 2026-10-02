@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, ChatLine, LogEntry, PendingConfirm, View},
+    app::{App, ChatLine, LogEntry, PanelScroll, PendingConfirm, View},
     skills::consent::ConsentRequest,
 };
 
@@ -46,8 +46,22 @@ pub fn render(frame: &mut Frame, app: &App) {
             let [chat, log] =
                 Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
                     .areas(main);
-            render_bottom_anchored(frame, chat, chat_text(app), " Chat ", Borders::ALL);
-            render_bottom_anchored(frame, log, log_text(app), " edw commands ", Borders::ALL);
+            render_bottom_anchored(
+                frame,
+                chat,
+                chat_text(app),
+                " Chat ",
+                Borders::ALL,
+                &app.chat_scroll,
+            );
+            render_bottom_anchored(
+                frame,
+                log,
+                log_text(app),
+                " edw commands ",
+                Borders::ALL,
+                &app.log_scroll,
+            );
         }
         // One panel, full width, with no side borders: a terminal selection then copies only
         // this panel's text.
@@ -57,6 +71,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             chat_text(app),
             " Chat · Tab: commands ",
             Borders::TOP,
+            &app.chat_scroll,
         ),
         View::Log => render_bottom_anchored(
             frame,
@@ -64,6 +79,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             log_text(app),
             " edw commands · Tab: both ",
             Borders::TOP,
+            &app.log_scroll,
         ),
     }
 
@@ -240,21 +256,25 @@ fn render_bottom_anchored(
     text: Text<'static>,
     title: &'static str,
     borders: Borders,
+    scroll: &PanelScroll,
 ) {
     let count = |sides: Borders| borders.intersection(sides).iter().count() as u16;
     let (vertical, horizontal) = (
         count(Borders::TOP | Borders::BOTTOM),
         count(Borders::LEFT | Borders::RIGHT),
     );
-    let paragraph = Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .block(Block::new().borders(borders).title(title));
+    let wrapped = Paragraph::new(text).wrap(Wrap { trim: false });
     let inner_height = area.height.saturating_sub(vertical) as usize;
-    // `line_count` includes the block's own top and bottom rows.
-    let lines = paragraph
-        .line_count(area.width.saturating_sub(horizontal))
-        .saturating_sub(vertical as usize);
-    let offset = lines.saturating_sub(inner_height).min(u16::MAX as usize) as u16;
+    let lines = wrapped.line_count(area.width.saturating_sub(horizontal));
+    let top = scroll.observe(lines, inner_height);
+    // Scrolled back: say so, and how to get to the newest lines.
+    let title = if scroll.following() || lines <= inner_height {
+        title.to_owned()
+    } else {
+        format!("{title}↑ older · PgDn/End ")
+    };
+    let paragraph = wrapped.block(Block::new().borders(borders).title(title));
+    let offset = top.min(u16::MAX as usize) as u16;
     frame.render_widget(paragraph.scroll((offset, 0)), area);
 }
 
@@ -384,7 +404,11 @@ fn render_confirm(frame: &mut Frame, pending: &PendingConfirm, queued: usize) {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+    };
     use tokio::sync::oneshot;
 
     use super::*;
@@ -511,6 +535,41 @@ mod tests {
         let scrolled = tall_screen(&app, 12);
         assert!(scrolled.contains("Sepolia (11155111)"), "{scrolled}");
         assert!(scrolled.contains("[y] allow"), "{scrolled}");
+    }
+
+    #[test]
+    fn a_scrolled_panel_shows_older_lines_and_stays_put_when_more_arrive() {
+        let mut app = App::new("m", "d");
+        for n in 0..60 {
+            app.chat.push(ChatLine::Info(format!("message {n:02}")));
+        }
+        let first = screen(&app);
+        assert!(first.contains("message 59") && !first.contains("message 10"));
+
+        app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        let scrolled = screen(&app);
+        assert!(!scrolled.contains("message 59"), "{scrolled}");
+        assert!(scrolled.contains("↑ older · PgDn/End"), "{scrolled}");
+        let oldest_shown = (0..60)
+            .find(|n| scrolled.contains(&format!("message {n:02}")))
+            .unwrap();
+
+        // A new message does not move a scrolled panel.
+        app.chat.push(ChatLine::Info("message 60".into()));
+        let after = screen(&app);
+        assert!(
+            after.contains(&format!("message {oldest_shown:02}")),
+            "{after}"
+        );
+        assert!(!after.contains("message 60"), "{after}");
+
+        app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        let end = screen(&app);
+        assert!(
+            end.contains("message 60") && !end.contains("↑ older"),
+            "{end}"
+        );
     }
 
     #[test]

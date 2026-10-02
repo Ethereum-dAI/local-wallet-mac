@@ -15,7 +15,7 @@ use crate::{
     skills::consent::ConsentRequest,
 };
 
-pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /skills lists skills · /copy [reply|log|address] copies to the clipboard · Tab shows one panel at a time, for selecting text · /help";
+pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /skills lists skills · /copy [reply|log|address] copies to the clipboard · PgUp/PgDn scroll the chat, Shift+PgUp/PgDn the command log, End jumps to the newest · Tab shows one panel at a time, for selecting text · /help";
 
 /// How long a confirmation must be on screen before y or n counts.
 pub const CONFIRM_GRACE: Duration = Duration::from_millis(400);
@@ -74,6 +74,61 @@ pub enum Action {
     Quit,
 }
 
+/// One panel's scroll position. `None` follows the newest lines; `Some(row)` pins the first
+/// visible wrapped row, so lines arriving below never move what is on screen.
+#[derive(Debug, Default)]
+pub struct PanelScroll {
+    top: Option<usize>,
+    /// (total wrapped rows, visible rows) as the last render saw them; keys page by these.
+    seen: std::cell::Cell<(usize, usize)>,
+}
+
+impl PanelScroll {
+    pub fn top(&self) -> Option<usize> {
+        self.top
+    }
+
+    pub fn following(&self) -> bool {
+        self.top.is_none()
+    }
+
+    /// Called by the renderer with the panel's size; returns the first row to show.
+    pub fn observe(&self, total: usize, height: usize) -> usize {
+        self.seen.set((total, height));
+        let last_top = total.saturating_sub(height);
+        self.top.map_or(last_top, |top| top.min(last_top))
+    }
+
+    fn page(&self) -> (usize, usize) {
+        let (total, height) = self.seen.get();
+        (
+            total.saturating_sub(height),
+            height.saturating_sub(1).max(1),
+        )
+    }
+
+    pub fn up(&mut self) {
+        let (last_top, page) = self.page();
+        if last_top == 0 {
+            return;
+        }
+        let from = self.top.unwrap_or(last_top).min(last_top);
+        self.top = Some(from.saturating_sub(page));
+    }
+
+    pub fn down(&mut self) {
+        let (last_top, page) = self.page();
+        if let Some(top) = self.top {
+            let next = top + page;
+            self.top = (next < last_top).then_some(next);
+        }
+    }
+
+    pub fn follow(&mut self) {
+        self.top = None;
+    }
+}
+
 pub struct App {
     pub model: String,
     pub data_dir: String,
@@ -88,6 +143,9 @@ pub struct App {
     pub busy: bool,
     /// The last `/models` listing, so `/model 2` can pick by number.
     pub models: Vec<String>,
+    /// PgUp/PgDn scroll the chat, Shift+PgUp/PgDn the command log, End returns both.
+    pub chat_scroll: PanelScroll,
+    pub log_scroll: PanelScroll,
     /// Skills waiting for the user's approval, shown one card at a time before chatting.
     pub consents: VecDeque<ConsentRequest>,
     pub consent_scroll: u16,
@@ -117,6 +175,8 @@ impl App {
             input: String::new(),
             busy: false,
             models: Vec::new(),
+            chat_scroll: PanelScroll::default(),
+            log_scroll: PanelScroll::default(),
             consents: VecDeque::new(),
             consent_scroll: 0,
             consent_total: 0,
@@ -216,6 +276,24 @@ impl App {
             }
             KeyCode::Tab => {
                 self.view = self.view.next();
+                Action::None
+            }
+            KeyCode::PageUp | KeyCode::PageDown => {
+                let panel = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    &mut self.log_scroll
+                } else {
+                    &mut self.chat_scroll
+                };
+                if key.code == KeyCode::PageUp {
+                    panel.up();
+                } else {
+                    panel.down();
+                }
+                Action::None
+            }
+            KeyCode::End => {
+                self.chat_scroll.follow();
+                self.log_scroll.follow();
                 Action::None
             }
             KeyCode::Char(c) => {
@@ -520,6 +598,54 @@ mod tests {
         assert!(!app.busy);
         assert_eq!(app.skills, ["alpha (ready)"]);
         assert!(matches!(app.chat.last(), Some(ChatLine::Info(t)) if t.contains("Docker")));
+    }
+
+    fn shifted(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn page_keys_scroll_chat_shift_page_keys_scroll_the_log_end_returns() {
+        let mut app = App::new("m", "d");
+        // As the last render saw them: 100 rows of chat, 50 of log, 20 visible each.
+        app.chat_scroll.observe(100, 20);
+        app.log_scroll.observe(50, 20);
+        assert!(app.chat_scroll.following() && app.log_scroll.following());
+
+        app.on_key(key(KeyCode::PageUp));
+        assert_eq!(
+            app.chat_scroll.top(),
+            Some(80 - 19),
+            "one page up from the bottom"
+        );
+        assert!(app.log_scroll.following(), "the log does not move");
+
+        app.on_key(shifted(KeyCode::PageUp));
+        app.on_key(shifted(KeyCode::PageUp));
+        assert_eq!(
+            app.log_scroll.top(),
+            Some(0),
+            "two pages up from row 30 stop at the top"
+        );
+
+        app.on_key(key(KeyCode::PageDown));
+        assert!(
+            app.chat_scroll.following(),
+            "paging down to the end follows again"
+        );
+
+        app.on_key(key(KeyCode::PageUp));
+        app.on_key(key(KeyCode::End));
+        assert!(app.chat_scroll.following() && app.log_scroll.following());
+        assert!(app.input.is_empty(), "scroll keys type nothing");
+    }
+
+    #[test]
+    fn a_short_panel_does_not_scroll() {
+        let mut app = App::new("m", "d");
+        app.chat_scroll.observe(5, 20);
+        app.on_key(key(KeyCode::PageUp));
+        assert!(app.chat_scroll.following());
     }
 
     #[test]

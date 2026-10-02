@@ -39,7 +39,9 @@ The TUI warns at startup when the installed edw is not the pinned revision.
 | `EDW_TUI_SKILL_IMAGE` | `python:3.12-slim@sha256:f77ac9e…` | The Docker image skill scripts run in, pinned by digest. |
 | `EDW_TUI_ADDRESS_ALIASES` | on | The model sees `ADDR_1`, `ADDR_2`… instead of 0x addresses and never retypes one (8B models lose count in long hex; Ollama then aborts the reply). `0` shows it raw addresses, e.g. for evals. |
 
-In the TUI: **Tab** shows one panel at a time, full width and without side borders, so a
+In the TUI: **PgUp/PgDn** scroll the chat and **Shift+PgUp/PgDn** the command log, each on its
+own (a scrolled panel stays put as new lines arrive; **End** returns both to the newest).
+**Tab** shows one panel at a time, full width and without side borders, so a
 mouse selection copies only that panel. `/copy` copies the last reply, `/copy log` the last
 command and its output, `/copy address` the sending profile's address. Pasting is safe:
 line breaks in a paste never send the message.

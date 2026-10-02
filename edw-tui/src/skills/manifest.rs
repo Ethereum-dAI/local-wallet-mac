@@ -318,6 +318,51 @@ fn tool(raw: RawTool) -> Result<ToolDef, String> {
     })
 }
 
+/// Token functions that grant or move funds directly. Plans approve only through the checker's
+/// own exact-amount step, so a manifest may not list these.
+const MOVES_TOKENS: [&str; 10] = [
+    "approve",
+    "increaseallowance",
+    "decreaseallowance",
+    "permit",
+    "transfer",
+    "transferfrom",
+    "safetransferfrom",
+    "setapprovalforall",
+    "approveandcall",
+    "transferandcall",
+];
+
+/// A function a plan could use to get around the checker: one that moves or approves tokens
+/// itself, or takes raw `bytes` (multicall-style), whose contents the checker cannot see.
+fn sidesteps_the_checker(function: &Function) -> Option<String> {
+    use alloy_dyn_abi::{DynSolType, Specifier};
+    fn raw_bytes(ty: &DynSolType) -> bool {
+        match ty {
+            DynSolType::Bytes => true,
+            DynSolType::Array(inner) | DynSolType::FixedArray(inner, _) => raw_bytes(inner),
+            DynSolType::Tuple(items) => items.iter().any(raw_bytes),
+            _ => false,
+        }
+    }
+    if MOVES_TOKENS.contains(&function.name.to_lowercase().as_str()) {
+        return Some(format!(
+            "{} is not allowed: plans approve and move tokens only through the checked approve step",
+            function.name
+        ));
+    }
+    let bytes = function
+        .inputs
+        .iter()
+        .any(|p| p.resolve().is_ok_and(|ty| raw_bytes(&ty)));
+    bytes.then(|| {
+        format!(
+            "{} is not allowed: it takes raw bytes, which the plan checker cannot inspect",
+            function.name
+        )
+    })
+}
+
 /// Text shown on the consent screen or in the review must be one line, with no terminal
 /// escapes: a control character could fake or hide lines there.
 fn single_line(raw: &RawManifest) -> Result<(), String> {
@@ -357,7 +402,14 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
         let functions = c
             .functions
             .iter()
-            .map(|sig| Function::parse(sig).map_err(|e| format!("{}: `{sig}`: {e}", c.id)))
+            .map(|sig| {
+                let function =
+                    Function::parse(sig).map_err(|e| format!("{}: `{sig}`: {e}", c.id))?;
+                match sidesteps_the_checker(&function) {
+                    Some(why) => Err(format!("{}: {why}", c.id)),
+                    None => Ok(function),
+                }
+            })
             .collect::<Result<Vec<_>, _>>()?;
         contracts.push(ContractDef {
             label: c.label.unwrap_or_else(|| c.id.clone()),
@@ -567,6 +619,23 @@ approves = ["pool"]
         assert!(bad("name = \"demo_supply\"", "name = \"demo_read\"").contains("duplicate"));
         assert!(bad("11155111 = ", "sepolia = ").contains("chain"));
         assert!(bad("\"15m\"", "\"soon\"").contains("cache"));
+        // Functions that would get around the plan checker's approval and recipient rules.
+        let supply =
+            "function supply(address asset,uint256 amount,address onBehalfOf,uint16 referralCode)";
+        for sig in [
+            "function approve(address spender,uint256 amount)",
+            "function increaseAllowance(address spender,uint256 added)",
+            "function permit(address owner,address spender,uint256 value,uint256 deadline,uint8 v,bytes32 r,bytes32 s)",
+            "function transfer(address to,uint256 amount)",
+            "function transferFrom(address from,address to,uint256 amount)",
+            "function setApprovalForAll(address operator,bool approved)",
+            "function multicall(bytes[] data)",
+            "function execute(address target,bytes data)",
+            "function batch((address,bytes)[] calls)",
+        ] {
+            let error = bad(supply, sig);
+            assert!(error.contains("not allowed"), "{sig}: {error}");
+        }
         // Everything from the manifest that reaches the consent screen or the review is one line.
         assert!(bad("label = \"Aave Pool\"", "label = \"Aave\\nStep 9\"").contains("control"));
         assert!(bad("symbol = \"USDC\"", "symbol = \"US\\u001b[2JDC\"").contains("control"));

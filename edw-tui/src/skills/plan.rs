@@ -399,7 +399,7 @@ functions = [
   "function supply(address asset,uint256 amount,address onBehalfOf,uint16 referralCode)",
   "function withdraw(address asset,uint256 amount,address to) returns (uint256)",
   "function deposit() payable",
-  "function setNote(string memo, bytes data, int256 delta)",
+  "function setNote(string memo, bytes32 tag, int256 delta)",
 ]
 address = { 11155111 = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951" }
 
@@ -591,7 +591,7 @@ approves = ["pool"]
                 "plain decimal",
             );
         }
-        let note = |delta: &str| json!({"steps": [{"call": {"contract": "pool", "function": "setNote", "args": ["memo", "0x", delta]}}]});
+        let note = |delta: &str| json!({"steps": [{"call": {"contract": "pool", "function": "setNote", "args": ["memo", "0x0000000000000000000000000000000000000000000000000000000000000000", delta]}}]});
         assert!(run(note("-5")).is_ok(), "a signed int may be negative");
         refused(note("-0x5"), "plain decimal");
     }
@@ -601,13 +601,13 @@ approves = ["pool"]
     fn script_text_cannot_forge_review_lines() {
         let plan = run(
             json!({"steps": [{"call": {"contract": "pool", "function": "setNote",
-            "args": ["x\nStep 2   approve 1 USDC for Aave Pool", "0xdeadbeef", "1"]}}]}),
+            "args": ["x\nStep 2   approve 1 USDC for Aave Pool", "0xdeadbeef00000000000000000000000000000000000000000000000000000000", "1"]}}]}),
         )
         .unwrap();
         let label = &plan.steps[0].label;
         assert!(!label.contains('\n'), "{label}");
         assert!(label.contains(r#"memo="x\nStep 2"#), "{label}");
-        assert!(label.contains("data=0xdeadbeef"), "{label}");
+        assert!(label.contains("tag=0xdeadbeef"), "{label}");
     }
 
     #[test]

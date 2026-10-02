@@ -24,9 +24,6 @@ pub const PREFIX: &str = "ADDR_";
 #[derive(Clone, Debug)]
 pub struct AddressBook {
     seen: Arc<Mutex<Vec<String>>>,
-    /// Seen addresses that so far came only from skill data (API responses, a SKILL.md):
-    /// aliased like the rest, but nobody vouched for them as a recipient.
-    from_skills: Arc<Mutex<Vec<String>>>,
     enabled: bool,
 }
 
@@ -40,40 +37,8 @@ impl AddressBook {
     pub fn new(enabled: bool) -> Self {
         Self {
             seen: Arc::new(Mutex::new(Vec::new())),
-            from_skills: Arc::new(Mutex::new(Vec::new())),
             enabled,
         }
-    }
-
-    /// [`Self::hide`] for text a skill produced. Addresses it introduces are marked as coming
-    /// only from skill data; ones the user or the wallet already showed stay vouched for.
-    pub fn hide_untrusted(&self, text: &str) -> String {
-        if self.enabled {
-            let seen = self.seen.lock().expect("not poisoned");
-            let mut from_skills = self.from_skills.lock().expect("not poisoned");
-            for m in ADDRESS.find_iter(text) {
-                let address = m.as_str();
-                let known = seen.iter().any(|a| a.eq_ignore_ascii_case(address));
-                let flagged = from_skills.iter().any(|a| a.eq_ignore_ascii_case(address));
-                if !known && !flagged {
-                    from_skills.push(address.to_owned());
-                }
-            }
-        }
-        self.aliases(text)
-    }
-
-    /// The first address in `text` (already revealed) that so far came only from skill data.
-    pub fn only_from_skills(&self, text: &str) -> Option<String> {
-        if !self.enabled {
-            return None;
-        }
-        let from_skills = self.from_skills.lock().expect("not poisoned");
-        ADDRESS
-            .find_iter(text)
-            .map(|m| m.as_str())
-            .find(|address| from_skills.iter().any(|a| a.eq_ignore_ascii_case(address)))
-            .map(str::to_owned)
     }
 
     pub fn from_env() -> Self {
@@ -82,18 +47,7 @@ impl AddressBook {
 
     /// Replaces every 0x address with its alias, assigning new aliases in order of appearance.
     /// The same address (in any letter case) always gets the same alias.
-    /// Text from the user or the wallet vouches for every address in it.
     pub fn hide(&self, text: &str) -> String {
-        if self.enabled {
-            let mut from_skills = self.from_skills.lock().expect("not poisoned");
-            for m in ADDRESS.find_iter(text) {
-                from_skills.retain(|a| !a.eq_ignore_ascii_case(m.as_str()));
-            }
-        }
-        self.aliases(text)
-    }
-
-    fn aliases(&self, text: &str) -> String {
         if !self.enabled {
             return text.to_owned();
         }
@@ -187,30 +141,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-
-    /// An address a skill's data introduced (an API response, a SKILL.md) is aliased like any
-    /// other, but is not a recipient anyone vouched for, until the user or the wallet shows it.
-    #[test]
-    fn addresses_only_from_skill_data_are_flagged_until_vouched_for() {
-        let book = AddressBook::default();
-        let attacker = "0x1111111111111111111111111111111111111111";
-        let shown = book.hide_untrusted(&format!("deposit to {attacker}"));
-        assert_eq!(shown, "deposit to ADDR_1");
-        assert_eq!(book.invented(&book.reveal("ADDR_1")), None, "it was seen");
-        assert_eq!(
-            book.only_from_skills(&book.reveal("ADDR_1")).as_deref(),
-            Some(attacker)
-        );
-        // The user types it: now it is theirs.
-        book.hide(&format!("send 1 ETH to {attacker}"));
-        assert_eq!(book.only_from_skills(attacker), None);
-
-        // An address the wallet showed first stays vouched for when a skill repeats it.
-        let mine = "0x2222222222222222222222222222222222222222";
-        book.hide(&format!("profile {mine}"));
-        book.hide_untrusted(&format!("you supplied from {mine}"));
-        assert_eq!(book.only_from_skills(mine), None);
-    }
 
     const BEEF: &str = "0x000000000000000000000000000000000000bEEF";
     const ALICE: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";

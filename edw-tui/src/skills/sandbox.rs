@@ -25,6 +25,8 @@ use super::{host::Host, manifest::Skill};
 pub const DEFAULT_IMAGE: &str =
     "python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f";
 pub const TIMEOUT: Duration = Duration::from_secs(20);
+/// How long startup waits for a first `docker pull` of the image.
+pub const PULL_TIMEOUT: Duration = Duration::from_secs(300);
 /// Everything a script prints on stdout, protocol lines included.
 pub const MAX_STDOUT: u64 = 1024 * 1024;
 const MAX_STDERR: u64 = 64 * 1024;
@@ -301,7 +303,9 @@ pub async fn docker_available() -> bool {
 
 /// Pulls the image if it is not present yet, so a first script call does not spend its timeout
 /// downloading it.
-pub async fn ensure_image(image: &str) -> Result<(), String> {
+/// Gives up after `timeout`, so a slow or stuck pull never hangs startup. Says on stderr that
+/// it is pulling, since the TUI is not up yet.
+pub async fn ensure_image(image: &str, timeout: Duration) -> Result<(), String> {
     let present = Command::new("docker")
         .args(["image", "inspect", image])
         .stdout(Stdio::null())
@@ -312,12 +316,21 @@ pub async fn ensure_image(image: &str) -> Result<(), String> {
     if present {
         return Ok(());
     }
-    let pulled = Command::new("docker")
+    eprintln!("Pulling the skill image {image} (first run only)…");
+    let pull = Command::new("docker")
         .args(["pull", "--quiet", image])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
+        .kill_on_drop(true)
+        .output();
+    let pulled = tokio::time::timeout(timeout, pull)
         .await
+        .map_err(|_| {
+            format!(
+                "docker pull {image} timed out after {}s; pull it by hand and restart",
+                timeout.as_secs()
+            )
+        })?
         .map_err(|e| format!("docker pull {image}: {e}"))?;
     if pulled.status.success() {
         Ok(())

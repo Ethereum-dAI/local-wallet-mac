@@ -317,6 +317,21 @@ async fn no_container_outlives_its_run() {
     assert_eq!(left, "", "the cancelled run left its container running");
 }
 
+/// A slow or stuck pull at startup gives up instead of hanging the TUI before it opens.
+#[tokio::test]
+async fn pulling_the_image_gives_up_after_its_timeout() {
+    if !docker().await {
+        return;
+    }
+    let error = sandbox::ensure_image(
+        "ghcr.io/edw-tui-tests/never-published:0",
+        Duration::from_millis(1),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("timed out"), "{error}");
+}
+
 #[tokio::test]
 async fn a_script_that_floods_stdout_is_cut_off() {
     if !docker().await {

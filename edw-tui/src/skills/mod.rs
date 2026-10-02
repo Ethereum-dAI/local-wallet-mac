@@ -88,7 +88,7 @@ pub async fn start(paths: &Paths, mut ask: impl FnMut(&str) -> bool) -> Startup 
     let runner = sandbox::Runner::from_env();
     let mut docker = !needs_docker || sandbox::docker_available().await;
     if needs_docker && docker {
-        if let Err(error) = sandbox::ensure_image(&runner.image).await {
+        if let Err(error) = sandbox::ensure_image(&runner.image, sandbox::PULL_TIMEOUT).await {
             notes.push(format!("Skills with scripts are off: {error}"));
             docker = false;
         }

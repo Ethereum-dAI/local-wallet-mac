@@ -5,6 +5,7 @@
 
 pub mod abi;
 pub mod catalog;
+pub mod consent;
 pub mod host;
 pub mod lock;
 pub mod manifest;
@@ -13,7 +14,7 @@ pub mod sandbox;
 pub mod simulate;
 pub mod tools;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use catalog::{Installed, SkillState};
 
@@ -57,24 +58,62 @@ pub struct Startup {
     pub notes: Vec<String>,
 }
 
-/// Discovers skills, asks `ask` (with the consent summary) about each one that needs
-/// consent, records the answers, and resolves which skills are ready.
-pub async fn start(paths: &Paths, mut ask: impl FnMut(&str) -> bool) -> Startup {
-    let mut notes = Vec::new();
+/// Skills found on disk, with the ones that need the user's consent laid out for the TUI.
+pub struct Discovery {
+    installed: Vec<Installed>,
+    lock: lock::Lock,
+    lock_path: PathBuf,
+    /// In discovery order; the TUI shows one approval card per request.
+    pub requests: Vec<consent::ConsentRequest>,
+}
+
+/// Finds skills and checks them against the lock, without asking anything yet.
+pub fn discover(paths: &Paths) -> Discovery {
     let mut installed = catalog::discover(&paths.dirs);
-    let mut lock = lock::Lock::open(&paths.lock);
+    let lock = lock::Lock::open(&paths.lock);
     catalog::apply_lock(&mut installed, &lock);
+    let requests = installed
+        .iter()
+        .filter(|i| i.state == SkillState::NeedsConsent)
+        .filter_map(|i| {
+            let skill = i.skill.as_ref()?;
+            let reason = consent::Reason::from_status(lock.status(skill, &i.hash))?;
+            Some(consent::ConsentRequest::new(skill, &i.hash, reason))
+        })
+        .collect();
+    Discovery {
+        installed,
+        lock,
+        lock_path: paths.lock.clone(),
+        requests,
+    }
+}
+
+/// Applies the user's answers (by skill name; anything unanswered is a no), records the yeses
+/// in the lock, and resolves which skills are ready: Docker, dependencies, tool names.
+pub async fn finish(discovery: Discovery, answers: &BTreeMap<String, bool>) -> Startup {
+    let Discovery {
+        mut installed,
+        mut lock,
+        lock_path,
+        requests,
+    } = discovery;
+    let mut notes = Vec::new();
     for i in installed.iter_mut() {
         if i.state != SkillState::NeedsConsent {
             continue;
         }
         let Some(skill) = &i.skill else { continue };
-        if ask(&catalog::consent_summary(skill, &i.hash)) {
+        // Only an answer to the very hash that was shown counts.
+        let shown = requests
+            .iter()
+            .any(|r| r.name == i.name && r.hash == i.hash);
+        if shown && answers.get(&i.name) == Some(&true) {
             if let Err(error) = lock.trust(skill, i.hash.clone()) {
                 notes.push(format!(
                     "Skill {} is allowed for this session, but {} could not be written ({error}); you will be asked again.",
                     i.name,
-                    paths.lock.display()
+                    lock_path.display()
                 ));
             }
             i.state = SkillState::Ready;
@@ -138,4 +177,70 @@ pub fn describe(installed: &[Installed]) -> Vec<String> {
             format!("{} ({state}){description}", i.name)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, fs};
+
+    use super::*;
+    use crate::skills::consent::Reason;
+
+    fn knowledge_skill(root: &std::path::Path, name: &str) {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: about {name}\n---\nbody\n"),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn answers_from_the_tui_decide_the_catalog_and_the_lock() {
+        let root = tempfile::tempdir().unwrap();
+        knowledge_skill(root.path(), "alpha");
+        knowledge_skill(root.path(), "beta");
+        let paths = Paths {
+            dirs: vec![root.path().to_owned()],
+            lock: root.path().join("state/skills.lock"),
+        };
+        let found = discover(&paths);
+        let asked: Vec<(&str, Reason)> = found
+            .requests
+            .iter()
+            .map(|r| (r.name.as_str(), r.reason))
+            .collect();
+        assert_eq!(asked, [("alpha", Reason::New), ("beta", Reason::New)]);
+
+        let answers = BTreeMap::from([("alpha".to_owned(), true), ("beta".to_owned(), false)]);
+        let startup = finish(found, &answers).await;
+        let names: Vec<&str> = startup
+            .set
+            .catalog
+            .skills
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["alpha"]);
+        assert!(describe(&startup.installed)[1].contains("declined"));
+
+        // Next start: only the declined one is asked about again.
+        let again = discover(&paths);
+        let asked: Vec<&str> = again.requests.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(asked, ["beta"]);
+    }
+
+    #[tokio::test]
+    async fn no_answer_is_a_no() {
+        let root = tempfile::tempdir().unwrap();
+        knowledge_skill(root.path(), "alpha");
+        let paths = Paths {
+            dirs: vec![root.path().to_owned()],
+            lock: root.path().join("skills.lock"),
+        };
+        let startup = finish(discover(&paths), &BTreeMap::new()).await;
+        assert!(startup.set.catalog.skills.is_empty());
+        assert!(!paths.lock.exists());
+    }
 }

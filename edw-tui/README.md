@@ -90,9 +90,11 @@ reads) and, optionally, `skill.toml`, which is what edw-tui enforces:
   they may `approves`.
 - `hosts`: the HTTP hosts its scripts may reach.
 
-**Consent.** On start, any skill that is new, changed (its folder hash differs from
-`skills.lock`) or asks for more hosts is shown on the terminal: its hosts, contracts and
-functions per chain, tokens and tools. Only `y` lets it in. `/skills` shows each skill's state.
+**Consent.** On start, the TUI shows an approval card for each skill that is new, changed
+(its folder hash differs from `skills.lock`) or asks for more hosts. The card lists what it
+needs, its web hosts and tools, and, per chain, every contract with its functions and the
+tokens it may approve. Only `y` lets it in (`n` or Esc declines, ↑↓ scroll); chat waits until
+every card is answered. `/skills` shows each skill's state.
 
 **Scripts run in Docker** (`skills/_sdk/edw_skill.py` is the protocol helper), one throwaway
 container per call: no network, read-only root and mounts, no capabilities, the `nobody` user,

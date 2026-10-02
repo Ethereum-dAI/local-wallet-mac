@@ -12,7 +12,9 @@ use ratatui::crossterm::{
     event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyEventKind},
     execute,
 };
-use tokio::sync::mpsc;
+use std::collections::BTreeMap;
+
+use tokio::sync::{mpsc, oneshot};
 
 /// Puts `text` on the system clipboard with the platform's own tool.
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
@@ -48,22 +50,6 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     Err("no clipboard tool found (pbcopy, wl-copy or xclip)".into())
 }
 
-/// Asks on the plain terminal (before the TUI starts) whether a skill may be used. Anything
-/// but y, or a stdin that is not a terminal, is a no.
-fn ask_consent(summary: &str) -> bool {
-    use std::io::{BufRead, IsTerminal, Write};
-    if !std::io::stdin().is_terminal() {
-        eprintln!("{summary}\nNot allowed: stdin is not a terminal, so no one can agree to it.");
-        return false;
-    }
-    println!("{summary}");
-    print!("Allow this skill? Its plans are still reviewed before anything is sent. [y/N] ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    let _ = std::io::stdin().lock().read_line(&mut line);
-    matches!(line.trim(), "y" | "Y" | "yes")
-}
-
 const USAGE: &str = "usage: edw-tui [tools-dump]
   (no command)  start the chat TUI
   tools-dump    print the model-facing contract (preamble, tool schemas) as JSON";
@@ -94,20 +80,9 @@ async fn main() -> anyhow::Result<()> {
     let interim = InterimConfig::from_env(config.clone());
     let model = source.handle(&model_name)?;
 
-    // Before the TUI takes the terminal: new or changed skills are agreed to here.
-    let startup = if std::env::var("EDW_TUI_SKILLS").is_ok_and(|v| v == "off") {
-        None
-    } else {
-        Some(skills::start(&skills::Paths::from_env(), ask_consent).await)
-    };
-    let (skill_set, skill_lines, skill_notes) = match startup {
-        Some(s) => (s.set, skills::describe(&s.installed), s.notes),
-        None => (
-            std::sync::Arc::new(SkillSet::empty()),
-            vec!["Skills are off (EDW_TUI_SKILLS=off).".into()],
-            Vec::new(),
-        ),
-    };
+    // Skills are found now and agreed to in the TUI; the agent starts once they are settled.
+    let discovery = (!std::env::var("EDW_TUI_SKILLS").is_ok_and(|v| v == "off"))
+        .then(|| skills::discover(&skills::Paths::from_env()));
 
     let (event_tx, mut events) = mpsc::unbounded_channel::<AgentEvent>();
     let (requests, request_rx) = mpsc::unbounded_channel::<Request>();
@@ -116,10 +91,46 @@ async fn main() -> anyhow::Result<()> {
     if let Some(warning) = edw::check_pin(&config.binary).warning() {
         app.chat.push(ChatLine::Info(warning));
     }
-    app.skills = skill_lines;
-    app.chat.extend(skill_notes.into_iter().map(ChatLine::Info));
-    let agent = agent::build_agent(model, config, interim.clone(), event_tx.clone(), skill_set);
-    tokio::spawn(agent::run(agent, request_rx, event_tx, source, interim));
+    app.ask_consents(
+        discovery
+            .as_ref()
+            .map(|d| d.requests.clone())
+            .unwrap_or_default(),
+    );
+
+    // Answers arrive from the TUI; finishing (Docker check, a first image pull) runs here so
+    // the UI stays responsive, then the agent starts with the skills that are ready.
+    let (answered, answers) = oneshot::channel::<BTreeMap<String, bool>>();
+    let mut answered = Some(answered);
+    {
+        let events = event_tx.clone();
+        tokio::spawn(async move {
+            let answers = answers.await.unwrap_or_default();
+            let (set, lines, notes) = match discovery {
+                Some(discovery) => {
+                    let startup = skills::finish(discovery, &answers).await;
+                    (
+                        startup.set,
+                        skills::describe(&startup.installed),
+                        startup.notes,
+                    )
+                }
+                None => (
+                    std::sync::Arc::new(SkillSet::empty()),
+                    vec!["Skills are off (EDW_TUI_SKILLS=off).".into()],
+                    Vec::new(),
+                ),
+            };
+            let agent = agent::build_agent(model, config, interim.clone(), events.clone(), set);
+            let _ = events.send(AgentEvent::SkillsReady { lines, notes });
+            agent::run(agent, request_rx, events, source, interim).await;
+        });
+    }
+    if app.consents.is_empty()
+        && let Some(answered) = answered.take()
+    {
+        let _ = answered.send(BTreeMap::new());
+    }
 
     let mut terminal = ratatui::init();
     // A paste arrives as one event instead of keystrokes, so its line breaks never press Enter.
@@ -136,6 +147,11 @@ async fn main() -> anyhow::Result<()> {
                             Ok(()) => ChatLine::Info(format!("Copied {} characters.", text.chars().count())),
                             Err(error) => ChatLine::Error(format!("cannot copy: {error}")),
                         }),
+                        Action::SkillsAnswered(answers) => {
+                            if let Some(answered) = answered.take() {
+                                let _ = answered.send(answers);
+                            }
+                        }
                         Action::Quit => return Ok(()),
                         Action::None => {}
                     },

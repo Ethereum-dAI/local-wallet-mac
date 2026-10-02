@@ -93,6 +93,12 @@ pub enum AgentEvent {
     },
     Reply(String),
     Error(String),
+    /// Startup finished: the skills are settled and the agent is listening. `lines` are for
+    /// `/skills`, `notes` for the chat (Docker missing, a skill unavailable, …).
+    SkillsReady {
+        lines: Vec<String>,
+        notes: Vec<String>,
+    },
     /// Models available to switch to, as listed by Ollama (plus the scripted stand-in).
     Models(Vec<String>),
     ModelChanged(String),

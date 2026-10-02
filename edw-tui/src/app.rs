@@ -2,7 +2,7 @@
 //! without a terminal.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -12,6 +12,7 @@ use tokio::sync::oneshot;
 use crate::{
     agent::{AgentEvent, Request},
     edw::EdwResult,
+    skills::consent::ConsentRequest,
 };
 
 pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /skills lists skills · /copy [reply|log|address] copies to the clipboard · Tab shows one panel at a time, for selecting text · /help";
@@ -68,6 +69,8 @@ pub enum Action {
     Send(Request),
     /// Put this text on the system clipboard.
     Copy(String),
+    /// Every skill approval is answered: skill name → allowed. Unlisted means no.
+    SkillsAnswered(BTreeMap<String, bool>),
     Quit,
 }
 
@@ -85,6 +88,13 @@ pub struct App {
     pub busy: bool,
     /// The last `/models` listing, so `/model 2` can pick by number.
     pub models: Vec<String>,
+    /// Skills waiting for the user's approval, shown one card at a time before chatting.
+    pub consents: VecDeque<ConsentRequest>,
+    pub consent_scroll: u16,
+    /// How many cards this round had, for "(2 of 3)".
+    pub consent_total: usize,
+    consent_answers: BTreeMap<String, bool>,
+    consent_shown: Option<Instant>,
     /// `/skills`: one line per installed skill and its state, from startup.
     pub skills: Vec<String>,
     /// Confirmations in arrival order; the model may emit several state changes in one turn.
@@ -107,10 +117,56 @@ impl App {
             input: String::new(),
             busy: false,
             models: Vec::new(),
+            consents: VecDeque::new(),
+            consent_scroll: 0,
+            consent_total: 0,
+            consent_answers: BTreeMap::new(),
+            consent_shown: None,
             skills: Vec::new(),
             pending: VecDeque::new(),
             confirm_shown: None,
             confirm_grace: CONFIRM_GRACE,
+        }
+    }
+
+    /// Shows these approval cards before anything else; chat waits until the skills are ready
+    /// (see `AgentEvent::SkillsReady`).
+    pub fn ask_consents(&mut self, requests: Vec<ConsentRequest>) {
+        self.consent_total = requests.len();
+        self.consents = requests.into();
+        self.consent_scroll = 0;
+        self.consent_answers.clear();
+        self.consent_shown = (!self.consents.is_empty()).then(Instant::now);
+        self.busy = true;
+    }
+
+    fn on_consent_key(&mut self, code: KeyCode) -> Action {
+        // Same rule as a send: only a deliberate y or n, once the card has been up a moment.
+        let settled = self
+            .consent_shown
+            .is_none_or(|shown| shown.elapsed() >= self.confirm_grace);
+        let allow = match code {
+            KeyCode::Char('y' | 'Y') if settled => true,
+            KeyCode::Char('n' | 'N') | KeyCode::Esc if settled => false,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.consent_scroll = self.consent_scroll.saturating_sub(1);
+                return Action::None;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.consent_scroll = self.consent_scroll.saturating_add(1);
+                return Action::None;
+            }
+            _ => return Action::None,
+        };
+        if let Some(request) = self.consents.pop_front() {
+            self.consent_answers.insert(request.name, allow);
+        }
+        self.consent_scroll = 0;
+        self.consent_shown = (!self.consents.is_empty()).then(Instant::now);
+        if self.consents.is_empty() {
+            Action::SkillsAnswered(std::mem::take(&mut self.consent_answers))
+        } else {
+            Action::None
         }
     }
 
@@ -119,6 +175,9 @@ impl App {
             && matches!(key.code, KeyCode::Char('c' | 'd'))
         {
             return Action::Quit;
+        }
+        if !self.consents.is_empty() {
+            return self.on_consent_key(key.code);
         }
         if !self.pending.is_empty() {
             // Only an explicit y or n answers, and only once the modal has been on screen for a
@@ -281,6 +340,11 @@ impl App {
 
     pub fn on_agent(&mut self, event: AgentEvent) {
         match event {
+            AgentEvent::SkillsReady { lines, notes } => {
+                self.skills = lines;
+                self.chat.extend(notes.into_iter().map(ChatLine::Info));
+                self.busy = false;
+            }
             AgentEvent::ToolStarted { command } => self.log.push(LogEntry::Running(command)),
             AgentEvent::ToolFinished(result) => {
                 let running = self
@@ -368,6 +432,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::consent::Reason;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -396,6 +461,74 @@ mod tests {
             app.on_key(key(KeyCode::Enter)),
             Action::Send(Request::Prompt("again".into()))
         );
+    }
+
+    fn consent(name: &str) -> ConsentRequest {
+        ConsentRequest {
+            name: name.into(),
+            version: "1".into(),
+            short_hash: "abc".into(),
+            hash: "abc".into(),
+            description: "d".into(),
+            reason: Reason::New,
+            requires: vec![],
+            hosts: vec![],
+            tools: vec![],
+            chains: vec![],
+        }
+    }
+
+    #[test]
+    fn skill_approvals_are_answered_one_by_one_and_then_handed_over() {
+        let mut app = App::new("m", "d");
+        app.confirm_grace = Duration::ZERO;
+        app.ask_consents(vec![consent("alpha"), consent("beta")]);
+        assert!(app.busy, "no chatting until the skills are settled");
+
+        // Typing does not leak into the message box, and Enter approves nothing.
+        type_text(&mut app, "hello");
+        assert!(app.input.is_empty());
+        assert_eq!(app.on_key(key(KeyCode::Enter)), Action::None);
+        assert_eq!(app.consents.len(), 2);
+
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.consent_scroll, 1);
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.consent_scroll, 0);
+
+        assert_eq!(app.on_key(key(KeyCode::Char('y'))), Action::None);
+        assert_eq!(app.consents.front().unwrap().name, "beta");
+        let done = app.on_key(key(KeyCode::Char('n')));
+        assert_eq!(
+            done,
+            Action::SkillsAnswered(BTreeMap::from([
+                ("alpha".to_owned(), true),
+                ("beta".to_owned(), false),
+            ]))
+        );
+        assert!(app.consents.is_empty());
+        assert!(
+            app.busy,
+            "still preparing until the agent says the skills are ready"
+        );
+
+        app.on_agent(AgentEvent::SkillsReady {
+            lines: vec!["alpha (ready)".into()],
+            notes: vec!["Docker is not running".into()],
+        });
+        assert!(!app.busy);
+        assert_eq!(app.skills, ["alpha (ready)"]);
+        assert!(matches!(app.chat.last(), Some(ChatLine::Info(t)) if t.contains("Docker")));
+    }
+
+    #[test]
+    fn a_skill_approval_waits_out_the_grace_period() {
+        let mut app = App::new("m", "d");
+        app.confirm_grace = Duration::from_secs(60);
+        app.ask_consents(vec![consent("alpha")]);
+        app.on_key(key(KeyCode::Char('y')));
+        assert_eq!(app.consents.len(), 1, "a y typed too early does not count");
     }
 
     #[test]

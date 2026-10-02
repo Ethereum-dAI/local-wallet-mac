@@ -9,7 +9,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::app::{App, ChatLine, LogEntry, PendingConfirm, View};
+use crate::{
+    app::{App, ChatLine, LogEntry, PendingConfirm, View},
+    skills::consent::ConsentRequest,
+};
 
 /// The input grows with its text up to this many rows, then scrolls to keep the end visible.
 const MAX_INPUT_ROWS: usize = 6;
@@ -87,8 +90,12 @@ pub fn render(frame: &mut Frame, app: &App) {
         frame.set_cursor_position((input.x + 1 + last, input.y + visible as u16));
     }
 
-    let hint = if !app.pending.is_empty() {
+    let hint = if !app.consents.is_empty() {
+        "y allow · n decline · ↑↓ scroll"
+    } else if !app.pending.is_empty() {
         "y run · n cancel"
+    } else if app.busy && app.skills.is_empty() {
+        "Preparing skills…"
     } else {
         "Enter send · Tab one panel · /copy · /help · Ctrl-C quit"
     };
@@ -101,9 +108,129 @@ pub fn render(frame: &mut Frame, app: &App) {
         status,
     );
 
-    if let Some(pending) = app.pending.front() {
+    if let Some(request) = app.consents.front() {
+        let index = app.consent_total.saturating_sub(app.consents.len()) + 1;
+        render_consent(frame, request, index, app.consent_total, app.consent_scroll);
+    } else if let Some(pending) = app.pending.front() {
         render_confirm(frame, pending, app.pending.len());
     }
+}
+
+/// The approval card for one skill: what it is, then everything it could touch, by chain.
+/// The body scrolls; the title and the keys stay put.
+fn render_consent(
+    frame: &mut Frame,
+    request: &ConsentRequest,
+    index: usize,
+    total: usize,
+    scroll: u16,
+) {
+    let heading = |text: &'static str| Span::from(text).cyan().bold();
+    let field =
+        |name: &'static str, value: String| Line::from(vec![heading(name), Span::from(value)]);
+    let none_or = |items: &[String], sep: &str, none: &str| {
+        if items.is_empty() {
+            none.to_owned()
+        } else {
+            items.join(sep)
+        }
+    };
+    let mut lines = vec![
+        Line::from(format!(
+            "{} {} · {} · sha256 {}",
+            request.name, request.version, request.reason, request.short_hash
+        ))
+        .bold(),
+        Line::from(request.description.clone()),
+        Line::default(),
+        field(
+            "NEEDS      ",
+            none_or(&request.requires, ", ", "no other skill"),
+        ),
+        field(
+            "WEB        ",
+            none_or(
+                &request.hosts,
+                ", ",
+                if request.tools.is_empty() {
+                    "none"
+                } else {
+                    "none (reads the chain through your RPC)"
+                },
+            ),
+        ),
+        field(
+            "TOOLS      ",
+            none_or(&request.tools, " · ", "none (instructions only)"),
+        ),
+        Line::default(),
+    ];
+    if request.chains.is_empty() {
+        lines.push(Line::from(vec![
+            heading("CAN PROPOSE CALLS TO "),
+            Span::from("nothing (read-only)"),
+        ]));
+    } else {
+        lines.push(Line::from(heading("CAN PROPOSE CALLS TO")));
+        for chain in &request.chains {
+            lines.push(Line::from(format!(" {}", chain.name)).bold());
+            for (label, address, functions) in &chain.calls {
+                lines.push(Line::from(vec![
+                    Span::from(format!("   {label} {address}  ")),
+                    Span::from(functions.join(", ")).yellow(),
+                ]));
+            }
+            for approval in &chain.approvals {
+                lines.push(Line::from(format!("   approve: {approval}")));
+            }
+        }
+    }
+    lines.push(Line::default());
+    lines.push(
+        Line::from("Every plan is still simulated and reviewed before you send it.").italic(),
+    );
+
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(100);
+    let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(2));
+    let [popup] = Layout::horizontal([Constraint::Length(width)])
+        .flex(ratatui::layout::Flex::Center)
+        .areas(area);
+    let [popup] = Layout::vertical([Constraint::Length(height)])
+        .flex(ratatui::layout::Flex::Center)
+        .areas(popup);
+    let title = if total > 1 {
+        format!(" Allow skill {}? ({index} of {total}) ", request.name)
+    } else {
+        format!(" Allow skill {}? ", request.name)
+    };
+    let block = Block::new().borders(Borders::ALL).title(title).yellow();
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    let [body, keys] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(
+        inner.inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 0,
+        }),
+    );
+    let max_scroll = (lines.len() as u16).saturating_sub(body.height);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .reset()
+            .scroll((scroll.min(max_scroll), 0)),
+        body,
+    );
+    let mut key_line = vec![
+        "  [y] ".green().bold(),
+        "allow   ".into(),
+        "[n] ".red().bold(),
+        "decline".into(),
+    ];
+    if max_scroll > 0 {
+        key_line.push("        ↑↓ scroll".dark_gray());
+    }
+    frame.render_widget(Paragraph::new(Line::from(key_line)).reset(), keys);
 }
 
 /// Keeps the newest lines visible: scrolls so the text ends at the bottom of the panel.
@@ -318,6 +445,72 @@ mod tests {
         ] {
             assert!(screen.contains(needle), "missing {needle:?} in\n{screen}");
         }
+    }
+
+    fn aave_request() -> crate::skills::consent::ConsentRequest {
+        use crate::skills::{consent::*, lock::hash_dir, manifest};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/aave-v3-lend");
+        let skill = manifest::load(&dir).unwrap();
+        ConsentRequest::new(&skill, &hash_dir(&skill.dir).unwrap(), Reason::New)
+    }
+
+    fn tall_screen(app: &App, rows: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, rows)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn shows_a_skill_approval_card_grouped_by_what_it_can_touch() {
+        let mut app = App::new("m", "d");
+        let request = aave_request();
+        let hash = request.short_hash.clone();
+        app.ask_consents(vec![request, aave_request()]);
+        let screen = tall_screen(&app, 40);
+        for needle in [
+            "Allow skill aave-v3-lend? (1 of 2)",
+            &format!("aave-v3-lend 0.1.0 · new · sha256 {hash}"),
+            "Earn interest on idle USDC",
+            "NEEDS",
+            "defi-data",
+            "WEB",
+            "none (reads the chain through your RPC)",
+            "TOOLS",
+            "aave_markets · aave_supply · aave_withdraw",
+            "CAN PROPOSE CALLS TO",
+            "Ethereum (1)",
+            "Aave Pool 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+            "supply, withdraw",
+            "approve: USDC, USDT, DAI → Aave Pool (exact amounts)",
+            "Sepolia (11155111)",
+            "Every plan is still simulated and reviewed before you send it.",
+            "[y] allow",
+            "[n] decline",
+            "y allow · n decline · ↑↓ scroll",
+        ] {
+            assert!(screen.contains(needle), "missing {needle:?} in\n{screen}");
+        }
+    }
+
+    #[test]
+    fn a_long_approval_card_scrolls_and_keeps_its_keys_visible() {
+        let mut app = App::new("m", "d");
+        app.ask_consents(vec![aave_request()]);
+        let short = tall_screen(&app, 12);
+        assert!(short.contains("[y] allow"), "keys always visible:\n{short}");
+        assert!(!short.contains("Sepolia (11155111)"), "{short}");
+        app.consent_scroll = 30;
+        let scrolled = tall_screen(&app, 12);
+        assert!(scrolled.contains("Sepolia (11155111)"), "{scrolled}");
+        assert!(scrolled.contains("[y] allow"), "{scrolled}");
     }
 
     #[test]

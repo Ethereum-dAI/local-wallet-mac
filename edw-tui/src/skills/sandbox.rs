@@ -303,8 +303,8 @@ pub async fn docker_available() -> bool {
 
 /// Pulls the image if it is not present yet, so a first script call does not spend its timeout
 /// downloading it.
-/// Gives up after `timeout`, so a slow or stuck pull never hangs startup. Says on stderr that
-/// it is pulling, since the TUI is not up yet.
+/// Gives up after `timeout`, so a slow or stuck pull never hangs startup. Runs while the TUI
+/// shows "Preparing skills…", so it prints nothing.
 pub async fn ensure_image(image: &str, timeout: Duration) -> Result<(), String> {
     let present = Command::new("docker")
         .args(["image", "inspect", image])
@@ -316,7 +316,6 @@ pub async fn ensure_image(image: &str, timeout: Duration) -> Result<(), String> 
     if present {
         return Ok(());
     }
-    eprintln!("Pulling the skill image {image} (first run only)…");
     let pull = Command::new("docker")
         .args(["pull", "--quiet", image])
         .stdout(Stdio::null())

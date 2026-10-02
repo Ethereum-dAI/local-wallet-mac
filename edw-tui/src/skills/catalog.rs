@@ -242,54 +242,6 @@ impl Catalog {
     }
 }
 
-/// What the user agrees to: everything the skill could touch, per chain.
-pub fn consent_summary(skill: &Skill, hash: &str) -> String {
-    let m = &skill.manifest;
-    let short = &hash[..hash.len().min(12)];
-    let mut lines = vec![
-        format!("Skill {} {} (sha256 {short})", skill.name, m.version),
-        format!("  {}", skill.description),
-        format!(
-            "  HTTP hosts: {}",
-            if m.hosts.is_empty() {
-                "none".into()
-            } else {
-                m.hosts.join(", ")
-            }
-        ),
-    ];
-    let tools = skill.tool_names();
-    if !tools.is_empty() {
-        lines.push(format!("  Tools: {}", tools.join(", ")));
-    }
-    if !m.contracts.is_empty() {
-        lines.push("  Contracts its plans may call:".into());
-        for c in &m.contracts {
-            let functions: Vec<String> = c.functions.iter().map(|f| f.signature()).collect();
-            for (chain, address) in &c.address {
-                lines.push(format!(
-                    "    chain {chain}: {} {address}: {}",
-                    c.label,
-                    functions.join(", ")
-                ));
-            }
-        }
-    }
-    if !m.tokens.is_empty() {
-        lines.push("  Tokens:".into());
-        for t in &m.tokens {
-            for (chain, address) in &t.address {
-                lines.push(format!(
-                    "    chain {chain}: {} {address}{}",
-                    t.symbol,
-                    if t.movable { " (may be approved)" } else { "" }
-                ));
-            }
-        }
-    }
-    lines.join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -453,48 +405,5 @@ mod tests {
         assert!(catalog.closure("nope").is_none());
         assert_eq!(catalog.skill_of_tool("data_tool").unwrap().name, "data");
         assert!(Catalog::default().preamble_block().is_empty());
-    }
-
-    #[test]
-    fn consent_summary_lists_what_the_skill_can_touch() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("lend");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("SKILL.md"),
-            "---\nname: lend\ndescription: Lend.\n---\nx\n",
-        )
-        .unwrap();
-        fs::write(
-            dir.join("skill.toml"),
-            r#"version = "0.1.0"
-hosts = ["yields.llama.fi"]
-[[contract]]
-id = "pool"
-label = "Aave Pool"
-functions = ["function supply(address asset,uint256 amount,address onBehalfOf,uint16 referralCode)"]
-address = { 1 = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2" }
-[[token]]
-id = "usdc"
-symbol = "USDC"
-decimals = 6
-address = { 1 = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" }
-"#,
-        )
-        .unwrap();
-        let skill = crate::skills::manifest::load(&dir).unwrap();
-        let text = consent_summary(&skill, "abcdef0123456789");
-        for needle in [
-            "lend 0.1.0",
-            "abcdef012345",
-            "yields.llama.fi",
-            "Aave Pool",
-            "supply(address,uint256,address,uint16)",
-            "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
-            "USDC",
-            "chain 1",
-        ] {
-            assert!(text.contains(needle), "missing {needle} in:\n{text}");
-        }
     }
 }

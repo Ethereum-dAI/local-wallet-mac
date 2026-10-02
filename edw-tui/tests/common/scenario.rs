@@ -85,6 +85,8 @@ impl Scenario {
                 ("EDW_DECRYPTION_PASSWORD", config.password.clone()),
                 ("EDW_TUI_RPC_URL", rpc.clone()),
                 ("EDW_TUI_INTERIM_SEPOLIA", "1".into()),
+                // These scenarios are about transfers and swaps; skills have their own e2e test.
+                ("EDW_TUI_SKILLS", "off".into()),
             ],
             ROWS,
             COLS,

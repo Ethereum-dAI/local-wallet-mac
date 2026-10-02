@@ -125,6 +125,8 @@ async fn alice_sends_bob_one_tenth_of_an_eth() {
             ("EDW_RUNTIME_DIR", config.runtime_dir.display().to_string()),
             ("EDW_DECRYPTION_PASSWORD", config.password.clone()),
             ("EDW_TUI_RPC_URL", rpc.clone()),
+            // This test is about a transfer; skills have their own e2e test.
+            ("EDW_TUI_SKILLS", "off".into()),
         ],
         ROWS,
         COLS,

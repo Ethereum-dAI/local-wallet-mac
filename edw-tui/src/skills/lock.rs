@@ -107,6 +107,16 @@ pub struct LockEntry {
     pub hosts: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    Trusted,
+    New,
+    /// The folder's content differs from what was agreed to.
+    Changed,
+    /// Same content as agreed, but it declares an HTTP host that was not.
+    MoreHosts,
+}
+
 /// Agreed-to skills, keyed by each skill folder's absolute path: approval is for that folder,
 /// so the same skill copied elsewhere (a cloned repo, say) is asked about again.
 pub struct Lock {
@@ -138,6 +148,16 @@ impl Lock {
         Self {
             path: path.to_owned(),
             entries,
+        }
+    }
+
+    /// Whether `skill` (with this folder hash) is agreed to, and if not, why.
+    pub fn status(&self, skill: &Skill, hash: &str) -> Status {
+        match self.entries.get(&key(skill)) {
+            None => Status::New,
+            Some(entry) if entry.hash != hash => Status::Changed,
+            Some(_) if !self.is_trusted(skill, hash) => Status::MoreHosts,
+            Some(_) => Status::Trusted,
         }
     }
 
@@ -296,6 +316,19 @@ mod tests {
             PathBuf::from("/home/me/.config/edw-tui/skills.lock"),
             "an empty XDG_CONFIG_HOME is unset"
         );
+    }
+
+    #[test]
+    fn the_status_says_why_consent_is_needed() {
+        let root = tempfile::tempdir().unwrap();
+        let mut skill = manifest::load(&skill_dir(root.path())).unwrap();
+        let mut lock = Lock::open(&root.path().join("skills.lock"));
+        assert_eq!(lock.status(&skill, "h1"), Status::New);
+        lock.trust(&skill, "h1".into()).unwrap();
+        assert_eq!(lock.status(&skill, "h1"), Status::Trusted);
+        assert_eq!(lock.status(&skill, "h2"), Status::Changed);
+        skill.manifest.hosts.push("example.com".into());
+        assert_eq!(lock.status(&skill, "h1"), Status::MoreHosts);
     }
 
     #[test]

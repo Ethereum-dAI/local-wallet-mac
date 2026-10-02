@@ -8,7 +8,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use alloy_primitives::Address;
@@ -51,11 +54,7 @@ impl SkillSet {
 
     /// No skills: the agent behaves exactly as it did before skills existed.
     pub fn empty() -> Self {
-        Self::new(
-            Catalog::default(),
-            &[],
-            Runner::from_env(PathBuf::from("skills/_sdk")),
-        )
+        Self::new(Catalog::default(), &[], Runner::from_env())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -105,6 +104,35 @@ impl SkillSet {
             ));
         }
         parts.join("\n\n")
+    }
+
+    /// A snapshot of `skill` to run from, checked against the hash the user agreed to. The
+    /// script runs from the copy, so an edit, `git pull` or planted file in the live folder
+    /// after consent never runs. The copy is removed when the returned guard drops.
+    pub fn prepare_run(&self, skill: &Skill) -> Result<(Skill, RunDir), String> {
+        static RUNS: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "edw-skill-run-{}-{}",
+            std::process::id(),
+            RUNS.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot prepare a run folder ({e})"))?;
+        let run = RunDir(std::fs::canonicalize(&dir).unwrap_or(dir));
+        let hash = super::lock::snapshot(&skill.dir, &run.0)
+            .map_err(|e| format!("{}: {e}; nothing was run.", skill.name))?;
+        let agreed = self.hash(&skill.name);
+        if hash != agreed {
+            return Err(format!(
+                "{} changed since you agreed to it (sha256 {} then, {} now); restart edw-tui to review it again. Nothing was run.",
+                skill.name,
+                &agreed[..agreed.len().min(12)],
+                &hash[..12]
+            ));
+        }
+        let mut copy = skill.clone();
+        copy.dir = run.0.clone();
+        Ok((copy, run))
     }
 
     /// Forgets which skills were loaded, with the conversation they were loaded in.
@@ -192,6 +220,15 @@ impl SkillSet {
     }
 }
 
+/// A run's snapshot folder; removed on drop.
+pub struct RunDir(PathBuf);
+
+impl Drop for RunDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Offers a skill's tools only after `load_skill`.
 pub struct SkillGate {
     pub builtin: Vec<String>,
@@ -230,4 +267,79 @@ pub fn builtin_tools(skills: &SkillSet) -> Vec<String> {
         names.push(LOAD_SKILL.to_owned());
     }
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use crate::skills::catalog::{self, SkillState};
+
+    fn set_with_one_skill(root: &std::path::Path) -> SkillSet {
+        let dir = root.join("demo");
+        fs::create_dir_all(dir.join("scripts")).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        fs::write(dir.join("scripts/run.py"), "print('reviewed')\n").unwrap();
+        let mut installed = catalog::discover(&[root.to_owned()]);
+        installed[0].state = SkillState::Ready;
+        SkillSet::new(
+            Catalog::from_installed(&installed),
+            &installed,
+            Runner::from_env(),
+        )
+    }
+
+    #[test]
+    fn a_run_uses_a_snapshot_with_the_agreed_hash() {
+        let root = tempfile::tempdir().unwrap();
+        let set = set_with_one_skill(root.path());
+        let skill = set.catalog.get("demo").unwrap().clone();
+        let (copy, run_dir) = set.prepare_run(&skill).unwrap();
+        assert_ne!(
+            copy.dir, skill.dir,
+            "scripts never run from the live folder"
+        );
+        assert_eq!(
+            fs::read_to_string(copy.dir.join("scripts/run.py")).unwrap(),
+            "print('reviewed')\n"
+        );
+        // A change to the live folder after the snapshot does not reach the run.
+        fs::write(skill.dir.join("scripts/run.py"), "print('swapped')\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(copy.dir.join("scripts/run.py")).unwrap(),
+            "print('reviewed')\n"
+        );
+        let path = copy.dir.clone();
+        drop(run_dir);
+        assert!(!path.exists(), "the snapshot is removed after the run");
+    }
+
+    #[test]
+    fn a_skill_edited_after_consent_does_not_run() {
+        let root = tempfile::tempdir().unwrap();
+        let set = set_with_one_skill(root.path());
+        let skill = set.catalog.get("demo").unwrap().clone();
+        fs::write(skill.dir.join("scripts/run.py"), "print('swapped')\n").unwrap();
+        let error = set.prepare_run(&skill).err().unwrap();
+        assert!(error.contains("changed since you agreed"), "{error}");
+        fs::write(skill.dir.join("scripts/run.py"), "print('reviewed')\n").unwrap();
+        fs::write(skill.dir.join("scripts/new.py"), "x").unwrap();
+        assert!(
+            set.prepare_run(&skill).is_err(),
+            "an added file is a change too"
+        );
+    }
+
+    #[test]
+    fn the_protocol_helper_is_edw_tuis_own() {
+        let runner = Runner::from_env();
+        let sdk = fs::read_to_string(runner.sdk.join("edw_skill.py")).unwrap();
+        assert_eq!(sdk, crate::skills::sandbox::SDK);
+        assert!(runner.sdk.is_absolute());
+    }
 }

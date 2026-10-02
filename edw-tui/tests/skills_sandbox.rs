@@ -26,7 +26,7 @@ fn probe() -> Skill {
 fn runner(timeout: Duration) -> Runner {
     Runner {
         timeout,
-        ..Runner::from_env(root().join("skills/_sdk"))
+        ..Runner::from_env()
     }
 }
 
@@ -127,7 +127,7 @@ fn every_lockdown_flag_is_passed() {
 async fn relative_skill_and_sdk_paths_still_mount_the_real_folders() {
     // cargo runs integration tests from the crate root.
     let skill = manifest::load(Path::new("tests/fixtures/skills/probe")).unwrap();
-    let runner = Runner::from_env(PathBuf::from("skills/_sdk"));
+    let runner = Runner::from_env();
     let args = runner.docker_args(&skill, "scripts/probe.py", "edw-skill-test");
     let mounts: Vec<&String> = args
         .windows(2)
@@ -139,8 +139,13 @@ async fn relative_skill_and_sdk_paths_still_mount_the_real_folders() {
     if !docker().await {
         return;
     }
-    let invoke = json!({"type": "invoke", "tool": "probe_echo", "args": {"mode": "echo"}, "context": {}});
-    let value = result(runner.run(&skill, "scripts/probe.py", invoke, &host(&[])).await);
+    let invoke =
+        json!({"type": "invoke", "tool": "probe_echo", "args": {"mode": "echo"}, "context": {}});
+    let value = result(
+        runner
+            .run(&skill, "scripts/probe.py", invoke, &host(&[]))
+            .await,
+    );
     assert_eq!(value["args"]["mode"], "echo");
 }
 

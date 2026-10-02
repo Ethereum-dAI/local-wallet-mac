@@ -29,7 +29,7 @@ fn probe_skills() -> Arc<SkillSet> {
     Arc::new(SkillSet::new(
         Catalog::from_installed(&installed),
         &installed,
-        Runner::from_env(root.join("skills/_sdk")),
+        Runner::from_env(),
     ))
 }
 

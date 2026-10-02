@@ -44,6 +44,23 @@ pub fn hash_dir(dir: &Path) -> Result<String, String> {
     Ok(hex(&hasher.finalize()))
 }
 
+/// Copies the skill folder `dir` into the empty folder `into` (same rules as [`hash_dir`]) and
+/// returns the hash of the copy: the code that will run is exactly the code that was hashed,
+/// whatever happens to `dir` afterwards.
+pub fn snapshot(dir: &Path, into: &Path) -> Result<String, String> {
+    let mut files = Vec::new();
+    collect(dir, dir, &mut files)?;
+    for relative in &files {
+        let target = into.join(relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        fs::copy(dir.join(relative), &target)
+            .map_err(|e| format!("{}: cannot copy ({e})", relative.display()))?;
+    }
+    hash_dir(into)
+}
+
 fn collect(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for entry in entries {
@@ -184,7 +201,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dir = skill_dir(root.path());
         fs::create_dir_all(dir.join("scripts/__pycache__")).unwrap();
-        fs::write(dir.join("scripts/__pycache__/a.cpython-312.pyc"), b"\x00evil").unwrap();
+        fs::write(
+            dir.join("scripts/__pycache__/a.cpython-312.pyc"),
+            b"\x00evil",
+        )
+        .unwrap();
         assert!(hash_dir(&dir).unwrap_err().contains("compiled Python"));
 
         let root = tempfile::tempdir().unwrap();

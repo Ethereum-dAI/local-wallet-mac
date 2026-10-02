@@ -71,7 +71,7 @@ async fn call(
     );
     let runner = Runner {
         timeout: Duration::from_secs(60),
-        ..Runner::from_env(root().join("skills/_sdk"))
+        ..Runner::from_env()
     };
     let invoke = sandbox::invoke_message(tool, &args, json!({"chain_id": 1, "network": "mainnet"}));
     match runner.run(&skill, &def.run, invoke, &host).await? {

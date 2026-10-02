@@ -339,7 +339,12 @@ impl Shared {
             (None, None) => return fail(&command, format!("`{tool}` is not in {}", skill.name)),
         };
         let invoke = sandbox::invoke_message(tool, &args, self.skills.context(&skill, &at));
-        let output = match self.skills.runner.run(&skill, &run, invoke, &host).await {
+        // Runs from a snapshot whose hash must still be the one the user agreed to.
+        let (snapshot, _run_dir) = match self.skills.prepare_run(&skill) {
+            Ok(prepared) => prepared,
+            Err(error) => return fail(&command, error),
+        };
+        let output = match self.skills.runner.run(&snapshot, &run, invoke, &host).await {
             Ok(output) => output,
             Err(error) => return fail(&command, format!("{short} failed: {error}")),
         };

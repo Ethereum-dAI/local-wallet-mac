@@ -20,17 +20,17 @@ use catalog::{Installed, SkillState};
 /// The one built-in skill tool: loads a skill (and what it requires) for the conversation.
 pub const LOAD_SKILL: &str = "load_skill";
 
-/// Where skills, the SDK and the lock live. Read from the environment by [`Paths::from_env`].
+/// Where skills and the lock live. Read from the environment by [`Paths::from_env`]. The
+/// protocol helper is not here: it is compiled in (`sandbox::SDK`).
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub dirs: Vec<PathBuf>,
-    pub sdk: PathBuf,
     pub lock: PathBuf,
 }
 
 impl Paths {
-    /// `EDW_TUI_SKILLS_DIR` (`:`-separated, default `skills`), its first `_sdk` folder, and
-    /// `EDW_TUI_SKILLS_LOCK` (default `.edw/skills.lock`).
+    /// `EDW_TUI_SKILLS_DIR` (`:`-separated, default `skills`) and `EDW_TUI_SKILLS_LOCK`
+    /// (default `.edw/skills.lock`).
     pub fn from_env() -> Self {
         let dirs: Vec<PathBuf> = std::env::var("EDW_TUI_SKILLS_DIR")
             .unwrap_or_else(|_| "skills".into())
@@ -38,15 +38,10 @@ impl Paths {
             .filter(|d| !d.is_empty())
             .map(PathBuf::from)
             .collect();
-        let sdk = dirs
-            .iter()
-            .map(|d| d.join("_sdk"))
-            .find(|d| d.is_dir())
-            .unwrap_or_else(|| PathBuf::from("skills/_sdk"));
         let lock = std::env::var("EDW_TUI_SKILLS_LOCK")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(".edw/skills.lock"));
-        Self { dirs, sdk, lock }
+        Self { dirs, lock }
     }
 }
 
@@ -85,7 +80,7 @@ pub async fn start(paths: &Paths, mut ask: impl FnMut(&str) -> bool) -> Startup 
     let needs_docker = installed.iter().any(|i| {
         i.state == SkillState::Ready && i.skill.as_ref().is_some_and(manifest::Skill::has_scripts)
     });
-    let runner = sandbox::Runner::from_env(paths.sdk.clone());
+    let runner = sandbox::Runner::from_env();
     let mut docker = !needs_docker || sandbox::docker_available().await;
     if needs_docker && docker {
         if let Err(error) = sandbox::ensure_image(&runner.image).await {

@@ -47,12 +47,30 @@ pub struct Runner {
 
 static RUNS: AtomicU64 = AtomicU64::new(0);
 
+/// The protocol helper every script imports. Compiled into edw-tui, so no skills folder can
+/// replace it for the other skills; it is not part of any skill's hash because it is not the
+/// skill's code.
+pub const SDK: &str = include_str!("../../skills/_sdk/edw_skill.py");
+
+/// [`SDK`] written once per process to a folder of its own, for mounting at `/sdk`.
+fn embedded_sdk() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("edw-tui-sdk-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("edw_skill.py"), SDK);
+        // Docker needs an absolute mount source (see `manifest::load`).
+        std::fs::canonicalize(&dir).unwrap_or(dir)
+    })
+    .clone()
+}
+
 impl Runner {
-    pub fn from_env(sdk: std::path::PathBuf) -> Self {
+    /// The image from `EDW_TUI_SKILL_IMAGE` (or the pinned default) and edw-tui's own SDK.
+    pub fn from_env() -> Self {
         Self {
             image: std::env::var("EDW_TUI_SKILL_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.into()),
-            // Docker needs an absolute mount source (see `manifest::load`).
-            sdk: std::fs::canonicalize(&sdk).unwrap_or(sdk),
+            sdk: embedded_sdk(),
             timeout: TIMEOUT,
         }
     }

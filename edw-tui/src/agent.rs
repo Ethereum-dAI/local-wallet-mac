@@ -307,10 +307,16 @@ impl Shared {
             );
         }
         if let Some(invented) = first_invented(&self.addresses, &args) {
+            // Worded like the transfer guard for actions; a read tool never sends anything.
+            let nothing = if skill.action(tool).is_some() {
+                "sent"
+            } else {
+                "run"
+            };
             return fail(
                 &short,
                 format!(
-                    "Refused: {invented} came from neither the user nor a tool, so it may be made up. Ask the user for the address; nothing was run."
+                    "Refused: {invented} came from neither the user nor a tool, so it may be made up. Ask the user for the address; nothing was {nothing}."
                 ),
             );
         }

@@ -128,9 +128,32 @@ async fn a_made_up_address_never_reaches_a_skill() {
     };
     let turn = h.turn("probe 0x2222", true).await;
     assert!(
+        turn.outputs.iter().any(|o| o.contains("Refused")
+            && o.contains("made up")
+            && o.contains("nothing was run")),
+        "{turn:?}"
+    );
+}
+
+/// For an action the refusal reads like a transfer's: nothing was sent.
+#[tokio::test]
+async fn a_made_up_address_never_reaches_a_skill_action() {
+    let model = Recorder::new(vec![
+        call("load_skill", json!({"name": "probe"})),
+        call(
+            "probe_act",
+            json!({"mode": "plan", "to": "0x1111111111111111111111111111111111111111"}),
+        ),
+    ]);
+    let Some((mut h, _node)) = start("skills-invented-act", model).await else {
+        return;
+    };
+    let turn = h.turn("act", true).await;
+    assert!(turn.confirms.is_empty(), "{turn:?}");
+    assert!(
         turn.outputs
             .iter()
-            .any(|o| o.contains("Refused") && o.contains("made up")),
+            .any(|o| o.contains("made up") && o.contains("nothing was sent")),
         "{turn:?}"
     );
 }

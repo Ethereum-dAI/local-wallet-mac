@@ -266,6 +266,17 @@ impl<const I: usize> Tool for EdwTool<I> {
             return Ok(result.to_model_json());
         }
         let args = self.0.addresses.reveal_json(args);
+        if TOOLS[I].moves_value
+            && let Some(address) = first_from_skills(&self.0.addresses, &args)
+        {
+            let result = EdwResult {
+                command: interim::display_command(Self::NAME, &args, &self.0.interim.profile()),
+                exit_code: 1,
+                output: from_skills_refusal(&address, "sent"),
+            };
+            self.0.log(AgentEvent::ToolFinished(result.clone()));
+            return Ok(self.0.addresses.hide(&result.to_model_json()));
+        }
         let output = self.0.run_tool::<I>(Self::NAME, &args).await;
         Ok(self.0.addresses.hide(&output))
     }
@@ -315,6 +326,11 @@ impl Shared {
             );
         }
         let args = self.addresses.reveal_json(args);
+        if skill.action(tool).is_some()
+            && let Some(address) = first_from_skills(&self.addresses, &args)
+        {
+            return fail(&short, from_skills_refusal(&address, "run"));
+        }
         let command = format!("{short} {args}");
         self.log(AgentEvent::ToolStarted {
             command: command.clone(),
@@ -442,6 +458,22 @@ impl Shared {
     }
 }
 
+/// The first address in `args` (revealed) that so far came only from a skill's data.
+fn first_from_skills(addresses: &AddressBook, args: &Value) -> Option<String> {
+    match args {
+        Value::String(text) => addresses.only_from_skills(text),
+        Value::Array(items) => items.iter().find_map(|v| first_from_skills(addresses, v)),
+        Value::Object(map) => map.values().find_map(|v| first_from_skills(addresses, v)),
+        _ => None,
+    }
+}
+
+fn from_skills_refusal(address: &str, what: &str) -> String {
+    format!(
+        "Refused: {address} came only from a skill's data, not from the user or the wallet. If it is the right address, ask the user to type it; nothing was {what}."
+    )
+}
+
 /// The first address in any string of `args` that neither the user nor a tool produced.
 fn first_invented(addresses: &AddressBook, args: &Value) -> Option<String> {
     match args {
@@ -560,7 +592,10 @@ fn dynamic_tools(shared: &Arc<Shared>) -> Vec<DynamicTool> {
         skill_tools::load_skill_parameters(),
         move |_context, args| {
             let s = s.clone();
-            Box::pin(async move { Ok(ToolOutput::text(s.load_skill(&args))) })
+            Box::pin(async move {
+                let text = s.load_skill(&args);
+                Ok(ToolOutput::text(s.addresses.hide_untrusted(&text)))
+            })
         },
     ));
     for skill in &shared.skills.catalog.skills {
@@ -577,7 +612,8 @@ fn dynamic_tools(shared: &Arc<Shared>) -> Vec<DynamicTool> {
                     let name = name.clone();
                     Box::pin(async move {
                         let output = s.skill_call(&name, args).await;
-                        Ok(ToolOutput::text(s.addresses.hide(&output)))
+                        // A skill's output is its data, not the user's or the wallet's word.
+                        Ok(ToolOutput::text(s.addresses.hide_untrusted(&output)))
                     })
                 },
             ));

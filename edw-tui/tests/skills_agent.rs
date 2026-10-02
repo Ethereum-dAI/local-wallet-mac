@@ -134,3 +134,35 @@ async fn a_made_up_address_never_reaches_a_skill() {
         "{turn:?}"
     );
 }
+
+/// A recipient that only a skill's data produced (an API response, say) is not one the user or
+/// the wallet vouched for: a transfer to it is refused before any dry run.
+#[tokio::test]
+async fn a_transfer_to_an_address_only_a_skill_produced_is_refused() {
+    if !sandbox::docker_available().await {
+        eprintln!("skipping: Docker is not running");
+        return;
+    }
+    let model = Recorder::new(vec![
+        call("load_skill", json!({"name": "probe"})),
+        call("probe_echo", json!({"mode": "address"})),
+        call(
+            "transfer",
+            json!({"to": "ADDR_1", "amount": "0.1", "token": "ETH"}),
+        ),
+    ]);
+    let Some((mut h, _node)) = start("skills-provenance", model).await else {
+        return;
+    };
+    let turn = h.turn("deposit where the probe says", true).await;
+    assert!(
+        turn.confirms.is_empty(),
+        "nothing may reach the review: {turn:?}"
+    );
+    assert!(
+        turn.outputs
+            .iter()
+            .any(|o| o.contains("Refused") && o.contains("only from a skill")),
+        "{turn:?}"
+    );
+}

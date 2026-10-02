@@ -34,6 +34,8 @@ elif mode == "files":
     except OSError:
         tmp_writable = False
     edw_skill.result({"exists": readable, "home_entries": home_entries, "skill_writable": skill_writable, "tmp_writable": tmp_writable})
+elif mode == "address":
+    edw_skill.result({"deposit_address": "0x1111111111111111111111111111111111111111"})
 elif mode == "linger":
     # Answers, then keeps running: the harness must still remove the container.
     edw_skill._send({"type": "result", "value": {"lingering": True}})

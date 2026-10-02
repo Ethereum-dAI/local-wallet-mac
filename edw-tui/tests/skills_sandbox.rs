@@ -262,6 +262,61 @@ async fn a_script_that_hangs_is_killed_and_its_container_removed() {
     assert!(left.is_empty(), "left a container behind: {left}");
 }
 
+fn containers(prefix: &str) -> String {
+    let ps = std::process::Command::new("docker")
+        .args(["ps", "-aq", "--filter", &format!("name={prefix}")])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&ps.stdout).trim().to_owned()
+}
+
+/// A script that answers and keeps running, and a run that is cancelled mid-way, both leave
+/// no container behind (killing the `docker` client alone does not stop it).
+#[tokio::test]
+async fn no_container_outlives_its_run() {
+    if !docker().await {
+        return;
+    }
+    let prefix = format!("edw-skill-linger-{}", std::process::id());
+    let runner = Runner {
+        name_prefix: prefix.clone(),
+        ..runner(Duration::from_secs(20))
+    };
+    let invoke =
+        json!({"type": "invoke", "tool": "probe_echo", "args": {"mode": "linger"}, "context": {}});
+    let value = result(
+        runner
+            .run(&probe(), "scripts/probe.py", invoke.clone(), &host(&[]))
+            .await,
+    );
+    assert_eq!(value["lingering"], true);
+    assert_eq!(
+        containers(&prefix),
+        "",
+        "the answered run left its container running"
+    );
+
+    // Cancelled: the future is dropped while the script sleeps.
+    let invoke =
+        json!({"type": "invoke", "tool": "probe_echo", "args": {"mode": "sleep"}, "context": {}});
+    let skill = probe();
+    let h = host(&[]);
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        runner.run(&skill, "scripts/probe.py", invoke, &h),
+    )
+    .await;
+    let mut left = String::from("?");
+    for _ in 0..20 {
+        left = containers(&prefix);
+        if left.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(left, "", "the cancelled run left its container running");
+}
+
 #[tokio::test]
 async fn a_script_that_floods_stdout_is_cut_off() {
     if !docker().await {

@@ -43,6 +43,8 @@ pub struct Runner {
     /// `skills/_sdk`, mounted at `/sdk` and put on `PYTHONPATH`.
     pub sdk: std::path::PathBuf,
     pub timeout: Duration,
+    /// Container names start with this, then the process id and a counter.
+    pub name_prefix: String,
 }
 
 static RUNS: AtomicU64 = AtomicU64::new(0);
@@ -72,6 +74,7 @@ impl Runner {
             image: std::env::var("EDW_TUI_SKILL_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.into()),
             sdk: embedded_sdk(),
             timeout: TIMEOUT,
+            name_prefix: "edw-skill".into(),
         }
     }
 
@@ -136,7 +139,8 @@ impl Runner {
         host: &Host,
     ) -> Result<Output, String> {
         let name = format!(
-            "edw-skill-{}-{}-{}",
+            "{}-{}-{}-{}",
+            self.name_prefix,
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -151,6 +155,11 @@ impl Runner {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("cannot start docker: {e}"))?;
+        // Removes the container if this future is dropped before the end (a cancelled turn).
+        let mut guard = Container {
+            name: name.clone(),
+            removed: false,
+        };
         let mut stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
@@ -217,15 +226,15 @@ impl Runner {
                 self.timeout.as_secs()
             )),
         };
-        // Whatever happened, the container goes: `--rm` removes it once it stops.
-        if outcome.is_err() {
-            let _ = Command::new("docker")
-                .args(["kill", &name])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await;
-        }
+        // Whatever happened, the container goes, even when the script answered and kept
+        // running: killing the `docker` client alone leaves the container up.
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        guard.removed = true;
         let _ = child.kill().await;
         let _ = child.wait().await;
         match outcome {
@@ -240,6 +249,25 @@ impl Runner {
                     Err(format!("{error}; stderr: {}", tail.join(" | ")))
                 }
             }
+        }
+    }
+}
+
+/// A running container's name; `docker rm -f` on drop unless the run already removed it.
+struct Container {
+    name: String,
+    removed: bool,
+}
+
+impl Drop for Container {
+    fn drop(&mut self) {
+        if !self.removed {
+            // Drop cannot await: start the removal and let it finish on its own.
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", &self.name])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
         }
     }
 }

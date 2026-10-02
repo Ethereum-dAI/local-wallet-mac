@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use crate::{
     agent::{AgentEvent, Request},
     edw::EdwResult,
-    skills::consent::ConsentRequest,
+    skills::{SkillRow, consent::ConsentRequest},
 };
 
 pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /skills lists skills · /copy [reply|log|address] copies to the clipboard · ↑↓ scroll the chat, Shift+↑↓ the command log (PgUp/PgDn too) · ←→ Home End move in the message · Tab shows one panel at a time, for selecting text · /help";
@@ -169,6 +169,9 @@ pub struct App {
     consent_shown: Option<Instant>,
     /// `/skills`: one line per installed skill and its state, from startup.
     pub skills: Vec<String>,
+    /// The Skills tab: every installed skill, and which one is selected.
+    pub skill_rows: Vec<SkillRow>,
+    pub skill_selected: usize,
     /// Confirmations in arrival order; the model may emit several state changes in one turn.
     pub pending: VecDeque<PendingConfirm>,
     /// When the front confirmation appeared; keys are ignored until `confirm_grace` has passed.
@@ -198,6 +201,8 @@ impl App {
             consent_answers: BTreeMap::new(),
             consent_shown: None,
             skills: Vec::new(),
+            skill_rows: Vec::new(),
+            skill_selected: 0,
             pending: VecDeque::new(),
             confirm_shown: None,
             confirm_grace: CONFIRM_GRACE,
@@ -491,8 +496,13 @@ impl App {
 
     pub fn on_agent(&mut self, event: AgentEvent) {
         match event {
-            AgentEvent::SkillsReady { lines, notes } => {
+            AgentEvent::Consents(requests) => self.ask_consents(requests),
+            AgentEvent::SkillsReady { lines, notes, rows } => {
                 self.skills = lines;
+                self.skill_rows = rows;
+                self.skill_selected = self
+                    .skill_selected
+                    .min(self.skill_rows.len().saturating_sub(1));
                 self.chat.extend(notes.into_iter().map(ChatLine::Info));
                 self.busy = false;
             }
@@ -667,6 +677,7 @@ mod tests {
         app.on_agent(AgentEvent::SkillsReady {
             lines: vec!["alpha (ready)".into()],
             notes: vec!["Docker is not running".into()],
+            rows: vec![],
         });
         assert!(!app.busy);
         assert_eq!(app.skills, ["alpha (ready)"]);

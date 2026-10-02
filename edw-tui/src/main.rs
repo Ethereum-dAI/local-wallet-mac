@@ -4,17 +4,14 @@ use edw_tui::{
     contract,
     edw::{self, EdwConfig},
     interim::InterimConfig,
-    skills::{self, tools::SkillSet},
-    ui,
+    skills, ui,
 };
 use futures::StreamExt;
 use ratatui::crossterm::{
     event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyEventKind},
     execute,
 };
-use std::collections::BTreeMap;
-
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 /// Puts `text` on the system clipboard with the platform's own tool.
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
@@ -80,9 +77,10 @@ async fn main() -> anyhow::Result<()> {
     let interim = InterimConfig::from_env(config.clone());
     let model = source.handle(&model_name)?;
 
-    // Skills are found now and agreed to in the TUI; the agent starts once they are settled.
-    let discovery = (!std::env::var("EDW_TUI_SKILLS").is_ok_and(|v| v == "off"))
-        .then(|| skills::discover(&skills::Paths::from_env()));
+    // The session settles the skills (approval cards come through the TUI), builds the agent,
+    // and rebuilds it on every change from the Skills tab.
+    let paths =
+        (!std::env::var("EDW_TUI_SKILLS").is_ok_and(|v| v == "off")).then(skills::Paths::from_env);
 
     let (event_tx, mut events) = mpsc::unbounded_channel::<AgentEvent>();
     let (requests, request_rx) = mpsc::unbounded_channel::<Request>();
@@ -91,46 +89,20 @@ async fn main() -> anyhow::Result<()> {
     if let Some(warning) = edw::check_pin(&config.binary).warning() {
         app.chat.push(ChatLine::Info(warning));
     }
-    app.ask_consents(
-        discovery
-            .as_ref()
-            .map(|d| d.requests.clone())
-            .unwrap_or_default(),
-    );
-
-    // Answers arrive from the TUI; finishing (Docker check, a first image pull) runs here so
-    // the UI stays responsive, then the agent starts with the skills that are ready.
-    let (answered, answers) = oneshot::channel::<BTreeMap<String, bool>>();
-    let mut answered = Some(answered);
-    {
-        let events = event_tx.clone();
-        tokio::spawn(async move {
-            let answers = answers.await.unwrap_or_default();
-            let (set, lines, notes) = match discovery {
-                Some(discovery) => {
-                    let startup = skills::finish(discovery, &answers).await;
-                    (
-                        startup.set,
-                        skills::describe(&startup.installed),
-                        startup.notes,
-                    )
-                }
-                None => (
-                    std::sync::Arc::new(SkillSet::empty()),
-                    vec!["Skills are off (EDW_TUI_SKILLS=off).".into()],
-                    Vec::new(),
-                ),
-            };
-            let agent = agent::build_agent(model, config, interim.clone(), events.clone(), set);
-            let _ = events.send(AgentEvent::SkillsReady { lines, notes });
-            agent::run(agent, request_rx, events, source, interim).await;
-        });
-    }
-    if app.consents.is_empty()
-        && let Some(answered) = answered.take()
-    {
-        let _ = answered.send(BTreeMap::new());
-    }
+    // Busy ("Preparing skills…") until the session says the skills are ready.
+    app.ask_consents(Vec::new());
+    tokio::spawn(agent::run_session(
+        agent::Session {
+            model_name: model_name.clone(),
+            model: Some(model),
+            source,
+            config,
+            interim,
+            paths,
+        },
+        request_rx,
+        event_tx,
+    ));
 
     let mut terminal = ratatui::init();
     // A paste arrives as one event instead of keystrokes, so its line breaks never press Enter.
@@ -148,9 +120,7 @@ async fn main() -> anyhow::Result<()> {
                             Err(error) => ChatLine::Error(format!("cannot copy: {error}")),
                         }),
                         Action::SkillsAnswered(answers) => {
-                            if let Some(answered) = answered.take() {
-                                let _ = answered.send(answers);
-                            }
+                            requests.send(Request::SkillsAnswered(answers))?
                         }
                         Action::Quit => return Ok(()),
                         Action::None => {}

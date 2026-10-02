@@ -135,6 +135,18 @@ impl SkillSet {
         Ok((copy, run))
     }
 
+    /// Keeps the skills `previous` had loaded that are still in this catalog, so a rebuild
+    /// after a Skills-tab change does not make the model load them again.
+    pub fn carry_loaded(&self, previous: &SkillSet) {
+        let before = previous.loaded.lock().expect("not poisoned").clone();
+        let mut loaded = self.loaded.lock().expect("not poisoned");
+        for name in before {
+            if self.catalog.get(&name).is_some() {
+                loaded.insert(name);
+            }
+        }
+    }
+
     /// Forgets which skills were loaded, with the conversation they were loaded in.
     pub fn reset(&self) {
         self.loaded.lock().expect("not poisoned").clear();

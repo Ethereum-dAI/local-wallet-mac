@@ -1,0 +1,77 @@
+version = "0.1.0"
+requires = ["defi-data"]
+# Everything this skill reads comes over the wallet's own RPC; it calls no HTTP host.
+hosts = []
+
+# Addresses: bgd-labs/aave-address-book (AaveV3Ethereum, AaveV3Sepolia), checked against Aave's
+# PoolAddressesProvider by `cargo test --test skills_aave -- --ignored`.
+[[contract]]
+id = "pool"
+label = "Aave Pool"
+functions = [
+  "function supply(address asset,uint256 amount,address onBehalfOf,uint16 referralCode)",
+  "function withdraw(address asset,uint256 amount,address to) returns (uint256)",
+]
+# The review shows these amounts in the asset's own units.
+amounts = { supply = { amount = "asset" }, withdraw = { amount = "asset" } }
+address = { 1 = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2", 11155111 = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951" }
+
+# On Sepolia these are Aave's own faucet tokens, not Circle's or Tether's.
+[[token]]
+id = "usdc"
+symbol = "USDC"
+decimals = 6
+address = { 1 = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 11155111 = "0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8" }
+
+[[token]]
+id = "usdt"
+symbol = "USDT"
+decimals = 6
+address = { 1 = "0xdAC17F958D2ee523a2206206994597C13D831ec7", 11155111 = "0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0" }
+
+[[token]]
+id = "dai"
+symbol = "DAI"
+decimals = 18
+address = { 1 = "0x6B175474E89094C44Da98b954EedeAC495271d0F", 11155111 = "0xFF34B3d4Aee8ddCd6F9AFFFB6Fe49bD371b8a357" }
+
+# Receipt tokens: listed so the review can name them, never approved by a plan.
+[[token]]
+id = "ausdc"
+symbol = "aUSDC"
+decimals = 6
+movable = false
+address = { 1 = "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c", 11155111 = "0x16dA4541aD1807f4443d92D26044C1147406EB80" }
+
+[[token]]
+id = "ausdt"
+symbol = "aUSDT"
+decimals = 6
+movable = false
+address = { 1 = "0x23878914EFE38d27C4D67Ab83ed1b93A74D4086a", 11155111 = "0xAF0F6e8b0Dc5c913bbF4d14c22B4E78Dd14310B6" }
+
+[[token]]
+id = "adai"
+symbol = "aDAI"
+decimals = 18
+movable = false
+address = { 1 = "0x018008bfb33d285247A21d44E50697654f754e63", 11155111 = "0x29598b72eb5CeBd806C5dCD549490FdA35B13cD8" }
+
+[[read_tool]]
+name = "aave_markets"
+run = "scripts/aave_markets.py"
+description = "Aave v3's current supply APY for USDC, USDT and DAI on the unlocked chain, read on chain, and how much of each the sending profile has supplied."
+schema = { type = "object", properties = {} }
+
+[[action]]
+name = "aave_supply"
+run = "scripts/aave_supply.py"
+description = "Supply a stablecoin (USDC, USDT or DAI) to Aave v3 from the sending profile. Approves exactly the amount, then supplies it. The user reviews it before anything is sent."
+schema = { type = "object", required = ["token", "amount"], properties = { token = { type = "string", enum = ["USDC", "USDT", "DAI"] }, amount = { type = "string", description = "In whole tokens, e.g. 100 or 12.5." } } }
+approves = ["pool"]
+
+[[action]]
+name = "aave_withdraw"
+run = "scripts/aave_withdraw.py"
+description = "Withdraw a stablecoin the sending profile supplied to Aave v3, back to the profile. amount is in whole tokens, or all. The user reviews it before anything is sent."
+schema = { type = "object", required = ["token", "amount"], properties = { token = { type = "string", enum = ["USDC", "USDT", "DAI"] }, amount = { type = "string", description = "In whole tokens, or all." } } }

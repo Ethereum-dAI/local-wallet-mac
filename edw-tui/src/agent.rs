@@ -5,7 +5,12 @@
 //! - one Rig `Tool` per `edw` command, each a thin wrapper over [`crate::edw`];
 //! - an `AgentHook` that holds state-changing calls until the user confirms them in the UI.
 
-use std::{convert::Infallible, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use rig_agent::{
     Agent, AgentBuilder, ModelHandle,
@@ -14,7 +19,7 @@ use rig_agent::{
         Chat, CompletionError, CompletionModel, CompletionRequest, CompletionResponse, Usage,
     },
     streaming::StreamingCompletionResponse,
-    tool::{Tool, ToolContext},
+    tool::{DynamicTool, Tool, ToolContext, ToolOutput},
 };
 use rig_core::{
     client::{CompletionClient, Nothing},
@@ -30,6 +35,15 @@ use crate::{
     edw::{self, Backend, EdwConfig, EdwResult, TOOLS},
     interim::{self, Interim, InterimConfig},
     scripted::ScriptedModel,
+    skills::{
+        self as skills_mod, LOAD_SKILL, Paths, SkillRow,
+        catalog::Catalog,
+        consent::ConsentRequest,
+        host::Log,
+        plan,
+        sandbox::{self, Output},
+        tools::{self as skill_tools, SkillGate, SkillSet},
+    },
 };
 
 const RULES: &str = "You are the chat interface of edw, a privacy-first Ethereum desktop wallet.
@@ -47,10 +61,24 @@ Rules:
 - If a tool fails, explain the error in one sentence and suggest the next step (for example, \"the wallet is locked, unlock it first\").
 - Keep answers short.";
 
-/// The system turn: edw-tui's rules, then the app's safety clause unchanged.
+/// The system turn without skills: edw-tui's rules, then the app's safety clause unchanged.
 pub fn preamble() -> String {
-    format!("{RULES}\n\n{SAFETY_CLAUSE}")
+    preamble_with(&Catalog::default())
 }
+
+/// The system turn: edw-tui's rules, the skills the model may load (if any), then the app's
+/// safety clause unchanged, so it stays last and overrides everything above it.
+pub fn preamble_with(catalog: &Catalog) -> String {
+    let block = catalog.preamble_block();
+    if block.is_empty() {
+        format!("{RULES}\n\n{SAFETY_CLAUSE}")
+    } else {
+        format!("{RULES}\n\n{block}\n\n{SAFETY_CLAUSE}")
+    }
+}
+
+/// The most of a read tool's result the model is given.
+pub const MAX_SKILL_RESULT: usize = 8 * 1024;
 
 /// Model calls per user message; each tool round-trip uses one.
 pub const MAX_TURNS: usize = 10;
@@ -71,6 +99,16 @@ pub enum AgentEvent {
     },
     Reply(String),
     Error(String),
+    /// Startup finished: the skills are settled and the agent is listening. `lines` are for
+    /// `/skills`, `notes` for the chat (Docker missing, a skill unavailable, …).
+    SkillsReady {
+        lines: Vec<String>,
+        notes: Vec<String>,
+        /// Every installed skill, for the Skills tab.
+        rows: Vec<SkillRow>,
+    },
+    /// Skills to approve before the session goes on; answer with `Request::SkillsAnswered`.
+    Consents(Vec<ConsentRequest>),
     /// Models available to switch to, as listed by Ollama (plus the scripted stand-in).
     Models(Vec<String>),
     ModelChanged(String),
@@ -91,6 +129,23 @@ pub enum Request {
     SetModel(String),
     /// Send from this profile (a name or `mnemonic/profile`), after checking it exists.
     SetProfile(String),
+    /// A change from the Skills tab.
+    Skill(SkillOp),
+    /// The answers to the approval cards the session sent (`AgentEvent::Consents`).
+    SkillsAnswered(BTreeMap<String, bool>),
+}
+
+/// What the Skills tab can do. Each one re-runs the startup steps (cards for anything new,
+/// Docker, dependencies) and rebuilds the agent; the conversation is kept.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SkillOp {
+    /// Copy this folder into the user's skills folder; its approval card comes next.
+    Add(PathBuf),
+    Disable(String),
+    /// Approval is asked for again.
+    Enable(String),
+    /// Only skills the user added.
+    Delete(String),
 }
 
 pub type Events = mpsc::UnboundedSender<AgentEvent>;
@@ -100,6 +155,7 @@ struct Shared {
     interim: Interim,
     addresses: AddressBook,
     events: Events,
+    skills: Arc<SkillSet>,
 }
 
 impl Shared {
@@ -249,6 +305,199 @@ impl<const I: usize> Tool for EdwTool<I> {
 }
 
 impl Shared {
+    fn load_skill(&self, args: &Value) -> String {
+        let name = args.get("name").and_then(Value::as_str).unwrap_or_default();
+        let text = self.skills.load(name);
+        let loaded = self.skills.is_loaded(name);
+        // The SKILL.md text is for the model; the log only says what was loaded, so the
+        // results that follow stay in view.
+        let output = if loaded {
+            match self.skills.catalog.closure(name) {
+                Some(skills) => {
+                    let parts: Vec<String> = skills
+                        .iter()
+                        .map(|s| {
+                            let tools = s.tool_names();
+                            if tools.is_empty() {
+                                format!("{} (instructions only)", s.name)
+                            } else {
+                                format!("{} (tools: {})", s.name, tools.join(", "))
+                            }
+                        })
+                        .collect();
+                    format!("Loaded {}", parts.join(", "))
+                }
+                None => text.clone(),
+            }
+        } else {
+            text.clone()
+        };
+        self.log(AgentEvent::ToolFinished(EdwResult {
+            command: format!("{LOAD_SKILL} {name}"),
+            exit_code: if loaded { 0 } else { 1 },
+            output,
+        }));
+        text
+    }
+
+    /// Runs one skill tool: a read tool's result goes back to the model; an action's plan is
+    /// checked, simulated, reviewed and only then sent.
+    async fn skill_call(&self, tool: &str, args: Value) -> String {
+        let Some(skill) = self.skills.catalog.skill_of_tool(tool).cloned() else {
+            return format!("`{tool}` is not a tool of any loaded skill; nothing was run.");
+        };
+        let fail = |command: &str, output: String| {
+            let result = EdwResult {
+                command: command.to_owned(),
+                exit_code: 1,
+                output,
+            };
+            self.log(AgentEvent::ToolFinished(result.clone()));
+            result.to_model_json()
+        };
+        let short = format!("skill {}/{tool}", skill.name);
+        if !self.skills.is_loaded(&skill.name) {
+            return fail(
+                &short,
+                format!("call load_skill {} first; nothing was run.", skill.name),
+            );
+        }
+        if let Some(invented) = first_invented(&self.addresses, &args) {
+            // Worded like the transfer guard for actions; a read tool never sends anything.
+            let nothing = if skill.action(tool).is_some() {
+                "sent"
+            } else {
+                "run"
+            };
+            return fail(
+                &short,
+                format!(
+                    "Refused: {invented} came from neither the user nor a tool, so it may be made up. Ask the user for the address; nothing was {nothing}."
+                ),
+            );
+        }
+        let args = self.addresses.reveal_json(args);
+        let command = format!("{short} {args}");
+        self.log(AgentEvent::ToolStarted {
+            command: command.clone(),
+        });
+        // Read tools need no wallet: with it locked they run without a sender or RPC (a
+        // lookup such as defi-data's needs neither). Actions build transactions, so they do.
+        let at = match self.interim.skill_context().await {
+            Ok(at) => Some(at),
+            Err(_) if skill.action(tool).is_none() => None,
+            Err(error) => return fail(&command, format!("{error}; skill actions need the wallet")),
+        };
+        let events = self.events.clone();
+        let log: Log = Arc::new(move |line| {
+            let _ = events.send(AgentEvent::ToolFinished(EdwResult {
+                command: line,
+                exit_code: 0,
+                output: String::new(),
+            }));
+        });
+        let host = self
+            .skills
+            .host(&skill, at.as_ref().map(|at| at.rpc.clone()), log);
+        let action = skill.action(tool);
+        let run = match (action, skill.read_tool(tool)) {
+            (Some(action), _) => action.tool.run.clone(),
+            (None, Some(read)) => read.run.clone(),
+            (None, None) => return fail(&command, format!("`{tool}` is not in {}", skill.name)),
+        };
+        let invoke = sandbox::invoke_message(tool, &args, self.skills.context(&skill, at.as_ref()));
+        // Runs from a snapshot whose hash must still be the one the user agreed to.
+        let (snapshot, _run_dir) = match self.skills.prepare_run(&skill) {
+            Ok(prepared) => prepared,
+            Err(error) => return fail(&command, error),
+        };
+        let output = match self.skills.runner.run(&snapshot, &run, invoke, &host).await {
+            Ok(output) => output,
+            Err(error) => return fail(&command, format!("{short} failed: {error}")),
+        };
+        let plan = match (output, action) {
+            (Output::Result(value), None) => {
+                let mut text = value.to_string();
+                if text.len() > MAX_SKILL_RESULT {
+                    let mut end = MAX_SKILL_RESULT;
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    text.truncate(end);
+                    text.push_str(" …(truncated at 8 KiB)");
+                }
+                let result = EdwResult {
+                    command,
+                    exit_code: 0,
+                    output: text,
+                };
+                self.log(AgentEvent::ToolFinished(result.clone()));
+                return result.to_model_json();
+            }
+            (Output::Plan(plan), Some(action)) => (plan, action),
+            (Output::Result(_), Some(_)) => {
+                return fail(
+                    &command,
+                    format!("{short} returned no plan; nothing was sent."),
+                );
+            }
+            (Output::Plan(_), None) => {
+                return fail(
+                    &command,
+                    format!(
+                        "{short} is a read tool and may not propose transactions; nothing was sent."
+                    ),
+                );
+            }
+        };
+        let (plan, action) = plan;
+        let Some(at) = at else {
+            return fail(
+                &command,
+                "the wallet is locked; unlock a network first".into(),
+            );
+        };
+        let checked = match plan::check(&plan, &skill, action, at.chain_id, at.me) {
+            Ok(checked) => checked,
+            Err(error) => {
+                return fail(
+                    &command,
+                    format!("the plan was refused ({error}); nothing was sent."),
+                );
+            }
+        };
+        let hash = self.skills.hash(&skill.name);
+        let header = vec![format!(
+            "Skill    {} {} (sha256 {})",
+            skill.name,
+            skill.manifest.version,
+            &hash[..hash.len().min(12)]
+        )];
+        let names = self.skills.names(&skill, at.chain_id);
+        let prepared = match self
+            .interim
+            .prepare_plan(command.clone(), header, checked, &names, &at)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => return fail(&command, error),
+        };
+        self.log(AgentEvent::ToolFinished(EdwResult {
+            command: format!("{command} (dry run)"),
+            exit_code: 0,
+            output: prepared.preview.clone(),
+        }));
+        if !self.confirm(&command, Some(prepared.preview.clone())).await {
+            return format!("The user declined `{short}`; nothing was sent.");
+        }
+        self.log(AgentEvent::ToolStarted {
+            command: command.clone(),
+        });
+        let result = self.interim.broadcast(prepared).await;
+        self.log(AgentEvent::ToolFinished(result.clone()));
+        result.to_model_json()
+    }
+
     async fn run_tool<const I: usize>(&self, name: &str, args: &Value) -> String {
         if TOOLS[I].backend == Backend::Interim {
             return self.interim_call(name, args).await;
@@ -263,6 +512,16 @@ impl Shared {
         let result = edw::run(&self.config, &argv).await;
         self.log(AgentEvent::ToolFinished(result.clone()));
         result.to_model_json()
+    }
+}
+
+/// The first address in any string of `args` that neither the user nor a tool produced.
+fn first_invented(addresses: &AddressBook, args: &Value) -> Option<String> {
+    match args {
+        Value::String(text) => addresses.invented(text).map(str::to_owned),
+        Value::Array(items) => items.iter().find_map(|v| first_invented(addresses, v)),
+        Value::Object(map) => map.values().find_map(|v| first_invented(addresses, v)),
+        _ => None,
     }
 }
 
@@ -320,15 +579,18 @@ pub fn build_agent(
     config: EdwConfig,
     interim: InterimConfig,
     events: Events,
+    skills: Arc<SkillSet>,
 ) -> Agent {
     let shared = Arc::new(Shared {
         config,
         addresses: interim.addresses.clone(),
         interim: Interim::new(interim),
         events: events.clone(),
+        skills: skills.clone(),
     });
-    AgentBuilder::from_model_handle(model)
-        .preamble(&preamble())
+    let dynamic = dynamic_tools(&shared);
+    let builder = AgentBuilder::from_model_handle(model)
+        .preamble(&preamble_with(&skills.catalog))
         .default_max_turns(MAX_TURNS)
         .additional_params(additional_params())
         .add_hook(ConfirmHook { events })
@@ -344,8 +606,57 @@ pub fn build_agent(
         .tool(EdwTool::<9>(shared.clone()))
         .tool(EdwTool::<10>(shared.clone()))
         .tool(EdwTool::<11>(shared.clone()))
-        .tool(EdwTool::<12>(shared))
+        .tool(EdwTool::<12>(shared));
+    if skills.is_empty() {
+        return builder.build();
+    }
+    builder
+        .dynamic_tools(dynamic)
+        .add_hook(SkillGate {
+            builtin: skill_tools::builtin_tools(&skills),
+            set: skills,
+        })
         .build()
+}
+
+/// `load_skill`, and one tool per read tool and action of every ready skill. They are all
+/// registered; [`SkillGate`] decides which ones a request offers.
+fn dynamic_tools(shared: &Arc<Shared>) -> Vec<DynamicTool> {
+    let mut tools = Vec::new();
+    if shared.skills.is_empty() {
+        return tools;
+    }
+    let s = shared.clone();
+    tools.push(DynamicTool::new(
+        LOAD_SKILL,
+        skill_tools::LOAD_SKILL_DESCRIPTION,
+        skill_tools::load_skill_parameters(),
+        move |_context, args| {
+            let s = s.clone();
+            Box::pin(async move { Ok(ToolOutput::text(s.load_skill(&args))) })
+        },
+    ));
+    for skill in &shared.skills.catalog.skills {
+        let m = &skill.manifest;
+        for tool in m.read_tools.iter().chain(m.actions.iter().map(|a| &a.tool)) {
+            let s = shared.clone();
+            let name = tool.name.clone();
+            tools.push(DynamicTool::new(
+                tool.name.clone(),
+                tool.description.clone(),
+                tool.schema.clone(),
+                move |_context, args| {
+                    let s = s.clone();
+                    let name = name.clone();
+                    Box::pin(async move {
+                        let output = s.skill_call(&name, args).await;
+                        Ok(ToolOutput::text(s.addresses.hide(&output)))
+                    })
+                },
+            ));
+        }
+    }
+    tools
 }
 
 /// An Ollama model behind [`OllamaReplies`]. `nudge` turns on the empty-reply retry that
@@ -485,42 +796,257 @@ pub async fn run(
 ) {
     let mut history: Vec<Message> = Vec::new();
     while let Some(request) = requests.recv().await {
-        let event = match request {
-            Request::Prompt(prompt) => {
-                let addresses = &interim.addresses;
-                match agent.chat(addresses.hide(&prompt), &mut history).await {
-                    Ok(answer) => {
-                        AgentEvent::Reply(addresses.reveal(&addresses.flag_invented(&answer)))
-                    }
-                    Err(error) => AgentEvent::Error(addresses.reveal(&error.to_string())),
-                }
-            }
-            Request::ListModels => match source.list().await {
-                Ok(names) => AgentEvent::Models(names),
-                Err(error) => AgentEvent::Error(format!("cannot list Ollama models: {error}")),
-            },
-            Request::SetModel(name) => match switch_model(&mut agent, &source, &name).await {
-                Ok(()) => AgentEvent::ModelChanged(name),
-                Err(error) => AgentEvent::Error(error.to_string()),
-            },
-            // Checked against the unlocked wallet first, so a typo never becomes the sender.
-            Request::SetProfile(selector) => {
-                match Interim::new(interim.clone()).address(Some(&selector)).await {
-                    Ok(address) => {
-                        interim.profile.set(&selector);
-                        AgentEvent::ProfileChanged {
-                            selector,
-                            address: address.to_string(),
-                            by_model: false,
-                        }
-                    }
-                    Err(error) => AgentEvent::Error(error),
-                }
-            }
-        };
+        let event = answer(&mut agent, &mut history, request, &source, &interim).await;
         if events.send(event).is_err() {
             return;
         }
+    }
+}
+
+/// One chat-loop request against `agent`; skill requests are the session's (see
+/// [`run_session`]).
+async fn answer(
+    agent: &mut Agent,
+    history: &mut Vec<Message>,
+    request: Request,
+    source: &ModelSource,
+    interim: &InterimConfig,
+) -> AgentEvent {
+    match request {
+        Request::Prompt(prompt) => {
+            let addresses = &interim.addresses;
+            match agent.chat(addresses.hide(&prompt), history).await {
+                Ok(answer) => {
+                    AgentEvent::Reply(addresses.reveal(&addresses.flag_invented(&answer)))
+                }
+                Err(error) => AgentEvent::Error(addresses.reveal(&error.to_string())),
+            }
+        }
+        Request::ListModels => match source.list().await {
+            Ok(names) => AgentEvent::Models(names),
+            Err(error) => AgentEvent::Error(format!("cannot list Ollama models: {error}")),
+        },
+        Request::SetModel(name) => match switch_model(agent, source, &name).await {
+            Ok(()) => AgentEvent::ModelChanged(name),
+            Err(error) => AgentEvent::Error(error.to_string()),
+        },
+        // Checked against the unlocked wallet first, so a typo never becomes the sender.
+        Request::SetProfile(selector) => {
+            match Interim::new(interim.clone()).address(Some(&selector)).await {
+                Ok(address) => {
+                    interim.profile.set(&selector);
+                    AgentEvent::ProfileChanged {
+                        selector,
+                        address: address.to_string(),
+                        by_model: false,
+                    }
+                }
+                Err(error) => AgentEvent::Error(error),
+            }
+        }
+        Request::Skill(_) | Request::SkillsAnswered(_) => {
+            AgentEvent::Error("skills cannot be changed in this session".into())
+        }
+    }
+}
+
+/// Everything the session needs to (re)build the agent.
+pub struct Session {
+    pub model_name: String,
+    /// The model to start with; `None` builds it from `model_name` through `source`.
+    pub model: Option<ModelHandle>,
+    pub source: ModelSource,
+    pub config: EdwConfig,
+    pub interim: InterimConfig,
+    /// `None`: skills are off.
+    pub paths: Option<Paths>,
+}
+
+/// The TUI's agent task: settles the skills (approval cards through the TUI, then Docker and
+/// dependencies), builds the agent, answers chat requests, and on every change from the Skills
+/// tab settles the skills again and rebuilds the agent with the same conversation.
+pub async fn run_session(
+    session: Session,
+    mut requests: mpsc::UnboundedReceiver<Request>,
+    events: Events,
+) {
+    let model = match session.model.clone() {
+        Some(model) => model,
+        None => match session.source.handle(&session.model_name) {
+            Ok(model) => model,
+            Err(error) => {
+                let _ = events.send(AgentEvent::Error(error.to_string()));
+                return;
+            }
+        },
+    };
+    let mut state = SessionState {
+        session,
+        events,
+        model,
+        agent: None,
+        set: Arc::new(SkillSet::empty()),
+        pending: None,
+        declined: BTreeSet::new(),
+        history: Vec::new(),
+    };
+    state.begin(None).await;
+    while let Some(request) = requests.recv().await {
+        match request {
+            Request::SkillsAnswered(answers) => {
+                if let Some((discovery, added)) = state.pending.take() {
+                    state.settle(discovery, &answers, added).await;
+                }
+            }
+            Request::Skill(op) => state.change(op).await,
+            other => {
+                let event = match state.agent.as_mut() {
+                    Some(agent) => {
+                        answer(
+                            agent,
+                            &mut state.history,
+                            other,
+                            &state.session.source,
+                            &state.session.interim,
+                        )
+                        .await
+                    }
+                    None => AgentEvent::Error("the skills are still being set up".into()),
+                };
+                if state.events.send(event).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+struct SessionState {
+    session: Session,
+    events: Events,
+    /// The model the first agent is built with; later rebuilds keep the current one.
+    model: ModelHandle,
+    agent: Option<Agent>,
+    set: Arc<SkillSet>,
+    /// Cards sent to the TUI and not answered yet, and a skill just added (deleted again if
+    /// it is not approved).
+    pending: Option<(skills_mod::Discovery, Option<String>)>,
+    /// (name, folder hash) of cards declined this session: not shown again on every change,
+    /// only when the user enables the skill (or its folder changes).
+    declined: BTreeSet<(String, String)>,
+    history: Vec<Message>,
+}
+
+impl SessionState {
+    /// Finds the skills; asks the TUI about any that need approval, or settles right away.
+    async fn begin(&mut self, added: Option<String>) {
+        let Some(paths) = &self.session.paths else {
+            self.rebuild(Arc::new(SkillSet::empty()));
+            let _ = self.events.send(AgentEvent::SkillsReady {
+                lines: vec!["Skills are off (EDW_TUI_SKILLS=off).".into()],
+                notes: Vec::new(),
+                rows: Vec::new(),
+            });
+            return;
+        };
+        let mut discovery = skills_mod::discover(paths);
+        discovery
+            .requests
+            .retain(|r| !self.declined.contains(&(r.name.clone(), r.hash.clone())));
+        if discovery.requests.is_empty() {
+            self.settle(discovery, &BTreeMap::new(), added).await;
+        } else {
+            let _ = self
+                .events
+                .send(AgentEvent::Consents(discovery.requests.clone()));
+            self.pending = Some((discovery, added));
+        }
+    }
+
+    async fn change(&mut self, op: SkillOp) {
+        let Some(paths) = self.session.paths.clone() else {
+            let _ = self.events.send(AgentEvent::Error(
+                "skills are off (EDW_TUI_SKILLS=off)".into(),
+            ));
+            return;
+        };
+        if self.pending.is_some() {
+            let _ = self.events.send(AgentEvent::Error(
+                "answer the open approval cards first".into(),
+            ));
+            return;
+        }
+        let done = match op {
+            SkillOp::Add(source) => skills_mod::add(&paths, &source).map(Some),
+            SkillOp::Disable(name) => skills_mod::disable(&paths, &name).map(|()| None),
+            SkillOp::Enable(name) => {
+                self.declined.retain(|(declined, _)| *declined != name);
+                skills_mod::enable(&paths, &name).map(|()| None)
+            }
+            SkillOp::Delete(name) => skills_mod::delete(&paths, &name).map(|()| None),
+        };
+        match done {
+            Ok(added) => {
+                // Adding a skill again is asking for its card again.
+                if let Some(name) = &added {
+                    self.declined.retain(|(declined, _)| declined != name);
+                }
+                self.begin(added).await
+            }
+            Err(error) => {
+                let _ = self.events.send(AgentEvent::Error(error));
+            }
+        }
+    }
+
+    async fn settle(
+        &mut self,
+        discovery: skills_mod::Discovery,
+        answers: &BTreeMap<String, bool>,
+        added: Option<String>,
+    ) {
+        let Some(paths) = self.session.paths.clone() else {
+            return;
+        };
+        for request in &discovery.requests {
+            if answers.get(&request.name) != Some(&true) {
+                self.declined
+                    .insert((request.name.clone(), request.hash.clone()));
+            }
+        }
+        let startup = skills_mod::finish(discovery, answers).await;
+        let mut notes = startup.notes;
+        let mut installed = startup.installed;
+        if let Some(name) = added
+            && answers.get(&name) != Some(&true)
+        {
+            // Never approved, so never kept.
+            let _ = skills_mod::delete(&paths, &name);
+            installed.retain(|i| i.name != name);
+            notes.push(format!("{name} was not added: it was not approved."));
+        }
+        startup.set.carry_loaded(&self.set);
+        self.set = startup.set;
+        self.rebuild(self.set.clone());
+        let _ = self.events.send(AgentEvent::SkillsReady {
+            lines: skills_mod::describe(&installed),
+            notes,
+            rows: skills_mod::rows(&installed, &paths),
+        });
+    }
+
+    fn rebuild(&mut self, set: Arc<SkillSet>) {
+        let model = self
+            .agent
+            .as_ref()
+            .map_or_else(|| self.model.clone(), |agent| agent.model_handle().clone());
+        self.agent = Some(build_agent(
+            model,
+            self.session.config.clone(),
+            self.session.interim.clone(),
+            self.events.clone(),
+            set,
+        ));
     }
 }
 

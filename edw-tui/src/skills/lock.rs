@@ -1,0 +1,396 @@
+//! `skills.lock`: what the user agreed to. A skill is trusted only while its folder hashes to
+//! the recorded value and it declares no HTTP host beyond the recorded ones.
+
+use std::{
+    collections::BTreeMap,
+    fs, io,
+    path::{Path, PathBuf},
+};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use super::manifest::Skill;
+
+/// Never part of a skill, and never run: Finder litter.
+const IGNORED: [&str; 1] = [".DS_Store"];
+
+/// Compiled Python is refused rather than skipped: the interpreter imports a `.pyc` from
+/// `__pycache__` even when the `.py` next to it differs, so it would be code that runs without
+/// being part of the hash the user agreed to.
+fn compiled_python(name: &std::ffi::OsStr) -> bool {
+    name == "__pycache__"
+        || Path::new(name)
+            .extension()
+            .is_some_and(|e| e == "pyc" || e == "pyo")
+}
+
+/// sha256 over every file under `dir`, in sorted path order: `path \0 len \0 bytes`.
+/// A symlink anywhere is refused, so the hash always covers what actually runs.
+pub fn hash_dir(dir: &Path) -> Result<String, String> {
+    let mut files = Vec::new();
+    collect(dir, dir, &mut files)?;
+    files.sort();
+    let mut hasher = Sha256::new();
+    for relative in files {
+        let bytes = fs::read(dir.join(&relative))
+            .map_err(|e| format!("{}: cannot read ({e})", relative.display()))?;
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update(bytes.len().to_le_bytes());
+        hasher.update([0]);
+        hasher.update(&bytes);
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+/// Copies the skill folder `dir` into the empty folder `into` (same rules as [`hash_dir`]) and
+/// returns the hash of the copy: the code that will run is exactly the code that was hashed,
+/// whatever happens to `dir` afterwards.
+pub fn snapshot(dir: &Path, into: &Path) -> Result<String, String> {
+    let mut files = Vec::new();
+    collect(dir, dir, &mut files)?;
+    for relative in &files {
+        let target = into.join(relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        fs::copy(dir.join(relative), &target)
+            .map_err(|e| format!("{}: cannot copy ({e})", relative.display()))?;
+    }
+    hash_dir(into)
+}
+
+fn collect(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        if IGNORED.iter().any(|i| name == *i) {
+            continue;
+        }
+        let path = entry.path();
+        let kind = fs::symlink_metadata(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?
+            .file_type();
+        let relative = path.strip_prefix(root).unwrap_or(&path).to_owned();
+        if compiled_python(&name) {
+            return Err(format!(
+                "{}: compiled Python is not allowed in a skill folder; delete it",
+                relative.display()
+            ));
+        }
+        if kind.is_symlink() {
+            return Err(format!(
+                "{}: symlinks are not allowed in a skill folder",
+                relative.display()
+            ));
+        } else if kind.is_dir() {
+            collect(root, &path, out)?;
+        } else if kind.is_file() {
+            out.push(relative);
+        }
+    }
+    Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockEntry {
+    /// For people reading the file; entries are keyed by the folder's absolute path.
+    pub name: String,
+    pub version: String,
+    pub hash: String,
+    pub hosts: Vec<String>,
+    /// Turned off in the Skills tab: never offered, never asked about, until enabled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    Trusted,
+    New,
+    /// The folder's content differs from what was agreed to.
+    Changed,
+    /// Same content as agreed, but it declares an HTTP host that was not.
+    MoreHosts,
+    /// Turned off by the user.
+    Disabled,
+}
+
+/// Agreed-to skills, keyed by each skill folder's absolute path: approval is for that folder,
+/// so the same skill copied elsewhere (a cloned repo, say) is asked about again.
+pub struct Lock {
+    path: PathBuf,
+    entries: BTreeMap<String, LockEntry>,
+}
+
+/// `$XDG_CONFIG_HOME/edw-tui/skills.lock`, else `~/.config/edw-tui/skills.lock`: per user and
+/// outside any repo, so no checkout can ship approvals of its own.
+pub fn default_path(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
+    let base = match xdg_config_home.filter(|x| !x.is_empty()) {
+        Some(xdg) => PathBuf::from(xdg),
+        None => PathBuf::from(home.unwrap_or(".")).join(".config"),
+    };
+    base.join("edw-tui").join("skills.lock")
+}
+
+fn key(skill: &Skill) -> String {
+    skill.dir.display().to_string()
+}
+
+impl Lock {
+    /// A missing or unreadable lock trusts nothing.
+    pub fn open(path: &Path) -> Self {
+        let entries = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        Self {
+            path: path.to_owned(),
+            entries,
+        }
+    }
+
+    /// Whether `skill` (with this folder hash) is agreed to, and if not, why.
+    pub fn status(&self, skill: &Skill, hash: &str) -> Status {
+        match self.entries.get(&key(skill)) {
+            None => Status::New,
+            Some(entry) if entry.disabled => Status::Disabled,
+            Some(entry) if entry.hash != hash => Status::Changed,
+            Some(_) if !self.is_trusted(skill, hash) => Status::MoreHosts,
+            Some(_) => Status::Trusted,
+        }
+    }
+
+    pub fn is_trusted(&self, skill: &Skill, hash: &str) -> bool {
+        self.entries.get(&key(skill)).is_some_and(|entry| {
+            !entry.disabled
+                && entry.hash == hash
+                && skill
+                    .manifest
+                    .hosts
+                    .iter()
+                    .all(|host| entry.hosts.contains(host))
+        })
+    }
+
+    pub fn trust(&mut self, skill: &Skill, hash: String) -> io::Result<()> {
+        self.entries.insert(
+            key(skill),
+            LockEntry {
+                name: skill.name.clone(),
+                version: skill.manifest.version.clone(),
+                hash,
+                hosts: skill.manifest.hosts.clone(),
+                disabled: false,
+            },
+        );
+        self.save()
+    }
+
+    /// Off until [`Lock::enable`]; its approval is gone too.
+    pub fn disable(&mut self, skill: &Skill) -> io::Result<()> {
+        self.entries.insert(
+            key(skill),
+            LockEntry {
+                name: skill.name.clone(),
+                version: skill.manifest.version.clone(),
+                hash: String::new(),
+                hosts: Vec::new(),
+                disabled: true,
+            },
+        );
+        self.save()
+    }
+
+    /// Forgets the skill, so the next start asks about it as new.
+    pub fn enable(&mut self, skill: &Skill) -> io::Result<()> {
+        self.entries.remove(&key(skill));
+        self.save()
+    }
+
+    /// Forgets a deleted folder.
+    pub fn forget(&mut self, dir: &Path) -> io::Result<()> {
+        self.entries.remove(&dir.display().to_string());
+        self.save()
+    }
+
+    fn save(&self) -> io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let text = serde_json::to_string_pretty(&self.entries).map_err(io::Error::other)?;
+        fs::write(&self.path, text + "\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use crate::skills::manifest;
+
+    fn skill_dir(root: &Path) -> PathBuf {
+        let dir = root.join("demo");
+        fs::create_dir_all(dir.join("scripts")).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        fs::write(dir.join("scripts/a.py"), "print(1)\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_hash_follows_content_not_creation_order() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let da = skill_dir(a.path());
+        // Same files, written in the other order.
+        let db = b.path().join("demo");
+        fs::create_dir_all(db.join("scripts")).unwrap();
+        fs::write(db.join("scripts/a.py"), "print(1)\n").unwrap();
+        fs::write(
+            db.join("SKILL.md"),
+            "---\nname: demo\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        assert_eq!(hash_dir(&da).unwrap(), hash_dir(&db).unwrap());
+
+        fs::write(db.join("scripts/a.py"), "print(2)\n").unwrap();
+        assert_ne!(hash_dir(&da).unwrap(), hash_dir(&db).unwrap());
+        // A renamed file changes it too, even with the same bytes.
+        fs::rename(db.join("scripts/a.py"), db.join("scripts/b.py")).unwrap();
+        fs::write(db.join("scripts/b.py"), "print(1)\n").unwrap();
+        assert_ne!(hash_dir(&da).unwrap(), hash_dir(&db).unwrap());
+    }
+
+    /// Python imports a `.pyc` from `__pycache__` even when the `.py` next to it says something
+    /// else, so compiled code would run without ever being part of what the user agreed to.
+    #[test]
+    fn compiled_python_is_refused_not_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = skill_dir(root.path());
+        fs::create_dir_all(dir.join("scripts/__pycache__")).unwrap();
+        fs::write(
+            dir.join("scripts/__pycache__/a.cpython-312.pyc"),
+            b"\x00evil",
+        )
+        .unwrap();
+        assert!(hash_dir(&dir).unwrap_err().contains("compiled Python"));
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = skill_dir(root.path());
+        fs::write(dir.join("scripts/a.pyc"), b"\x00evil").unwrap();
+        assert!(hash_dir(&dir).unwrap_err().contains("compiled Python"));
+    }
+
+    #[test]
+    fn a_symlink_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = skill_dir(root.path());
+        std::os::unix::fs::symlink("/etc/hosts", dir.join("scripts/link")).unwrap();
+        assert!(hash_dir(&dir).unwrap_err().contains("symlink"));
+    }
+
+    #[test]
+    fn trust_round_trips_and_follows_hash_and_hosts() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = skill_dir(root.path());
+        let mut skill = manifest::load(&dir).unwrap();
+        let path = root.path().join("state/skills.lock");
+        let mut lock = Lock::open(&path);
+        assert!(!lock.is_trusted(&skill, "h1"));
+        lock.trust(&skill, "h1".into()).unwrap();
+        let lock = Lock::open(&path);
+        assert!(lock.is_trusted(&skill, "h1"));
+        assert!(
+            !lock.is_trusted(&skill, "h2"),
+            "a changed folder needs consent again"
+        );
+        skill.manifest.hosts.push("example.com".into());
+        assert!(
+            !lock.is_trusted(&skill, "h1"),
+            "a new host needs consent again"
+        );
+    }
+
+    /// Approval is for one folder: the same skill copied elsewhere (a cloned repo that also
+    /// ships a lock file, say) is a different skill until agreed to.
+    #[test]
+    fn trust_is_for_one_folder_not_a_name() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let first = manifest::load(&skill_dir(a.path())).unwrap();
+        let copy = manifest::load(&skill_dir(b.path())).unwrap();
+        let hash = hash_dir(&first.dir).unwrap();
+        assert_eq!(hash, hash_dir(&copy.dir).unwrap(), "same bytes");
+        let path = a.path().join("skills.lock");
+        let mut lock = Lock::open(&path);
+        lock.trust(&first, hash.clone()).unwrap();
+        let lock = Lock::open(&path);
+        assert!(lock.is_trusted(&first, &hash));
+        assert!(!lock.is_trusted(&copy, &hash));
+    }
+
+    #[test]
+    fn the_lock_lives_in_the_users_config_folder() {
+        assert_eq!(
+            default_path(Some("/x/config"), Some("/home/me")),
+            PathBuf::from("/x/config/edw-tui/skills.lock")
+        );
+        assert_eq!(
+            default_path(None, Some("/home/me")),
+            PathBuf::from("/home/me/.config/edw-tui/skills.lock")
+        );
+        assert_eq!(
+            default_path(Some(""), Some("/home/me")),
+            PathBuf::from("/home/me/.config/edw-tui/skills.lock"),
+            "an empty XDG_CONFIG_HOME is unset"
+        );
+    }
+
+    #[test]
+    fn the_status_says_why_consent_is_needed() {
+        let root = tempfile::tempdir().unwrap();
+        let mut skill = manifest::load(&skill_dir(root.path())).unwrap();
+        let mut lock = Lock::open(&root.path().join("skills.lock"));
+        assert_eq!(lock.status(&skill, "h1"), Status::New);
+        lock.trust(&skill, "h1".into()).unwrap();
+        assert_eq!(lock.status(&skill, "h1"), Status::Trusted);
+        assert_eq!(lock.status(&skill, "h2"), Status::Changed);
+        skill.manifest.hosts.push("example.com".into());
+        assert_eq!(lock.status(&skill, "h1"), Status::MoreHosts);
+    }
+
+    #[test]
+    fn a_disabled_skill_is_not_trusted_and_enabling_forgets_it() {
+        let root = tempfile::tempdir().unwrap();
+        let skill = manifest::load(&skill_dir(root.path())).unwrap();
+        let path = root.path().join("skills.lock");
+        let mut lock = Lock::open(&path);
+        lock.trust(&skill, "h1".into()).unwrap();
+        lock.disable(&skill).unwrap();
+        let mut lock = Lock::open(&path);
+        assert_eq!(lock.status(&skill, "h1"), Status::Disabled);
+        assert!(!lock.is_trusted(&skill, "h1"));
+        lock.enable(&skill).unwrap();
+        assert_eq!(Lock::open(&path).status(&skill, "h1"), Status::New);
+    }
+
+    #[test]
+    fn a_missing_or_corrupt_lock_trusts_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("skills.lock");
+        fs::write(&path, "not json").unwrap();
+        let skill = manifest::load(&skill_dir(root.path())).unwrap();
+        assert!(!Lock::open(&path).is_trusted(&skill, "h1"));
+    }
+}

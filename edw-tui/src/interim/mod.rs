@@ -18,13 +18,14 @@ pub mod swap;
 pub mod tokens;
 
 use std::{
+    collections::BTreeMap,
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use alloy_network::{EthereumWallet, TransactionBuilder};
-use alloy_primitives::{Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, I256, TxKind, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_signer_local::PrivateKeySigner;
@@ -44,6 +45,10 @@ use serde_json::Value;
 use crate::{
     addresses::AddressBook,
     edw::{self, EdwConfig, EdwResult},
+    skills::{
+        plan::CheckedPlan,
+        simulate::{self, Deltas},
+    },
 };
 
 sol! {
@@ -99,6 +104,9 @@ pub struct InterimConfig {
     pub addresses: AddressBook,
     /// Swap slippage tolerance in basis points (the app's default is 100, 1%; at most 5000).
     pub swap_slippage_bps: u64,
+    /// Lets `mainnet` through, but only against an anvil fork on a loopback RPC
+    /// (`EDW_TUI_MAINNET_FORK=1`); see [`fork_gate`].
+    pub mainnet_fork: bool,
 }
 
 impl InterimConfig {
@@ -116,8 +124,18 @@ impl InterimConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(swap::DEFAULT_SLIPPAGE_BPS)
                 .min(swap::MAX_SLIPPAGE_BPS),
+            mainnet_fork: std::env::var("EDW_TUI_MAINNET_FORK").is_ok_and(|v| v == "1"),
         }
     }
+}
+
+/// What a skill script is told about where it runs.
+#[derive(Clone, Debug)]
+pub struct SkillContext {
+    pub chain_id: u64,
+    pub me: Address,
+    pub network: String,
+    pub rpc: Url,
 }
 
 /// One transaction of a prepared action.
@@ -257,8 +275,8 @@ impl Interim {
         let network = SupportedNetwork::from_str(session)
             .map_err(|_| format!("edw reports an unknown network `{session}`"))?;
         match network {
-            SupportedNetwork::Mainnet => Err(
-                "sending on mainnet is disabled while edw-tui's transfers are interim; unlock local or sepolia".into(),
+            SupportedNetwork::Mainnet if !self.config.mainnet_fork => Err(
+                "sending on mainnet is disabled while edw-tui's transfers are interim; unlock local or sepolia (an anvil mainnet fork works with EDW_TUI_MAINNET_FORK=1)".into(),
             ),
             SupportedNetwork::Sepolia if !self.config.allow_sepolia => Err(
                 "interim sends on sepolia are off; set EDW_TUI_INTERIM_SEPOLIA=1 to allow them".into(),
@@ -844,6 +862,144 @@ impl Interim {
         })
     }
 
+    /// Where skill scripts run against: the unlocked chain, the sending profile's address and
+    /// the RPC, after the same chain (and mainnet-fork) checks every send gets.
+    pub async fn skill_context(&self) -> Result<SkillContext, String> {
+        let account = self.account(None).await?;
+        let provider = ProviderBuilder::new().connect_http(account.rpc.clone());
+        check_chain(&provider, &account).await?;
+        Ok(SkillContext {
+            chain_id: account.chain_id,
+            me: account.address(),
+            network: account.network.to_string(),
+            rpc: account.rpc,
+        })
+    }
+
+    /// A checked skill plan as a reviewed dry run, like a transfer's: the whole plan simulated
+    /// in one block, the review written from the plan's labels and the simulation, and only
+    /// these transactions sent (by [`Interim::broadcast`]) after a yes. `header` goes on top of
+    /// the review; `names` labels tokens in the simulated changes.
+    pub async fn prepare_plan(
+        &self,
+        command: String,
+        header: Vec<String>,
+        plan: CheckedPlan,
+        names: &BTreeMap<Address, (String, u8)>,
+        checked_for: &SkillContext,
+    ) -> Result<Prepared, String> {
+        let account = self.account(None).await?;
+        // The plan's `$self` and contract ids were resolved for `checked_for`; if the session's
+        // network or sender changed while the script ran, they would mean something else.
+        if account.chain_id != checked_for.chain_id || account.address() != checked_for.me {
+            return Err(format!(
+                "the wallet changed while the skill ran (it was {} on chain {}, now {} on chain {}); nothing was sent",
+                checked_for.me,
+                checked_for.chain_id,
+                account.address(),
+                account.chain_id
+            ));
+        }
+        let provider = ProviderBuilder::new().connect_http(account.rpc.clone());
+        check_chain(&provider, &account).await?;
+        let me = account.address();
+        let eth = provider.get_balance(me).await.map_err(provider_error)?;
+        if plan.total_value > eth {
+            return Err(format!(
+                "not enough ETH: the profile holds {} ETH, the plan sends {} ETH",
+                format_units(eth, 18),
+                format_units(plan.total_value, 18)
+            ));
+        }
+        for step in &plan.steps {
+            if let Some((token, amount)) = step.approval {
+                let held = erc20_balance(&provider, token, me).await?;
+                if amount > held {
+                    let (symbol, decimals) = names
+                        .get(&token)
+                        .cloned()
+                        .unwrap_or_else(|| (token.to_string(), 0));
+                    return Err(format!(
+                        "not enough {symbol}: the profile holds {}, the plan approves {}",
+                        format_units(held, decimals),
+                        format_units(amount, decimals)
+                    ));
+                }
+            }
+        }
+
+        let results = simulate::simulate(&account.rpc, me, &plan.steps).await?;
+        for (index, (result, step)) in results.iter().zip(&plan.steps).enumerate() {
+            if !result.ok {
+                let reason = result.error.as_deref().unwrap_or("reverted");
+                return Err(format!(
+                    "step {} ({}) would fail in simulation ({}), so nothing was sent",
+                    index + 1,
+                    step.label,
+                    evm_reason(reason)
+                ));
+            }
+        }
+        let deltas = simulate::deltas(me, &results);
+
+        let fees = provider
+            .estimate_eip1559_fees()
+            .await
+            .map_err(provider_error)?;
+        let nonce = provider
+            .get_transaction_count(me)
+            .await
+            .map_err(provider_error)?;
+        let mut steps = Vec::new();
+        let mut max_cost = U256::ZERO;
+        for (index, (step, result)) in plan.steps.iter().zip(&results).enumerate() {
+            let gas = result.gas_used * 13 / 10 + 25_000;
+            max_cost += U256::from(gas) * U256::from(fees.max_fee_per_gas);
+            steps.push(Step {
+                label: step.label.clone(),
+                tx: TransactionRequest::default()
+                    .with_from(me)
+                    .with_to(step.to)
+                    .with_value(step.value)
+                    .with_input(step.data.clone())
+                    .with_nonce(nonce + index as u64)
+                    .with_chain_id(account.chain_id)
+                    .with_gas_limit(gas)
+                    .with_max_fee_per_gas(fees.max_fee_per_gas)
+                    .with_max_priority_fee_per_gas(fees.max_priority_fee_per_gas),
+                // Re-checked right before sending, on the state the earlier steps left.
+                estimate_on_send: index > 0,
+            });
+        }
+        let needed = plan.total_value + max_cost;
+        if needed > eth {
+            return Err(format!(
+                "not enough ETH for this plan and its fees: the profile holds {} ETH, it needs up to {} ETH",
+                format_units(eth, 18),
+                format_units(needed, 18)
+            ));
+        }
+
+        let mut preview = header;
+        preview.push(format!("From     {}", account.describe()));
+        for (index, step) in plan.steps.iter().enumerate() {
+            preview.push(format!("Step {}   {}", index + 1, step.label));
+        }
+        preview.push(format!(
+            "Changes  {} (simulated)",
+            describe_deltas(&deltas, names)
+        ));
+        preview.push(format!("Max fee  {} ETH", format_units(max_cost, 18)));
+        preview.push("Signed by edw-tui's interim executor (edw-core), not edw's CLI".into());
+        Ok(Prepared {
+            command,
+            preview: preview.join("\n"),
+            steps,
+            signer: account.signer,
+            rpc: account.rpc,
+        })
+    }
+
     /// Sends the prepared transactions in order, each after the previous one succeeded, and
     /// stops at the first failure.
     pub async fn broadcast(&self, prepared: Prepared) -> EdwResult {
@@ -995,7 +1151,98 @@ async fn check_chain(provider: &impl Provider, account: &Account) -> Result<(), 
             account.rpc, account.network, account.chain_id, account.network
         ));
     }
+    if account.network == SupportedNetwork::Mainnet {
+        // Only reachable with EDW_TUI_MAINNET_FORK=1 (see `unlocked_network`).
+        let info: Value = provider
+            .raw_request("anvil_nodeInfo".into(), ())
+            .await
+            .unwrap_or(Value::Null);
+        let fork_url = info.pointer("/forkConfig/forkUrl").and_then(Value::as_str);
+        fork_gate(account.network, true, &account.rpc, fork_url)?;
+    }
     Ok(())
+}
+
+/// Mainnet only on an anvil fork: the flag set, a loopback RPC, and a node that reports a fork
+/// URL. Anything else that claims to be mainnet is refused before a key is used.
+fn fork_gate(
+    network: SupportedNetwork,
+    mainnet_fork: bool,
+    rpc: &Url,
+    fork_url: Option<&str>,
+) -> Result<(), String> {
+    if network != SupportedNetwork::Mainnet {
+        return Ok(());
+    }
+    if !mainnet_fork {
+        return Err("sending on mainnet is disabled; an anvil mainnet fork works with EDW_TUI_MAINNET_FORK=1".into());
+    }
+    let host = rpc
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let loopback = host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if !loopback {
+        return Err(format!(
+            "mainnet-fork mode needs a loopback RPC (EDW_TUI_RPC_URL=http://127.0.0.1:…), not {rpc}"
+        ));
+    }
+    if fork_url.is_none_or(str::is_empty) {
+        return Err(format!(
+            "the node at {rpc} is not an anvil fork, so mainnet-fork mode will not use it"
+        ));
+    }
+    Ok(())
+}
+
+/// Signed amounts, ETH first, named where the skill or the wallet knows the token.
+fn describe_deltas(deltas: &Deltas, names: &BTreeMap<Address, (String, u8)>) -> String {
+    let signed = |value: I256, decimals: u8, unit: &str| {
+        let sign = if value.is_negative() { '−' } else { '+' };
+        format!(
+            "{sign}{} {unit}",
+            format_units(value.unsigned_abs(), decimals)
+        )
+    };
+    let mut parts = Vec::new();
+    if !deltas.eth.is_zero() {
+        parts.push(signed(deltas.eth, 18, "ETH"));
+    }
+    for (token, amount) in &deltas.erc20 {
+        parts.push(match names.get(token) {
+            Some((symbol, decimals)) => signed(*amount, *decimals, symbol),
+            None => {
+                let sign = if amount.is_negative() { '−' } else { '+' };
+                format!("{sign}{} units of {token}", amount.unsigned_abs())
+            }
+        });
+    }
+    let name = |token: &Address| {
+        names
+            .get(token)
+            .map_or_else(|| token.to_string(), |(s, _)| s.clone())
+    };
+    parts.extend(
+        deltas
+            .nfts_in
+            .iter()
+            .map(|(token, id)| format!("+NFT #{id} of {}", name(token))),
+    );
+    parts.extend(
+        deltas
+            .nfts_out
+            .iter()
+            .map(|(token, id)| format!("−NFT #{id} of {}", name(token))),
+    );
+    if parts.is_empty() {
+        "none".into()
+    } else {
+        parts.join(", ")
+    }
 }
 
 async fn call<C: SolCall>(
@@ -1050,6 +1297,63 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn mainnet_is_allowed_only_on_a_local_anvil_fork_with_the_flag() {
+        let local: Url = "http://127.0.0.1:8546".parse().unwrap();
+        let remote: Url = "https://eth.llamarpc.com".parse().unwrap();
+        let fork = Some("https://archive.example");
+        let mainnet = SupportedNetwork::Mainnet;
+        assert!(
+            fork_gate(mainnet, false, &local, fork)
+                .unwrap_err()
+                .contains("EDW_TUI_MAINNET_FORK")
+        );
+        assert!(
+            fork_gate(mainnet, true, &remote, fork)
+                .unwrap_err()
+                .contains("loopback")
+        );
+        assert!(
+            fork_gate(mainnet, true, &local, None)
+                .unwrap_err()
+                .contains("fork")
+        );
+        assert!(
+            fork_gate(
+                mainnet,
+                true,
+                &"http://localhost:8546".parse().unwrap(),
+                fork
+            )
+            .is_ok()
+        );
+        assert!(fork_gate(mainnet, true, &local, fork).is_ok());
+        // Other networks are not this gate's business.
+        assert!(fork_gate(SupportedNetwork::Sepolia, false, &remote, None).is_ok());
+        assert!(fork_gate(SupportedNetwork::Local, false, &local, None).is_ok());
+    }
+
+    #[test]
+    fn deltas_read_as_signed_amounts_with_names() {
+        let usdc = Address::repeat_byte(1);
+        let mut d = crate::skills::simulate::Deltas {
+            eth: I256::try_from(-500_000_000_000_000_000i128).unwrap(),
+            ..Default::default()
+        };
+        d.erc20.insert(usdc, I256::try_from(100_000_000).unwrap());
+        d.erc20
+            .insert(Address::repeat_byte(2), I256::try_from(-7).unwrap());
+        let names = BTreeMap::from([(usdc, ("USDC".to_owned(), 6u8))]);
+        assert_eq!(
+            describe_deltas(&d, &names),
+            format!(
+                "−0.5 ETH, +100 USDC, −7 units of {}",
+                Address::repeat_byte(2)
+            )
+        );
+        assert_eq!(describe_deltas(&Default::default(), &names), "none");
+    }
 
     #[test]
     fn shows_the_call_as_a_command_line() {

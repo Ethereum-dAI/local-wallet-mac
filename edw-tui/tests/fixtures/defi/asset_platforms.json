@@ -1,0 +1,50 @@
+[
+{
+"id": "polygon-pos",
+"chain_identifier": 137,
+"name": "Polygon POS",
+"shortname": "Polygon"
+},
+{
+"id": "arbitrum-one",
+"chain_identifier": 42161,
+"name": "Arbitrum One",
+"shortname": "Arbitrum"
+},
+{
+"id": "optimistic-ethereum",
+"chain_identifier": 10,
+"name": "Optimism",
+"shortname": "Optimism"
+},
+{
+"id": "binance-smart-chain",
+"chain_identifier": 56,
+"name": "BNB Smart Chain",
+"shortname": "BSC"
+},
+{
+"id": "ethereum",
+"chain_identifier": 1,
+"name": "Ethereum",
+"shortname": "Ethereum"
+},
+{
+"id": "base",
+"chain_identifier": 8453,
+"name": "Base",
+"shortname": ""
+},
+{
+"id": "avalanche",
+"chain_identifier": 43114,
+"name": "Avalanche",
+"shortname": "AVAX"
+},
+{
+"id": "solana",
+"chain_identifier": null,
+"name": "Solana",
+"shortname": "Solana"
+}
+]

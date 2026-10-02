@@ -9,7 +9,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::app::{App, ChatLine, LogEntry, PendingConfirm, View};
+use crate::{
+    app::{App, ChatLine, LogEntry, PanelScroll, PendingConfirm, View},
+    skills::consent::ConsentRequest,
+};
 
 /// The input grows with its text up to this many rows, then scrolls to keep the end visible.
 const MAX_INPUT_ROWS: usize = 6;
@@ -31,6 +34,11 @@ pub fn render(frame: &mut Frame, app: &App) {
     let inner_width = frame.area().width.saturating_sub(2) as usize;
     let rows = wrap_input(&format!("{PROMPT}{}", app.input), inner_width);
     let visible = rows.len().min(MAX_INPUT_ROWS);
+    // Where the cursor is in the wrapped rows, and the window of rows that keeps it on screen
+    // (the last rows, unless the cursor is above them).
+    let at = PROMPT.chars().count() + app.cursor;
+    let (cursor_row, cursor_col) = (at / inner_width.max(1), at % inner_width.max(1));
+    let first = (rows.len() - visible).min(cursor_row);
 
     let [main, input, status] = Layout::vertical([
         Constraint::Min(5),
@@ -43,8 +51,22 @@ pub fn render(frame: &mut Frame, app: &App) {
             let [chat, log] =
                 Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
                     .areas(main);
-            render_bottom_anchored(frame, chat, chat_text(app), " Chat ", Borders::ALL);
-            render_bottom_anchored(frame, log, log_text(app), " edw commands ", Borders::ALL);
+            render_bottom_anchored(
+                frame,
+                chat,
+                chat_text(app),
+                " Chat ",
+                Borders::ALL,
+                &app.chat_scroll,
+            );
+            render_bottom_anchored(
+                frame,
+                log,
+                log_text(app),
+                " edw commands ",
+                Borders::ALL,
+                &app.log_scroll,
+            );
         }
         // One panel, full width, with no side borders: a terminal selection then copies only
         // this panel's text.
@@ -54,6 +76,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             chat_text(app),
             " Chat · Tab: commands ",
             Borders::TOP,
+            &app.chat_scroll,
         ),
         View::Log => render_bottom_anchored(
             frame,
@@ -61,16 +84,18 @@ pub fn render(frame: &mut Frame, app: &App) {
             log_text(app),
             " edw commands · Tab: both ",
             Borders::TOP,
+            &app.log_scroll,
         ),
+        View::Skills => render_skills(frame, main, app),
     }
 
     let prompt: Text = if app.busy {
         "thinking…".dark_gray().into()
     } else {
-        let shown = &rows[rows.len() - visible..];
+        let shown = &rows[first..first + visible];
         let mut lines: Vec<Line> = shown.iter().map(|row| Line::from(row.clone())).collect();
         // Bold the prompt marker when the first row is on screen.
-        if visible == rows.len()
+        if first == 0
             && let Some(first) = lines.first_mut()
         {
             let rest = shown[0].chars().skip(PROMPT.len()).collect::<String>();
@@ -82,13 +107,21 @@ pub fn render(frame: &mut Frame, app: &App) {
         Paragraph::new(prompt).block(Block::bordered().title(" Message ")),
         input,
     );
-    if !app.busy && app.pending.is_empty() {
-        let last = rows.last().map_or(0, |row| row.chars().count()) as u16;
-        frame.set_cursor_position((input.x + 1 + last, input.y + visible as u16));
+    if !app.busy && app.pending.is_empty() && app.view != View::Skills {
+        frame.set_cursor_position((
+            input.x + 1 + cursor_col as u16,
+            input.y + 1 + (cursor_row - first) as u16,
+        ));
     }
 
-    let hint = if !app.pending.is_empty() {
+    let hint = if !app.consents.is_empty() {
+        "y allow · n decline · ↑↓ scroll"
+    } else if !app.pending.is_empty() {
         "y run · n cancel"
+    } else if app.view == View::Skills {
+        "Tab: chat"
+    } else if app.busy && app.skills.is_empty() {
+        "Preparing skills…"
     } else {
         "Enter send · Tab one panel · /copy · /help · Ctrl-C quit"
     };
@@ -101,9 +134,252 @@ pub fn render(frame: &mut Frame, app: &App) {
         status,
     );
 
-    if let Some(pending) = app.pending.front() {
+    if let Some(request) = app.consents.front() {
+        let index = app.consent_total.saturating_sub(app.consents.len()) + 1;
+        render_consent(frame, request, index, app.consent_total, app.consent_scroll);
+    } else if let Some(pending) = app.pending.front() {
         render_confirm(frame, pending, app.pending.len());
     }
+}
+
+/// The Skills tab: every installed skill with its state, the selected one's details below,
+/// and the keys (or the folder being typed, or a delete waiting for y/n) at the bottom.
+fn render_skills(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .title(" Skills · Tab: chat ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let list_height = (app.skill_rows.len().max(1) as u16).min(inner.height / 2);
+    let [list, rule, details, notice, keys] = Layout::vertical([
+        Constraint::Length(list_height),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    let mut rows: Vec<Line> = Vec::new();
+    if app.skill_rows.is_empty() {
+        rows.push(Line::from("  No skills. Press a to add one from a folder.").dark_gray());
+    }
+    for (index, row) in app.skill_rows.iter().enumerate() {
+        let icon = match row.state.as_str() {
+            "ready" => "●".green(),
+            "disabled" | "declined" => "○".dark_gray(),
+            "needs approval" => "?".yellow(),
+            _ => "!".red(),
+        };
+        let marker = if index == app.skill_selected {
+            "▶ "
+        } else {
+            "  "
+        };
+        let about = row.note.clone().unwrap_or_else(|| row.description.clone());
+        let mut line = Line::from(vec![
+            Span::from(marker),
+            icon,
+            Span::from(format!(
+                " {:<16} {:<7} {:<14} ",
+                row.name, row.version, row.state
+            )),
+            Span::from(about).dark_gray(),
+        ]);
+        if index == app.skill_selected {
+            line = line.bold();
+        }
+        rows.push(line);
+    }
+    // Keep the selected row in view when there are more skills than rows.
+    let scroll = app
+        .skill_selected
+        .saturating_sub(list_height.saturating_sub(1) as usize) as u16;
+    frame.render_widget(Paragraph::new(rows).scroll((scroll, 0)), list);
+    frame.render_widget(
+        Paragraph::new("─".repeat(rule.width as usize)).dark_gray(),
+        rule,
+    );
+
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(row) = app.skill_rows.get(app.skill_selected) {
+        let origin = match row.origin {
+            crate::skills::Origin::Shipped => "shipped",
+            crate::skills::Origin::Added => "added",
+        };
+        lines.push(Line::from(format!("{} · {origin} ({})", row.name, row.dir.display())).bold());
+        if let Some(note) = &row.note {
+            lines.push(Line::from(format!("Unavailable: {note}")).red());
+        }
+        if let Some(request) = &row.details {
+            let or = |items: &[String], none: &str| {
+                if items.is_empty() {
+                    none.to_owned()
+                } else {
+                    items.join(", ")
+                }
+            };
+            lines.push(Line::from(format!(
+                "NEEDS {} · WEB {} · TOOLS {}",
+                or(&request.requires, "no other skill"),
+                or(&request.hosts, "none"),
+                or(&request.tools, "none")
+            )));
+            for chain in &request.chains {
+                for (label, address, functions) in &chain.calls {
+                    lines.push(Line::from(format!(
+                        "{}  {label} {address}  {}",
+                        chain.name,
+                        functions.join(", ")
+                    )));
+                }
+                for approval in &chain.approvals {
+                    lines.push(Line::from(format!("{}  approve: {approval}", chain.name)));
+                }
+            }
+        } else if row.note.is_none() && !row.description.is_empty() {
+            lines.push(Line::from(row.description.clone()));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), details);
+
+    if let Some(text) = &app.skill_notice {
+        frame.render_widget(Paragraph::new(text.clone()).yellow(), notice);
+    }
+    let footer: Line = if let Some(path) = &app.skill_add {
+        Line::from(vec![
+            "Skill folder: ".cyan().bold(),
+            Span::from(path.clone()),
+            "▏  Enter add · Esc cancel".dark_gray(),
+        ])
+    } else if let Some(name) = &app.skill_delete {
+        Line::from(vec![
+            Span::from(format!("Delete {name} from disk? ")).bold(),
+            "[y] delete".red().bold(),
+            "  ".into(),
+            "[n] keep".green().bold(),
+        ])
+    } else {
+        Line::from("↑↓ select · d disable · e enable · x delete · a add · Tab back").dark_gray()
+    };
+    frame.render_widget(Paragraph::new(footer), keys);
+}
+
+/// The approval card for one skill: what it is, then everything it could touch, by chain.
+/// The body scrolls; the title and the keys stay put.
+fn render_consent(
+    frame: &mut Frame,
+    request: &ConsentRequest,
+    index: usize,
+    total: usize,
+    scroll: u16,
+) {
+    let heading = |text: &'static str| Span::from(text).cyan().bold();
+    let field =
+        |name: &'static str, value: String| Line::from(vec![heading(name), Span::from(value)]);
+    let none_or = |items: &[String], sep: &str, none: &str| {
+        if items.is_empty() {
+            none.to_owned()
+        } else {
+            items.join(sep)
+        }
+    };
+    let mut lines = vec![
+        Line::from(format!(
+            "{} {} · {} · sha256 {}",
+            request.name, request.version, request.reason, request.short_hash
+        ))
+        .bold(),
+        Line::from(request.description.clone()),
+        Line::default(),
+        field(
+            "NEEDS      ",
+            none_or(&request.requires, ", ", "no other skill"),
+        ),
+        field(
+            "WEB        ",
+            none_or(
+                &request.hosts,
+                ", ",
+                if request.tools.is_empty() {
+                    "none"
+                } else {
+                    "none (reads the chain through your RPC)"
+                },
+            ),
+        ),
+        field(
+            "TOOLS      ",
+            none_or(&request.tools, " · ", "none (instructions only)"),
+        ),
+        Line::default(),
+    ];
+    if request.chains.is_empty() {
+        lines.push(Line::from(vec![
+            heading("CAN PROPOSE CALLS TO "),
+            Span::from("nothing (read-only)"),
+        ]));
+    } else {
+        lines.push(Line::from(heading("CAN PROPOSE CALLS TO")));
+        for chain in &request.chains {
+            lines.push(Line::from(format!(" {}", chain.name)).bold());
+            for (label, address, functions) in &chain.calls {
+                lines.push(Line::from(vec![
+                    Span::from(format!("   {label} {address}  ")),
+                    Span::from(functions.join(", ")).yellow(),
+                ]));
+            }
+            for approval in &chain.approvals {
+                lines.push(Line::from(format!("   approve: {approval}")));
+            }
+        }
+    }
+    lines.push(Line::default());
+    lines.push(
+        Line::from("Every plan is still simulated and reviewed before you send it.").italic(),
+    );
+
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(100);
+    // Long lines (many web hosts, say) wrap; the card is as tall as the wrapped text.
+    let paragraph = Paragraph::new(Text::from(lines))
+        .reset()
+        .wrap(Wrap { trim: false });
+    let rows = paragraph.line_count(width.saturating_sub(4)) as u16;
+    let height = (rows + 4).min(area.height.saturating_sub(2));
+    let [popup] = Layout::horizontal([Constraint::Length(width)])
+        .flex(ratatui::layout::Flex::Center)
+        .areas(area);
+    let [popup] = Layout::vertical([Constraint::Length(height)])
+        .flex(ratatui::layout::Flex::Center)
+        .areas(popup);
+    let title = if total > 1 {
+        format!(" Allow skill {}? ({index} of {total}) ", request.name)
+    } else {
+        format!(" Allow skill {}? ", request.name)
+    };
+    let block = Block::new().borders(Borders::ALL).title(title).yellow();
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    let [body, keys] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(
+        inner.inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 0,
+        }),
+    );
+    let max_scroll = rows.saturating_sub(body.height);
+    frame.render_widget(paragraph.scroll((scroll.min(max_scroll), 0)), body);
+    let mut key_line = vec![
+        "  [y] ".green().bold(),
+        "allow   ".into(),
+        "[n] ".red().bold(),
+        "decline".into(),
+    ];
+    if max_scroll > 0 {
+        key_line.push("        ↑↓ scroll".dark_gray());
+    }
+    frame.render_widget(Paragraph::new(Line::from(key_line)).reset(), keys);
 }
 
 /// Keeps the newest lines visible: scrolls so the text ends at the bottom of the panel.
@@ -113,21 +389,25 @@ fn render_bottom_anchored(
     text: Text<'static>,
     title: &'static str,
     borders: Borders,
+    scroll: &PanelScroll,
 ) {
     let count = |sides: Borders| borders.intersection(sides).iter().count() as u16;
     let (vertical, horizontal) = (
         count(Borders::TOP | Borders::BOTTOM),
         count(Borders::LEFT | Borders::RIGHT),
     );
-    let paragraph = Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .block(Block::new().borders(borders).title(title));
+    let wrapped = Paragraph::new(text).wrap(Wrap { trim: false });
     let inner_height = area.height.saturating_sub(vertical) as usize;
-    // `line_count` includes the block's own top and bottom rows.
-    let lines = paragraph
-        .line_count(area.width.saturating_sub(horizontal))
-        .saturating_sub(vertical as usize);
-    let offset = lines.saturating_sub(inner_height).min(u16::MAX as usize) as u16;
+    let lines = wrapped.line_count(area.width.saturating_sub(horizontal));
+    let top = scroll.observe(lines, inner_height);
+    // Scrolled back: say so, and how to get to the newest lines.
+    let title = if scroll.following() || lines <= inner_height {
+        title.to_owned()
+    } else {
+        format!("{title}↑ older · ↓ newer ")
+    };
+    let paragraph = wrapped.block(Block::new().borders(borders).title(title));
+    let offset = top.min(u16::MAX as usize) as u16;
     frame.render_widget(paragraph.scroll((offset, 0)), area);
 }
 
@@ -257,7 +537,11 @@ fn render_confirm(frame: &mut Frame, pending: &PendingConfirm, queued: usize) {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+    };
     use tokio::sync::oneshot;
 
     use super::*;
@@ -299,6 +583,44 @@ mod tests {
         }
     }
 
+    fn cursor_at(app: &App) -> (u16, u16) {
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let p = terminal.get_cursor_position().unwrap();
+        (p.x, p.y)
+    }
+
+    #[test]
+    fn the_terminal_cursor_follows_the_edit_position() {
+        let mut app = App::new("m", "d");
+        app.on_paste("hello");
+        let end = cursor_at(&app);
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(cursor_at(&app), (end.0 - 2, end.1));
+
+        // A message long enough to wrap: the cursor goes back to the first row.
+        let mut app = App::new("m", "d");
+        app.on_paste(&"x".repeat(250));
+        app.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        let (x, y) = cursor_at(&app);
+        let (_, end_y) = {
+            let mut copy = App::new("m", "d");
+            copy.on_paste(&"x".repeat(250));
+            cursor_at(&copy)
+        };
+        assert_eq!(
+            x,
+            1 + PROMPT.len() as u16,
+            "after the prompt, inside the border"
+        );
+        assert_eq!(
+            y,
+            end_y - 2,
+            "two rows above the end of a three-row message"
+        );
+    }
+
     #[test]
     fn shows_the_confirmation_modal() {
         let mut app = App::new("m", "d");
@@ -318,6 +640,197 @@ mod tests {
         ] {
             assert!(screen.contains(needle), "missing {needle:?} in\n{screen}");
         }
+    }
+
+    fn aave_request() -> crate::skills::consent::ConsentRequest {
+        use crate::skills::{consent::*, lock::hash_dir, manifest};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/aave-v3-lend");
+        let skill = manifest::load(&dir).unwrap();
+        ConsentRequest::new(&skill, &hash_dir(&skill.dir).unwrap(), Reason::New)
+    }
+
+    fn tall_screen(app: &App, rows: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, rows)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn shows_a_skill_approval_card_grouped_by_what_it_can_touch() {
+        let mut app = App::new("m", "d");
+        let request = aave_request();
+        let hash = request.short_hash.clone();
+        app.ask_consents(vec![request, aave_request()]);
+        let screen = tall_screen(&app, 40);
+        for needle in [
+            "Allow skill aave-v3-lend? (1 of 2)",
+            &format!("aave-v3-lend 0.1.0 · new · sha256 {hash}"),
+            "Earn interest on idle USDC",
+            "NEEDS",
+            "defi-data",
+            "WEB",
+            "none (reads the chain through your RPC)",
+            "TOOLS",
+            "aave_markets · aave_supply · aave_withdraw",
+            "CAN PROPOSE CALLS TO",
+            "Ethereum (1)",
+            "Aave Pool 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+            "supply, withdraw",
+            "approve: USDC, USDT, DAI → Aave Pool (exact amounts)",
+            "Sepolia (11155111)",
+            "Every plan is still simulated and reviewed before you send it.",
+            "[y] allow",
+            "[n] decline",
+            "y allow · n decline · ↑↓ scroll",
+        ] {
+            assert!(screen.contains(needle), "missing {needle:?} in\n{screen}");
+        }
+    }
+
+    /// A line wider than the card (defi-data's five web hosts) wraps instead of being cut off.
+    #[test]
+    fn long_card_lines_wrap_instead_of_running_off_the_card() {
+        use crate::skills::{consent::*, lock::hash_dir, manifest};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/defi-data");
+        let skill = manifest::load(&dir).unwrap();
+        let request = ConsentRequest::new(&skill, &hash_dir(&skill.dir).unwrap(), Reason::New);
+        let mut app = App::new("m", "d");
+        app.ask_consents(vec![request]);
+        let screen = tall_screen(&app, 30);
+        assert!(screen.contains("api.dexscreener.com"), "{screen}");
+        assert!(screen.contains("[y] allow"), "{screen}");
+    }
+
+    #[test]
+    fn a_long_approval_card_scrolls_and_keeps_its_keys_visible() {
+        let mut app = App::new("m", "d");
+        app.ask_consents(vec![aave_request()]);
+        let short = tall_screen(&app, 12);
+        assert!(short.contains("[y] allow"), "keys always visible:\n{short}");
+        assert!(!short.contains("Sepolia (11155111)"), "{short}");
+        app.consent_scroll = 30;
+        let scrolled = tall_screen(&app, 12);
+        assert!(scrolled.contains("Sepolia (11155111)"), "{scrolled}");
+        assert!(scrolled.contains("[y] allow"), "{scrolled}");
+    }
+
+    #[test]
+    fn the_skills_tab_lists_skills_and_details_the_selected_one() {
+        use crate::skills::{Origin, SkillRow};
+        let details = aave_request();
+        let mut app = App::new("m", "d");
+        app.on_agent(AgentEvent::SkillsReady {
+            lines: vec![],
+            notes: vec![],
+            rows: vec![
+                SkillRow {
+                    name: "defi-data".into(),
+                    version: "0.2.0".into(),
+                    state: "ready".into(),
+                    note: None,
+                    description: "Look up past yields".into(),
+                    origin: Origin::Shipped,
+                    dir: "/repo/skills/defi-data".into(),
+                    details: None,
+                },
+                SkillRow {
+                    name: "aave-v3-lend".into(),
+                    version: "0.1.0".into(),
+                    state: "disabled".into(),
+                    note: None,
+                    description: "Earn interest on idle USDC".into(),
+                    origin: Origin::Added,
+                    dir: "/home/me/.config/edw-tui/skills/aave-v3-lend".into(),
+                    details: Some(details),
+                },
+                SkillRow {
+                    name: "broken".into(),
+                    version: String::new(),
+                    state: "unavailable".into(),
+                    note: Some("requires `x`, which is not installed".into()),
+                    description: String::new(),
+                    origin: Origin::Shipped,
+                    dir: "/repo/skills/broken".into(),
+                    details: None,
+                },
+            ],
+        });
+        app.view = View::Skills;
+        app.skill_selected = 1;
+        let screen = tall_screen(&app, 30);
+        for needle in [
+            "Skills · Tab: chat",
+            "defi-data",
+            "0.2.0",
+            "ready",
+            "▶ ○ aave-v3-lend",
+            "disabled",
+            "! broken",
+            "requires `x`",
+            "aave-v3-lend · added (/home/me/.config/edw-tui/skills/aave-v3-lend)",
+            "NEEDS defi-data",
+            "Aave Pool 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+            "↑↓ select · d disable · e enable · x delete · a add · Tab back",
+        ] {
+            assert!(screen.contains(needle), "missing {needle:?} in\n{screen}");
+        }
+
+        app.skill_add = Some("~/Downloads/lp".into());
+        let screen = tall_screen(&app, 30);
+        assert!(screen.contains("Skill folder: ~/Downloads/lp"), "{screen}");
+        assert!(screen.contains("Enter add · Esc cancel"), "{screen}");
+        app.skill_add = None;
+        app.skill_delete = Some("aave-v3-lend".into());
+        let screen = tall_screen(&app, 30);
+        assert!(
+            screen.contains("Delete aave-v3-lend from disk? [y] delete  [n] keep"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn a_scrolled_panel_shows_older_lines_and_stays_put_when_more_arrive() {
+        let mut app = App::new("m", "d");
+        for n in 0..60 {
+            app.chat.push(ChatLine::Info(format!("message {n:02}")));
+        }
+        let first = screen(&app);
+        assert!(first.contains("message 59") && !first.contains("message 10"));
+
+        app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        let scrolled = screen(&app);
+        assert!(!scrolled.contains("message 59"), "{scrolled}");
+        assert!(scrolled.contains("↑ older · ↓ newer"), "{scrolled}");
+        let oldest_shown = (0..60)
+            .find(|n| scrolled.contains(&format!("message {n:02}")))
+            .unwrap();
+
+        // A new message does not move a scrolled panel.
+        app.chat.push(ChatLine::Info("message 60".into()));
+        let after = screen(&app);
+        assert!(
+            after.contains(&format!("message {oldest_shown:02}")),
+            "{after}"
+        );
+        assert!(!after.contains("message 60"), "{after}");
+
+        for _ in 0..10 {
+            app.on_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        let end = screen(&app);
+        assert!(
+            end.contains("message 60") && !end.contains("↑ older"),
+            "{end}"
+        );
     }
 
     #[test]

@@ -30,6 +30,9 @@ pub enum Chain {
     /// An anvil fork of Sepolia (`EDW_TUI_SEPOLIA_RPC`, default a no-tracking public RPC);
     /// edw's `sepolia` network. Needs the network.
     SepoliaFork,
+    /// An anvil fork of Ethereum mainnet (`ETH_RPC_URL`, default a no-tracking public RPC);
+    /// edw's `mainnet` network, allowed only through `EDW_TUI_MAINNET_FORK`. Needs the network.
+    MainnetFork,
 }
 
 pub struct Scenario {
@@ -45,6 +48,18 @@ impl Scenario {
     /// scripted model. `None` (with a message) when edw or anvil is missing, or edw is not the
     /// pinned revision. Recording starts when `EDW_TUI_E2E_RECORD` is set.
     pub async fn start(name: &str, chain: Chain) -> Option<Self> {
+        Self::launch(name, chain, false).await
+    }
+
+    /// As [`Scenario::start`], with the crate's shipped skills (`skills/`) on, a throwaway lock
+    /// and user folder, and every startup approval card answered `y`.
+    pub async fn start_with_skills(name: &str, chain: Chain) -> Option<Self> {
+        let mut s = Self::launch(name, chain, true).await?;
+        s.approve_skills();
+        Some(s)
+    }
+
+    async fn launch(name: &str, chain: Chain, skills: bool) -> Option<Self> {
         let binary = edw_binary().or_else(|| {
             eprintln!("skipping: edw is not installed");
             None
@@ -62,6 +77,13 @@ impl Scenario {
                 ),
                 "sepolia",
             ),
+            Chain::MainnetFork => (
+                Anvil::new().fork(
+                    std::env::var("ETH_RPC_URL")
+                        .unwrap_or_else(|_| "https://ethereum-rpc.publicnode.com".into()),
+                ),
+                "mainnet",
+            ),
         };
         let chain = match anvil.try_spawn() {
             Ok(chain) => chain,
@@ -75,17 +97,43 @@ impl Scenario {
         seed_wallet(&wallet.config, network).await;
 
         let config = &wallet.config;
+        let mut env = vec![
+            ("EDW_TUI_MODEL", "scripted".into()),
+            ("EDW_BIN", binary.display().to_string()),
+            ("EDW_DATA_DIR", config.data_dir.display().to_string()),
+            ("EDW_RUNTIME_DIR", config.runtime_dir.display().to_string()),
+            ("EDW_DECRYPTION_PASSWORD", config.password.clone()),
+            ("EDW_TUI_RPC_URL", rpc.clone()),
+            ("EDW_TUI_INTERIM_SEPOLIA", "1".into()),
+            ("EDW_TUI_MAINNET_FORK", "1".into()),
+        ];
+        if skills {
+            // The shipped skills, approved into a throwaway lock, never the user's own.
+            let state = config.data_dir.join("skills-state");
+            env.extend([
+                (
+                    "EDW_TUI_SKILLS_DIR",
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("skills")
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "EDW_TUI_SKILLS_LOCK",
+                    state.join("skills.lock").display().to_string(),
+                ),
+                (
+                    "EDW_TUI_SKILLS_USER_DIR",
+                    state.join("added").display().to_string(),
+                ),
+            ]);
+        } else {
+            // These scenarios are about transfers and swaps; skills have their own e2e tests.
+            env.push(("EDW_TUI_SKILLS", "off".into()));
+        }
         let mut tui = Tui::spawn(
             &PathBuf::from(env!("CARGO_BIN_EXE_edw-tui")),
-            &[
-                ("EDW_TUI_MODEL", "scripted".into()),
-                ("EDW_BIN", binary.display().to_string()),
-                ("EDW_DATA_DIR", config.data_dir.display().to_string()),
-                ("EDW_RUNTIME_DIR", config.runtime_dir.display().to_string()),
-                ("EDW_DECRYPTION_PASSWORD", config.password.clone()),
-                ("EDW_TUI_RPC_URL", rpc.clone()),
-                ("EDW_TUI_INTERIM_SEPOLIA", "1".into()),
-            ],
+            &env,
             ROWS,
             COLS,
         );
@@ -101,6 +149,22 @@ impl Scenario {
             network,
             _chain: chain,
         })
+    }
+
+    /// Answers every skill approval card on screen with `y`, after the time to read it.
+    pub fn approve_skills(&mut self) {
+        loop {
+            let screen = self.tui.wait_for_within("the skills to settle", 120, |s| {
+                s.contains("Allow skill") || !s.contains("Preparing skills")
+            });
+            if !screen.contains("Allow skill") {
+                return;
+            }
+            self.tui.linger(2500); // the card is the point of this moment in a recording
+            self.tui.answer(b"y");
+            self.tui
+                .wait_for_within("the card to close", 30, |s| s != screen);
+        }
     }
 
     /// Types a request, answers its confirmation with `y`, and waits for `done` on screen and
@@ -130,10 +194,10 @@ impl Scenario {
 
     /// The address of a profile (`0/0`, `alice`, …) in the unlocked wallet.
     pub async fn address(&self, profile: &str) -> Address {
-        Interim::new(self.wallet.interim(Some(self.rpc.clone()), true))
-            .address(Some(profile))
-            .await
-            .unwrap()
+        let mut config = self.wallet.interim(Some(self.rpc.clone()), true);
+        // Same as the TUI under test: a mainnet scenario runs on a fork.
+        config.mainnet_fork = self.network == "mainnet";
+        Interim::new(config).address(Some(profile)).await.unwrap()
     }
 
     /// Gives `who` ETH on the chain, and clears any contract code it has there: on a fork, the

@@ -176,6 +176,11 @@ pub fn spec(name: &str) -> Option<&'static ToolSpec> {
     TOOLS.iter().find(|tool| tool.name == name)
 }
 
+/// Every built-in tool's name, in [`TOOLS`] order.
+pub fn tool_names() -> Vec<&'static str> {
+    TOOLS.iter().map(|tool| tool.name).collect()
+}
+
 pub(crate) fn text(
     args: &Map<String, Value>,
     key: &str,

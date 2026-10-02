@@ -1,0 +1,62 @@
+[
+{
+"name": "Base",
+"chainId": 8453,
+"gecko_id": null,
+"tvl": 6481034131.269126
+},
+{
+"name": "Avalanche",
+"chainId": 43114,
+"gecko_id": "avalanche-2",
+"tvl": 650679556.5361468
+},
+{
+"name": "BSC",
+"chainId": 56,
+"gecko_id": "binancecoin",
+"tvl": 5817148299.542311
+},
+{
+"name": "Arbitrum",
+"chainId": 42161,
+"gecko_id": "arbitrum",
+"tvl": 1436344108.9808652
+},
+{
+"name": "OP Mainnet",
+"chainId": 10,
+"gecko_id": "optimism",
+"tvl": 494859805.36253196
+},
+{
+"name": "Ethereum",
+"chainId": 1,
+"gecko_id": "ethereum",
+"tvl": 54566077998.51933
+},
+{
+"name": "Polygon",
+"chainId": 137,
+"gecko_id": "polygon-ecosystem-token",
+"tvl": 756568152.8963127
+},
+{
+"name": "Binance",
+"chainId": 56,
+"gecko_id": "binancecoin",
+"tvl": 0
+},
+{
+"name": "Solana",
+"chainId": null,
+"gecko_id": "solana",
+"tvl": 6713961207.466623
+},
+{
+"name": "Optimism",
+"chainId": 10,
+"gecko_id": "optimism",
+"tvl": 0
+}
+]

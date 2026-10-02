@@ -1,0 +1,14 @@
+version = "1"
+hosts = ["yields.llama.fi"]
+
+[[read_tool]]
+name = "probe_echo"
+run = "scripts/probe.py"
+description = "Runs one sandbox probe."
+schema = { type = "object", properties = { mode = { type = "string" } } }
+
+[[action]]
+name = "probe_act"
+run = "scripts/probe.py"
+description = "Proposes a plan (tests only)."
+schema = { type = "object", properties = { mode = { type = "string" }, to = { type = "string" } } }

@@ -4,7 +4,7 @@ use edw_tui::{
     contract,
     edw::{self, EdwConfig},
     interim::InterimConfig,
-    ui,
+    skills, ui,
 };
 use futures::StreamExt;
 use ratatui::crossterm::{
@@ -77,6 +77,11 @@ async fn main() -> anyhow::Result<()> {
     let interim = InterimConfig::from_env(config.clone());
     let model = source.handle(&model_name)?;
 
+    // The session settles the skills (approval cards come through the TUI), builds the agent,
+    // and rebuilds it on every change from the Skills tab.
+    let paths =
+        (!std::env::var("EDW_TUI_SKILLS").is_ok_and(|v| v == "off")).then(skills::Paths::from_env);
+
     let (event_tx, mut events) = mpsc::unbounded_channel::<AgentEvent>();
     let (requests, request_rx) = mpsc::unbounded_channel::<Request>();
     let mut app = App::new(&model_name, config.data_dir.display().to_string());
@@ -84,8 +89,20 @@ async fn main() -> anyhow::Result<()> {
     if let Some(warning) = edw::check_pin(&config.binary).warning() {
         app.chat.push(ChatLine::Info(warning));
     }
-    let agent = agent::build_agent(model, config, interim.clone(), event_tx.clone());
-    tokio::spawn(agent::run(agent, request_rx, event_tx, source, interim));
+    // Busy ("Preparing skills…") until the session says the skills are ready.
+    app.ask_consents(Vec::new());
+    tokio::spawn(agent::run_session(
+        agent::Session {
+            model_name: model_name.clone(),
+            model: Some(model),
+            source,
+            config,
+            interim,
+            paths,
+        },
+        request_rx,
+        event_tx,
+    ));
 
     let mut terminal = ratatui::init();
     // A paste arrives as one event instead of keystrokes, so its line breaks never press Enter.
@@ -102,6 +119,9 @@ async fn main() -> anyhow::Result<()> {
                             Ok(()) => ChatLine::Info(format!("Copied {} characters.", text.chars().count())),
                             Err(error) => ChatLine::Error(format!("cannot copy: {error}")),
                         }),
+                        Action::SkillsAnswered(answers) => {
+                            requests.send(Request::SkillsAnswered(answers))?
+                        }
                         Action::Quit => return Ok(()),
                         Action::None => {}
                     },

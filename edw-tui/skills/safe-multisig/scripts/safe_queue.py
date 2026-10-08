@@ -4,6 +4,7 @@ import safe_common as safe
 import edw_skill
 
 MAX = 8
+APPROVED = "function approvedHashes(address owner,bytes32 hash) view returns (uint256)"
 
 
 def main():
@@ -35,6 +36,16 @@ def main():
         })
         if me and me in owners:
             row["you_have_signed"] = me in signed
+        if me and me not in signed and context.get("chain_id") == chain_id:
+            # An approval sent on chain (safe_approve_hash) is not in the service's list; the
+            # Safe's own record is the truth.
+            try:
+                approved = int(edw_skill.call(address, APPROVED, [me, tx["safeTxHash"]])[0]) != 0
+            except edw_skill.HostError:
+                approved = False
+            if approved:
+                row["you_have_signed"] = True
+                row["you_approved_on_chain"] = True
         rows.append(row)
     # The service lists every proposal at a nonce; two at the same nonce are competing, only one can run.
     nonces = [r["nonce"] for r in rows]
@@ -50,7 +61,7 @@ def main():
         "waiting": len(rows),
         "more_than_shown": bool(page.get("next")),
         "transactions": rows,
-        "note": "This only reads. Signing and executing happen in the Safe app or with the owners' own keys.",
+        "note": "This only reads. To approve one on chain use safe_approve_hash; executing happens in the Safe app.",
     })
 
 

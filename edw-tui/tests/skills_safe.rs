@@ -10,7 +10,8 @@ use std::{
 };
 
 use alloy_dyn_abi::DynSolValue;
-use alloy_primitives::Address;
+use alloy_primitives::{Address, U256};
+use alloy_sol_types::{SolCall, sol};
 use edw_tui::skills::{
     host::{Host, HostConfig, SharedCache},
     manifest::{self, Skill},
@@ -54,6 +55,12 @@ fn fixtures() -> BTreeMap<String, String> {
         ),
         (
             format!(
+                "GET {BASE}/safes/{SAFE}/multisig-transactions/?executed=false&nonce__gte={nonce}&ordering=nonce&limit=20"
+            ),
+            fixture("queue.json"),
+        ),
+        (
+            format!(
                 "GET {BASE}/safes/{SAFE}/multisig-transactions/?executed=true&ordering=-executionDate&limit=5"
             ),
             fixture("activity.json"),
@@ -65,10 +72,25 @@ async fn call(
     tool: &str,
     args: Value,
     context: Value,
-    mut extra: BTreeMap<String, String>,
+    extra: BTreeMap<String, String>,
 ) -> Result<Value, String> {
+    match run(tool, args, context, extra).await? {
+        Output::Result(value) => Ok(value),
+        Output::Plan(plan) => panic!("a read tool returned a plan: {plan}"),
+    }
+}
+
+async fn run(
+    tool: &str,
+    args: Value,
+    context: Value,
+    mut extra: BTreeMap<String, String>,
+) -> Result<Output, String> {
     let skill = skill();
-    let def = skill.read_tool(tool).unwrap();
+    let def = skill
+        .read_tool(tool)
+        .or_else(|| skill.action(tool).map(|a| &a.tool))
+        .unwrap();
     extra.extend(fixtures());
     let host = Host::new(
         HostConfig {
@@ -86,10 +108,7 @@ async fn call(
         ..Runner::from_env()
     };
     let invoke = sandbox::invoke_message(tool, &args, context);
-    match runner.run(&skill, &def.run, invoke, &host).await? {
-        Output::Result(value) => Ok(value),
-        Output::Plan(plan) => panic!("a read tool returned a plan: {plan}"),
-    }
+    runner.run(&skill, &def.run, invoke, &host).await
 }
 
 async fn docker() -> bool {
@@ -141,14 +160,27 @@ fn owners() -> Vec<String> {
 }
 
 #[test]
-fn the_skill_only_reads_and_declares_one_host() {
+fn the_skill_reads_and_can_only_approve_a_hash_on_the_safe_the_user_names() {
     let skill = skill();
     assert_eq!(skill.manifest.hosts, ["api.safe.global"]);
-    assert!(skill.manifest.contracts.is_empty() && skill.manifest.actions.is_empty());
     assert_eq!(
         skill.tool_names(),
-        ["safe_info", "safe_queue", "safe_activity"]
+        [
+            "safe_info",
+            "safe_queue",
+            "safe_activity",
+            "safe_approve_hash"
+        ]
     );
+    // Not pinned: its address is the call's own `address`, and it may do exactly one thing.
+    let [safe] = &skill.manifest.contracts[..] else {
+        panic!("one contract")
+    };
+    assert!(safe.address.is_empty());
+    assert_eq!(safe.address_arg.as_deref(), Some("address"));
+    assert_eq!(safe.functions.len(), 1);
+    assert_eq!(safe.functions[0].name, "approveHash");
+    assert!(skill.manifest.actions[0].approves.is_empty());
 }
 
 #[tokio::test]
@@ -385,4 +417,215 @@ async fn bad_input_fails_with_a_reason() {
     .await
     .unwrap_err();
     assert!(err.contains("does not cover"), "{err}");
+}
+
+sol! {
+    function getTransactionHash(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, uint256 _nonce) returns (bytes32);
+    function isOwner(address owner) returns (bool);
+    function nonce() returns (uint256);
+    function approvedHashes(address owner, bytes32 hash) returns (uint256);
+}
+
+const ME: &str = "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0";
+
+fn rpc(data: Vec<u8>, answer: &str) -> (String, String) {
+    (
+        format!(
+            r#"rpc eth_call [{{"data":"0x{}","to":"{}"}},"latest"]"#,
+            alloy_primitives::hex::encode(data),
+            SAFE.to_lowercase()
+        ),
+        format!("\"{answer}\""),
+    )
+}
+
+/// What the Safe says on chain for the first waiting proposal (the 1 COW transfer at nonce 1445).
+fn approve_reads(owner: bool, hash: &str, approved: bool) -> BTreeMap<String, String> {
+    let queue: Value = serde_json::from_str(&fixture("queue.json")).unwrap();
+    let tx = &queue["results"][0];
+    let text = |key: &str| tx[key].as_str().unwrap().to_owned();
+    let number = |key: &str| {
+        tx[key]
+            .as_str()
+            .map_or_else(|| tx[key].as_u64().unwrap().to_string(), str::to_owned)
+            .parse::<U256>()
+            .unwrap()
+    };
+    let me: Address = ME.parse().unwrap();
+    let hash_call = getTransactionHashCall {
+        to: text("to").parse().unwrap(),
+        value: number("value"),
+        data: alloy_primitives::hex::decode(text("data")).unwrap().into(),
+        operation: 0,
+        safeTxGas: number("safeTxGas"),
+        baseGas: number("baseGas"),
+        gasPrice: number("gasPrice"),
+        gasToken: text("gasToken").parse().unwrap(),
+        refundReceiver: text("refundReceiver").parse().unwrap(),
+        _nonce: number("nonce"),
+    };
+    let flag = |yes: bool| format!("0x{}", word(u64::from(yes)));
+    BTreeMap::from([
+        rpc(isOwnerCall { owner: me }.abi_encode(), &flag(owner)),
+        rpc(nonceCall {}.abi_encode(), &format!("0x{}", word(1445))),
+        rpc(hash_call.abi_encode(), hash),
+        rpc(
+            approvedHashesCall {
+                owner: me,
+                hash: hash.parse().unwrap(),
+            }
+            .abi_encode(),
+            &format!("0x{}", word(u64::from(approved))),
+        ),
+    ])
+}
+
+fn first_hash() -> String {
+    serde_json::from_str::<Value>(&fixture("queue.json")).unwrap()["results"][0]["safeTxHash"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn wallet() -> Value {
+    json!({"chain_id": 1, "me": ME})
+}
+
+#[tokio::test]
+async fn approving_a_waiting_transaction_proposes_exactly_approve_hash_on_the_safe() {
+    if !docker().await {
+        return;
+    }
+    let hash = first_hash();
+    let Output::Plan(plan) = run(
+        "safe_approve_hash",
+        json!({"address": SAFE, "nonce": 1445, "safe_tx_hash": hash}),
+        wallet(),
+        approve_reads(true, &hash, false),
+    )
+    .await
+    .unwrap() else {
+        panic!("expected a plan")
+    };
+    assert_eq!(
+        plan,
+        json!({"steps": [{"call": {"contract": "safe", "function": "approveHash", "args": [hash]}}]})
+    );
+    // And the checker compiles it, at the Safe the user named and nowhere else.
+    let skill = skill();
+    let action = skill.action("safe_approve_hash").unwrap();
+    let checked = edw_tui::skills::plan::check(
+        &plan,
+        &skill,
+        action,
+        1,
+        ME.parse().unwrap(),
+        &json!({"address": SAFE, "nonce": 1445}),
+    )
+    .unwrap();
+    assert_eq!(checked.steps.len(), 1);
+    assert_eq!(checked.steps[0].to, SAFE.parse::<Address>().unwrap());
+    assert_eq!(checked.steps[0].value, U256::ZERO);
+    assert_eq!(checked.steps[0].data.len(), 4 + 32);
+}
+
+#[tokio::test]
+async fn approving_refuses_what_the_chain_does_not_back() {
+    if !docker().await {
+        return;
+    }
+    let hash = first_hash();
+    let refuse = |args: Value, reads: BTreeMap<String, String>| async move {
+        run("safe_approve_hash", args, wallet(), reads)
+            .await
+            .expect_err("a refusal")
+    };
+    // Two proposals share nonce 1445: ask which, never pick one.
+    let error = refuse(
+        json!({"address": SAFE, "nonce": 1445}),
+        approve_reads(true, &hash, false),
+    )
+    .await;
+    assert!(
+        error.contains("competing") && error.contains(&hash),
+        "{error}"
+    );
+    // The service's transaction does not hash to what the Safe computes.
+    let other = format!("0x{}", "ab".repeat(32));
+    let error = refuse(
+        json!({"address": SAFE, "nonce": 1445, "safe_tx_hash": hash}),
+        approve_reads(true, &other, false),
+    )
+    .await;
+    assert!(error.contains("does not hash"), "{error}");
+    // The profile is not an owner.
+    let error = refuse(
+        json!({"address": SAFE, "nonce": 1445, "safe_tx_hash": hash}),
+        approve_reads(false, &hash, false),
+    )
+    .await;
+    assert!(error.contains("not an owner"), "{error}");
+    // A nonce the Safe has already used.
+    let error = refuse(
+        json!({"address": SAFE, "nonce": 1000}),
+        approve_reads(true, &hash, false),
+    )
+    .await;
+    assert!(error.contains("already been used"), "{error}");
+}
+
+#[tokio::test]
+async fn an_approval_already_sent_is_reported_not_repeated() {
+    if !docker().await {
+        return;
+    }
+    let hash = first_hash();
+    let out = run(
+        "safe_approve_hash",
+        json!({"address": SAFE, "nonce": 1445, "safe_tx_hash": hash}),
+        wallet(),
+        approve_reads(true, &hash, true),
+    )
+    .await
+    .unwrap();
+    let Output::Result(value) = out else {
+        panic!("expected a result")
+    };
+    assert_eq!(value["already_approved"], true);
+}
+
+#[tokio::test]
+async fn safe_queue_shows_an_approval_the_profile_sent_on_chain() {
+    if !docker().await {
+        return;
+    }
+    let hash = first_hash();
+    // Not the proposer: the service already lists that owner as having signed.
+    let me: Address = "0x00000000000000000000000000000000000000A1"
+        .parse()
+        .unwrap();
+    let reads = BTreeMap::from([rpc(
+        approvedHashesCall {
+            owner: me,
+            hash: hash.parse().unwrap(),
+        }
+        .abi_encode(),
+        &format!("0x{}", word(1)),
+    )]);
+    let out = call(
+        "safe_queue",
+        json!({"address": SAFE, "chain": "Ethereum", "limit": 5}),
+        json!({"chain_id": 1, "me": me}),
+        reads,
+    )
+    .await
+    .unwrap();
+    let rows = out["transactions"].as_array().unwrap();
+    let mine: Vec<&Value> = rows
+        .iter()
+        .filter(|r| r["you_approved_on_chain"] == true)
+        .collect();
+    assert_eq!(mine.len(), 1, "{out}");
+    assert_eq!(mine[0]["safe_tx_hash"], hash);
+    assert_eq!(mine[0]["you_have_signed"], true);
 }

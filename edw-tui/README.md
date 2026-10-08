@@ -88,16 +88,22 @@ skills. The system prompt lists each skill's name and one-line description; the 
   Sepolia, Base and others: `safe_info` (owners, threshold, modules; the signer set is
   cross-checked against the Safe on chain when the wallet is on that chain), `safe_queue` (what
   is waiting for signatures, in plain English, with who has not signed) and `safe_activity`
-  (what it recently executed). Read-only, from the Safe Transaction Service. Labels are rules,
+  (what it recently executed), all from the Safe Transaction Service. One write,
+  `safe_approve_hash`: approve a waiting transaction on chain as the sending profile (an owner).
+  The skill refuses unless the Safe's own `getTransactionHash` equals the service's, and the
+  review shows the Safe's full address. Labels are rules,
   not a model's guess: payouts, CoW Protocol pre-signed swap orders, approvals (unlimited ones
   are flagged), owner/module changes, rejections, and any delegatecall that is not Safe's own
-  MultiSend. It has no actions: a plan may only call manifest-pinned contracts, and a user's
-  Safe is not one.
+  MultiSend. A user's Safe cannot be pinned, so its contract uses `address_arg`: the address
+  is the call's own `address` argument, never one the script chose, and only `approveHash` may be
+  called there. Executing, proposing and owner changes are not offered (they need raw `bytes`
+  or an off-chain signature).
 
 A folder holds `SKILL.md` (frontmatter `name` and `description`, then at most 4 KiB the model
 reads) and, optionally, `skill.toml`, which is what edw-tui enforces:
 
-- `[[contract]]`: the only contracts its plans may call, pinned by address per chain, with the
+- `[[contract]]`: the only contracts its plans may call, pinned by address per chain (or, with
+  `address_arg`, at the address the user gave the action; never approvable), with the
   functions allowed as signatures (`"function supply(address asset,uint256 amount,…)"`).
   Functions that approve or move tokens themselves (`approve`, `permit`, `transfer`…) or take
   raw `bytes` are refused. `amounts = { supply = { amount = "asset" } }` makes the review show

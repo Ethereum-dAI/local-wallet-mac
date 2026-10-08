@@ -1,13 +1,16 @@
 # ToDo: write operations for `safe-multisig`
 
-Status: not started. `safe-multisig` (PR #102) is read-only: `safe_info`, `safe_queue`, `safe_activity`.
-This file lists the write operations to add next, in order, and what blocks each.
+Status: write 1 (approveHash) is built: `safe_approve_hash`, with the new `address_arg` contract kind
+(a contract at the address the user names; only that address, only the listed functions, never approvable).
+This file lists the other write operations, in order, and what blocks each.
 
-## Why writes are not in v0.1
+## What blocks the rest
 
-A plan may only call contracts pinned in the skill manifest, and a user's own Safe cannot be pinned.
-Before any write below that targets the user's Safe (1-4), check whether the "accept skill addrs, per-user lock"
-decision from the earlier skills work already allows a per-user target. If not, that is the first thing to build.
+Done: a plan may now call a contract at an address from the action's own arguments (`address_arg`).
+Still blocked by the plan checker: any function taking raw `bytes` (`execTransaction`, `multiSend`,
+`createProxyWithNonce`), and anything needing an off-chain signature (rejection, proposing).
+Owner and threshold changes are not callable directly by an owner at all: only the Safe itself can
+call them, so they need `execTransaction` too.
 
 ## Evidence for the scope
 
@@ -18,19 +21,21 @@ Earlier completion test (40 real MultiSend batches, hide the last call): gemma4 
 
 ## Writes, in order
 
-1. **Approve a queued transaction on-chain**: `approveHash(safeTxHash)` on the Safe.
-   Hash comes from `safe_queue`. Needs per-user target. Smallest write, highest use.
+1. **DONE: approve a queued transaction on-chain**: `approveHash(safeTxHash)` on the Safe.
+   The Safe's own `getTransactionHash` must match the service's hash; competing nonces need `safe_tx_hash`;
+   warnings must be acknowledged. Tested offline, on a mainnet fork, and recorded.
 2. **Execute a fully signed transaction**: `execTransaction(to, value, data, operation, ...)` on the Safe,
    using the stored signatures. `safe_queue` already reports `ready_to_execute`.
-   Verify the service's calldata hashes to the reported `safeTxHash` before sending.
+   Blocked: the function takes raw `bytes`. Needs a checker rule that allows `bytes` only when the harness
+   itself rebuilds them from the verified queue entry.
 3. **Reject a queued transaction**: propose an empty self-call at the same nonce.
    Needs an off-chain EIP-712 signature, so it depends on the harness being able to sign a message.
 4. **Propose a transfer or batch**: build the `safeTxHash`, sign, post to the service.
    Payout batches go through MultiSendCallOnly (`0x40A2aCCbd92BCA938b02010E17A5b8929b49130D` or the chain's equivalent; confirm the address per chain). This one is a fixed address and can be pinned.
-5. **Create a Safe**: `createProxyWithNonce` on the Safe proxy factory. Fixed address, needs no per-user pinning.
+5. **Create a Safe**: `createProxyWithNonce` on the Safe proxy factory. Fixed address, needs no per-user pinning, but the function takes raw `bytes` (the initializer), so it is blocked like 2.
 6. **Owner and threshold management** (`addOwnerWithThreshold`, `removeOwner`, `swapOwner`, `changeThreshold`, `enableModule`):
    always flagged "changes who controls the Safe"; `removeOwner` and `swapOwner` need `prevOwner` from the on-chain `getOwners()` order.
-7. **CoW pre-sign**: `setPreSignature(orderUid, true)` on `0x9008D19f58AAbD9eD0D60971565AA8510560ab41`.
+7. **CoW pre-sign**: `setPreSignature(orderUid, true)` on `0x9008D19f58AAbD9eD0D60971565AA8510560ab41`. Raw `bytes` again, and it must be sent by the Safe, so it rides inside a proposed Safe transaction (4).
 
 ## Reads to add alongside
 

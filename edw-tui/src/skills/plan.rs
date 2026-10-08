@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use super::{
     abi,
-    manifest::{ActionDef, Skill},
+    manifest::{ActionDef, ContractDef, Skill},
 };
 use crate::interim::guards::{format_units, is_burn};
 
@@ -43,13 +43,16 @@ pub struct CheckedPlan {
 }
 
 /// Checks `plan` (`{"steps": [...]}`) for `action` of `skill` on `chain_id`, sent by `me`.
-/// The error names the rule that failed; nothing is partially accepted.
+/// `input` is what the action was called with: it supplies the address of a contract the
+/// manifest leaves to the user (`address_arg`). The error names the rule that failed; nothing
+/// is partially accepted.
 pub fn check(
     plan: &Value,
     skill: &Skill,
     action: &ActionDef,
     chain_id: u64,
     me: Address,
+    input: &Value,
 ) -> Result<CheckedPlan, String> {
     let steps = plan
         .get("steps")
@@ -68,6 +71,7 @@ pub fn check(
         skill,
         chain_id,
         me,
+        input,
     };
     let mut checked = Vec::new();
     let mut total_value = U256::ZERO;
@@ -96,6 +100,7 @@ struct Ctx<'a> {
     skill: &'a Skill,
     chain_id: u64,
     me: Address,
+    input: &'a Value,
 }
 
 /// Only digits (and a leading `-` for signed types): what the review shows is then exactly the
@@ -200,6 +205,26 @@ impl Ctx<'_> {
         })
     }
 
+    /// Where a contract of the manifest is: pinned for this chain, or the address the user gave
+    /// in the action's own arguments.
+    fn contract_address(&self, contract: &ContractDef) -> Result<Address, String> {
+        let Some(arg) = &contract.address_arg else {
+            return self.on_chain(&contract.id, contract.address.get(&self.chain_id));
+        };
+        let text = self
+            .input
+            .get(arg)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{}: the call has no `{arg}` address", contract.id))?;
+        let address: Address = text
+            .parse()
+            .map_err(|_| format!("{}: `{text}` is not an address", contract.id))?;
+        if is_burn(&address) {
+            return Err(format!("{}: {text} is a burn or zero address", contract.id));
+        }
+        Ok(address)
+    }
+
     fn on_chain(&self, id: &str, address: Option<&Address>) -> Result<Address, String> {
         address
             .copied()
@@ -217,7 +242,7 @@ impl Ctx<'_> {
         }
         let m = &self.skill.manifest;
         if let Some(c) = m.contract(text) {
-            return self.on_chain(text, c.address.get(&self.chain_id));
+            return self.contract_address(c);
         }
         if let Some(t) = m.token(text) {
             return self.on_chain(text, t.address.get(&self.chain_id));
@@ -233,7 +258,7 @@ impl Ctx<'_> {
         let contract = m
             .contract(contract_id)
             .ok_or_else(|| format!("`{contract_id}` is not a contract of this skill"))?;
-        let to = self.on_chain(contract_id, contract.address.get(&self.chain_id))?;
+        let to = self.contract_address(contract)?;
         let name = text(step, "function")?;
         let args = match step.get("args") {
             None => Vec::new(),
@@ -292,7 +317,14 @@ impl Ctx<'_> {
         let data = function
             .abi_encode_input(&values)
             .map_err(|e| format!("{name}: {e}"))?;
-        let mut label = one_line(&format!("{}.{name}({})", contract.label, shown.join(", ")));
+        // A contract the user named is not one the manifest vouches for, so the review spells out
+        // where the call goes.
+        let place = if contract.address_arg.is_some() {
+            format!("{} {to}", contract.label)
+        } else {
+            contract.label.clone()
+        };
+        let mut label = one_line(&format!("{place}.{name}({})", shown.join(", ")));
         if !value.is_zero() {
             label.push_str(&format!(" with {} ETH", format_units(value, 18)));
         }
@@ -468,7 +500,7 @@ approves = ["pool"]
     fn run(plan: Value) -> Result<CheckedPlan, String> {
         let (_root, skill) = skill();
         let action = skill.action("supply_it").unwrap().clone();
-        check(&plan, &skill, &action, SEPOLIA, ME)
+        check(&plan, &skill, &action, SEPOLIA, ME, &json!({}))
     }
 
     fn approve(amount: &str) -> Value {
@@ -665,7 +697,74 @@ approves = ["pool"]
     fn a_known_id_on_the_wrong_chain_is_refused() {
         let (_root, skill) = skill();
         let action = skill.action("supply_it").unwrap().clone();
-        let error = check(&json!({"steps": [approve("1")]}), &skill, &action, 1, ME).unwrap_err();
+        let error = check(
+            &json!({"steps": [approve("1")]}),
+            &skill,
+            &action,
+            1,
+            ME,
+            &json!({}),
+        )
+        .unwrap_err();
         assert!(error.contains("chain 1"), "{error}");
+    }
+
+    mod named_contract {
+        use std::path::Path;
+
+        use super::*;
+
+        const SAFE: &str = "0xA03be496e67Ec29bC62F01a428683D7F9c204930";
+
+        fn approve_hash(input: Value) -> Result<CheckedPlan, String> {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/safe-multisig");
+            let skill = manifest::load(&dir).unwrap();
+            let action = skill.action("safe_approve_hash").unwrap().clone();
+            let plan = json!({"steps": [{"call": {
+                "contract": "safe", "function": "approveHash", "args": [format!("0x{}", "ab".repeat(32))]
+            }}]});
+            check(&plan, &skill, &action, 1, ME, &input)
+        }
+
+        #[test]
+        fn the_target_is_the_address_the_user_gave_never_one_the_script_picked() {
+            let plan = approve_hash(json!({"address": SAFE})).unwrap();
+            assert_eq!(plan.steps[0].to, SAFE.parse::<Address>().unwrap());
+            assert!(
+                plan.steps[0]
+                    .label
+                    .starts_with(&format!("Safe {SAFE}.approveHash(")),
+                "{}",
+                plan.steps[0].label
+            );
+            // Same plan, another Safe: only the user's own argument moved the call.
+            let other = "0x9cFA3e01d3E093D5ADAcf08f9A391EFF42C40D86";
+            let moved = approve_hash(json!({"address": other})).unwrap();
+            assert_eq!(moved.steps[0].to, other.parse::<Address>().unwrap());
+        }
+
+        #[test]
+        fn without_a_usable_address_nothing_is_compiled() {
+            for input in [
+                json!({}),
+                json!({"address": "not an address"}),
+                json!({"address": "0x0000000000000000000000000000000000000000"}),
+                json!({"address": 7}),
+            ] {
+                let error = approve_hash(input.clone()).unwrap_err();
+                assert!(error.contains("safe:"), "{input}: {error}");
+            }
+        }
+
+        #[test]
+        fn only_approve_hash_is_allowed_there() {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/safe-multisig");
+            let skill = manifest::load(&dir).unwrap();
+            let action = skill.action("safe_approve_hash").unwrap().clone();
+            let plan = json!({"steps": [{"call": {"contract": "safe", "function": "execTransaction", "args": []}}]});
+            let error =
+                check(&plan, &skill, &action, 1, ME, &json!({"address": SAFE})).unwrap_err();
+            assert!(error.contains("not one of"), "{error}");
+        }
     }
 }

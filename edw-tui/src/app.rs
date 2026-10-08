@@ -756,6 +756,7 @@ mod tests {
             hosts: vec![],
             tools: vec![],
             chains: vec![],
+            named: vec![],
         }
     }
 

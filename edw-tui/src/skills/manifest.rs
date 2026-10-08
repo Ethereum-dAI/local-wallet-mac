@@ -45,6 +45,10 @@ pub struct ContractDef {
     pub label: String,
     pub functions: Vec<Function>,
     pub address: BTreeMap<u64, Address>,
+    /// Instead of a pinned address: the name of the action argument that holds it. The address
+    /// then comes from what the user asked for, never from the script, and a call to it is only
+    /// as wide as `functions`. For a contract each user has their own copy of, such as a Safe.
+    pub address_arg: Option<String>,
     /// function → uint parameter → the address parameter holding its token, so the review can
     /// show that amount in the token's units (`amount=2.5 USDC (2500000)`).
     pub amounts: BTreeMap<String, BTreeMap<String, String>>,
@@ -137,7 +141,9 @@ struct RawContract {
     id: String,
     label: Option<String>,
     functions: Vec<String>,
+    #[serde(default)]
     address: BTreeMap<String, String>,
+    address_arg: Option<String>,
     #[serde(default)]
     amounts: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -456,7 +462,20 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         check_amounts(&c.id, &functions, &c.amounts)?;
+        match (&c.address_arg, c.address.is_empty()) {
+            (Some(_), false) => {
+                return Err(format!(
+                    "{}: give `address` or `address_arg`, not both",
+                    c.id
+                ));
+            }
+            (None, true) => {
+                return Err(format!("{}: needs an `address` or an `address_arg`", c.id));
+            }
+            _ => {}
+        }
         contracts.push(ContractDef {
+            address_arg: c.address_arg,
             amounts: c.amounts,
             label: c.label.unwrap_or_else(|| c.id.clone()),
             address: addresses(&c.id, c.address)?,
@@ -500,6 +519,16 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
         {
             return Err(format!(
                 "{}: approves `{spender}`, which is not a contract in this manifest",
+                a.name
+            ));
+        }
+        if let Some(spender) = a.approves.iter().find(|s| {
+            contracts
+                .iter()
+                .any(|c| &c.id == *s && c.address_arg.is_some())
+        }) {
+            return Err(format!(
+                "{}: approves `{spender}`, whose address the user names; only a pinned contract may be approved",
                 a.name
             ));
         }
@@ -665,6 +694,20 @@ approves = ["pool"]
         assert!(bad("name = \"demo_supply\"", "name = \"demo_read\"").contains("duplicate"));
         assert!(bad("11155111 = ", "sepolia = ").contains("chain"));
         assert!(bad("\"15m\"", "\"soon\"").contains("cache"));
+        // A contract is pinned or named by the user, never both and never neither.
+        let pool_address = "address = { 11155111 = \"0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951\", 1 = \"0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2\" }";
+        assert!(
+            bad(pool_address, "address_arg = \"safe\"")
+                .contains("only a pinned contract may be approved")
+        );
+        assert!(
+            bad(
+                pool_address,
+                &format!("{pool_address}\naddress_arg = \"safe\"")
+            )
+            .contains("not both")
+        );
+        assert!(bad(pool_address, "").contains("needs an `address` or an `address_arg`"));
         // `amounts` must name a listed function, a uint parameter, and an address parameter
         // holding the token.
         let amounts = |decl: &str| {

@@ -27,6 +27,8 @@ A script ends with exactly one of:
   "Skill says (not checked)".
 - `edw_skill.fail("one sentence the user can act on")`.
 
-Validate arguments and fail early with a clear message. Read tools run with the wallet locked
-(`context["me"]` is None); actions need it unlocked. Put code shared by several scripts in
+Validate arguments and fail early with a clear message. Read tools may run with the wallet locked
+or unlocked. When it is locked, `context` has `wallet` = "locked" and `chain_id` and `me` are None.
+Chain reads (`call`, `eth_call`, `get_balance`, `block_number`) then fail, while plain `http_get`
+lookups still work. Actions need the wallet unlocked. Put code shared by several scripts in
 `scripts/<name>_common.py` and `import` it.

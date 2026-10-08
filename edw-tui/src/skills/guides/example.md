@@ -7,7 +7,8 @@ name: balance-of
 description: Look up the ETH balance of any address on the wallet's chain. Use when the user asks what an address holds.
 ---
 Call balance_of with the address the user gave. Report the amount in ETH and say which chain it
-is from. This only reads; it never needs the wallet unlocked for the lookup itself.
+is from. The lookup reads the chain, so if balance_of says the wallet must be unlocked, tell the
+user to unlock it and ask again.
 ```
 
 ### FILE: skill.toml
@@ -31,6 +32,8 @@ _, args, context = edw_skill.invoke()
 address = str(args.get("address", ""))
 if not re.fullmatch(r"0x[0-9a-fA-F]{40}", address):
     edw_skill.fail("balance_of needs a 0x address")
+if context.get("wallet") != "unlocked":
+    edw_skill.fail("unlock the wallet first: reading a balance needs a network")
 wei = edw_skill.get_balance(address)
 edw_skill.result({
     "address": address,

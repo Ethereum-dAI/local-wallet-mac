@@ -39,21 +39,21 @@ for chain, safe, vd in real_batches():
 for (key, chain, safe, vd) in fam["setPreSignature"][:10]:
     uid = vd[-1]["dataDecoded"]["parameters"][0]["value"]
     cases.append({"family": "cow_presign", "chain": chain, "safe": safe,
-        "intent": f"The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order {uid} on-chain so solvers can fill it.",
+        "intent": f"The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order {uid} on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
         "context": {"batch_so_far": [short(x) for x in vd[:-1]]},
         "expect": [{"to": COW, "function": "setPreSignature", "args": [uid, "true"]}], "args_checked": 2})
 for (key, chain, safe, vd) in fam["borrow"][:8]:
     t = vd[-1]
     amt = t["dataDecoded"]["parameters"][0]["value"]
     cases.append({"family": "defi_borrow", "chain": chain, "safe": safe,
-        "intent": f"Collateral is enabled. Now borrow {amt} base units from the Compound market at {t['to']}.",
+        "intent": f"Collateral is enabled. Now borrow {amt} base units from the Compound market at {t['to']}. Return only that final call, not the earlier ones.",
         "context": {"batch_so_far": [short(x) for x in vd[:-1]]},
         "expect": [{"to": t["to"], "function": "borrow", "args": [amt]}], "args_checked": 1})
 for (key, chain, safe, vd) in fam["mint"][:8]:
     t = vd[-1]
     amt = t["dataDecoded"]["parameters"][0]["value"]
     cases.append({"family": "defi_supply", "chain": chain, "safe": safe,
-        "intent": f"The token is approved. Now supply {amt} base units to the Compound market at {t['to']} so it earns interest.",
+        "intent": f"The token is approved. Now supply {amt} base units to the Compound market at {t['to']} so it earns interest. Return only that final call, not the earlier ones.",
         "context": {"batch_so_far": [short(x) for x in vd[:-1]]},
         "expect": [{"to": t["to"], "function": "mint", "args": [amt]}], "args_checked": 1})
 

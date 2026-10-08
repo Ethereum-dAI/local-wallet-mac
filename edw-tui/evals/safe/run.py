@@ -1,12 +1,13 @@
 """Ask a local model to turn each intent into Safe calls and score it against ground truth.
 
-usage: run.py <model> [bare|recipe|both] [limit]
+usage: run.py <model>  (deepseek-*/org/name models use EF_INTERNAL_INFERENCE_* from the environment)
+       run.py <model> [bare|recipe|both] [limit]
   bare    only the intent and the context a read tool would have returned
   recipe  the same plus the facts the safe-multisig skill would carry (signatures, addresses, decimals)
 Scoring: a case passes only if every expected call matches function, target and the first `args_checked`
 arguments (values compared after lowercasing; amounts are integer base units). Order matters unless `unordered`.
 """
-import json, sys, pathlib, urllib.request, collections, re
+import json, sys, pathlib, urllib.request, collections, re, os
 
 HERE = pathlib.Path(__file__).parent
 MODEL = sys.argv[1]; MODE = sys.argv[2] if len(sys.argv) > 2 else "both"; LIMIT = int(sys.argv[3]) if len(sys.argv) > 3 else 10**9
@@ -25,7 +26,14 @@ RECIPE = """Facts about Safe and the protocols involved:
 - Compound v2 markets (cTokens): supply is mint(uint256 mintAmount), borrow is borrow(uint256 borrowAmount); both are called on the market address.
 - ERC-20: transfer(address to,uint256 amount), approve(address spender,uint256 amount). Mainnet tokens: USDC 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 (6 decimals), USDT 0xdAC17F958D2ee523a2206206994597C13D831ec7 (6), DAI 0x6B175474E89094C44Da98b954EedeAC495271d0F (18), WETH 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 (18)."""
 
+REMOTE = MODEL.startswith("deepseek") or "/" in MODEL  # served by an OpenAI-compatible endpoint (EF_INTERNAL_INFERENCE_*)
+
 def ask(prompt):
+    if REMOTE:
+        body = {"model": MODEL, "temperature": 0, "response_format": {"type": "json_object"}, "messages": [{"role": "user", "content": prompt}]}
+        req = urllib.request.Request(os.environ["EF_INTERNAL_INFERENCE_BASE_URL"].rstrip("/") + "/chat/completions", json.dumps(body).encode(),
+                                     {"content-type": "application/json", "authorization": "Bearer " + os.environ["EF_INTERNAL_INFERENCE_API_KEY"]})
+        return json.load(urllib.request.urlopen(req, timeout=600))["choices"][0]["message"]["content"]
     body = {"model": MODEL, "stream": False, "format": "json", "think": False, "options": {"temperature": 0}, "messages": [{"role": "user", "content": prompt}]}
     req = urllib.request.Request("http://localhost:11434/api/chat", json.dumps(body).encode(), {"content-type": "application/json"})
     return json.load(urllib.request.urlopen(req, timeout=600))["message"]["content"]
@@ -65,17 +73,20 @@ def prompt(case, recipe):
     return p
 
 modes = ["bare", "recipe"] if MODE == "both" else [MODE]
-report = {}
+report = {}; errors = collections.Counter()
 for mode in modes:
     stats = collections.defaultdict(lambda: [0, 0, 0, 0]); log = []
     for c in cases:
-        try: out = json.loads(ask(prompt(c, mode == "recipe")))
-        except Exception as e: out = {}
+        out = {}; err = 0
+        for attempt in range(2):
+            try: out = json.loads(ask(prompt(c, mode == "recipe"))); err = 0; break
+            except Exception: err = 1
+        errors[mode] += err
         full, fn, to, got = score(c, out)
         s = stats[c["family"]]; s[0] += 1; s[1] += full; s[2] += fn; s[3] += to
         log.append({"family": c["family"], "intent": c["intent"][:90], "pass": full, "fn": fn, "to": to, "expected": c["expect"], "got": got})
     report[mode] = {"stats": stats, "log": log}
     n = sum(s[0] for s in stats.values())
-    print(f"\n== {MODEL} / {mode}: pass {sum(s[1] for s in stats.values())}/{n}  function {sum(s[2] for s in stats.values())}/{n}  target {sum(s[3] for s in stats.values())}/{n}")
+    print(f"\n== {MODEL} / {mode} ({errors[mode]} unparseable or failed replies): pass {sum(s[1] for s in stats.values())}/{n}  function {sum(s[2] for s in stats.values())}/{n}  target {sum(s[3] for s in stats.values())}/{n}")
     for f, s in stats.items(): print(f"  {f:16s} pass {s[1]}/{s[0]}  fn {s[2]}  to {s[3]}")
-json.dump({m: {"stats": r["stats"], "log": r["log"]} for m, r in report.items()}, open(HERE / f"results_{MODEL.replace(':', '_')}.json", "w"), indent=1)
+json.dump({m: {"stats": r["stats"], "log": r["log"]} for m, r in report.items()}, open(HERE / f"results_{MODEL.replace(':', '_').replace('/', '_')}.json", "w"), indent=1)

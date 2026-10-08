@@ -3,7 +3,7 @@
   "family": "cow_presign",
   "chain": "eth",
   "safe": "0x32a0eE82a7CDee2E1E1Ccb6fcAD333C134A27588",
-  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x4affd08fe2a3d08b1937ea4ae664a7ea3d1d2e78db71f28fc831788d1293bb1432a0ee82a7cdee2e1e1ccb6fcad333c134a275886ac41653 on-chain so solvers can fill it.",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x4affd08fe2a3d08b1937ea4ae664a7ea3d1d2e78db71f28fc831788d1293bb1432a0ee82a7cdee2e1e1ccb6fcad333c134a275886ac41653 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -32,7 +32,7 @@
   "family": "cow_presign",
   "chain": "eth",
   "safe": "0xb7f09490d5E7cdd2F045bD4Fca06D60B13c680f9",
-  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xde1ba1940ec60afb1999404ff1c1d3263fd779cd447e80af7bde5985f1497958b7f09490d5e7cdd2f045bd4fca06d60b13c680f96ac6b8cf on-chain so solvers can fill it.",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xde1ba1940ec60afb1999404ff1c1d3263fd779cd447e80af7bde5985f1497958b7f09490d5e7cdd2f045bd4fca06d60b13c680f96ac6b8cf on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -66,7 +66,7 @@
   "family": "cow_presign",
   "chain": "eth",
   "safe": "0xb7f09490d5E7cdd2F045bD4Fca06D60B13c680f9",
-  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xc6780d975c5e7f72db59ea243595e7d6b22c2ef41cc23cf3fb99bcb8b91a40e0b7f09490d5e7cdd2f045bd4fca06d60b13c680f96aa070a0 on-chain so solvers can fill it.",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xc6780d975c5e7f72db59ea243595e7d6b22c2ef41cc23cf3fb99bcb8b91a40e0b7f09490d5e7cdd2f045bd4fca06d60b13c680f96aa070a0 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -95,7 +95,7 @@
   "family": "cow_presign",
   "chain": "eth",
   "safe": "0x386DE0C673b494317e720637984Fc744235Ade7A",
-  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x732bae45bd7f63b2f4d59fa262846b5efb6d5a9c7f84e55f785d3d47c680a6f9386de0c673b494317e720637984fc744235ade7a6ac6bb42 on-chain so solvers can fill it.",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x732bae45bd7f63b2f4d59fa262846b5efb6d5a9c7f84e55f785d3d47c680a6f9386de0c673b494317e720637984fc744235ade7a6ac6bb42 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -129,7 +129,7 @@
   "family": "cow_presign",
   "chain": "eth",
   "safe": "0x386DE0C673b494317e720637984Fc744235Ade7A",
-  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xda258aa8c4e05ec6d8fa99143c8afec7701b3ae3ddb5a759f8b93d2c5d38eb98386de0c673b494317e720637984fc744235ade7a69e64d05 on-chain so solvers can fill it.",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xda258aa8c4e05ec6d8fa99143c8afec7701b3ae3ddb5a759f8b93d2c5d38eb98386de0c673b494317e720637984fc744235ade7a69e64d05 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -158,7 +158,7 @@
   "family": "cow_presign",
   "chain": "eth",
   "safe": "0x5D0C187f4e1a4C6f07Fb41F16c0452c95DE4EB9F",
-  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xd1204d5025bdb694ddade72a2f27e974ccc955a433238cfdd9b6da4b0213a1de5d0c187f4e1a4c6f07fb41f16c0452c95de4eb9f6ac6c9d1 on-chain so solvers can fill it.",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xd1204d5025bdb694ddade72a2f27e974ccc955a433238cfdd9b6da4b0213a1de5d0c187f4e1a4c6f07fb41f16c0452c95de4eb9f6ac6c9d1 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -187,7 +187,7 @@
   "family": "cow_presign",
   "chain": "eth",
   "safe": "0x260915385D24468036789843121e7c8B8c5AB8e9",
-  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xba169141019a4e02aebc171eb6b8bc6c1010b24988fb1efdfb8c324a1a7239eb260915385d24468036789843121e7c8b8c5ab8e96a99b852 on-chain so solvers can fill it.",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xba169141019a4e02aebc171eb6b8bc6c1010b24988fb1efdfb8c324a1a7239eb260915385d24468036789843121e7c8b8c5ab8e96a99b852 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -216,7 +216,7 @@
   "family": "cow_presign",
   "chain": "eth",
   "safe": "0x3887d605A519253f3a8cd29A062C71A13D0D7F1C",
-  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x3ad63cd089e77cea0049c950bcbd1a659853873449692cb68046453567b4f9d03887d605a519253f3a8cd29a062c71a13d0d7f1c6ac94f94 on-chain so solvers can fill it.",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x3ad63cd089e77cea0049c950bcbd1a659853873449692cb68046453567b4f9d03887d605a519253f3a8cd29a062c71a13d0d7f1c6ac94f94 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -245,7 +245,7 @@
   "family": "cow_presign",
   "chain": "eth",
   "safe": "0x3887d605A519253f3a8cd29A062C71A13D0D7F1C",
-  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x29803262b9baca4b3c58881312e883c27e0fed24e00b03bd8a651f97a1d226673887d605a519253f3a8cd29a062c71a13d0d7f1c6ac80755 on-chain so solvers can fill it.",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x29803262b9baca4b3c58881312e883c27e0fed24e00b03bd8a651f97a1d226673887d605a519253f3a8cd29a062c71a13d0d7f1c6ac80755 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -274,7 +274,7 @@
   "family": "cow_presign",
   "chain": "eth",
   "safe": "0x3887d605A519253f3a8cd29A062C71A13D0D7F1C",
-  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x46fc38cee68f7d6b6a2de5f97e77b8a826ddd63b0839909ee780cdd91f4550a13887d605a519253f3a8cd29a062c71a13d0d7f1c6ac80707 on-chain so solvers can fill it.",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x46fc38cee68f7d6b6a2de5f97e77b8a826ddd63b0839909ee780cdd91f4550a13887d605a519253f3a8cd29a062c71a13d0d7f1c6ac80707 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -303,7 +303,7 @@
   "family": "defi_borrow",
   "chain": "eth",
   "safe": "0x5108aEAf373D004d2372be82C206Ec9aA7f1872F",
-  "intent": "Collateral is enabled. Now borrow 3000000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B.",
+  "intent": "Collateral is enabled. Now borrow 3000000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -330,7 +330,7 @@
   "family": "defi_borrow",
   "chain": "eth",
   "safe": "0x5108aEAf373D004d2372be82C206Ec9aA7f1872F",
-  "intent": "Collateral is enabled. Now borrow 3200000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B.",
+  "intent": "Collateral is enabled. Now borrow 3200000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -357,7 +357,7 @@
   "family": "defi_borrow",
   "chain": "eth",
   "safe": "0x2b95F3d0b89b24B432DAcC5d1E9a621a9A79e687",
-  "intent": "Collateral is enabled. Now borrow 3023320614057100000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B.",
+  "intent": "Collateral is enabled. Now borrow 3023320614057100000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -384,7 +384,7 @@
   "family": "defi_borrow",
   "chain": "eth",
   "safe": "0x224A1019C39CE671221bfd5f64Af28d0513d0A11",
-  "intent": "Collateral is enabled. Now borrow 4707299445940400000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B.",
+  "intent": "Collateral is enabled. Now borrow 4707299445940400000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -411,7 +411,7 @@
   "family": "defi_borrow",
   "chain": "eth",
   "safe": "0x224A1019C39CE671221bfd5f64Af28d0513d0A11",
-  "intent": "Collateral is enabled. Now borrow 4692967229429099000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B.",
+  "intent": "Collateral is enabled. Now borrow 4692967229429099000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -438,7 +438,7 @@
   "family": "defi_borrow",
   "chain": "eth",
   "safe": "0xd63E6A63706eE25587DAb2F173ABdC80f97BE391",
-  "intent": "Collateral is enabled. Now borrow 600000000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B.",
+  "intent": "Collateral is enabled. Now borrow 600000000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -465,7 +465,7 @@
   "family": "defi_borrow",
   "chain": "eth",
   "safe": "0xd63E6A63706eE25587DAb2F173ABdC80f97BE391",
-  "intent": "Collateral is enabled. Now borrow 100000000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B.",
+  "intent": "Collateral is enabled. Now borrow 100000000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -492,7 +492,7 @@
   "family": "defi_borrow",
   "chain": "eth",
   "safe": "0xd63E6A63706eE25587DAb2F173ABdC80f97BE391",
-  "intent": "Collateral is enabled. Now borrow 500000000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B.",
+  "intent": "Collateral is enabled. Now borrow 500000000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -519,7 +519,7 @@
   "family": "defi_supply",
   "chain": "eth",
   "safe": "0xAA13eC1fbC3a180a2eB5c5F8c34D22956F94e94A",
-  "intent": "The token is approved. Now supply 150279564 base units to the Compound market at 0x0f864A3e50D1070adDE5100fd848446C0567362B so it earns interest.",
+  "intent": "The token is approved. Now supply 150279564 base units to the Compound market at 0x0f864A3e50D1070adDE5100fd848446C0567362B so it earns interest. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -547,7 +547,7 @@
   "family": "defi_supply",
   "chain": "eth",
   "safe": "0xAA13eC1fbC3a180a2eB5c5F8c34D22956F94e94A",
-  "intent": "The token is approved. Now supply 154253499 base units to the Compound market at 0x0f864A3e50D1070adDE5100fd848446C0567362B so it earns interest.",
+  "intent": "The token is approved. Now supply 154253499 base units to the Compound market at 0x0f864A3e50D1070adDE5100fd848446C0567362B so it earns interest. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -575,7 +575,7 @@
   "family": "defi_supply",
   "chain": "eth",
   "safe": "0x5108aEAf373D004d2372be82C206Ec9aA7f1872F",
-  "intent": "The token is approved. Now supply 3000157 base units to the Compound market at 0xc3aD34De18B59A24BD0877e454Fb924181F09C8f so it earns interest.",
+  "intent": "The token is approved. Now supply 3000157 base units to the Compound market at 0xc3aD34De18B59A24BD0877e454Fb924181F09C8f so it earns interest. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -603,7 +603,7 @@
   "family": "defi_supply",
   "chain": "eth",
   "safe": "0x5108aEAf373D004d2372be82C206Ec9aA7f1872F",
-  "intent": "The token is approved. Now supply 6004795 base units to the Compound market at 0xc3aD34De18B59A24BD0877e454Fb924181F09C8f so it earns interest.",
+  "intent": "The token is approved. Now supply 6004795 base units to the Compound market at 0xc3aD34De18B59A24BD0877e454Fb924181F09C8f so it earns interest. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -631,7 +631,7 @@
   "family": "defi_supply",
   "chain": "eth",
   "safe": "0x2b95F3d0b89b24B432DAcC5d1E9a621a9A79e687",
-  "intent": "The token is approved. Now supply 4781 base units to the Compound market at 0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6 so it earns interest.",
+  "intent": "The token is approved. Now supply 4781 base units to the Compound market at 0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6 so it earns interest. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -659,7 +659,7 @@
   "family": "defi_supply",
   "chain": "eth",
   "safe": "0x224A1019C39CE671221bfd5f64Af28d0513d0A11",
-  "intent": "The token is approved. Now supply 7444 base units to the Compound market at 0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6 so it earns interest.",
+  "intent": "The token is approved. Now supply 7444 base units to the Compound market at 0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6 so it earns interest. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -687,7 +687,7 @@
   "family": "defi_supply",
   "chain": "eth",
   "safe": "0x224A1019C39CE671221bfd5f64Af28d0513d0A11",
-  "intent": "The token is approved. Now supply 7243 base units to the Compound market at 0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6 so it earns interest.",
+  "intent": "The token is approved. Now supply 7243 base units to the Compound market at 0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6 so it earns interest. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {
@@ -715,7 +715,7 @@
   "family": "defi_supply",
   "chain": "eth",
   "safe": "0xd63E6A63706eE25587DAb2F173ABdC80f97BE391",
-  "intent": "The token is approved. Now supply 99990000 base units to the Compound market at 0x0f864A3e50D1070adDE5100fd848446C0567362B so it earns interest.",
+  "intent": "The token is approved. Now supply 99990000 base units to the Compound market at 0x0f864A3e50D1070adDE5100fd848446C0567362B so it earns interest. Return only that final call, not the earlier ones.",
   "context": {
    "batch_so_far": [
     {

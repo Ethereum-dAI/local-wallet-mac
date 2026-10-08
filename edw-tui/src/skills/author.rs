@@ -191,6 +191,10 @@ fn lint(skill: &Skill, report: &mut Report) {
         report.errors.push(format!(
             "the description is {len} characters; the model picks skills from it, so say what the skill does and when to use it (20-300 characters)"
         ));
+    } else if len > 1000 {
+        report.errors.push(format!(
+            "the description is {len} characters; at most 1000, and every skill's description is in every request, so keep it under 300"
+        ));
     } else if len > 300 {
         report.warnings.push(format!(
             "the description is {len} characters; every skill's description is in every request, so keep it under 300"
@@ -406,6 +410,14 @@ mod tests {
         let report = check(&dir);
         assert!(report.ok());
         assert!(report.warnings.iter().any(|w| w.contains("description")));
+        let huge = format!(
+            "---\nname: demo\ndescription: {}\n---\nbody\n",
+            "word ".repeat(250)
+        );
+        let (_c, dir) = draft(&[("SKILL.md", &huge)]);
+        let report = check(&dir);
+        assert!(!report.ok());
+        assert!(report.errors.iter().any(|e| e.contains("at most 1000")));
     }
 
     #[test]

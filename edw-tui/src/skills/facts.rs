@@ -71,34 +71,59 @@ impl AbiSource for Sourcify {
     }
 }
 
+/// The most (contract, chain) addresses one check looks up.
+const MAX_LOOKUPS: usize = 8;
+
 /// One finding per problem: an address with no verified source, a source that cannot be reached,
 /// a declared function the verified ABI does not have. Contracts the user names at call time
-/// (`address_arg`) have nothing to check.
+/// (`address_arg`) have nothing to check. At most [`MAX_LOOKUPS`] lookups are made, and the
+/// first failed lookup ends the check, so a Sourcify that is down costs one timeout.
 pub async fn verify(skill: &Skill, source: &impl AbiSource) -> Vec<String> {
     let mut findings = Vec::new();
-    for contract in &skill.manifest.contracts {
-        for (chain, address) in &contract.address {
-            let label = format!("{} ({address}) on chain {chain}", contract.label);
-            match source.abi(*chain, *address).await {
-                Err(why) => findings.push(format!("could not check {label}: {why}")),
-                Ok(None) => findings.push(format!(
-                    "{label} has no verified source on Sourcify; confirm the address yourself before allowing the skill"
-                )),
-                Ok(Some(abi)) => {
-                    for function in &contract.functions {
-                        let found = abi
-                            .functions()
-                            .any(|known| known.selector() == function.selector());
-                        if !found {
-                            findings.push(format!(
-                                "{label}: the verified ABI has no `{}` with these parameters (if this is a proxy, the ABI may be the proxy's own)",
-                                function.name
-                            ));
-                        }
+    let pairs: Vec<_> = skill
+        .manifest
+        .contracts
+        .iter()
+        .flat_map(|contract| {
+            contract
+                .address
+                .iter()
+                .map(move |(c, a)| (contract, *c, *a))
+        })
+        .collect();
+    let total = pairs.len();
+    for (done, (contract, chain, address)) in pairs.into_iter().take(MAX_LOOKUPS).enumerate() {
+        let label = format!("{} ({address}) on chain {chain}", contract.label);
+        match source.abi(chain, address).await {
+            Err(why) => {
+                findings.push(format!(
+                    "Sourcify unreachable, skipped {} checks (first failure: {label}: {why})",
+                    total - done
+                ));
+                return findings;
+            }
+            Ok(None) => findings.push(format!(
+                "{label} has no verified source on Sourcify; confirm the address yourself before allowing the skill"
+            )),
+            Ok(Some(abi)) => {
+                for function in &contract.functions {
+                    let found = abi
+                        .functions()
+                        .any(|known| known.selector() == function.selector());
+                    if !found {
+                        findings.push(format!(
+                            "{label}: the verified ABI has no `{}` with these parameters (if this is a proxy, the ABI may be the proxy's own)",
+                            function.name
+                        ));
                     }
                 }
             }
         }
+    }
+    if total > MAX_LOOKUPS {
+        findings.push(format!(
+            "checked {MAX_LOOKUPS} of {total} addresses; the rest were skipped"
+        ));
     }
     findings
 }
@@ -200,6 +225,51 @@ mod tests {
         assert_eq!(findings.len(), 2, "{findings:?}");
         assert!(findings.iter().any(|f| f.contains("no verified source")));
         assert!(findings.iter().any(|f| f.contains("unreachable")));
+    }
+
+    /// Counts lookups, and fails every one.
+    struct Down(std::sync::atomic::AtomicUsize);
+
+    impl AbiSource for Down {
+        async fn abi(&self, _: u64, _: Address) -> Result<Option<JsonAbi>, String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("timed out".into())
+        }
+    }
+
+    fn many_chains(n: u64) -> String {
+        let entries: Vec<String> = (1..=n).map(|c| format!("{c} = \"{POOL}\"")).collect();
+        format!("address = {{ {} }}", entries.join(", "))
+    }
+
+    #[tokio::test]
+    async fn a_source_that_is_down_is_asked_once_and_reported_once() {
+        let (_r, skill) = skill(r#""function supply(address asset)""#, &many_chains(5));
+        let source = Down(Default::default());
+        let findings = verify(&skill, &source).await;
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].contains("Sourcify unreachable, skipped 5 checks"),
+            "{findings:?}"
+        );
+        assert_eq!(source.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn lookups_are_capped_and_the_cap_is_reported() {
+        let (_r, skill) = skill(r#""function supply(address asset)""#, &many_chains(10));
+        let findings = verify(&skill, &Fake(BTreeMap::new())).await;
+        let unverified = findings
+            .iter()
+            .filter(|f| f.contains("no verified source"))
+            .count();
+        assert_eq!(unverified, 8, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f == "checked 8 of 10 addresses; the rest were skipped"),
+            "{findings:?}"
+        );
     }
 
     #[tokio::test]

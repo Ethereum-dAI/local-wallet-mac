@@ -213,7 +213,13 @@ pub fn install_draft(paths: &Paths, name: &str) -> Result<String, String> {
     if !report.ok() {
         return Err(format!("{name} has problems: {}", report.errors.join("; ")));
     }
-    add(paths, &dir)
+    add(paths, &dir).map_err(|error| {
+        if error.contains("already installed") {
+            format!("{error}; delete it in the Skills tab (x), then install again.")
+        } else {
+            error
+        }
+    })
 }
 
 /// Deletes a skill the user added (never a shipped one) and forgets its approval.
@@ -453,15 +459,42 @@ mod tests {
                 .unwrap_err()
                 .contains("problems")
         );
+        assert!(install_draft(&paths, "../escape").is_err());
+    }
+
+    #[test]
+    fn install_draft_refuses_a_name_in_use_and_leaves_the_shipped_skill_and_lock_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = layout(root.path());
+        let shipped = root.path().join("skills/alpha/SKILL.md");
+        let before = fs::read(&shipped).unwrap();
+        write_draft(
+            &paths,
+            "alpha",
+            "---\nname: alpha\ndescription: A draft that reuses a shipped skill's name.\n---\nbody\n",
+        );
+        let error = install_draft(&paths, "alpha").unwrap_err();
+        assert!(error.contains("already installed"), "{error}");
+        assert!(error.contains("delete it in the Skills tab"), "{error}");
+        assert_eq!(fs::read(&shipped).unwrap(), before);
+        assert!(!paths.user_dir.join("alpha").exists());
+        assert!(!paths.lock.exists(), "a refused install writes no lock");
+    }
+
+    #[test]
+    fn install_draft_never_touches_the_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = layout(root.path());
+        fs::write(&paths.lock, "sentinel").unwrap();
         write_draft(&paths, "fresh-skill", DRAFT_MD);
         install_draft(&paths, "fresh-skill").unwrap();
+        assert_eq!(fs::read_to_string(&paths.lock).unwrap(), "sentinel");
+        // Installing twice is refused (the user's copy is now in use).
         assert!(
             install_draft(&paths, "fresh-skill")
                 .unwrap_err()
-                .contains("already installed"),
-            "installing twice (or over a shipped skill) is refused"
+                .contains("already installed")
         );
-        assert!(install_draft(&paths, "../escape").is_err());
     }
 
     #[tokio::test]

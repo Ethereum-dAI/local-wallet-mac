@@ -344,23 +344,60 @@ impl Shared {
         text
     }
 
-    /// Runs one skill tool: a read tool's result goes back to the model; an action's plan is
-    /// checked, simulated, reviewed and only then sent.
-    /// Runs one authoring tool against the drafts folder. Address aliases in the arguments are
-    /// resolved first, so a skill.toml the model writes holds real addresses.
-    async fn author_call(&self, tool: &str, args: Value) -> String {
+    /// Runs one authoring tool against the drafts folder. It needs `skill-creator` loaded.
+    /// Addresses the model writes must have come from the user or a tool, and an `ADDR_n`
+    /// alias is resolved only inside `skill.toml`: a script or SKILL.md is written as typed.
+    async fn author_call(&self, tool: &str, mut args: Value) -> String {
         let Some(store) = self.skills.drafts() else {
             return "skill authoring is not available".into();
         };
-        let args = self.addresses.reveal_json(args);
-        let name = args.get("name").and_then(Value::as_str).unwrap_or_default();
+        let name = args
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
         let command = format!("{tool} {name}");
+        let fail = |output: String| {
+            self.log(AgentEvent::ToolFinished(EdwResult {
+                command: command.clone(),
+                exit_code: 1,
+                output: output.clone(),
+            }));
+            output
+        };
+        if !self.skills.is_loaded(author::CREATOR) {
+            return fail(format!(
+                "load the {} skill first (call load_skill); nothing was written.",
+                author::CREATOR
+            ));
+        }
+        if tool == author::WRITE {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
+            let is_manifest = path == "skill.toml";
+            if let Some(content) = args.get("content").and_then(Value::as_str) {
+                if let Some(invented) = self.addresses.invented(content) {
+                    return fail(format!(
+                        "Refused: {invented} came from neither the user nor a tool, so it may be made up. Ask the user for the address; nothing was written."
+                    ));
+                }
+                if is_manifest {
+                    let revealed = self.addresses.reveal_uppercase(content);
+                    args["content"] = Value::String(revealed);
+                }
+            }
+        }
         self.log(AgentEvent::ToolStarted {
             command: command.clone(),
         });
-        let (exit_code, output) =
+        let (exit_code, mut output) =
             author_tools::call(store, &facts::Sourcify::new(), tool, &args).await;
-        let output: String = output.chars().take(MAX_SKILL_RESULT).collect();
+        if output.len() > MAX_SKILL_RESULT {
+            let mut end = MAX_SKILL_RESULT;
+            while !output.is_char_boundary(end) {
+                end -= 1;
+            }
+            output.truncate(end);
+        }
         self.log(AgentEvent::ToolFinished(EdwResult {
             command,
             exit_code,
@@ -369,6 +406,8 @@ impl Shared {
         output
     }
 
+    /// Runs one skill tool: a read tool's result goes back to the model; an action's plan is
+    /// checked, simulated, reviewed and only then sent.
     async fn skill_call(&self, tool: &str, args: Value) -> String {
         let Some(skill) = self.skills.catalog.skill_of_tool(tool).cloned() else {
             return format!("`{tool}` is not a tool of any loaded skill; nothing was run.");
@@ -663,7 +702,7 @@ fn dynamic_tools(shared: &Arc<Shared>) -> Vec<DynamicTool> {
             Box::pin(async move { Ok(ToolOutput::text(s.load_skill(&args))) })
         },
     ));
-    if shared.skills.catalog.get(author::CREATOR).is_some() && shared.skills.drafts().is_some() {
+    if shared.skills.authoring_enabled() {
         for (name, description, schema) in author_tools::specs() {
             let s = shared.clone();
             tools.push(DynamicTool::new(
@@ -1210,5 +1249,138 @@ mod tests {
     async fn other_errors_pass_through_untouched() {
         let (answer, calls) = ask(1, || CompletionError::ResponseError("boom".into()), true).await;
         assert!(answer.unwrap_err().contains("boom") && calls == 1);
+    }
+
+    fn creator_set(root: &std::path::Path, with_drafts: bool) -> Arc<SkillSet> {
+        use crate::skills::{
+            author::DraftStore,
+            catalog::{self, Catalog, SkillState},
+            sandbox::Runner,
+        };
+        let dir = root.join("skills/skill-creator");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: skill-creator\ndescription: Create a new skill.\n---\nbody\n",
+        )
+        .unwrap();
+        let mut installed = catalog::discover(&[root.join("skills")]);
+        installed[0].state = SkillState::Ready;
+        let mut set = SkillSet::new(
+            Catalog::from_installed(&installed),
+            &installed,
+            Runner::from_env(),
+        );
+        if with_drafts {
+            set = set.with_drafts(DraftStore::new(root.join("drafts")));
+        }
+        Arc::new(set)
+    }
+
+    fn shared_with(skills: Arc<SkillSet>, root: &std::path::Path) -> Arc<Shared> {
+        let edw = EdwConfig {
+            binary: "edw".into(),
+            data_dir: root.join("data"),
+            runtime_dir: root.join("run"),
+            password: String::new(),
+        };
+        let interim = InterimConfig::from_env(edw.clone());
+        let (events, _rx) = mpsc::unbounded_channel();
+        Arc::new(Shared {
+            config: edw,
+            addresses: interim.addresses.clone(),
+            interim: Interim::new(interim),
+            events,
+            skills,
+        })
+    }
+
+    const KNOWN: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+    const MADE_UP: &str = "0x1111111111111111111111111111111111111111";
+
+    async fn write_draft(s: &Shared, path: &str, content: &str) -> String {
+        s.author_call(
+            author::WRITE,
+            serde_json::json!({"name": "demo", "path": path, "content": content}),
+        )
+        .await
+    }
+
+    fn authoring_tool_names(shared: &Arc<Shared>) -> usize {
+        dynamic_tools(shared)
+            .iter()
+            .filter(|t| author::TOOL_NAMES.contains(&t.name()))
+            .count()
+    }
+
+    #[test]
+    fn authoring_tools_are_registered_only_with_skill_creator_and_a_drafts_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let with = shared_with(creator_set(root.path(), true), root.path());
+        assert_eq!(authoring_tool_names(&with), 3);
+        let root = tempfile::tempdir().unwrap();
+        let no_drafts = shared_with(creator_set(root.path(), false), root.path());
+        assert_eq!(authoring_tool_names(&no_drafts), 0);
+        let root = tempfile::tempdir().unwrap();
+        let empty = SkillSet::empty().with_drafts(crate::skills::author::DraftStore::new(
+            root.path().join("drafts"),
+        ));
+        let no_creator = shared_with(Arc::new(empty), root.path());
+        assert_eq!(authoring_tool_names(&no_creator), 0);
+    }
+
+    #[tokio::test]
+    async fn an_authoring_call_is_refused_until_skill_creator_is_loaded() {
+        let root = tempfile::tempdir().unwrap();
+        let s = shared_with(creator_set(root.path(), true), root.path());
+        let out = write_draft(&s, "SKILL.md", "x").await;
+        assert!(out.contains("load the skill-creator skill first"), "{out}");
+        assert!(!root.path().join("drafts/demo").exists());
+        s.skills.load("skill-creator");
+        let out = write_draft(&s, "SKILL.md", "x").await;
+        assert!(out.starts_with("wrote SKILL.md"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_draft_write_refuses_addresses_from_neither_user_nor_tool() {
+        let root = tempfile::tempdir().unwrap();
+        let s = shared_with(creator_set(root.path(), true), root.path());
+        s.skills.load("skill-creator");
+        s.addresses.hide(KNOWN);
+        let ok = write_draft(&s, "skill.toml", &format!("a = \"{KNOWN}\"\n")).await;
+        assert!(ok.starts_with("wrote"), "{ok}");
+        let refused = write_draft(&s, "scripts/a.py", &format!("A = \"{MADE_UP}\"\n")).await;
+        assert!(
+            refused.contains("Refused")
+                && refused.contains(MADE_UP)
+                && refused.contains("nothing was written"),
+            "{refused}"
+        );
+        assert!(!root.path().join("drafts/demo/scripts/a.py").exists());
+    }
+
+    #[tokio::test]
+    async fn aliases_resolve_only_in_skill_toml() {
+        let root = tempfile::tempdir().unwrap();
+        let s = shared_with(creator_set(root.path(), true), root.path());
+        s.skills.load("skill-creator");
+        s.addresses.hide(KNOWN);
+        let script = "addr_1 = ctx['to']\nprint(addr_1)\n";
+        write_draft(&s, "scripts/run.py", script).await;
+        write_draft(&s, "skill.toml", "to = \"ADDR_1\"\n").await;
+        write_draft(&s, "SKILL.md", "use ADDR_1\n").await;
+        let dir = root.path().join("drafts/demo");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("scripts/run.py")).unwrap(),
+            script
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("skill.toml")).unwrap(),
+            format!("to = \"{KNOWN}\"\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+            "use ADDR_1\n"
+        );
     }
 }

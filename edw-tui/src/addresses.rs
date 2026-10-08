@@ -19,6 +19,9 @@ static ADDRESS: LazyLock<Regex> =
 static ALIAS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bADDR_(\d+)\b").expect("valid regex"));
 
+static ALIAS_UPPER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bADDR_(\d+)\b").expect("valid regex"));
+
 pub const PREFIX: &str = "ADDR_";
 
 #[derive(Clone, Debug)]
@@ -69,11 +72,21 @@ impl AddressBook {
 
     /// Replaces every known alias with its address; unknown aliases are left as written.
     pub fn reveal(&self, text: &str) -> String {
+        self.reveal_with(&ALIAS, text)
+    }
+
+    /// Like [`Self::reveal`] but only the uppercase `ADDR_n` form: lowercase `addr_1` (an
+    /// identifier in code) is left alone.
+    pub fn reveal_uppercase(&self, text: &str) -> String {
+        self.reveal_with(&ALIAS_UPPER, text)
+    }
+
+    fn reveal_with(&self, pattern: &Regex, text: &str) -> String {
         if !self.enabled {
             return text.to_owned();
         }
         let seen = self.seen.lock().expect("not poisoned");
-        ALIAS
+        pattern
             .replace_all(text, |caps: &regex::Captures| {
                 caps[1]
                     .parse::<usize>()
@@ -144,6 +157,17 @@ mod tests {
 
     const BEEF: &str = "0x000000000000000000000000000000000000bEEF";
     const ALICE: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+
+    #[test]
+    fn reveal_uppercase_leaves_lowercase_aliases_alone() {
+        let book = AddressBook::default();
+        book.hide(BEEF);
+        assert_eq!(
+            book.reveal_uppercase("a = ADDR_1; b = addr_1"),
+            format!("a = {BEEF}; b = addr_1")
+        );
+        assert_eq!(book.reveal("addr_1"), BEEF);
+    }
 
     #[test]
     fn round_trips_addresses_through_aliases() {

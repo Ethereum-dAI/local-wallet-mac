@@ -149,7 +149,8 @@ skill) loads the shipped `skill-creator` skill. The model writes a draft into
 and checks it with `skill_draft_check`: it loads, scripts parse, and contracts are compared
 with Sourcify. You then run `/skill install <name>`, which copies the draft into your skills
 folder and shows the usual approval card. The model cannot install a draft; only your command
-does. A skill with actions still goes through the plan checker and per-transaction review.
+does. Declining the approval card discards the installed copy (the draft stays in the drafts
+folder), and `/skill install` refuses a draft whose check reports errors. A skill with actions still goes through the plan checker and per-transaction review.
 
 **Scripts run in Docker** (`skills/_sdk/edw_skill.py` is the protocol helper), one throwaway
 container per call: no network, read-only root and mounts, no capabilities, the `nobody` user,

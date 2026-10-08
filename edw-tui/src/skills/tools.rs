@@ -64,6 +64,12 @@ impl SkillSet {
         self.drafts.as_ref()
     }
 
+    /// Authoring tools are registered only when `skill-creator` is in the catalog and a drafts
+    /// folder is set.
+    pub fn authoring_enabled(&self) -> bool {
+        self.catalog.get(author::CREATOR).is_some() && self.drafts.is_some()
+    }
+
     /// No skills: the agent behaves exactly as it did before skills existed.
     pub fn empty() -> Self {
         Self::new(Catalog::default(), &[], Runner::from_env())

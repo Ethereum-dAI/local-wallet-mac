@@ -376,8 +376,11 @@ impl Shared {
             let is_manifest = path == "skill.toml";
             if let Some(content) = args.get("content").and_then(Value::as_str) {
                 if let Some(invented) = self.addresses.invented(content) {
+                    // The address is left out of the text: the reply goes back through `hide`,
+                    // which would register it as known and let the model use it.
+                    let _ = invented;
                     return fail(format!(
-                        "Refused: {invented} came from neither the user nor a tool, so it may be made up. Ask the user for the address; nothing was written."
+                        "Refused: an address in {path} came from neither the user nor a tool, so it may be made up. Ask the user for the address; nothing was written."
                     ));
                 }
                 if is_manifest {
@@ -404,6 +407,13 @@ impl Shared {
             output: output.clone(),
         }));
         output
+    }
+
+    /// What the model reads after an authoring call: [`Self::author_call`]'s text with every
+    /// address hidden. Refusals never contain the address they refuse (see `author_call`).
+    async fn author_reply(&self, tool: &str, args: Value) -> String {
+        let output = self.author_call(tool, args).await;
+        self.addresses.hide(&output)
     }
 
     /// Runs one skill tool: a read tool's result goes back to the model; an action's plan is
@@ -711,10 +721,7 @@ fn dynamic_tools(shared: &Arc<Shared>) -> Vec<DynamicTool> {
                 schema,
                 move |_context, args| {
                     let s = s.clone();
-                    Box::pin(async move {
-                        let output = s.author_call(name, args).await;
-                        Ok(ToolOutput::text(s.addresses.hide(&output)))
-                    })
+                    Box::pin(async move { Ok(ToolOutput::text(s.author_reply(name, args).await)) })
                 },
             ));
         }
@@ -1284,7 +1291,8 @@ mod tests {
             runtime_dir: root.join("run"),
             password: String::new(),
         };
-        let interim = InterimConfig::from_env(edw.clone());
+        let mut interim = InterimConfig::from_env(edw.clone());
+        interim.addresses = AddressBook::new(true);
         let (events, _rx) = mpsc::unbounded_channel();
         Arc::new(Shared {
             config: edw,
@@ -1352,11 +1360,32 @@ mod tests {
         let refused = write_draft(&s, "scripts/a.py", &format!("A = \"{MADE_UP}\"\n")).await;
         assert!(
             refused.contains("Refused")
-                && refused.contains(MADE_UP)
+                && refused.contains("scripts/a.py")
                 && refused.contains("nothing was written"),
             "{refused}"
         );
         assert!(!root.path().join("drafts/demo/scripts/a.py").exists());
+    }
+
+    #[tokio::test]
+    async fn a_refusal_does_not_launder_the_invented_address() {
+        let root = tempfile::tempdir().unwrap();
+        let s = shared_with(creator_set(root.path(), true), root.path());
+        s.skills.load("skill-creator");
+        let args = |content: &str| serde_json::json!({"name": "demo", "path": "skill.toml", "content": content});
+        let bad = format!("a = \"{MADE_UP}\"\n");
+        let first = s.author_reply(author::WRITE, args(&bad)).await;
+        assert!(
+            first.contains("Refused") && !first.contains(MADE_UP),
+            "{first}"
+        );
+        assert!(!first.contains("ADDR_"), "{first}");
+        let retry = s.author_reply(author::WRITE, args(&bad)).await;
+        assert!(retry.contains("Refused"), "{retry}");
+        s.author_reply(author::WRITE, args("a = \"ADDR_1\"\n"))
+            .await;
+        let written = std::fs::read_to_string(root.path().join("drafts/demo/skill.toml")).unwrap();
+        assert!(!written.contains(MADE_UP), "{written}");
     }
 
     #[tokio::test]

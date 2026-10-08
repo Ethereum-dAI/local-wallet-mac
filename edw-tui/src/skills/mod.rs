@@ -6,6 +6,7 @@
 
 pub mod abi;
 pub mod author;
+pub mod author_tools;
 pub mod catalog;
 pub mod consent;
 pub mod explain;

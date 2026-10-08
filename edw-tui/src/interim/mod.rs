@@ -953,17 +953,26 @@ impl Interim {
         let mut steps = Vec::new();
         let mut max_cost = U256::ZERO;
         for (index, (step, result)) in plan.steps.iter().zip(&results).enumerate() {
-            let gas = result.gas_used * 13 / 10 + 25_000;
+            let mut gas = result.gas_used * 13 / 10 + 25_000;
+            let tx = TransactionRequest::default()
+                .with_from(me)
+                .with_to(step.to)
+                .with_value(step.value)
+                .with_input(step.data.clone())
+                .with_nonce(nonce + index as u64)
+                .with_chain_id(account.chain_id);
+            if index == 0 {
+                // What a call used is not what it needs: a Safe will not even start an inner call
+                // unless it was given its `safeTxGas` up front. The node's own estimate searches for
+                // the least gas that does not revert. (Later steps are re-estimated when sent.)
+                if let Ok(estimated) = provider.estimate_gas(tx.clone()).await {
+                    gas = gas.max(estimated * 12 / 10);
+                }
+            }
             max_cost += U256::from(gas) * U256::from(fees.max_fee_per_gas);
             steps.push(Step {
                 label: step.label.clone(),
-                tx: TransactionRequest::default()
-                    .with_from(me)
-                    .with_to(step.to)
-                    .with_value(step.value)
-                    .with_input(step.data.clone())
-                    .with_nonce(nonce + index as u64)
-                    .with_chain_id(account.chain_id)
+                tx: tx
                     .with_gas_limit(gas)
                     .with_max_fee_per_gas(fees.max_fee_per_gas)
                     .with_max_priority_fee_per_gas(fees.max_priority_fee_per_gas),

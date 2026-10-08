@@ -1,16 +1,16 @@
 # ToDo: write operations for `safe-multisig`
 
-Status: write 1 (approveHash) is built: `safe_approve_hash`, with the new `address_arg` contract kind
-(a contract at the address the user names; only that address, only the listed functions, never approvable).
+Status: writes 1 (approveHash) and 2 (execTransaction) are built: `safe_approve_hash` and `safe_execute`, with two new manifest keys: `address_arg` (a contract at the address
+the user names; only that address, only the listed functions, never approvable) and `signed_calls` (functions the
+contract authenticates by signature, so raw bytes are allowed; the review spells the arguments out).
 This file lists the other write operations, in order, and what blocks each.
 
 ## What blocks the rest
 
-Done: a plan may now call a contract at an address from the action's own arguments (`address_arg`).
-Still blocked by the plan checker: any function taking raw `bytes` (`execTransaction`, `multiSend`,
-`createProxyWithNonce`), and anything needing an off-chain signature (rejection, proposing).
-Owner and threshold changes are not callable directly by an owner at all: only the Safe itself can
-call them, so they need `execTransaction` too.
+Still blocked: anything needing an off-chain signature (reject, propose) and anything only the Safe itself
+can call (owner and threshold changes), which would ride inside a proposed Safe transaction. Creating a Safe and
+CoW pre-sign take raw `bytes` on a contract that does not authenticate them by signature, so they need either a
+proposal or a different rule.
 
 ## Evidence for the scope
 
@@ -24,10 +24,10 @@ Earlier completion test (40 real MultiSend batches, hide the last call): gemma4 
 1. **DONE: approve a queued transaction on-chain**: `approveHash(safeTxHash)` on the Safe.
    The Safe's own `getTransactionHash` must match the service's hash; competing nonces need `safe_tx_hash`;
    warnings must be acknowledged. Tested offline, on a mainnet fork, and recorded.
-2. **Execute a fully signed transaction**: `execTransaction(to, value, data, operation, ...)` on the Safe,
-   using the stored signatures. `safe_queue` already reports `ready_to_execute`.
-   Blocked: the function takes raw `bytes`. Needs a checker rule that allows `bytes` only when the harness
-   itself rebuilds them from the verified queue entry.
+2. **DONE: execute a fully signed transaction**: `execTransaction(...)` on the Safe with the stored signatures
+   (owners ascending), only for the Safe's next nonce, after `checkNSignatures` passes. Needed a gas fix: the plan's
+   first step now gets at least the node's own estimate, since a Safe will not start an inner call without its
+   `safeTxGas`. Tested offline, and on a mainnet fork against a real fully signed transaction.
 3. **Reject a queued transaction**: propose an empty self-call at the same nonce.
    Needs an off-chain EIP-712 signature, so it depends on the harness being able to sign a message.
 4. **Propose a transfer or batch**: build the `safeTxHash`, sign, post to the service.

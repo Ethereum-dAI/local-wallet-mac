@@ -283,6 +283,7 @@ impl Ctx<'_> {
                 args.len()
             ));
         }
+        let signed = contract.signed_calls.iter().any(|n| n == name);
         let mut values = Vec::new();
         let mut shown = Vec::new();
         for (param, arg) in function.inputs.iter().zip(&args) {
@@ -292,9 +293,12 @@ impl Ctx<'_> {
             } else {
                 param.name.clone()
             };
-            let resolved = self
-                .addresses(&ty, arg)
-                .map_err(|e| format!("{name}({label}): {e}"))?;
+            let resolved = if signed {
+                self.signed_argument(&ty, arg)
+            } else {
+                self.addresses(&ty, arg)
+            }
+            .map_err(|e| format!("{name}({label}): {e}"))?;
             let value = abi::coerce(&ty, &resolved).map_err(|e| format!("{name}({label}): {e}"))?;
             let in_token = contract
                 .amounts
@@ -311,6 +315,11 @@ impl Ctx<'_> {
             None => U256::ZERO,
             some => uint(some)?,
         };
+        if signed && !value.is_zero() {
+            return Err(format!(
+                "{name} is sent without ETH; the Safe moves its own"
+            ));
+        }
         if !value.is_zero() && function.state_mutability != StateMutability::Payable {
             return Err(format!("{name} is not payable, so it cannot take a value"));
         }
@@ -335,6 +344,38 @@ impl Ctx<'_> {
             data: data.into(),
             approval: None,
         })
+    }
+
+    /// An argument of a signed call: the contract rejects it unless the owners signed exactly
+    /// this, so any address is allowed (and the zero address, a Safe's "no refund receiver").
+    /// Only digits for numbers and well-formed addresses, so the review shows what is encoded.
+    fn signed_argument(&self, ty: &DynSolType, value: &Value) -> Result<Value, String> {
+        match ty {
+            DynSolType::Address => {
+                let text = value
+                    .as_str()
+                    .ok_or_else(|| format!("expected an address, got {value}"))?;
+                if text == SELF {
+                    return Ok(Value::String(self.me.to_string()));
+                }
+                text.parse::<Address>()
+                    .map_err(|_| format!("`{text}` is not an address"))?;
+                Ok(value.clone())
+            }
+            DynSolType::Uint(_) => plain_decimal(value, false),
+            DynSolType::Int(_) => plain_decimal(value, true),
+            DynSolType::Bytes => match value.as_str() {
+                Some(text)
+                    if text.starts_with("0x")
+                        && text.len() % 2 == 0
+                        && text[2..].chars().all(|c| c.is_ascii_hexdigit()) =>
+                {
+                    Ok(value.clone())
+                }
+                _ => Err(format!("`{value}` is not 0x hex bytes")),
+            },
+            _ => Err(format!("a {ty} is not expected in a signed call")),
+        }
     }
 
     /// The same JSON with every address-typed value resolved: `$self` to the sender, a manifest
@@ -414,6 +455,9 @@ impl Ctx<'_> {
                 .unwrap_or_else(|| id.to_owned()),
             (DynSolType::Uint(_), Some(text)) if text == U256::MAX.to_string() => "all".into(),
             (DynSolType::String, Some(text)) => format!("{text:?}"),
+            (DynSolType::Bytes, Some(text)) if text.len() > 2 + 8 => {
+                format!("{}… ({} bytes)", &text[..2 + 8], (text.len() - 2) / 2)
+            }
             (_, Some(text)) => one_line(text),
             _ => value.to_string(),
         }
@@ -756,12 +800,123 @@ approves = ["pool"]
             }
         }
 
+        fn exec_plan(args: Value) -> Result<CheckedPlan, String> {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/safe-multisig");
+            let skill = manifest::load(&dir).unwrap();
+            let action = skill.action("safe_execute").unwrap().clone();
+            let plan = json!({"steps": [{"call": {
+                "contract": "safe", "function": "execTransaction", "args": args
+            }}]});
+            check(&plan, &skill, &action, 1, ME, &json!({"address": SAFE}))
+        }
+
+        fn exec_args() -> Vec<Value> {
+            let payee = "0x6C9F86423e5F36D6E42FbC1BAf966d3c1E0B5711";
+            vec![
+                json!("0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB"),
+                json!("0"),
+                json!(format!(
+                    "0xa9059cbb{}{}",
+                    "0".repeat(24) + &payee[2..].to_lowercase(),
+                    "0".repeat(49) + "de0b6b3a7640000"
+                )),
+                json!("0"),
+                json!("0"),
+                json!("0"),
+                json!("0"),
+                json!("0x0000000000000000000000000000000000000000"),
+                json!("0x0000000000000000000000000000000000000000"),
+                json!(format!("0x{}", "ab".repeat(65))),
+            ]
+        }
+
         #[test]
-        fn only_approve_hash_is_allowed_there() {
+        fn a_signed_call_takes_raw_bytes_and_any_address_and_the_review_spells_them_out() {
+            let plan = exec_plan(exec_args().into()).unwrap();
+            let step = &plan.steps[0];
+            assert_eq!(step.to, SAFE.parse::<Address>().unwrap());
+            assert!(
+                step.label
+                    .contains("to=0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB"),
+                "{}",
+                step.label
+            );
+            assert!(
+                step.label.contains("data=0xa9059cbb… (68 bytes)"),
+                "{}",
+                step.label
+            );
+            assert!(
+                step.label.contains("signatures=0xabababab… (65 bytes)"),
+                "{}",
+                step.label
+            );
+            assert_eq!(
+                &step.data[..4],
+                &[0x6a, 0x76, 0x12, 0x02],
+                "execTransaction selector"
+            );
+        }
+
+        #[test]
+        fn a_signed_call_still_refuses_malformed_arguments_and_eth() {
+            let mut args = exec_args();
+            args[0] = json!("not an address");
+            assert!(
+                exec_plan(args.into())
+                    .unwrap_err()
+                    .contains("not an address")
+            );
+            let mut args = exec_args();
+            args[2] = json!("0xzz");
+            assert!(exec_plan(args.into()).unwrap_err().contains("hex"));
+            let mut args = exec_args();
+            args[1] = json!("1e18");
+            assert!(
+                exec_plan(args.into())
+                    .unwrap_err()
+                    .contains("plain decimal")
+            );
+            let mut plan = json!({"steps": [{"call": {"contract": "safe", "function": "execTransaction", "args": exec_args(), "value": "1"}}]});
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/safe-multisig");
+            let skill = manifest::load(&dir).unwrap();
+            let action = skill.action("safe_execute").unwrap().clone();
+            let error =
+                check(&plan, &skill, &action, 1, ME, &json!({"address": SAFE})).unwrap_err();
+            assert!(error.contains("without ETH"), "{error}");
+            plan["steps"][0]["call"]["value"] = json!("0");
+            assert!(check(&plan, &skill, &action, 1, ME, &json!({"address": SAFE})).is_ok());
+        }
+
+        #[test]
+        fn raw_bytes_stay_refused_unless_a_function_is_declared_signed() {
+            let toml = std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/safe-multisig/skill.toml"),
+            )
+            .unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("safe-multisig");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                "---\nname: safe-multisig\ndescription: d\n---\nx\n",
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("skill.toml"),
+                toml.replace("signed_calls = [\"execTransaction\"]", ""),
+            )
+            .unwrap();
+            let error = manifest::load(&dir).unwrap_err();
+            assert!(error.contains("raw bytes"), "{error}");
+        }
+
+        #[test]
+        fn only_the_listed_functions_are_allowed_there() {
             let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/safe-multisig");
             let skill = manifest::load(&dir).unwrap();
             let action = skill.action("safe_approve_hash").unwrap().clone();
-            let plan = json!({"steps": [{"call": {"contract": "safe", "function": "execTransaction", "args": []}}]});
+            let plan = json!({"steps": [{"call": {"contract": "safe", "function": "swapOwner", "args": []}}]});
             let error =
                 check(&plan, &skill, &action, 1, ME, &json!({"address": SAFE})).unwrap_err();
             assert!(error.contains("not one of"), "{error}");

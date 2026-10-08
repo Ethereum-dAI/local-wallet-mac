@@ -81,8 +81,8 @@ fn safe_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
     if has("gnosis") {
         args["chain"] = json!("gnosis");
     }
-    if has("approve") {
-        // Look at what waits first, then approve the one asked for: `approve nonce 1445 on safe 0x…`.
+    if has("approve") || has("execute") {
+        // Look at what waits first, then act on the one asked for: `approve nonce 1445 on safe 0x…`.
         let nonce = prompt
             .split_whitespace()
             .skip_while(|w| !w.eq_ignore_ascii_case("nonce"))
@@ -92,14 +92,19 @@ fn safe_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
                     .parse::<u64>()
                     .ok()
             });
-        let mut approve = json!({"address": args["address"]});
+        let mut act = json!({"address": args["address"]});
         if let Some(nonce) = nonce {
-            approve["nonce"] = json!(nonce);
+            act["nonce"] = json!(nonce);
         }
+        let tool = if has("execute") {
+            "safe_execute"
+        } else {
+            "safe_approve_hash"
+        };
         return Some(Script::Calls(vec![
             ("load_skill", json!({"name": "safe-multisig"})),
             ("safe_queue", args),
-            ("safe_approve_hash", approve),
+            (tool, act),
         ]));
     }
     let tool = if has("waiting")
@@ -302,6 +307,11 @@ pub fn summary(tool: &str, result: &str) -> Option<String> {
                 .collect();
             Some(format!("Recently executed: {}", lines.join(" | ")))
         }
+        "safe_execute" => Some(if output.contains("succeeded") {
+            "Executed: the Safe ran the transaction and its nonce moved on.".to_owned()
+        } else {
+            format!("Not executed: {output}")
+        }),
         "safe_approve_hash" => Some(if output.contains("succeeded") {
             "Approved on chain: the Safe now counts your approval for that transaction. It still needs the other owners, and someone must execute it in the Safe app.".to_owned()
         } else {
@@ -606,6 +616,14 @@ mod tests {
                 load.clone(),
                 ("safe_queue", json!({"address": safe})),
                 ("safe_approve_hash", json!({"address": safe, "nonce": 1445})),
+            ])
+        );
+        assert_eq!(
+            script(&format!("execute nonce 1446 on safe {safe}")),
+            Script::Calls(vec![
+                load.clone(),
+                ("safe_queue", json!({"address": safe})),
+                ("safe_execute", json!({"address": safe, "nonce": 1446})),
             ])
         );
         // The harness hands the model an alias, not the address itself.

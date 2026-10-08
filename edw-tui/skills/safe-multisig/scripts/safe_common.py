@@ -242,3 +242,81 @@ def summarize(tx, short, chain_id):
     if "control" in kinds:
         warnings.append("changes who controls the Safe")
     return {"summary": text[0].upper() + text[1:] if text else text, "kind": kind, "warnings": warnings}
+
+
+# --- Acting on a waiting transaction ---------------------------------------------------------------
+HASH = (
+    "function getTransactionHash(address to,uint256 value,bytes data,uint8 operation,uint256 safeTxGas,"
+    "uint256 baseGas,uint256 gasPrice,address gasToken,address refundReceiver,uint256 _nonce) view returns (bytes32)"
+)
+NONCE = "function nonce() view returns (uint256)"
+
+
+def wallet_chain(args, context, doing):
+    """(chain_id, short) once the wallet is unlocked and on the Safe's chain."""
+    if not context.get("me") or not context.get("chain_id"):
+        edw_skill.fail(f"the wallet is locked; unlock a network first ({doing} needs its chain and address)")
+    chain_id, short = chain(args.get("chain"), context)
+    if chain_id != context["chain_id"]:
+        edw_skill.fail(
+            f"the wallet is on {CHAIN_LABEL.get(context['chain_id'], context['chain_id'])}, "
+            f"not {CHAIN_LABEL[chain_id]}; switch networks to {doing} there"
+        )
+    return chain_id, short
+
+
+def waiting_tx(address, short, args, current, only_next=False):
+    """The one waiting transaction asked for, its hash confirmed by the Safe itself."""
+    page = service(
+        short, f"safes/{address}/multisig-transactions/?executed=false&nonce__gte={current}&ordering=nonce&limit=20"
+    ) or {}
+    pending = page.get("results", [])
+    nonce = args.get("nonce")
+    if nonce is None or nonce == "":
+        nonces = sorted({tx["nonce"] for tx in pending})
+        if only_next:
+            nonces = [n for n in nonces if n == current]
+        if len(nonces) != 1:
+            edw_skill.fail(
+                "say which transaction (its nonce); waiting nonces: " + (", ".join(map(str, nonces)) or "none")
+            )
+        nonce = nonces[0]
+    nonce = int(nonce)
+    if nonce < current:
+        edw_skill.fail(f"nonce {nonce} has already been used; the Safe's next nonce is {current}")
+    rows = [tx for tx in pending if tx["nonce"] == nonce]
+    wanted = (args.get("safe_tx_hash") or "").lower()
+    if wanted:
+        rows = [tx for tx in rows if tx["safeTxHash"].lower() == wanted]
+    if not rows:
+        edw_skill.fail(f"no transaction is waiting at nonce {nonce}")
+    if len(rows) > 1:
+        edw_skill.fail(
+            f"{len(rows)} competing proposals share nonce {nonce}; only one can ever run. Pass safe_tx_hash, one of: "
+            + ", ".join(tx["safeTxHash"] for tx in rows)
+        )
+    tx = rows[0]
+    onchain = edw_skill.call(
+        address,
+        HASH,
+        [
+            tx["to"], str(tx["value"]), tx.get("data") or "0x", str(tx["operation"]), str(tx["safeTxGas"]),
+            str(tx["baseGas"]), str(tx["gasPrice"]), tx["gasToken"], tx["refundReceiver"], str(tx["nonce"]),
+        ],
+    )[0]
+    if onchain.lower() != tx["safeTxHash"].lower():
+        edw_skill.fail(
+            f"the service's transaction at nonce {nonce} does not hash to what the Safe computes "
+            f"({tx['safeTxHash']} vs {onchain}); not going ahead"
+        )
+    return tx, onchain
+
+
+def check_warnings(tx, short, chain_id, args):
+    described = summarize(tx, short, chain_id)
+    if described["warnings"] and not args.get("acknowledge_warnings"):
+        edw_skill.fail(
+            f"nonce {tx['nonce']} is: {described['summary']}. Warnings: " + " | ".join(described["warnings"])
+            + ". Tell the user every warning; call again with acknowledge_warnings=true only if they still want to go ahead."
+        )
+    return described

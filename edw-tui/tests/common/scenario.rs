@@ -59,7 +59,24 @@ impl Scenario {
         Some(s)
     }
 
+    /// As [`Scenario::start_with_skills`], but the shipped skills come from `skills_dir` instead
+    /// of the crate's own, and authoring drafts go to a throwaway folder beside the lock.
+    pub async fn start_with_skills_dir(
+        name: &str,
+        chain: Chain,
+        skills_dir: PathBuf,
+    ) -> Option<Self> {
+        let mut s = Self::launch_with(name, chain, Some(skills_dir)).await?;
+        s.approve_skills();
+        Some(s)
+    }
+
     async fn launch(name: &str, chain: Chain, skills: bool) -> Option<Self> {
+        let dir = skills.then(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills"));
+        Self::launch_with(name, chain, dir).await
+    }
+
+    async fn launch_with(name: &str, chain: Chain, skills: Option<PathBuf>) -> Option<Self> {
         let binary = edw_binary().or_else(|| {
             eprintln!("skipping: edw is not installed");
             None
@@ -107,16 +124,14 @@ impl Scenario {
             ("EDW_TUI_INTERIM_SEPOLIA", "1".into()),
             ("EDW_TUI_MAINNET_FORK", "1".into()),
         ];
-        if skills {
+        if let Some(skills_dir) = skills {
             // The shipped skills, approved into a throwaway lock, never the user's own.
             let state = config.data_dir.join("skills-state");
             env.extend([
+                ("EDW_TUI_SKILLS_DIR", skills_dir.display().to_string()),
                 (
-                    "EDW_TUI_SKILLS_DIR",
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("skills")
-                        .display()
-                        .to_string(),
+                    "EDW_TUI_SKILLS_DRAFTS_DIR",
+                    state.join("drafts").display().to_string(),
                 ),
                 (
                     "EDW_TUI_SKILLS_LOCK",

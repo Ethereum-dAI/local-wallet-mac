@@ -5,6 +5,7 @@
 //! [`add`], [`disable`], [`enable`] and [`delete`] back the TUI's Skills tab.
 
 pub mod abi;
+pub mod author;
 pub mod catalog;
 pub mod consent;
 pub mod explain;

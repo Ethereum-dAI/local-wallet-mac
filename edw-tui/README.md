@@ -75,7 +75,7 @@ failure. Only known tokens are traded.
 
 A skill is a folder under `skills/` that teaches the agent something new, like Claude's
 skills. The system prompt lists each skill's name and one-line description; the model calls
-`load_skill` to read its instructions, and only then are its tools offered. Two ship here:
+`load_skill` to read its instructions, and only then are its tools offered. Three ship here:
 
 - `defi-data`: past yields, TVL and volume of DeFi pools and lending markets, from
   DefiLlama, GeckoTerminal and DexScreener (no API keys). Read-only. A chain may be written
@@ -84,6 +84,15 @@ skills. The system prompt lists each skill's name and one-line description; the 
   when the wallet is on a testnet).
 - `aave-v3-lend`: supply USDC, USDT or DAI to Aave v3 and withdraw it, on Sepolia (Aave's faucet
   tokens) or an anvil mainnet fork. Requires `defi-data`.
+- `safe-multisig`: read a [Safe](https://safe.global) by address on Ethereum, Gnosis Chain,
+  Sepolia, Base and others: `safe_info` (owners, threshold, modules; the signer set is
+  cross-checked against the Safe on chain when the wallet is on that chain), `safe_queue` (what
+  is waiting for signatures, in plain English, with who has not signed) and `safe_activity`
+  (what it recently executed). Read-only, from the Safe Transaction Service. Labels are rules,
+  not a model's guess: payouts, CoW Protocol pre-signed swap orders, approvals (unlimited ones
+  are flagged), owner/module changes, rejections, and any delegatecall that is not Safe's own
+  MultiSend. It has no actions: a plan may only call manifest-pinned contracts, and a user's
+  Safe is not one.
 
 A folder holds `SKILL.md` (frontmatter `name` and `description`, then at most 4 KiB the model
 reads) and, optionally, `skill.toml`, which is what edw-tui enforces:

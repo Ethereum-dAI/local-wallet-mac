@@ -1,0 +1,24 @@
+version = "0.1.0"
+# The Safe Transaction Service lists a Safe's owners and its queued and executed transactions,
+# decoded. Chain reads (the signer set) go over the wallet's own RPC. No contracts, no actions:
+# a user's Safe is not a pinned address, so this skill only reads.
+hosts = ["api.safe.global"]
+
+[[read_tool]]
+name = "safe_info"
+run = "scripts/safe_info.py"
+description = "Who controls a Safe: its owners, how many must sign (threshold), version, modules and next nonce. Cross-checked on chain when the wallet is on that chain."
+cache = { "https://api.safe.global/tx-service/" = "1m" }
+schema = { type = "object", required = ["address"], properties = { address = { type = "string", description = "The Safe's 0x address." }, chain = { type = "string", description = "Ethereum, Gnosis, Sepolia, Base… or a chain id. Omit for the wallet's chain." } } }
+
+[[read_tool]]
+name = "safe_queue"
+run = "scripts/safe_queue.py"
+description = "Transactions waiting for signatures on a Safe, each in plain English with signatures so far, who has not signed, and warnings (delegatecall, owner changes, competing nonces)."
+schema = { type = "object", required = ["address"], properties = { address = { type = "string", description = "The Safe's 0x address." }, chain = { type = "string", description = "Ethereum, Gnosis, Sepolia, Base… or a chain id. Omit for the wallet's chain." }, limit = { type = "integer", description = "At most 8; defaults to 5." } } }
+
+[[read_tool]]
+name = "safe_activity"
+run = "scripts/safe_activity.py"
+description = "What a Safe recently executed, newest first, one plain-English line each: payouts, swap orders, approvals, owner changes."
+schema = { type = "object", required = ["address"], properties = { address = { type = "string", description = "The Safe's 0x address." }, chain = { type = "string", description = "Ethereum, Gnosis, Sepolia, Base… or a chain id. Omit for the wallet's chain." }, limit = { type = "integer", description = "At most 10; defaults to 5." } } }

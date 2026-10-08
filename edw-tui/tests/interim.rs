@@ -530,28 +530,36 @@ async fn a_checked_skill_plan_is_simulated_reviewed_and_sent_in_order() {
         value: U256::from(wei),
         data: Default::default(),
         approval: None,
+        details: Vec::new(),
+        binding: None,
     };
     let plan = |steps: Vec<CheckedStep>| CheckedPlan {
         total_value: steps.iter().map(|s| s.value).sum(),
         steps,
+        notes: Vec::new(),
     };
     let header = vec!["Skill    demo 1 (sha256 abc)".to_owned()];
     let names = Default::default();
 
+    let mut detailed = plan(vec![
+        send(ETHER / 5, "first"),
+        send(ETHER * 3 / 10, "second"),
+    ]);
+    detailed.steps[0].details = vec!["does: pays someone 0.2 ETH".into()];
+    detailed.notes = vec!["it is only a test".into()];
     let prepared = interim
         .prepare_plan(
             "skill demo_send".into(),
             header.clone(),
-            plan(vec![
-                send(ETHER / 5, "first"),
-                send(ETHER * 3 / 10, "second"),
-            ]),
+            detailed,
             &names,
             &context,
         )
         .await
         .unwrap();
     for needle in [
+        "Step 1   first\n           does: pays someone 0.2 ETH",
+        "Skill says (not checked): it is only a test",
         "Skill    demo 1",
         "Step 1   first",
         "Step 2   second",

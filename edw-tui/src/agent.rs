@@ -457,7 +457,7 @@ impl Shared {
                 "the wallet is locked; unlock a network first".into(),
             );
         };
-        let checked = match plan::check(&plan, &skill, action, at.chain_id, at.me) {
+        let checked = match plan::check(&plan, &skill, action, at.chain_id, at.me, &args) {
             Ok(checked) => checked,
             Err(error) => {
                 return fail(

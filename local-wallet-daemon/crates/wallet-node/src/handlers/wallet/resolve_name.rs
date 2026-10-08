@@ -309,6 +309,7 @@ async fn universal_resolve(
     Err(ResolveNameError::CcipReadDepth)
 }
 
+#[allow(clippy::double_must_use)] // async_trait's generated methods; see ChainAdapter
 #[async_trait]
 trait EnsCaller: Send + Sync {
     async fn eth_call(&self, tx: CallRequest) -> Result<Bytes, ChainError>;

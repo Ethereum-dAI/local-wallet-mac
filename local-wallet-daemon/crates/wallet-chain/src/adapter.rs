@@ -5,6 +5,9 @@ use crate::types::{
 };
 use async_trait::async_trait;
 
+// `async_trait` marks each generated method `#[must_use]` and its boxed future is already must-use,
+// which clippy 1.99 flags as `double_must_use` on every method. Nothing to change in our code.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ChainAdapter: Send + Sync {
     async fn eth_get_balance(&self, address: Address, block: BlockTag) -> Result<U256, ChainError>;

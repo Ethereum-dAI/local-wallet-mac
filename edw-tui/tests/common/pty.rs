@@ -193,6 +193,20 @@ impl Tui {
             thread::sleep(Duration::from_millis(400)); // a beat to read what was typed
         }
         self.press(b"\r");
+        // The app ignores Enter for a moment after it finishes a reply, so a message typed right
+        // away can stay in the box. If it is still there, send it again.
+        for _ in 0..8 {
+            thread::sleep(Duration::from_millis(500));
+            let still_typed = format!("> {}", text.chars().take(60).collect::<String>());
+            if !self
+                .screen()
+                .lines()
+                .any(|l| l.contains(&still_typed) && !l.contains("you:"))
+            {
+                return;
+            }
+            self.press(b"\r");
+        }
     }
 
     /// A pause that only matters to someone watching the recording.

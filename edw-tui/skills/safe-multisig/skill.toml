@@ -1,0 +1,50 @@
+version = "0.1.0"
+# The Safe Transaction Service lists a Safe's owners and its queued and executed transactions,
+# decoded. Chain reads (the signer set) go over the wallet's own RPC.
+# Two writes on the Safe the user names (approveHash, execTransaction). A user's Safe cannot be
+# pinned, so the checker takes its address from the call's own `address` argument, never from
+# the script.
+hosts = ["api.safe.global"]
+
+[[contract]]
+id = "safe"
+label = "Safe"
+functions = [
+  "function approveHash(bytes32 hashToApprove)",
+  "function execTransaction(address to,uint256 value,bytes data,uint8 operation,uint256 safeTxGas,uint256 baseGas,uint256 gasPrice,address gasToken,address refundReceiver,bytes signatures) payable returns (bool success)",
+]
+address_arg = "address"
+# The Safe runs execTransaction only if enough owners signed exactly these arguments, so raw
+# bytes and arbitrary addresses are safe to pass; the review still spells them out.
+signed_calls = ["execTransaction"]
+
+[[read_tool]]
+name = "safe_info"
+run = "scripts/safe_info.py"
+description = "Who controls a Safe: its owners, how many must sign (threshold), version, modules and next nonce. Cross-checked on chain when the wallet is on that chain."
+cache = { "https://api.safe.global/tx-service/" = "1m" }
+schema = { type = "object", required = ["address"], properties = { address = { type = "string", description = "The Safe's 0x address." }, chain = { type = "string", description = "Ethereum, Gnosis, Sepolia, Base… or a chain id. Omit for the wallet's chain." } } }
+
+[[read_tool]]
+name = "safe_queue"
+run = "scripts/safe_queue.py"
+description = "Transactions waiting for signatures on a Safe, each in plain English with signatures so far, who has not signed, and warnings (delegatecall, owner changes, competing nonces)."
+schema = { type = "object", required = ["address"], properties = { address = { type = "string", description = "The Safe's 0x address." }, chain = { type = "string", description = "Ethereum, Gnosis, Sepolia, Base… or a chain id. Omit for the wallet's chain." }, limit = { type = "integer", description = "At most 8; defaults to 5." } } }
+
+[[read_tool]]
+name = "safe_activity"
+run = "scripts/safe_activity.py"
+description = "What a Safe recently executed, newest first, one plain-English line each: payouts, swap orders, approvals, owner changes."
+schema = { type = "object", required = ["address"], properties = { address = { type = "string", description = "The Safe's 0x address." }, chain = { type = "string", description = "Ethereum, Gnosis, Sepolia, Base… or a chain id. Omit for the wallet's chain." }, limit = { type = "integer", description = "At most 10; defaults to 5." } } }
+
+[[action]]
+name = "safe_approve_hash"
+run = "scripts/safe_approve_hash.py"
+description = "Approve a transaction waiting on a Safe, on chain, as the sending profile (it must be an owner). The Safe's own hash must match the service's. The user reviews it before anything is sent."
+schema = { type = "object", required = ["address"], properties = { address = { type = "string", description = "The Safe's 0x address." }, nonce = { type = "integer", description = "Which waiting transaction. Optional when only one waits." }, safe_tx_hash = { type = "string", description = "Only when several proposals share a nonce." }, acknowledge_warnings = { type = "boolean", description = "Only after the user has heard every warning." }, chain = { type = "string", description = "Omit: approvals happen on the wallet's chain." } } }
+
+[[action]]
+name = "safe_execute"
+run = "scripts/safe_execute.py"
+description = "Execute the next waiting transaction of a Safe once enough owners have signed it. Anyone may send it. The Safe's own hash and signature check must pass first. The user reviews it before anything is sent."
+schema = { type = "object", required = ["address"], properties = { address = { type = "string", description = "The Safe's 0x address." }, nonce = { type = "integer", description = "Must be the Safe's next nonce. Optional." }, safe_tx_hash = { type = "string", description = "Only when several proposals share the nonce." }, acknowledge_warnings = { type = "boolean", description = "Only after the user has heard every warning." }, chain = { type = "string", description = "Omit: executing happens on the wallet's chain." } } }

@@ -5,6 +5,9 @@ use wallet_chain::types::{Log, TransactionReceipt};
 
 use crate::{BundlerError, Result};
 
+// `async_trait` marks each generated method `#[must_use]` and its boxed future is already must-use,
+// which clippy 1.99 flags as `double_must_use`.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait RawTransactionSubmitter: Send + Sync {
     async fn submit_raw_transaction(
@@ -14,6 +17,7 @@ pub trait RawTransactionSubmitter: Send + Sync {
     ) -> Result<RawTransactionSubmitOutcome>;
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait RawTransactionReceiptFetcher: Send + Sync {
     async fn get_transaction_receipt(&self, tx_hash: B256) -> Result<Option<TransactionReceipt>>;

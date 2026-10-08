@@ -1,0 +1,2012 @@
+[
+ {
+  "family": "cow_presign",
+  "chain": "eth",
+  "safe": "0x32a0eE82a7CDee2E1E1Ccb6fcAD333C134A27588",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x4affd08fe2a3d08b1937ea4ae664a7ea3d1d2e78db71f28fc831788d1293bb1432a0ee82a7cdee2e1e1ccb6fcad333c134a275886ac41653 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+     "function": "approve",
+     "args": [
+      "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",
+      "1157920892373161954235709850086879078532699846"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
+    "function": "setPreSignature",
+    "args": [
+     "0x4affd08fe2a3d08b1937ea4ae664a7ea3d1d2e78db71f28fc831788d1293bb1432a0ee82a7cdee2e1e1ccb6fcad333c134a275886ac41653",
+     "true"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "cow_presign",
+  "chain": "eth",
+  "safe": "0xb7f09490d5E7cdd2F045bD4Fca06D60B13c680f9",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xde1ba1940ec60afb1999404ff1c1d3263fd779cd447e80af7bde5985f1497958b7f09490d5e7cdd2f045bd4fca06d60b13c680f96ac6b8cf on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+     "function": "deposit",
+     "args": []
+    },
+    {
+     "to": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+     "function": "approve",
+     "args": [
+      "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",
+      "1157920892373161954235709850086879078532699846"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
+    "function": "setPreSignature",
+    "args": [
+     "0xde1ba1940ec60afb1999404ff1c1d3263fd779cd447e80af7bde5985f1497958b7f09490d5e7cdd2f045bd4fca06d60b13c680f96ac6b8cf",
+     "true"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "cow_presign",
+  "chain": "eth",
+  "safe": "0xb7f09490d5E7cdd2F045bD4Fca06D60B13c680f9",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xc6780d975c5e7f72db59ea243595e7d6b22c2ef41cc23cf3fb99bcb8b91a40e0b7f09490d5e7cdd2f045bd4fca06d60b13c680f96aa070a0 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0xdC035D45d973E3EC169d2276DDab16f1e407384F",
+     "function": "approve",
+     "args": [
+      "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",
+      "1157920892373161954235709850086879078532699846"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
+    "function": "setPreSignature",
+    "args": [
+     "0xc6780d975c5e7f72db59ea243595e7d6b22c2ef41cc23cf3fb99bcb8b91a40e0b7f09490d5e7cdd2f045bd4fca06d60b13c680f96aa070a0",
+     "true"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "cow_presign",
+  "chain": "eth",
+  "safe": "0x386DE0C673b494317e720637984Fc744235Ade7A",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x732bae45bd7f63b2f4d59fa262846b5efb6d5a9c7f84e55f785d3d47c680a6f9386de0c673b494317e720637984fc744235ade7a6ac6bb42 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+     "function": "deposit",
+     "args": []
+    },
+    {
+     "to": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+     "function": "approve",
+     "args": [
+      "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",
+      "1157920892373161954235709850086879078532699846"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
+    "function": "setPreSignature",
+    "args": [
+     "0x732bae45bd7f63b2f4d59fa262846b5efb6d5a9c7f84e55f785d3d47c680a6f9386de0c673b494317e720637984fc744235ade7a6ac6bb42",
+     "true"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "cow_presign",
+  "chain": "eth",
+  "safe": "0x386DE0C673b494317e720637984Fc744235Ade7A",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xda258aa8c4e05ec6d8fa99143c8afec7701b3ae3ddb5a759f8b93d2c5d38eb98386de0c673b494317e720637984fc744235ade7a69e64d05 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0xCec8314Cf4d448Fbd3525696af045F13CcEa7444",
+     "function": "approve",
+     "args": [
+      "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",
+      "1157920892373161954235709850086879078532699846"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
+    "function": "setPreSignature",
+    "args": [
+     "0xda258aa8c4e05ec6d8fa99143c8afec7701b3ae3ddb5a759f8b93d2c5d38eb98386de0c673b494317e720637984fc744235ade7a69e64d05",
+     "true"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "cow_presign",
+  "chain": "eth",
+  "safe": "0x5D0C187f4e1a4C6f07Fb41F16c0452c95DE4EB9F",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xd1204d5025bdb694ddade72a2f27e974ccc955a433238cfdd9b6da4b0213a1de5d0c187f4e1a4c6f07fb41f16c0452c95de4eb9f6ac6c9d1 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x77E06c9eCCf2E797fd462A92B6D7642EF85b0A44",
+     "function": "approve",
+     "args": [
+      "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",
+      "1157920892373161954235709850086879078532699846"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
+    "function": "setPreSignature",
+    "args": [
+     "0xd1204d5025bdb694ddade72a2f27e974ccc955a433238cfdd9b6da4b0213a1de5d0c187f4e1a4c6f07fb41f16c0452c95de4eb9f6ac6c9d1",
+     "true"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "cow_presign",
+  "chain": "eth",
+  "safe": "0x260915385D24468036789843121e7c8B8c5AB8e9",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0xba169141019a4e02aebc171eb6b8bc6c1010b24988fb1efdfb8c324a1a7239eb260915385d24468036789843121e7c8b8c5ab8e96a99b852 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0xae78736Cd615f374D3085123A210448E74Fc6393",
+     "function": "approve",
+     "args": [
+      "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",
+      "350000000000000000"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
+    "function": "setPreSignature",
+    "args": [
+     "0xba169141019a4e02aebc171eb6b8bc6c1010b24988fb1efdfb8c324a1a7239eb260915385d24468036789843121e7c8b8c5ab8e96a99b852",
+     "true"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "cow_presign",
+  "chain": "eth",
+  "safe": "0x3887d605A519253f3a8cd29A062C71A13D0D7F1C",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x3ad63cd089e77cea0049c950bcbd1a659853873449692cb68046453567b4f9d03887d605a519253f3a8cd29a062c71a13d0d7f1c6ac94f94 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x514910771AF9Ca656af840dff83E8264EcF986CA",
+     "function": "approve",
+     "args": [
+      "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",
+      "1157920892373161954235709850086879078532699846"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
+    "function": "setPreSignature",
+    "args": [
+     "0x3ad63cd089e77cea0049c950bcbd1a659853873449692cb68046453567b4f9d03887d605a519253f3a8cd29a062c71a13d0d7f1c6ac94f94",
+     "true"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "cow_presign",
+  "chain": "eth",
+  "safe": "0x3887d605A519253f3a8cd29A062C71A13D0D7F1C",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x29803262b9baca4b3c58881312e883c27e0fed24e00b03bd8a651f97a1d226673887d605a519253f3a8cd29a062c71a13d0d7f1c6ac80755 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x853d955aCEf822Db058eb8505911ED77F175b99e",
+     "function": "approve",
+     "args": [
+      "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",
+      "1157920892373161954235709850086879078532699846"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
+    "function": "setPreSignature",
+    "args": [
+     "0x29803262b9baca4b3c58881312e883c27e0fed24e00b03bd8a651f97a1d226673887d605a519253f3a8cd29a062c71a13d0d7f1c6ac80755",
+     "true"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "cow_presign",
+  "chain": "eth",
+  "safe": "0x3887d605A519253f3a8cd29A062C71A13D0D7F1C",
+  "intent": "The batch so far approved the sell token for CoW Protocol. Finish it: authorise CoW order 0x46fc38cee68f7d6b6a2de5f97e77b8a826ddd63b0839909ee780cdd91f4550a13887d605a519253f3a8cd29a062c71a13d0d7f1c6ac80707 on-chain so solvers can fill it. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0xBA11D00c5f74255f56a5E366F4F77f5A186d7f55",
+     "function": "approve",
+     "args": [
+      "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",
+      "1157920892373161954235709850086879078532699846"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
+    "function": "setPreSignature",
+    "args": [
+     "0x46fc38cee68f7d6b6a2de5f97e77b8a826ddd63b0839909ee780cdd91f4550a13887d605a519253f3a8cd29a062c71a13d0d7f1c6ac80707",
+     "true"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "defi_borrow",
+  "chain": "eth",
+  "safe": "0x5108aEAf373D004d2372be82C206Ec9aA7f1872F",
+  "intent": "Collateral is enabled. Now borrow 3000000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x0b9af1fd73885aD52680A1aeAa7A3f17AC702afA",
+     "function": "enterMarkets",
+     "args": [
+      "['0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B']"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B",
+    "function": "borrow",
+    "args": [
+     "3000000000000000000000"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_borrow",
+  "chain": "eth",
+  "safe": "0x5108aEAf373D004d2372be82C206Ec9aA7f1872F",
+  "intent": "Collateral is enabled. Now borrow 3200000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x0b9af1fd73885aD52680A1aeAa7A3f17AC702afA",
+     "function": "enterMarkets",
+     "args": [
+      "['0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B']"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B",
+    "function": "borrow",
+    "args": [
+     "3200000000000000000000"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_borrow",
+  "chain": "eth",
+  "safe": "0x2b95F3d0b89b24B432DAcC5d1E9a621a9A79e687",
+  "intent": "Collateral is enabled. Now borrow 3023320614057100000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x0b9af1fd73885aD52680A1aeAa7A3f17AC702afA",
+     "function": "enterMarkets",
+     "args": [
+      "['0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B']"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B",
+    "function": "borrow",
+    "args": [
+     "3023320614057100000000"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_borrow",
+  "chain": "eth",
+  "safe": "0x224A1019C39CE671221bfd5f64Af28d0513d0A11",
+  "intent": "Collateral is enabled. Now borrow 4707299445940400000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x0b9af1fd73885aD52680A1aeAa7A3f17AC702afA",
+     "function": "enterMarkets",
+     "args": [
+      "['0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B']"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B",
+    "function": "borrow",
+    "args": [
+     "4707299445940400000000"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_borrow",
+  "chain": "eth",
+  "safe": "0x224A1019C39CE671221bfd5f64Af28d0513d0A11",
+  "intent": "Collateral is enabled. Now borrow 4692967229429099000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x0b9af1fd73885aD52680A1aeAa7A3f17AC702afA",
+     "function": "enterMarkets",
+     "args": [
+      "['0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B']"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B",
+    "function": "borrow",
+    "args": [
+     "4692967229429099000000"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_borrow",
+  "chain": "eth",
+  "safe": "0xd63E6A63706eE25587DAb2F173ABdC80f97BE391",
+  "intent": "Collateral is enabled. Now borrow 600000000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x0b9af1fd73885aD52680A1aeAa7A3f17AC702afA",
+     "function": "enterMarkets",
+     "args": [
+      "['0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B']"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B",
+    "function": "borrow",
+    "args": [
+     "600000000000000000000000"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_borrow",
+  "chain": "eth",
+  "safe": "0xd63E6A63706eE25587DAb2F173ABdC80f97BE391",
+  "intent": "Collateral is enabled. Now borrow 100000000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x0b9af1fd73885aD52680A1aeAa7A3f17AC702afA",
+     "function": "enterMarkets",
+     "args": [
+      "['0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B']"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B",
+    "function": "borrow",
+    "args": [
+     "100000000000000000000000"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_borrow",
+  "chain": "eth",
+  "safe": "0xd63E6A63706eE25587DAb2F173ABdC80f97BE391",
+  "intent": "Collateral is enabled. Now borrow 500000000000000000000000 base units from the Compound market at 0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x0b9af1fd73885aD52680A1aeAa7A3f17AC702afA",
+     "function": "enterMarkets",
+     "args": [
+      "['0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B']"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xf80eeec09f417Fa7FCc4A848Ef03af9dF2658d7B",
+    "function": "borrow",
+    "args": [
+     "500000000000000000000000"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_supply",
+  "chain": "eth",
+  "safe": "0xAA13eC1fbC3a180a2eB5c5F8c34D22956F94e94A",
+  "intent": "The token is approved. Now supply 150279564 base units to the Compound market at 0x0f864A3e50D1070adDE5100fd848446C0567362B so it earns interest. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+     "function": "approve",
+     "args": [
+      "0x0f864A3e50D1070adDE5100fd848446C0567362B",
+      "150279564"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0x0f864A3e50D1070adDE5100fd848446C0567362B",
+    "function": "mint",
+    "args": [
+     "150279564"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_supply",
+  "chain": "eth",
+  "safe": "0xAA13eC1fbC3a180a2eB5c5F8c34D22956F94e94A",
+  "intent": "The token is approved. Now supply 154253499 base units to the Compound market at 0x0f864A3e50D1070adDE5100fd848446C0567362B so it earns interest. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+     "function": "approve",
+     "args": [
+      "0x0f864A3e50D1070adDE5100fd848446C0567362B",
+      "154253499"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0x0f864A3e50D1070adDE5100fd848446C0567362B",
+    "function": "mint",
+    "args": [
+     "154253499"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_supply",
+  "chain": "eth",
+  "safe": "0x5108aEAf373D004d2372be82C206Ec9aA7f1872F",
+  "intent": "The token is approved. Now supply 3000157 base units to the Compound market at 0xc3aD34De18B59A24BD0877e454Fb924181F09C8f so it earns interest. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+     "function": "approve",
+     "args": [
+      "0xc3aD34De18B59A24BD0877e454Fb924181F09C8f",
+      "3000157"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xc3aD34De18B59A24BD0877e454Fb924181F09C8f",
+    "function": "mint",
+    "args": [
+     "3000157"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_supply",
+  "chain": "eth",
+  "safe": "0x5108aEAf373D004d2372be82C206Ec9aA7f1872F",
+  "intent": "The token is approved. Now supply 6004795 base units to the Compound market at 0xc3aD34De18B59A24BD0877e454Fb924181F09C8f so it earns interest. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+     "function": "approve",
+     "args": [
+      "0xc3aD34De18B59A24BD0877e454Fb924181F09C8f",
+      "6004795"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xc3aD34De18B59A24BD0877e454Fb924181F09C8f",
+    "function": "mint",
+    "args": [
+     "6004795"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_supply",
+  "chain": "eth",
+  "safe": "0x2b95F3d0b89b24B432DAcC5d1E9a621a9A79e687",
+  "intent": "The token is approved. Now supply 4781 base units to the Compound market at 0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6 so it earns interest. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+     "function": "approve",
+     "args": [
+      "0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6",
+      "4781"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6",
+    "function": "mint",
+    "args": [
+     "4781"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_supply",
+  "chain": "eth",
+  "safe": "0x224A1019C39CE671221bfd5f64Af28d0513d0A11",
+  "intent": "The token is approved. Now supply 7444 base units to the Compound market at 0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6 so it earns interest. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+     "function": "approve",
+     "args": [
+      "0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6",
+      "7444"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6",
+    "function": "mint",
+    "args": [
+     "7444"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_supply",
+  "chain": "eth",
+  "safe": "0x224A1019C39CE671221bfd5f64Af28d0513d0A11",
+  "intent": "The token is approved. Now supply 7243 base units to the Compound market at 0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6 so it earns interest. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+     "function": "approve",
+     "args": [
+      "0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6",
+      "7243"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xDa5928d59ECE82808Af2cbBE4f2872FeA8E12CD6",
+    "function": "mint",
+    "args": [
+     "7243"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "defi_supply",
+  "chain": "eth",
+  "safe": "0xd63E6A63706eE25587DAb2F173ABdC80f97BE391",
+  "intent": "The token is approved. Now supply 99990000 base units to the Compound market at 0x0f864A3e50D1070adDE5100fd848446C0567362B so it earns interest. Return only that final call, not the earlier ones.",
+  "context": {
+   "batch_so_far": [
+    {
+     "to": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+     "function": "approve",
+     "args": [
+      "0x0f864A3e50D1070adDE5100fd848446C0567362B",
+      "99990000"
+     ]
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0x0f864A3e50D1070adDE5100fd848446C0567362B",
+    "function": "mint",
+    "args": [
+     "99990000"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "owner_add",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Add 0x5B38Da6a701c568545dCfcB03FcB875f56beddC4 as an owner and set the threshold to 3.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "owners_in_getOwners_order": [
+    "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+    "0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200",
+    "0xd0e93CD8462a9Abb41d3713e4376904420FD0AE0",
+    "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+    "0x79063d9173C09887d536924E2F6eADbaBAc099f5",
+    "0x6648867EF1AaE43a5d3bef774312815c4950a065",
+    "0xc3792470cee7e0D42C2Be8e9552bd651766c5178",
+    "0xf6d3a588dF6C4eEe8F095CbcCDBDACccCBf59A18",
+    "0x34872330F5D08C18dd0ef3CB4Dd8908104F3763B",
+    "0xCF89198fb5f37C98516bC36c6111a431ff7457b2",
+    "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0"
+   ],
+   "threshold": 4
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "addOwnerWithThreshold",
+    "args": [
+     "0x5B38Da6a701c568545dCfcB03FcB875f56beddC4",
+     "3"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "owner_add",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Add 0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2 as an owner and set the threshold to 4.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "owners_in_getOwners_order": [
+    "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+    "0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200",
+    "0xd0e93CD8462a9Abb41d3713e4376904420FD0AE0",
+    "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+    "0x79063d9173C09887d536924E2F6eADbaBAc099f5",
+    "0x6648867EF1AaE43a5d3bef774312815c4950a065",
+    "0xc3792470cee7e0D42C2Be8e9552bd651766c5178",
+    "0xf6d3a588dF6C4eEe8F095CbcCDBDACccCBf59A18",
+    "0x34872330F5D08C18dd0ef3CB4Dd8908104F3763B",
+    "0xCF89198fb5f37C98516bC36c6111a431ff7457b2",
+    "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0"
+   ],
+   "threshold": 4
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "addOwnerWithThreshold",
+    "args": [
+     "0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2",
+     "4"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "owner_add",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Add 0x4B20993Bc481177ec7E8f571ceCaE8A9e22C02db as an owner and set the threshold to 3.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "owners_in_getOwners_order": [
+    "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+    "0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200",
+    "0xd0e93CD8462a9Abb41d3713e4376904420FD0AE0",
+    "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+    "0x79063d9173C09887d536924E2F6eADbaBAc099f5",
+    "0x6648867EF1AaE43a5d3bef774312815c4950a065",
+    "0xc3792470cee7e0D42C2Be8e9552bd651766c5178",
+    "0xf6d3a588dF6C4eEe8F095CbcCDBDACccCBf59A18",
+    "0x34872330F5D08C18dd0ef3CB4Dd8908104F3763B",
+    "0xCF89198fb5f37C98516bC36c6111a431ff7457b2",
+    "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0"
+   ],
+   "threshold": 4
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "addOwnerWithThreshold",
+    "args": [
+     "0x4B20993Bc481177ec7E8f571ceCaE8A9e22C02db",
+     "3"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "owner_remove",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Remove owner 0xD118ebD98C6445853ec03E036eC67a22a829Ff03 and keep the threshold at 4.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "owners_in_getOwners_order": [
+    "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+    "0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200",
+    "0xd0e93CD8462a9Abb41d3713e4376904420FD0AE0",
+    "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+    "0x79063d9173C09887d536924E2F6eADbaBAc099f5",
+    "0x6648867EF1AaE43a5d3bef774312815c4950a065",
+    "0xc3792470cee7e0D42C2Be8e9552bd651766c5178",
+    "0xf6d3a588dF6C4eEe8F095CbcCDBDACccCBf59A18",
+    "0x34872330F5D08C18dd0ef3CB4Dd8908104F3763B",
+    "0xCF89198fb5f37C98516bC36c6111a431ff7457b2",
+    "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0"
+   ],
+   "threshold": 4
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "removeOwner",
+    "args": [
+     "0x0000000000000000000000000000000000000001",
+     "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+     "4"
+    ]
+   }
+  ],
+  "args_checked": 3
+ },
+ {
+  "family": "owner_remove",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Remove owner 0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374 and keep the threshold at 4.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "owners_in_getOwners_order": [
+    "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+    "0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200",
+    "0xd0e93CD8462a9Abb41d3713e4376904420FD0AE0",
+    "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+    "0x79063d9173C09887d536924E2F6eADbaBAc099f5",
+    "0x6648867EF1AaE43a5d3bef774312815c4950a065",
+    "0xc3792470cee7e0D42C2Be8e9552bd651766c5178",
+    "0xf6d3a588dF6C4eEe8F095CbcCDBDACccCBf59A18",
+    "0x34872330F5D08C18dd0ef3CB4Dd8908104F3763B",
+    "0xCF89198fb5f37C98516bC36c6111a431ff7457b2",
+    "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0"
+   ],
+   "threshold": 4
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "removeOwner",
+    "args": [
+     "0xd0e93CD8462a9Abb41d3713e4376904420FD0AE0",
+     "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+     "4"
+    ]
+   }
+  ],
+  "args_checked": 3
+ },
+ {
+  "family": "owner_remove",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Remove owner 0xc3792470cee7e0D42C2Be8e9552bd651766c5178 and keep the threshold at 4.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "owners_in_getOwners_order": [
+    "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+    "0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200",
+    "0xd0e93CD8462a9Abb41d3713e4376904420FD0AE0",
+    "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+    "0x79063d9173C09887d536924E2F6eADbaBAc099f5",
+    "0x6648867EF1AaE43a5d3bef774312815c4950a065",
+    "0xc3792470cee7e0D42C2Be8e9552bd651766c5178",
+    "0xf6d3a588dF6C4eEe8F095CbcCDBDACccCBf59A18",
+    "0x34872330F5D08C18dd0ef3CB4Dd8908104F3763B",
+    "0xCF89198fb5f37C98516bC36c6111a431ff7457b2",
+    "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0"
+   ],
+   "threshold": 4
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "removeOwner",
+    "args": [
+     "0x6648867EF1AaE43a5d3bef774312815c4950a065",
+     "0xc3792470cee7e0D42C2Be8e9552bd651766c5178",
+     "4"
+    ]
+   }
+  ],
+  "args_checked": 3
+ },
+ {
+  "family": "owner_swap",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Replace owner 0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200 with 0x4B20993Bc481177ec7E8f571ceCaE8A9e22C02db.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "owners_in_getOwners_order": [
+    "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+    "0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200",
+    "0xd0e93CD8462a9Abb41d3713e4376904420FD0AE0",
+    "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+    "0x79063d9173C09887d536924E2F6eADbaBAc099f5",
+    "0x6648867EF1AaE43a5d3bef774312815c4950a065",
+    "0xc3792470cee7e0D42C2Be8e9552bd651766c5178",
+    "0xf6d3a588dF6C4eEe8F095CbcCDBDACccCBf59A18",
+    "0x34872330F5D08C18dd0ef3CB4Dd8908104F3763B",
+    "0xCF89198fb5f37C98516bC36c6111a431ff7457b2",
+    "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0"
+   ],
+   "threshold": 4
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "swapOwner",
+    "args": [
+     "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+     "0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200",
+     "0x4B20993Bc481177ec7E8f571ceCaE8A9e22C02db"
+    ]
+   }
+  ],
+  "args_checked": 3
+ },
+ {
+  "family": "owner_swap",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Replace owner 0x79063d9173C09887d536924E2F6eADbaBAc099f5 with 0x78731D3Ca6b7E34aC0F824c42a7cC18A495cabaB.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "owners_in_getOwners_order": [
+    "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+    "0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200",
+    "0xd0e93CD8462a9Abb41d3713e4376904420FD0AE0",
+    "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+    "0x79063d9173C09887d536924E2F6eADbaBAc099f5",
+    "0x6648867EF1AaE43a5d3bef774312815c4950a065",
+    "0xc3792470cee7e0D42C2Be8e9552bd651766c5178",
+    "0xf6d3a588dF6C4eEe8F095CbcCDBDACccCBf59A18",
+    "0x34872330F5D08C18dd0ef3CB4Dd8908104F3763B",
+    "0xCF89198fb5f37C98516bC36c6111a431ff7457b2",
+    "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0"
+   ],
+   "threshold": 4
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "swapOwner",
+    "args": [
+     "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+     "0x79063d9173C09887d536924E2F6eADbaBAc099f5",
+     "0x78731D3Ca6b7E34aC0F824c42a7cC18A495cabaB"
+    ]
+   }
+  ],
+  "args_checked": 3
+ },
+ {
+  "family": "threshold",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Change the signing threshold to 2.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "owners_in_getOwners_order": [
+    "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+    "0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200",
+    "0xd0e93CD8462a9Abb41d3713e4376904420FD0AE0",
+    "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+    "0x79063d9173C09887d536924E2F6eADbaBAc099f5",
+    "0x6648867EF1AaE43a5d3bef774312815c4950a065",
+    "0xc3792470cee7e0D42C2Be8e9552bd651766c5178",
+    "0xf6d3a588dF6C4eEe8F095CbcCDBDACccCBf59A18",
+    "0x34872330F5D08C18dd0ef3CB4Dd8908104F3763B",
+    "0xCF89198fb5f37C98516bC36c6111a431ff7457b2",
+    "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0"
+   ],
+   "threshold": 4
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "changeThreshold",
+    "args": [
+     "2"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "threshold",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Change the signing threshold to 5.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "owners_in_getOwners_order": [
+    "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+    "0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200",
+    "0xd0e93CD8462a9Abb41d3713e4376904420FD0AE0",
+    "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+    "0x79063d9173C09887d536924E2F6eADbaBAc099f5",
+    "0x6648867EF1AaE43a5d3bef774312815c4950a065",
+    "0xc3792470cee7e0D42C2Be8e9552bd651766c5178",
+    "0xf6d3a588dF6C4eEe8F095CbcCDBDACccCBf59A18",
+    "0x34872330F5D08C18dd0ef3CB4Dd8908104F3763B",
+    "0xCF89198fb5f37C98516bC36c6111a431ff7457b2",
+    "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0"
+   ],
+   "threshold": 4
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "changeThreshold",
+    "args": [
+     "5"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "module",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Enable the module at 0x5B38Da6a701c568545dCfcB03FcB875f56beddC4 on this Safe.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "owners_in_getOwners_order": [
+    "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+    "0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200",
+    "0xd0e93CD8462a9Abb41d3713e4376904420FD0AE0",
+    "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+    "0x79063d9173C09887d536924E2F6eADbaBAc099f5",
+    "0x6648867EF1AaE43a5d3bef774312815c4950a065",
+    "0xc3792470cee7e0D42C2Be8e9552bd651766c5178",
+    "0xf6d3a588dF6C4eEe8F095CbcCDBDACccCBf59A18",
+    "0x34872330F5D08C18dd0ef3CB4Dd8908104F3763B",
+    "0xCF89198fb5f37C98516bC36c6111a431ff7457b2",
+    "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0"
+   ],
+   "threshold": 4
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "enableModule",
+    "args": [
+     "0x5B38Da6a701c568545dCfcB03FcB875f56beddC4"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "module",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Enable the module at 0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2 on this Safe.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "owners_in_getOwners_order": [
+    "0xD118ebD98C6445853ec03E036eC67a22a829Ff03",
+    "0xc7d9e9D8fCC0060a21C8401C50483A8b2cCc8200",
+    "0xd0e93CD8462a9Abb41d3713e4376904420FD0AE0",
+    "0xdEF4cb94150E7A7349d2650dCD974a236c0Fa374",
+    "0x79063d9173C09887d536924E2F6eADbaBAc099f5",
+    "0x6648867EF1AaE43a5d3bef774312815c4950a065",
+    "0xc3792470cee7e0D42C2Be8e9552bd651766c5178",
+    "0xf6d3a588dF6C4eEe8F095CbcCDBDACccCBf59A18",
+    "0x34872330F5D08C18dd0ef3CB4Dd8908104F3763B",
+    "0xCF89198fb5f37C98516bC36c6111a431ff7457b2",
+    "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0"
+   ],
+   "threshold": 4
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "enableModule",
+    "args": [
+     "0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "sign_existing",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Sign the pending transaction at nonce 1445. My wallet is a smart contract, so I can only send on-chain transactions, not off-chain signatures.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "pending_queue": [
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c",
+     "to": "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB",
+     "value": "0",
+     "data": "0xa9059cbb0000000000000000000000006c9f86423e5f36d6e42fbc1baf966d3c1e0b57110000000000000000000000000000000000000000000000000de0b6b3a7640000",
+     "operation": 0,
+     "confirmations": "1 of 4"
+    },
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7",
+     "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+     "value": "0",
+     "data": "0x",
+     "operation": 0,
+     "confirmations": "2 of 4"
+    },
+    {
+     "nonce": 1446,
+     "safeTxHash": "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833",
+     "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+     "value": "0",
+     "data": "0x8d80ff0a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000132000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f913700000000000000000000000000000000000000000000002d9f288733cf0c666600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f91370000000000000000000000000000000000000000000000112e152815992cf1a600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000c8598ba37a93f67c75b1e69f13ff21fda23c0b140000000000000000000000000000000000000000000000081664ea25d0b2900000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000001aaaa287890837c8326dd1fedd2308e8a4e89290000000000000000000000000000000000000000000000000728065b7b93ee00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f778a8be9da0ba4b3d2224c694f49c94e36e5b840000000000000000000000000000000000000000000000131aed57a8a198400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee600000000000000000000000000000000000000000000002cabd7af0d6567cccc00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee60000000000000000000000000000000000000000000000209e67456c4201b15400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000000275c22f727ad9c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000003545cce626efd7000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000d7bec97d0d286c2eb0b21f8a74de87a3a2fb37b700000000000000000000000000000000000000000000000714f3fa0eb62cdb3300def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc400000000000000000000000000000000000000000000000f6e4db54276f9000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc40000000000000000000000000000000000000000000000edba99515de35e800000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000171d4a72a56dbd16cd75619de7d1d17f316fc51100000000000000000000000000000000000000000000000ef40d1a35cf1b545c00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba0000000000000000000000000000000000000000000000075320ced2f5a33e2d00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f1000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000300f8883b19db770000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000002bd12a973952e2971c93f970f31abf635ed7721c0000000000000000000000000000000000000000000000044955c722b1c0c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003e9e37a0794e62000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f10000000000000000000000000000000000000000000000188ab2d3b7fa78815900def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bed870b51ea0c39b896124c6ca293fb94579a7cf000000000000000000000000000000000000000000000000f8d849fd5b8ef8b400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000008464759c6e30b000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000010bbdc8824f64a400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003a5e73da27ee8e000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000054f2fe355fdca91100def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea59000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea590000000000000000000000000000000000000000000000209a84e2ceab2c000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000409ec55a2543c427ce84c6437012d2166754b2ab00000000000000000000000000000000000000000000000265d1fa7d538fbb3600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000002592216048c8a2000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000000e2a8221531977880000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d50000000000000000000000000000000000000000000000043fc3c6515fd5400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d500000000000000000000000000000000000000000000000d7c814c3dbc4b200000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000080db9081298fe0ef937100a85f715cf915a4f4ce000000000000000000000000000000000000000000000009346111b6d1231db3",
+     "operation": 1,
+     "confirmations": "4 of 4"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "approveHash",
+    "args": [
+     "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "sign_existing",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "I want to approve queued transaction #1445 as an owner. I cannot produce an off-chain signature.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "pending_queue": [
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c",
+     "to": "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB",
+     "value": "0",
+     "data": "0xa9059cbb0000000000000000000000006c9f86423e5f36d6e42fbc1baf966d3c1e0b57110000000000000000000000000000000000000000000000000de0b6b3a7640000",
+     "operation": 0,
+     "confirmations": "1 of 4"
+    },
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7",
+     "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+     "value": "0",
+     "data": "0x",
+     "operation": 0,
+     "confirmations": "2 of 4"
+    },
+    {
+     "nonce": 1446,
+     "safeTxHash": "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833",
+     "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+     "value": "0",
+     "data": "0x8d80ff0a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000132000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f913700000000000000000000000000000000000000000000002d9f288733cf0c666600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f91370000000000000000000000000000000000000000000000112e152815992cf1a600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000c8598ba37a93f67c75b1e69f13ff21fda23c0b140000000000000000000000000000000000000000000000081664ea25d0b2900000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000001aaaa287890837c8326dd1fedd2308e8a4e89290000000000000000000000000000000000000000000000000728065b7b93ee00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f778a8be9da0ba4b3d2224c694f49c94e36e5b840000000000000000000000000000000000000000000000131aed57a8a198400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee600000000000000000000000000000000000000000000002cabd7af0d6567cccc00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee60000000000000000000000000000000000000000000000209e67456c4201b15400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000000275c22f727ad9c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000003545cce626efd7000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000d7bec97d0d286c2eb0b21f8a74de87a3a2fb37b700000000000000000000000000000000000000000000000714f3fa0eb62cdb3300def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc400000000000000000000000000000000000000000000000f6e4db54276f9000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc40000000000000000000000000000000000000000000000edba99515de35e800000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000171d4a72a56dbd16cd75619de7d1d17f316fc51100000000000000000000000000000000000000000000000ef40d1a35cf1b545c00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba0000000000000000000000000000000000000000000000075320ced2f5a33e2d00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f1000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000300f8883b19db770000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000002bd12a973952e2971c93f970f31abf635ed7721c0000000000000000000000000000000000000000000000044955c722b1c0c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003e9e37a0794e62000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f10000000000000000000000000000000000000000000000188ab2d3b7fa78815900def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bed870b51ea0c39b896124c6ca293fb94579a7cf000000000000000000000000000000000000000000000000f8d849fd5b8ef8b400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000008464759c6e30b000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000010bbdc8824f64a400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003a5e73da27ee8e000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000054f2fe355fdca91100def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea59000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea590000000000000000000000000000000000000000000000209a84e2ceab2c000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000409ec55a2543c427ce84c6437012d2166754b2ab00000000000000000000000000000000000000000000000265d1fa7d538fbb3600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000002592216048c8a2000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000000e2a8221531977880000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d50000000000000000000000000000000000000000000000043fc3c6515fd5400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d500000000000000000000000000000000000000000000000d7c814c3dbc4b200000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000080db9081298fe0ef937100a85f715cf915a4f4ce000000000000000000000000000000000000000000000009346111b6d1231db3",
+     "operation": 1,
+     "confirmations": "4 of 4"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "approveHash",
+    "args": [
+     "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "execute_signed",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Transaction at nonce 1445 has collected all required signatures. Execute it.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "pending_queue": [
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c",
+     "to": "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB",
+     "value": "0",
+     "data": "0xa9059cbb0000000000000000000000006c9f86423e5f36d6e42fbc1baf966d3c1e0b57110000000000000000000000000000000000000000000000000de0b6b3a7640000",
+     "operation": 0,
+     "confirmations": "1 of 4"
+    },
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7",
+     "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+     "value": "0",
+     "data": "0x",
+     "operation": 0,
+     "confirmations": "2 of 4"
+    },
+    {
+     "nonce": 1446,
+     "safeTxHash": "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833",
+     "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+     "value": "0",
+     "data": "0x8d80ff0a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000132000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f913700000000000000000000000000000000000000000000002d9f288733cf0c666600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f91370000000000000000000000000000000000000000000000112e152815992cf1a600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000c8598ba37a93f67c75b1e69f13ff21fda23c0b140000000000000000000000000000000000000000000000081664ea25d0b2900000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000001aaaa287890837c8326dd1fedd2308e8a4e89290000000000000000000000000000000000000000000000000728065b7b93ee00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f778a8be9da0ba4b3d2224c694f49c94e36e5b840000000000000000000000000000000000000000000000131aed57a8a198400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee600000000000000000000000000000000000000000000002cabd7af0d6567cccc00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee60000000000000000000000000000000000000000000000209e67456c4201b15400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000000275c22f727ad9c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000003545cce626efd7000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000d7bec97d0d286c2eb0b21f8a74de87a3a2fb37b700000000000000000000000000000000000000000000000714f3fa0eb62cdb3300def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc400000000000000000000000000000000000000000000000f6e4db54276f9000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc40000000000000000000000000000000000000000000000edba99515de35e800000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000171d4a72a56dbd16cd75619de7d1d17f316fc51100000000000000000000000000000000000000000000000ef40d1a35cf1b545c00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba0000000000000000000000000000000000000000000000075320ced2f5a33e2d00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f1000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000300f8883b19db770000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000002bd12a973952e2971c93f970f31abf635ed7721c0000000000000000000000000000000000000000000000044955c722b1c0c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003e9e37a0794e62000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f10000000000000000000000000000000000000000000000188ab2d3b7fa78815900def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bed870b51ea0c39b896124c6ca293fb94579a7cf000000000000000000000000000000000000000000000000f8d849fd5b8ef8b400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000008464759c6e30b000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000010bbdc8824f64a400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003a5e73da27ee8e000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000054f2fe355fdca91100def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea59000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea590000000000000000000000000000000000000000000000209a84e2ceab2c000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000409ec55a2543c427ce84c6437012d2166754b2ab00000000000000000000000000000000000000000000000265d1fa7d538fbb3600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000002592216048c8a2000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000000e2a8221531977880000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d50000000000000000000000000000000000000000000000043fc3c6515fd5400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d500000000000000000000000000000000000000000000000d7c814c3dbc4b200000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000080db9081298fe0ef937100a85f715cf915a4f4ce000000000000000000000000000000000000000000000009346111b6d1231db3",
+     "operation": 1,
+     "confirmations": "4 of 4"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "execTransaction",
+    "args": [
+     "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB",
+     "0",
+     "0xa9059cbb0000000000000000000000006c9f86423e5f36d6e42fbc1baf966d3c1e0b57110000000000000000000000000000000000000000000000000de0b6b3a7640000",
+     "0"
+    ]
+   }
+  ],
+  "args_checked": 4
+ },
+ {
+  "family": "reject",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Cancel the pending transaction at nonce 1445 by replacing it with a rejection.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "pending_queue": [
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c",
+     "to": "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB",
+     "value": "0",
+     "data": "0xa9059cbb0000000000000000000000006c9f86423e5f36d6e42fbc1baf966d3c1e0b57110000000000000000000000000000000000000000000000000de0b6b3a7640000",
+     "operation": 0,
+     "confirmations": "1 of 4"
+    },
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7",
+     "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+     "value": "0",
+     "data": "0x",
+     "operation": 0,
+     "confirmations": "2 of 4"
+    },
+    {
+     "nonce": 1446,
+     "safeTxHash": "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833",
+     "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+     "value": "0",
+     "data": "0x8d80ff0a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000132000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f913700000000000000000000000000000000000000000000002d9f288733cf0c666600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f91370000000000000000000000000000000000000000000000112e152815992cf1a600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000c8598ba37a93f67c75b1e69f13ff21fda23c0b140000000000000000000000000000000000000000000000081664ea25d0b2900000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000001aaaa287890837c8326dd1fedd2308e8a4e89290000000000000000000000000000000000000000000000000728065b7b93ee00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f778a8be9da0ba4b3d2224c694f49c94e36e5b840000000000000000000000000000000000000000000000131aed57a8a198400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee600000000000000000000000000000000000000000000002cabd7af0d6567cccc00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee60000000000000000000000000000000000000000000000209e67456c4201b15400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000000275c22f727ad9c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000003545cce626efd7000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000d7bec97d0d286c2eb0b21f8a74de87a3a2fb37b700000000000000000000000000000000000000000000000714f3fa0eb62cdb3300def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc400000000000000000000000000000000000000000000000f6e4db54276f9000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc40000000000000000000000000000000000000000000000edba99515de35e800000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000171d4a72a56dbd16cd75619de7d1d17f316fc51100000000000000000000000000000000000000000000000ef40d1a35cf1b545c00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba0000000000000000000000000000000000000000000000075320ced2f5a33e2d00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f1000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000300f8883b19db770000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000002bd12a973952e2971c93f970f31abf635ed7721c0000000000000000000000000000000000000000000000044955c722b1c0c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003e9e37a0794e62000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f10000000000000000000000000000000000000000000000188ab2d3b7fa78815900def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bed870b51ea0c39b896124c6ca293fb94579a7cf000000000000000000000000000000000000000000000000f8d849fd5b8ef8b400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000008464759c6e30b000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000010bbdc8824f64a400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003a5e73da27ee8e000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000054f2fe355fdca91100def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea59000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea590000000000000000000000000000000000000000000000209a84e2ceab2c000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000409ec55a2543c427ce84c6437012d2166754b2ab00000000000000000000000000000000000000000000000265d1fa7d538fbb3600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000002592216048c8a2000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000000e2a8221531977880000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d50000000000000000000000000000000000000000000000043fc3c6515fd5400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d500000000000000000000000000000000000000000000000d7c814c3dbc4b200000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000080db9081298fe0ef937100a85f715cf915a4f4ce000000000000000000000000000000000000000000000009346111b6d1231db3",
+     "operation": 1,
+     "confirmations": "4 of 4"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "",
+    "args": [],
+    "value": "0"
+   }
+  ],
+  "args_checked": 0,
+  "safe_nonce": 1445
+ },
+ {
+  "family": "sign_existing",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Sign the pending transaction at nonce 1445. My wallet is a smart contract, so I can only send on-chain transactions, not off-chain signatures.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "pending_queue": [
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c",
+     "to": "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB",
+     "value": "0",
+     "data": "0xa9059cbb0000000000000000000000006c9f86423e5f36d6e42fbc1baf966d3c1e0b57110000000000000000000000000000000000000000000000000de0b6b3a7640000",
+     "operation": 0,
+     "confirmations": "1 of 4"
+    },
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7",
+     "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+     "value": "0",
+     "data": "0x",
+     "operation": 0,
+     "confirmations": "2 of 4"
+    },
+    {
+     "nonce": 1446,
+     "safeTxHash": "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833",
+     "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+     "value": "0",
+     "data": "0x8d80ff0a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000132000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f913700000000000000000000000000000000000000000000002d9f288733cf0c666600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f91370000000000000000000000000000000000000000000000112e152815992cf1a600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000c8598ba37a93f67c75b1e69f13ff21fda23c0b140000000000000000000000000000000000000000000000081664ea25d0b2900000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000001aaaa287890837c8326dd1fedd2308e8a4e89290000000000000000000000000000000000000000000000000728065b7b93ee00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f778a8be9da0ba4b3d2224c694f49c94e36e5b840000000000000000000000000000000000000000000000131aed57a8a198400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee600000000000000000000000000000000000000000000002cabd7af0d6567cccc00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee60000000000000000000000000000000000000000000000209e67456c4201b15400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000000275c22f727ad9c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000003545cce626efd7000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000d7bec97d0d286c2eb0b21f8a74de87a3a2fb37b700000000000000000000000000000000000000000000000714f3fa0eb62cdb3300def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc400000000000000000000000000000000000000000000000f6e4db54276f9000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc40000000000000000000000000000000000000000000000edba99515de35e800000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000171d4a72a56dbd16cd75619de7d1d17f316fc51100000000000000000000000000000000000000000000000ef40d1a35cf1b545c00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba0000000000000000000000000000000000000000000000075320ced2f5a33e2d00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f1000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000300f8883b19db770000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000002bd12a973952e2971c93f970f31abf635ed7721c0000000000000000000000000000000000000000000000044955c722b1c0c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003e9e37a0794e62000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f10000000000000000000000000000000000000000000000188ab2d3b7fa78815900def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bed870b51ea0c39b896124c6ca293fb94579a7cf000000000000000000000000000000000000000000000000f8d849fd5b8ef8b400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000008464759c6e30b000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000010bbdc8824f64a400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003a5e73da27ee8e000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000054f2fe355fdca91100def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea59000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea590000000000000000000000000000000000000000000000209a84e2ceab2c000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000409ec55a2543c427ce84c6437012d2166754b2ab00000000000000000000000000000000000000000000000265d1fa7d538fbb3600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000002592216048c8a2000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000000e2a8221531977880000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d50000000000000000000000000000000000000000000000043fc3c6515fd5400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d500000000000000000000000000000000000000000000000d7c814c3dbc4b200000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000080db9081298fe0ef937100a85f715cf915a4f4ce000000000000000000000000000000000000000000000009346111b6d1231db3",
+     "operation": 1,
+     "confirmations": "4 of 4"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "approveHash",
+    "args": [
+     "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "sign_existing",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "I want to approve queued transaction #1445 as an owner. I cannot produce an off-chain signature.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "pending_queue": [
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c",
+     "to": "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB",
+     "value": "0",
+     "data": "0xa9059cbb0000000000000000000000006c9f86423e5f36d6e42fbc1baf966d3c1e0b57110000000000000000000000000000000000000000000000000de0b6b3a7640000",
+     "operation": 0,
+     "confirmations": "1 of 4"
+    },
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7",
+     "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+     "value": "0",
+     "data": "0x",
+     "operation": 0,
+     "confirmations": "2 of 4"
+    },
+    {
+     "nonce": 1446,
+     "safeTxHash": "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833",
+     "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+     "value": "0",
+     "data": "0x8d80ff0a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000132000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f913700000000000000000000000000000000000000000000002d9f288733cf0c666600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f91370000000000000000000000000000000000000000000000112e152815992cf1a600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000c8598ba37a93f67c75b1e69f13ff21fda23c0b140000000000000000000000000000000000000000000000081664ea25d0b2900000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000001aaaa287890837c8326dd1fedd2308e8a4e89290000000000000000000000000000000000000000000000000728065b7b93ee00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f778a8be9da0ba4b3d2224c694f49c94e36e5b840000000000000000000000000000000000000000000000131aed57a8a198400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee600000000000000000000000000000000000000000000002cabd7af0d6567cccc00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee60000000000000000000000000000000000000000000000209e67456c4201b15400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000000275c22f727ad9c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000003545cce626efd7000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000d7bec97d0d286c2eb0b21f8a74de87a3a2fb37b700000000000000000000000000000000000000000000000714f3fa0eb62cdb3300def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc400000000000000000000000000000000000000000000000f6e4db54276f9000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc40000000000000000000000000000000000000000000000edba99515de35e800000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000171d4a72a56dbd16cd75619de7d1d17f316fc51100000000000000000000000000000000000000000000000ef40d1a35cf1b545c00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba0000000000000000000000000000000000000000000000075320ced2f5a33e2d00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f1000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000300f8883b19db770000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000002bd12a973952e2971c93f970f31abf635ed7721c0000000000000000000000000000000000000000000000044955c722b1c0c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003e9e37a0794e62000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f10000000000000000000000000000000000000000000000188ab2d3b7fa78815900def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bed870b51ea0c39b896124c6ca293fb94579a7cf000000000000000000000000000000000000000000000000f8d849fd5b8ef8b400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000008464759c6e30b000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000010bbdc8824f64a400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003a5e73da27ee8e000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000054f2fe355fdca91100def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea59000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea590000000000000000000000000000000000000000000000209a84e2ceab2c000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000409ec55a2543c427ce84c6437012d2166754b2ab00000000000000000000000000000000000000000000000265d1fa7d538fbb3600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000002592216048c8a2000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000000e2a8221531977880000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d50000000000000000000000000000000000000000000000043fc3c6515fd5400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d500000000000000000000000000000000000000000000000d7c814c3dbc4b200000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000080db9081298fe0ef937100a85f715cf915a4f4ce000000000000000000000000000000000000000000000009346111b6d1231db3",
+     "operation": 1,
+     "confirmations": "4 of 4"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "approveHash",
+    "args": [
+     "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "execute_signed",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Transaction at nonce 1445 has collected all required signatures. Execute it.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "pending_queue": [
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c",
+     "to": "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB",
+     "value": "0",
+     "data": "0xa9059cbb0000000000000000000000006c9f86423e5f36d6e42fbc1baf966d3c1e0b57110000000000000000000000000000000000000000000000000de0b6b3a7640000",
+     "operation": 0,
+     "confirmations": "1 of 4"
+    },
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7",
+     "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+     "value": "0",
+     "data": "0x",
+     "operation": 0,
+     "confirmations": "2 of 4"
+    },
+    {
+     "nonce": 1446,
+     "safeTxHash": "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833",
+     "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+     "value": "0",
+     "data": "0x8d80ff0a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000132000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f913700000000000000000000000000000000000000000000002d9f288733cf0c666600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f91370000000000000000000000000000000000000000000000112e152815992cf1a600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000c8598ba37a93f67c75b1e69f13ff21fda23c0b140000000000000000000000000000000000000000000000081664ea25d0b2900000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000001aaaa287890837c8326dd1fedd2308e8a4e89290000000000000000000000000000000000000000000000000728065b7b93ee00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f778a8be9da0ba4b3d2224c694f49c94e36e5b840000000000000000000000000000000000000000000000131aed57a8a198400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee600000000000000000000000000000000000000000000002cabd7af0d6567cccc00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee60000000000000000000000000000000000000000000000209e67456c4201b15400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000000275c22f727ad9c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000003545cce626efd7000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000d7bec97d0d286c2eb0b21f8a74de87a3a2fb37b700000000000000000000000000000000000000000000000714f3fa0eb62cdb3300def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc400000000000000000000000000000000000000000000000f6e4db54276f9000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc40000000000000000000000000000000000000000000000edba99515de35e800000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000171d4a72a56dbd16cd75619de7d1d17f316fc51100000000000000000000000000000000000000000000000ef40d1a35cf1b545c00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba0000000000000000000000000000000000000000000000075320ced2f5a33e2d00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f1000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000300f8883b19db770000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000002bd12a973952e2971c93f970f31abf635ed7721c0000000000000000000000000000000000000000000000044955c722b1c0c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003e9e37a0794e62000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f10000000000000000000000000000000000000000000000188ab2d3b7fa78815900def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bed870b51ea0c39b896124c6ca293fb94579a7cf000000000000000000000000000000000000000000000000f8d849fd5b8ef8b400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000008464759c6e30b000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000010bbdc8824f64a400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003a5e73da27ee8e000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000054f2fe355fdca91100def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea59000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea590000000000000000000000000000000000000000000000209a84e2ceab2c000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000409ec55a2543c427ce84c6437012d2166754b2ab00000000000000000000000000000000000000000000000265d1fa7d538fbb3600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000002592216048c8a2000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000000e2a8221531977880000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d50000000000000000000000000000000000000000000000043fc3c6515fd5400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d500000000000000000000000000000000000000000000000d7c814c3dbc4b200000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000080db9081298fe0ef937100a85f715cf915a4f4ce000000000000000000000000000000000000000000000009346111b6d1231db3",
+     "operation": 1,
+     "confirmations": "4 of 4"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "execTransaction",
+    "args": [
+     "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+     "0",
+     "0x",
+     "0"
+    ]
+   }
+  ],
+  "args_checked": 4
+ },
+ {
+  "family": "reject",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Cancel the pending transaction at nonce 1445 by replacing it with a rejection.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "pending_queue": [
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c",
+     "to": "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB",
+     "value": "0",
+     "data": "0xa9059cbb0000000000000000000000006c9f86423e5f36d6e42fbc1baf966d3c1e0b57110000000000000000000000000000000000000000000000000de0b6b3a7640000",
+     "operation": 0,
+     "confirmations": "1 of 4"
+    },
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7",
+     "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+     "value": "0",
+     "data": "0x",
+     "operation": 0,
+     "confirmations": "2 of 4"
+    },
+    {
+     "nonce": 1446,
+     "safeTxHash": "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833",
+     "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+     "value": "0",
+     "data": "0x8d80ff0a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000132000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f913700000000000000000000000000000000000000000000002d9f288733cf0c666600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f91370000000000000000000000000000000000000000000000112e152815992cf1a600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000c8598ba37a93f67c75b1e69f13ff21fda23c0b140000000000000000000000000000000000000000000000081664ea25d0b2900000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000001aaaa287890837c8326dd1fedd2308e8a4e89290000000000000000000000000000000000000000000000000728065b7b93ee00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f778a8be9da0ba4b3d2224c694f49c94e36e5b840000000000000000000000000000000000000000000000131aed57a8a198400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee600000000000000000000000000000000000000000000002cabd7af0d6567cccc00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee60000000000000000000000000000000000000000000000209e67456c4201b15400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000000275c22f727ad9c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000003545cce626efd7000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000d7bec97d0d286c2eb0b21f8a74de87a3a2fb37b700000000000000000000000000000000000000000000000714f3fa0eb62cdb3300def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc400000000000000000000000000000000000000000000000f6e4db54276f9000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc40000000000000000000000000000000000000000000000edba99515de35e800000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000171d4a72a56dbd16cd75619de7d1d17f316fc51100000000000000000000000000000000000000000000000ef40d1a35cf1b545c00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba0000000000000000000000000000000000000000000000075320ced2f5a33e2d00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f1000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000300f8883b19db770000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000002bd12a973952e2971c93f970f31abf635ed7721c0000000000000000000000000000000000000000000000044955c722b1c0c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003e9e37a0794e62000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f10000000000000000000000000000000000000000000000188ab2d3b7fa78815900def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bed870b51ea0c39b896124c6ca293fb94579a7cf000000000000000000000000000000000000000000000000f8d849fd5b8ef8b400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000008464759c6e30b000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000010bbdc8824f64a400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003a5e73da27ee8e000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000054f2fe355fdca91100def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea59000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea590000000000000000000000000000000000000000000000209a84e2ceab2c000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000409ec55a2543c427ce84c6437012d2166754b2ab00000000000000000000000000000000000000000000000265d1fa7d538fbb3600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000002592216048c8a2000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000000e2a8221531977880000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d50000000000000000000000000000000000000000000000043fc3c6515fd5400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d500000000000000000000000000000000000000000000000d7c814c3dbc4b200000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000080db9081298fe0ef937100a85f715cf915a4f4ce000000000000000000000000000000000000000000000009346111b6d1231db3",
+     "operation": 1,
+     "confirmations": "4 of 4"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "",
+    "args": [],
+    "value": "0"
+   }
+  ],
+  "args_checked": 0,
+  "safe_nonce": 1445
+ },
+ {
+  "family": "sign_existing",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Sign the pending transaction at nonce 1446. My wallet is a smart contract, so I can only send on-chain transactions, not off-chain signatures.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "pending_queue": [
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c",
+     "to": "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB",
+     "value": "0",
+     "data": "0xa9059cbb0000000000000000000000006c9f86423e5f36d6e42fbc1baf966d3c1e0b57110000000000000000000000000000000000000000000000000de0b6b3a7640000",
+     "operation": 0,
+     "confirmations": "1 of 4"
+    },
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7",
+     "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+     "value": "0",
+     "data": "0x",
+     "operation": 0,
+     "confirmations": "2 of 4"
+    },
+    {
+     "nonce": 1446,
+     "safeTxHash": "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833",
+     "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+     "value": "0",
+     "data": "0x8d80ff0a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000132000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f913700000000000000000000000000000000000000000000002d9f288733cf0c666600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f91370000000000000000000000000000000000000000000000112e152815992cf1a600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000c8598ba37a93f67c75b1e69f13ff21fda23c0b140000000000000000000000000000000000000000000000081664ea25d0b2900000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000001aaaa287890837c8326dd1fedd2308e8a4e89290000000000000000000000000000000000000000000000000728065b7b93ee00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f778a8be9da0ba4b3d2224c694f49c94e36e5b840000000000000000000000000000000000000000000000131aed57a8a198400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee600000000000000000000000000000000000000000000002cabd7af0d6567cccc00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee60000000000000000000000000000000000000000000000209e67456c4201b15400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000000275c22f727ad9c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000003545cce626efd7000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000d7bec97d0d286c2eb0b21f8a74de87a3a2fb37b700000000000000000000000000000000000000000000000714f3fa0eb62cdb3300def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc400000000000000000000000000000000000000000000000f6e4db54276f9000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc40000000000000000000000000000000000000000000000edba99515de35e800000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000171d4a72a56dbd16cd75619de7d1d17f316fc51100000000000000000000000000000000000000000000000ef40d1a35cf1b545c00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba0000000000000000000000000000000000000000000000075320ced2f5a33e2d00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f1000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000300f8883b19db770000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000002bd12a973952e2971c93f970f31abf635ed7721c0000000000000000000000000000000000000000000000044955c722b1c0c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003e9e37a0794e62000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f10000000000000000000000000000000000000000000000188ab2d3b7fa78815900def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bed870b51ea0c39b896124c6ca293fb94579a7cf000000000000000000000000000000000000000000000000f8d849fd5b8ef8b400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000008464759c6e30b000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000010bbdc8824f64a400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003a5e73da27ee8e000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000054f2fe355fdca91100def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea59000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea590000000000000000000000000000000000000000000000209a84e2ceab2c000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000409ec55a2543c427ce84c6437012d2166754b2ab00000000000000000000000000000000000000000000000265d1fa7d538fbb3600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000002592216048c8a2000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000000e2a8221531977880000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d50000000000000000000000000000000000000000000000043fc3c6515fd5400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d500000000000000000000000000000000000000000000000d7c814c3dbc4b200000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000080db9081298fe0ef937100a85f715cf915a4f4ce000000000000000000000000000000000000000000000009346111b6d1231db3",
+     "operation": 1,
+     "confirmations": "4 of 4"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "approveHash",
+    "args": [
+     "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "sign_existing",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "I want to approve queued transaction #1446 as an owner. I cannot produce an off-chain signature.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "pending_queue": [
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c",
+     "to": "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB",
+     "value": "0",
+     "data": "0xa9059cbb0000000000000000000000006c9f86423e5f36d6e42fbc1baf966d3c1e0b57110000000000000000000000000000000000000000000000000de0b6b3a7640000",
+     "operation": 0,
+     "confirmations": "1 of 4"
+    },
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7",
+     "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+     "value": "0",
+     "data": "0x",
+     "operation": 0,
+     "confirmations": "2 of 4"
+    },
+    {
+     "nonce": 1446,
+     "safeTxHash": "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833",
+     "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+     "value": "0",
+     "data": "0x8d80ff0a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000132000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f913700000000000000000000000000000000000000000000002d9f288733cf0c666600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f91370000000000000000000000000000000000000000000000112e152815992cf1a600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000c8598ba37a93f67c75b1e69f13ff21fda23c0b140000000000000000000000000000000000000000000000081664ea25d0b2900000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000001aaaa287890837c8326dd1fedd2308e8a4e89290000000000000000000000000000000000000000000000000728065b7b93ee00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f778a8be9da0ba4b3d2224c694f49c94e36e5b840000000000000000000000000000000000000000000000131aed57a8a198400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee600000000000000000000000000000000000000000000002cabd7af0d6567cccc00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee60000000000000000000000000000000000000000000000209e67456c4201b15400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000000275c22f727ad9c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000003545cce626efd7000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000d7bec97d0d286c2eb0b21f8a74de87a3a2fb37b700000000000000000000000000000000000000000000000714f3fa0eb62cdb3300def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc400000000000000000000000000000000000000000000000f6e4db54276f9000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc40000000000000000000000000000000000000000000000edba99515de35e800000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000171d4a72a56dbd16cd75619de7d1d17f316fc51100000000000000000000000000000000000000000000000ef40d1a35cf1b545c00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba0000000000000000000000000000000000000000000000075320ced2f5a33e2d00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f1000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000300f8883b19db770000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000002bd12a973952e2971c93f970f31abf635ed7721c0000000000000000000000000000000000000000000000044955c722b1c0c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003e9e37a0794e62000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f10000000000000000000000000000000000000000000000188ab2d3b7fa78815900def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bed870b51ea0c39b896124c6ca293fb94579a7cf000000000000000000000000000000000000000000000000f8d849fd5b8ef8b400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000008464759c6e30b000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000010bbdc8824f64a400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003a5e73da27ee8e000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000054f2fe355fdca91100def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea59000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea590000000000000000000000000000000000000000000000209a84e2ceab2c000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000409ec55a2543c427ce84c6437012d2166754b2ab00000000000000000000000000000000000000000000000265d1fa7d538fbb3600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000002592216048c8a2000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000000e2a8221531977880000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d50000000000000000000000000000000000000000000000043fc3c6515fd5400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d500000000000000000000000000000000000000000000000d7c814c3dbc4b200000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000080db9081298fe0ef937100a85f715cf915a4f4ce000000000000000000000000000000000000000000000009346111b6d1231db3",
+     "operation": 1,
+     "confirmations": "4 of 4"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "approveHash",
+    "args": [
+     "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833"
+    ]
+   }
+  ],
+  "args_checked": 1
+ },
+ {
+  "family": "execute_signed",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Transaction at nonce 1446 has collected all required signatures. Execute it.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "pending_queue": [
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c",
+     "to": "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB",
+     "value": "0",
+     "data": "0xa9059cbb0000000000000000000000006c9f86423e5f36d6e42fbc1baf966d3c1e0b57110000000000000000000000000000000000000000000000000de0b6b3a7640000",
+     "operation": 0,
+     "confirmations": "1 of 4"
+    },
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7",
+     "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+     "value": "0",
+     "data": "0x",
+     "operation": 0,
+     "confirmations": "2 of 4"
+    },
+    {
+     "nonce": 1446,
+     "safeTxHash": "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833",
+     "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+     "value": "0",
+     "data": "0x8d80ff0a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000132000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f913700000000000000000000000000000000000000000000002d9f288733cf0c666600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f91370000000000000000000000000000000000000000000000112e152815992cf1a600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000c8598ba37a93f67c75b1e69f13ff21fda23c0b140000000000000000000000000000000000000000000000081664ea25d0b2900000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000001aaaa287890837c8326dd1fedd2308e8a4e89290000000000000000000000000000000000000000000000000728065b7b93ee00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f778a8be9da0ba4b3d2224c694f49c94e36e5b840000000000000000000000000000000000000000000000131aed57a8a198400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee600000000000000000000000000000000000000000000002cabd7af0d6567cccc00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee60000000000000000000000000000000000000000000000209e67456c4201b15400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000000275c22f727ad9c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000003545cce626efd7000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000d7bec97d0d286c2eb0b21f8a74de87a3a2fb37b700000000000000000000000000000000000000000000000714f3fa0eb62cdb3300def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc400000000000000000000000000000000000000000000000f6e4db54276f9000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc40000000000000000000000000000000000000000000000edba99515de35e800000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000171d4a72a56dbd16cd75619de7d1d17f316fc51100000000000000000000000000000000000000000000000ef40d1a35cf1b545c00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba0000000000000000000000000000000000000000000000075320ced2f5a33e2d00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f1000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000300f8883b19db770000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000002bd12a973952e2971c93f970f31abf635ed7721c0000000000000000000000000000000000000000000000044955c722b1c0c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003e9e37a0794e62000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f10000000000000000000000000000000000000000000000188ab2d3b7fa78815900def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bed870b51ea0c39b896124c6ca293fb94579a7cf000000000000000000000000000000000000000000000000f8d849fd5b8ef8b400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000008464759c6e30b000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000010bbdc8824f64a400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003a5e73da27ee8e000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000054f2fe355fdca91100def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea59000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea590000000000000000000000000000000000000000000000209a84e2ceab2c000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000409ec55a2543c427ce84c6437012d2166754b2ab00000000000000000000000000000000000000000000000265d1fa7d538fbb3600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000002592216048c8a2000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000000e2a8221531977880000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d50000000000000000000000000000000000000000000000043fc3c6515fd5400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d500000000000000000000000000000000000000000000000d7c814c3dbc4b200000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000080db9081298fe0ef937100a85f715cf915a4f4ce000000000000000000000000000000000000000000000009346111b6d1231db3",
+     "operation": 1,
+     "confirmations": "4 of 4"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "execTransaction",
+    "args": [
+     "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+     "0",
+     "0x8d80ff0a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000132000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f913700000000000000000000000000000000000000000000002d9f288733cf0c666600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f91370000000000000000000000000000000000000000000000112e152815992cf1a600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000c8598ba37a93f67c75b1e69f13ff21fda23c0b140000000000000000000000000000000000000000000000081664ea25d0b2900000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000001aaaa287890837c8326dd1fedd2308e8a4e89290000000000000000000000000000000000000000000000000728065b7b93ee00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f778a8be9da0ba4b3d2224c694f49c94e36e5b840000000000000000000000000000000000000000000000131aed57a8a198400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee600000000000000000000000000000000000000000000002cabd7af0d6567cccc00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee60000000000000000000000000000000000000000000000209e67456c4201b15400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000000275c22f727ad9c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000003545cce626efd7000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000d7bec97d0d286c2eb0b21f8a74de87a3a2fb37b700000000000000000000000000000000000000000000000714f3fa0eb62cdb3300def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc400000000000000000000000000000000000000000000000f6e4db54276f9000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc40000000000000000000000000000000000000000000000edba99515de35e800000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000171d4a72a56dbd16cd75619de7d1d17f316fc51100000000000000000000000000000000000000000000000ef40d1a35cf1b545c00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba0000000000000000000000000000000000000000000000075320ced2f5a33e2d00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f1000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000300f8883b19db770000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000002bd12a973952e2971c93f970f31abf635ed7721c0000000000000000000000000000000000000000000000044955c722b1c0c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003e9e37a0794e62000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f10000000000000000000000000000000000000000000000188ab2d3b7fa78815900def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bed870b51ea0c39b896124c6ca293fb94579a7cf000000000000000000000000000000000000000000000000f8d849fd5b8ef8b400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000008464759c6e30b000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000010bbdc8824f64a400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003a5e73da27ee8e000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000054f2fe355fdca91100def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea59000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea590000000000000000000000000000000000000000000000209a84e2ceab2c000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000409ec55a2543c427ce84c6437012d2166754b2ab00000000000000000000000000000000000000000000000265d1fa7d538fbb3600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000002592216048c8a2000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000000e2a8221531977880000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d50000000000000000000000000000000000000000000000043fc3c6515fd5400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d500000000000000000000000000000000000000000000000d7c814c3dbc4b200000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000080db9081298fe0ef937100a85f715cf915a4f4ce000000000000000000000000000000000000000000000009346111b6d1231db3",
+     "1"
+    ]
+   }
+  ],
+  "args_checked": 4
+ },
+ {
+  "family": "reject",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "intent": "Cancel the pending transaction at nonce 1446 by replacing it with a rejection.",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+   "pending_queue": [
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x4fa25e1e26e6b33eee3de99de867d7880a56f714061d53f43528f8495f414d7c",
+     "to": "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB",
+     "value": "0",
+     "data": "0xa9059cbb0000000000000000000000006c9f86423e5f36d6e42fbc1baf966d3c1e0b57110000000000000000000000000000000000000000000000000de0b6b3a7640000",
+     "operation": 0,
+     "confirmations": "1 of 4"
+    },
+    {
+     "nonce": 1445,
+     "safeTxHash": "0x055a277d2506978fc73a743d10ee9dee7805b74f895eaa399f0a8601224c05a7",
+     "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+     "value": "0",
+     "data": "0x",
+     "operation": 0,
+     "confirmations": "2 of 4"
+    },
+    {
+     "nonce": 1446,
+     "safeTxHash": "0xebd70e8588d667f134c3036b5fcc18b0a718d22de0c9e262a2c235251e420833",
+     "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+     "value": "0",
+     "data": "0x8d80ff0a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000132000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f913700000000000000000000000000000000000000000000002d9f288733cf0c666600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000009b47d63fd901fc03d0c1213431ac6ea0bd3f91370000000000000000000000000000000000000000000000112e152815992cf1a600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000c8598ba37a93f67c75b1e69f13ff21fda23c0b140000000000000000000000000000000000000000000000081664ea25d0b2900000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000001aaaa287890837c8326dd1fedd2308e8a4e89290000000000000000000000000000000000000000000000000728065b7b93ee00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f778a8be9da0ba4b3d2224c694f49c94e36e5b840000000000000000000000000000000000000000000000131aed57a8a198400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee600000000000000000000000000000000000000000000002cabd7af0d6567cccc00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000165f90d55397cd115809a5954b42c1f8c4006ee60000000000000000000000000000000000000000000000209e67456c4201b15400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000000275c22f727ad9c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000660c3251695fb03a73e3c80de6606fd6ae69708a00000000000000000000000000000000000000000000003545cce626efd7000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000d7bec97d0d286c2eb0b21f8a74de87a3a2fb37b700000000000000000000000000000000000000000000000714f3fa0eb62cdb3300def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc400000000000000000000000000000000000000000000000f6e4db54276f9000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000004cf2ca9d42ea35767ca209494371689e9fbb2cc40000000000000000000000000000000000000000000000edba99515de35e800000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000171d4a72a56dbd16cd75619de7d1d17f316fc51100000000000000000000000000000000000000000000000ef40d1a35cf1b545c00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba0000000000000000000000000000000000000000000000075320ced2f5a33e2d00def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f1000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000300f8883b19db770000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000002bd12a973952e2971c93f970f31abf635ed7721c0000000000000000000000000000000000000000000000044955c722b1c0c00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003e9e37a0794e62000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f10000000000000000000000000000000000000000000000188ab2d3b7fa78815900def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bed870b51ea0c39b896124c6ca293fb94579a7cf000000000000000000000000000000000000000000000000f8d849fd5b8ef8b400def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000008464759c6e30b000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000bece6f358a252cb72f7fe64d491a7f448ed5ecc9000000000000000000000000000000000000000000000010bbdc8824f64a400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000003a5e73da27ee8e000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000f75c91ae0021a1cc18846e36fee456ccc678c5f100000000000000000000000000000000000000000000000054f2fe355fdca91100def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea59000000000000000000000000000000000000000000000001578131272bbca00000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000ca8a6c454bbccb2017eb37e075cfea813b4dea590000000000000000000000000000000000000000000000209a84e2ceab2c000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000409ec55a2543c427ce84c6437012d2166754b2ab00000000000000000000000000000000000000000000000265d1fa7d538fbb3600def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000002592216048c8a2000000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb000000000000000000000000689d90b257722edb0759e1d07ed956494dfc805e00000000000000000000000000000000000000000000000e2a8221531977880000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d50000000000000000000000000000000000000000000000043fc3c6515fd5400000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000050650829101f9e3df0cebb0cbab7cca1e2c335d500000000000000000000000000000000000000000000000d7c814c3dbc4b200000def1ca1fb7fbcdc777520aa7f396b4e015f497ab00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044a9059cbb00000000000000000000000080db9081298fe0ef937100a85f715cf915a4f4ce000000000000000000000000000000000000000000000009346111b6d1231db3",
+     "operation": 1,
+     "confirmations": "4 of 4"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "to": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+    "function": "",
+    "args": [],
+    "value": "0"
+   }
+  ],
+  "args_checked": 0,
+  "safe_nonce": 1446
+ },
+ {
+  "family": "payout",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930"
+  },
+  "intent": "Pay 250 USDC to 0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0 and 75 USDC to 0x6C9F86423e5F36D6E42FbC1BAf966d3c1E0B5711 from this Safe, in one batch.",
+  "expect": [
+   {
+    "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "function": "transfer",
+    "args": [
+     "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0",
+     "250000000"
+    ]
+   },
+   {
+    "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "function": "transfer",
+    "args": [
+     "0x6C9F86423e5F36D6E42FbC1BAf966d3c1E0B5711",
+     "75000000"
+    ]
+   }
+  ],
+  "args_checked": 2,
+  "unordered": true
+ },
+ {
+  "family": "payout",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930"
+  },
+  "intent": "Pay 1200 USDC to 0x2e7c372981944a94138B5A7D7fDdC8EaeF01B5AD and 5 USDC to 0x9E60E47215A9e71c862fef93bA2Bc6F800929114 from this Safe, in one batch.",
+  "expect": [
+   {
+    "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "function": "transfer",
+    "args": [
+     "0x2e7c372981944a94138B5A7D7fDdC8EaeF01B5AD",
+     "1200000000"
+    ]
+   },
+   {
+    "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "function": "transfer",
+    "args": [
+     "0x9E60E47215A9e71c862fef93bA2Bc6F800929114",
+     "5000000"
+    ]
+   }
+  ],
+  "args_checked": 2,
+  "unordered": true
+ },
+ {
+  "family": "payout",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930"
+  },
+  "intent": "Pay 100 USDT to 0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0 and 75 USDT to 0x6C9F86423e5F36D6E42FbC1BAf966d3c1E0B5711 from this Safe, in one batch.",
+  "expect": [
+   {
+    "to": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+    "function": "transfer",
+    "args": [
+     "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0",
+     "100000000"
+    ]
+   },
+   {
+    "to": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+    "function": "transfer",
+    "args": [
+     "0x6C9F86423e5F36D6E42FbC1BAf966d3c1E0B5711",
+     "75000000"
+    ]
+   }
+  ],
+  "args_checked": 2,
+  "unordered": true
+ },
+ {
+  "family": "payout",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930"
+  },
+  "intent": "Pay 250 USDT to 0x2e7c372981944a94138B5A7D7fDdC8EaeF01B5AD and 75 USDT to 0x9E60E47215A9e71c862fef93bA2Bc6F800929114 from this Safe, in one batch.",
+  "expect": [
+   {
+    "to": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+    "function": "transfer",
+    "args": [
+     "0x2e7c372981944a94138B5A7D7fDdC8EaeF01B5AD",
+     "250000000"
+    ]
+   },
+   {
+    "to": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+    "function": "transfer",
+    "args": [
+     "0x9E60E47215A9e71c862fef93bA2Bc6F800929114",
+     "75000000"
+    ]
+   }
+  ],
+  "args_checked": 2,
+  "unordered": true
+ },
+ {
+  "family": "payout",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930"
+  },
+  "intent": "Pay 1200 DAI to 0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0 and 5 DAI to 0x6C9F86423e5F36D6E42FbC1BAf966d3c1E0B5711 from this Safe, in one batch.",
+  "expect": [
+   {
+    "to": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+    "function": "transfer",
+    "args": [
+     "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0",
+     "1200000000000000000000"
+    ]
+   },
+   {
+    "to": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+    "function": "transfer",
+    "args": [
+     "0x6C9F86423e5F36D6E42FbC1BAf966d3c1E0B5711",
+     "5000000000000000000"
+    ]
+   }
+  ],
+  "args_checked": 2,
+  "unordered": true
+ },
+ {
+  "family": "payout",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930"
+  },
+  "intent": "Pay 100 DAI to 0x2e7c372981944a94138B5A7D7fDdC8EaeF01B5AD and 40 DAI to 0x9E60E47215A9e71c862fef93bA2Bc6F800929114 from this Safe, in one batch.",
+  "expect": [
+   {
+    "to": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+    "function": "transfer",
+    "args": [
+     "0x2e7c372981944a94138B5A7D7fDdC8EaeF01B5AD",
+     "100000000000000000000"
+    ]
+   },
+   {
+    "to": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+    "function": "transfer",
+    "args": [
+     "0x9E60E47215A9e71c862fef93bA2Bc6F800929114",
+     "40000000000000000000"
+    ]
+   }
+  ],
+  "args_checked": 2,
+  "unordered": true
+ },
+ {
+  "family": "payout",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930"
+  },
+  "intent": "Pay 250 WETH to 0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0 and 5 WETH to 0x6C9F86423e5F36D6E42FbC1BAf966d3c1E0B5711 from this Safe, in one batch.",
+  "expect": [
+   {
+    "to": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "function": "transfer",
+    "args": [
+     "0x1c20Fd4b76E2ec0BFd417eD18C02F45c1e8190C0",
+     "250000000000000000000"
+    ]
+   },
+   {
+    "to": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "function": "transfer",
+    "args": [
+     "0x6C9F86423e5F36D6E42FbC1BAf966d3c1E0B5711",
+     "5000000000000000000"
+    ]
+   }
+  ],
+  "args_checked": 2,
+  "unordered": true
+ },
+ {
+  "family": "payout",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930"
+  },
+  "intent": "Pay 100 WETH to 0x2e7c372981944a94138B5A7D7fDdC8EaeF01B5AD and 75 WETH to 0x9E60E47215A9e71c862fef93bA2Bc6F800929114 from this Safe, in one batch.",
+  "expect": [
+   {
+    "to": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "function": "transfer",
+    "args": [
+     "0x2e7c372981944a94138B5A7D7fDdC8EaeF01B5AD",
+     "100000000000000000000"
+    ]
+   },
+   {
+    "to": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "function": "transfer",
+    "args": [
+     "0x9E60E47215A9e71c862fef93bA2Bc6F800929114",
+     "75000000000000000000"
+    ]
+   }
+  ],
+  "args_checked": 2,
+  "unordered": true
+ },
+ {
+  "family": "limited_approve",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930"
+  },
+  "intent": "Allow the Uniswap V3 router at 0xE592427A0AEce92De3Edee1F18E0157C05861564 to spend exactly 500 USDC from this Safe for a swap. Do not grant more.",
+  "expect": [
+   {
+    "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "function": "approve",
+    "args": [
+     "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+     "500000000"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "limited_approve",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930"
+  },
+  "intent": "Allow the Uniswap V3 router at 0xE592427A0AEce92De3Edee1F18E0157C05861564 to spend exactly 1000 USDT from this Safe for a swap. Do not grant more.",
+  "expect": [
+   {
+    "to": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+    "function": "approve",
+    "args": [
+     "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+     "1000000000"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "limited_approve",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930"
+  },
+  "intent": "Allow the Uniswap V3 router at 0xE592427A0AEce92De3Edee1F18E0157C05861564 to spend exactly 300 DAI from this Safe for a swap. Do not grant more.",
+  "expect": [
+   {
+    "to": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+    "function": "approve",
+    "args": [
+     "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+     "300000000000000000000"
+    ]
+   }
+  ],
+  "args_checked": 2
+ },
+ {
+  "family": "limited_approve",
+  "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930",
+  "context": {
+   "safe": "0xA03be496e67Ec29bC62F01a428683D7F9c204930"
+  },
+  "intent": "Allow the Uniswap V3 router at 0xE592427A0AEce92De3Edee1F18E0157C05861564 to spend exactly 2 WETH from this Safe for a swap. Do not grant more.",
+  "expect": [
+   {
+    "to": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "function": "approve",
+    "args": [
+     "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+     "2000000000000000000"
+    ]
+   }
+  ],
+  "args_checked": 2
+ }
+]

@@ -484,6 +484,7 @@ async fn read_allowance(
     allowanceCall::abi_decode_returns(&raw).map_err(|_| QuoteSwapError::Decode)
 }
 
+#[allow(clippy::double_must_use)] // async_trait's generated methods; see ChainAdapter
 #[async_trait]
 trait QuoteEthCaller {
     async fn eth_call(&self, to: Address, data: Bytes) -> Result<Bytes, QuoteSwapError>;

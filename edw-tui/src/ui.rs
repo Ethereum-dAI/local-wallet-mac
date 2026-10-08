@@ -237,6 +237,12 @@ fn render_skills(frame: &mut Frame, area: Rect, app: &App) {
                     lines.push(Line::from(format!("{}  approve: {approval}", chain.name)));
                 }
             }
+            for (label, functions) in &request.named {
+                lines.push(Line::from(format!(
+                    "any {label} you name  {}",
+                    functions.join(", ")
+                )));
+            }
         } else if row.note.is_none() && !row.description.is_empty() {
             lines.push(Line::from(row.description.clone()));
         }
@@ -314,7 +320,7 @@ fn render_consent(
         ),
         Line::default(),
     ];
-    if request.chains.is_empty() {
+    if request.chains.is_empty() && request.named.is_empty() {
         lines.push(Line::from(vec![
             heading("CAN PROPOSE CALLS TO "),
             Span::from("nothing (read-only)"),
@@ -332,6 +338,12 @@ fn render_consent(
             for approval in &chain.approvals {
                 lines.push(Line::from(format!("   approve: {approval}")));
             }
+        }
+        for (label, functions) in &request.named {
+            lines.push(Line::from(vec![
+                Span::from(format!(" Any {label} you name, on any chain  ")),
+                Span::from(functions.join(", ")).yellow(),
+            ]));
         }
     }
     lines.push(Line::default());

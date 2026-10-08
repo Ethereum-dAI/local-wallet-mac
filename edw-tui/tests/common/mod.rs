@@ -4,6 +4,7 @@
 
 pub mod pty;
 pub mod recorder;
+pub mod safe_fork;
 pub mod scenario;
 
 use std::{path::PathBuf, sync::Arc, time::Duration};

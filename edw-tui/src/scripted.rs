@@ -53,9 +53,106 @@ fn stablecoin(text: &str) -> &'static str {
         .unwrap_or("USDC")
 }
 
+/// The first address in a prompt: a `0x` + 40-hex word, or the `ADDR_n` alias the harness puts
+/// in its place before the model sees the message (it reveals the alias again in tool arguments).
+fn address_in(prompt: &str) -> Option<String> {
+    prompt
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_'))
+        .find(|w| {
+            let hex = w.len() == 42
+                && w.starts_with("0x")
+                && w[2..].chars().all(|c| c.is_ascii_hexdigit());
+            let alias = w
+                .strip_prefix("ADDR_")
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+            hex || alias
+        })
+        .map(str::to_owned)
+}
+
+/// The address right after the word `safe` (`safe 0x…`, `safe at ADDR_1`): `is it safe to send 5
+/// USDC to 0x…` is not a Safe request.
+fn safe_address_in(prompt: &str) -> Option<String> {
+    let words: Vec<&str> = prompt.split_whitespace().collect();
+    words.iter().enumerate().find_map(|(i, w)| {
+        if !w
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .eq_ignore_ascii_case("safe")
+        {
+            return None;
+        }
+        let rest = &words[i + 1..];
+        let next = if rest.first().is_some_and(|w| w.eq_ignore_ascii_case("at")) {
+            rest.get(1)
+        } else {
+            rest.first()
+        };
+        address_in(next?)
+    })
+}
+
+/// Safe requests: `what is waiting for signatures on safe 0x…`, `who controls safe 0x…`,
+/// `what did safe 0x… do recently on gnosis`.
+fn safe_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
+    if !has("safe") {
+        return None;
+    }
+    let mut args = json!({"address": safe_address_in(prompt)?});
+    if has("gnosis") {
+        args["chain"] = json!("gnosis");
+    }
+    let asks_nonce = has("nonce");
+    if (has("approve") || has("execute")) && asks_nonce {
+        // Look at what waits first, then act on the one asked for: `approve nonce 1445 on safe 0x…`.
+        let nonce = prompt
+            .split_whitespace()
+            .skip_while(|w| !w.eq_ignore_ascii_case("nonce"))
+            .nth(1)
+            .and_then(|w| {
+                w.trim_matches(|c: char| !c.is_ascii_digit())
+                    .parse::<u64>()
+                    .ok()
+            });
+        let mut act = json!({"address": args["address"]});
+        // `nonce <n>` is required for a write; without a number it is not a request to send.
+        act["nonce"] = json!(nonce?);
+        let tool = if has("execute") {
+            "safe_execute"
+        } else {
+            "safe_approve_hash"
+        };
+        return Some(Script::Calls(vec![
+            ("load_skill", json!({"name": "safe-multisig"})),
+            ("safe_queue", args),
+            (tool, act),
+        ]));
+    }
+    let tool = if has("waiting")
+        || has("pending")
+        || has("queue")
+        || has("sign")
+        || has("signature")
+        || has("signatures")
+    {
+        "safe_queue"
+    } else if has("controls") || has("owners") || has("threshold") || has("signers") {
+        "safe_info"
+    } else {
+        "safe_activity"
+    };
+    Some(Script::Calls(vec![
+        ("load_skill", json!({"name": "safe-multisig"})),
+        (tool, args),
+    ]))
+}
+
 /// Skill requests: `what does aave pay`, `put <amount> <token> on aave`, `withdraw all my
 /// <token> from aave`, `best <token> lending rates on <chain>`.
 fn skill_script(prompt: &str, text: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
+    if let Some(safe) = safe_script(prompt, has) {
+        return Some(safe);
+    }
     let aave = ("load_skill", json!({"name": "aave-v3-lend"}));
     if has("aave") {
         let token = stablecoin(text);
@@ -169,6 +266,78 @@ pub fn summary(tool: &str, result: &str) -> Option<String> {
             };
             Some(format!("Aave v3 pays now: {}. {held}", rates.join(" · ")))
         }
+        "safe_info" => {
+            let v: Value = serde_json::from_str(output).ok()?;
+            Some(format!(
+                "That Safe on {}: {} (v{}); {}. {}",
+                v["chain"].as_str()?,
+                v["rule"].as_str()?,
+                v["version"].as_str().unwrap_or("?"),
+                v["onchain_check"]
+                    .as_str()
+                    .unwrap_or("not checked on chain"),
+                v["warning"].as_str().unwrap_or("No modules are enabled.")
+            ))
+        }
+        "safe_queue" => {
+            let v: Value = serde_json::from_str(output).ok()?;
+            let rows = v["transactions"].as_array()?;
+            if rows.is_empty() {
+                return Some("Nothing is waiting for signatures on that Safe.".into());
+            }
+            let lines: Vec<String> = rows
+                .iter()
+                .map(|r| {
+                    let warn = r["warnings"].as_array().map_or(String::new(), |w| {
+                        w.iter()
+                            .filter_map(Value::as_str)
+                            .map(|w| format!(" ⚠ {w}."))
+                            .collect()
+                    });
+                    format!(
+                        "#{} {} ({} signed){warn}",
+                        r["nonce"],
+                        r["summary"].as_str().unwrap_or("?"),
+                        r["signatures"].as_str().unwrap_or("?")
+                    )
+                })
+                .collect();
+            let approved: Vec<String> = rows
+                .iter()
+                .filter(|r| r["you_approved_on_chain"] == true)
+                .map(|r| format!("#{}", r["nonce"]))
+                .collect();
+            let mine = if approved.is_empty() {
+                String::new()
+            } else {
+                format!(" You approved {} on chain.", approved.join(", "))
+            };
+            Some(format!(
+                "{} waiting ({}): {}{mine}",
+                rows.len(),
+                v["rule"].as_str()?,
+                lines.join(" | ")
+            ))
+        }
+        "safe_activity" => {
+            let v: Value = serde_json::from_str(output).ok()?;
+            let lines: Vec<String> = v["transactions"]
+                .as_array()?
+                .iter()
+                .map(|r| format!("#{} {}", r["nonce"], r["summary"].as_str().unwrap_or("?")))
+                .collect();
+            Some(format!("Recently executed: {}", lines.join(" | ")))
+        }
+        "safe_execute" => Some(if output.contains("succeeded") {
+            "Executed: the Safe ran the transaction and its nonce moved on.".to_owned()
+        } else {
+            format!("Not executed: {output}")
+        }),
+        "safe_approve_hash" => Some(if output.contains("succeeded") {
+            "Approved on chain: the Safe now counts your approval for that transaction. It still needs the other owners, and someone must execute it in the Safe app.".to_owned()
+        } else {
+            format!("Not approved: {output}")
+        }),
         "aave_supply" | "aave_withdraw" => Some(if output.contains("succeeded") {
             "Done: the transactions were sent and all succeeded.".to_owned()
         } else {
@@ -441,6 +610,93 @@ mod tests {
         assert!(
             summary("balance", &sent).is_none(),
             "other tools keep the plain reply"
+        );
+    }
+
+    #[test]
+    fn scripts_safe_requests_by_what_is_asked() {
+        let safe = "0xA03be496e67Ec29bC62F01a428683D7F9c204930";
+        let load = ("load_skill", json!({"name": "safe-multisig"}));
+        let calls =
+            |tool: &'static str, args: Value| Script::Calls(vec![load.clone(), (tool, args)]);
+        assert_eq!(
+            script(&format!("what is waiting for signatures on safe {safe}?")),
+            calls("safe_queue", json!({"address": safe}))
+        );
+        assert_eq!(
+            script(&format!("who controls safe {safe}?")),
+            calls("safe_info", json!({"address": safe}))
+        );
+        assert_eq!(
+            script(&format!("what did safe {safe} do recently on gnosis")),
+            calls("safe_activity", json!({"address": safe, "chain": "gnosis"}))
+        );
+        assert_eq!(
+            script(&format!("approve nonce 1445 on safe {safe}")),
+            Script::Calls(vec![
+                load.clone(),
+                ("safe_queue", json!({"address": safe})),
+                ("safe_approve_hash", json!({"address": safe, "nonce": 1445})),
+            ])
+        );
+        assert_eq!(
+            script(&format!("execute nonce 1446 on safe {safe}")),
+            Script::Calls(vec![
+                load.clone(),
+                ("safe_queue", json!({"address": safe})),
+                ("safe_execute", json!({"address": safe, "nonce": 1446})),
+            ])
+        );
+        // Words that merely contain "safe", or a write without a nonce, are not Safe requests.
+        for prompt in [
+            format!("is it safe to send 5 USDC to {safe}?"),
+            format!("approve the router for 5 USDC, keep it safe {safe}"),
+            format!("approve safe {safe}"),
+            format!("execute safe {safe} now"),
+        ] {
+            assert!(
+                !matches!(script(&prompt), Script::Calls(ref c) if c.iter().any(|(t, _)| matches!(*t, "safe_approve_hash" | "safe_execute"))),
+                "{prompt}"
+            );
+        }
+        // The harness hands the model an alias, not the address itself.
+        assert_eq!(
+            script("who controls safe ADDR_1?"),
+            calls("safe_info", json!({"address": "ADDR_1"}))
+        );
+        // No address: nothing to look up, so it is not a Safe request.
+        assert!(!matches!(script("what is a safe"), Script::Calls(_)));
+    }
+
+    #[test]
+    fn safe_results_are_summed_up_in_the_reply() {
+        let result = |output: Value| {
+            json!({"command": "skill x", "exit_code": 0, "output": output.to_string()}).to_string()
+        };
+        let info = result(json!({
+            "chain": "Ethereum", "rule": "4 of 11 owners must sign", "version": "1.3.0",
+            "onchain_check": "owners and threshold match the chain",
+        }));
+        assert_eq!(
+            summary("safe_info", &info).unwrap(),
+            "That Safe on Ethereum: 4 of 11 owners must sign (v1.3.0); owners and threshold match the chain. No modules are enabled."
+        );
+        let queue = result(json!({
+            "rule": "4 of 11 owners must sign",
+            "transactions": [
+                {"nonce": 1445, "summary": "Sends 1 COW to 0x6C9F…5711", "signatures": "1 of 4", "warnings": []},
+                {"nonce": 1446, "summary": "Pays 5 COW to 2 recipients", "signatures": "4 of 4",
+                 "warnings": ["changes who controls the Safe"]},
+            ]
+        }));
+        assert_eq!(
+            summary("safe_queue", &queue).unwrap(),
+            "2 waiting (4 of 11 owners must sign): #1445 Sends 1 COW to 0x6C9F…5711 (1 of 4 signed) | #1446 Pays 5 COW to 2 recipients (4 of 4 signed) ⚠ changes who controls the Safe."
+        );
+        let empty = result(json!({"rule": "1 of 1 owners must sign", "transactions": []}));
+        assert_eq!(
+            summary("safe_queue", &empty).unwrap(),
+            "Nothing is waiting for signatures on that Safe."
         );
     }
 

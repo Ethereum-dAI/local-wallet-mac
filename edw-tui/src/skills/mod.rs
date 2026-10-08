@@ -7,6 +7,7 @@
 pub mod abi;
 pub mod catalog;
 pub mod consent;
+pub mod explain;
 pub mod host;
 pub mod lock;
 pub mod manifest;

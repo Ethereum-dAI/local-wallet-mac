@@ -56,6 +56,9 @@ pub struct ConsentRequest {
     pub hosts: Vec<String>,
     pub tools: Vec<String>,
     pub chains: Vec<ChainView>,
+    /// (contract label, allowed function names): contracts at an address the user names when
+    /// they ask, on any chain, such as their own Safe.
+    pub named: Vec<(String, Vec<String>)>,
 }
 
 pub fn chain_name(id: u64) -> String {
@@ -128,6 +131,17 @@ impl ConsentRequest {
             hosts: m.hosts.clone(),
             tools: skill.tool_names().into_iter().map(str::to_owned).collect(),
             chains,
+            named: m
+                .contracts
+                .iter()
+                .filter(|c| c.address_arg.is_some())
+                .map(|c| {
+                    (
+                        one_line(&c.label),
+                        c.functions.iter().map(|f| f.name.clone()).collect(),
+                    )
+                })
+                .collect(),
         }
     }
 }

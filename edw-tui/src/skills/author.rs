@@ -2,10 +2,14 @@
 //! run from here. It becomes a skill only through `skills::install_draft`, which the user starts
 //! (`/skill install <name>`) and which ends in the normal approval card.
 
+use regex::Regex;
 use std::{
     fs,
     path::{Component, Path, PathBuf},
+    process::Command,
 };
+
+use super::manifest::{self, Skill};
 
 /// The shipped skill whose instructions drive authoring; loading it offers the tools below.
 pub const CREATOR: &str = "skill-creator";
@@ -115,6 +119,144 @@ fn count_files(dir: &Path) -> usize {
         .sum()
 }
 
+/// What `check` found. Errors stop an install; warnings are for the model to fix or the user to
+/// weigh.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Report {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+impl Report {
+    pub fn ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    /// Text for the model, errors first.
+    pub fn render(&self, name: &str) -> String {
+        if self.errors.is_empty() && self.warnings.is_empty() {
+            return format!("{name}: no problems found.");
+        }
+        let mut out = String::new();
+        if !self.errors.is_empty() {
+            out.push_str("Errors (fix these):\n");
+            for e in &self.errors {
+                out.push_str(&format!("- {e}\n"));
+            }
+        }
+        if !self.warnings.is_empty() {
+            out.push_str("Warnings (fix them, or tell the user):\n");
+            for w in &self.warnings {
+                out.push_str(&format!("- {w}\n"));
+            }
+        }
+        out.trim_end().to_owned()
+    }
+}
+
+/// Loads the draft with the real manifest loader, then lints what the loader allows but a user
+/// would regret.
+pub fn check(dir: &Path) -> Report {
+    let mut report = Report::default();
+    match manifest::load(dir) {
+        Ok(skill) => lint(&skill, &mut report),
+        Err(why) => report.errors.push(why),
+    }
+    report
+}
+
+/// Words that tell a reader a skill can send transactions.
+const ACTING: [&str; 16] = [
+    "send",
+    "supply",
+    "withdraw",
+    "approve",
+    "swap",
+    "transfer",
+    "deposit",
+    "stake",
+    "execute",
+    "sign",
+    "buy",
+    "sell",
+    "lend",
+    "borrow",
+    "repay",
+    "transaction",
+];
+
+fn lint(skill: &Skill, report: &mut Report) {
+    let len = skill.description.chars().count();
+    if len < 20 {
+        report.errors.push(format!(
+            "the description is {len} characters; the model picks skills from it, so say what the skill does and when to use it (20-300 characters)"
+        ));
+    } else if len > 300 {
+        report.warnings.push(format!(
+            "the description is {len} characters; every skill's description is in every request, so keep it under 300"
+        ));
+    }
+    if skill.body.trim().is_empty() {
+        report
+            .errors
+            .push("SKILL.md has no instructions below the frontmatter".into());
+    }
+    if Regex::new(r"\b(ALWAYS|NEVER|MUST)\b")
+        .expect("valid pattern")
+        .is_match(&skill.body)
+    {
+        report.warnings.push(
+            "SKILL.md uses ALWAYS/NEVER/MUST in capital letters; models follow a stated reason better than shouting, so say why".into(),
+        );
+    }
+    let m = &skill.manifest;
+    for tool in m.read_tools.iter().chain(m.actions.iter().map(|a| &a.tool)) {
+        let script = skill.dir.join(&tool.run);
+        if !script.is_file() {
+            report.errors.push(format!(
+                "{} runs {}, which is not in the draft",
+                tool.name, tool.run
+            ));
+        } else if let Some(why) = python_syntax(&script) {
+            report.errors.push(format!("{}: {why}", tool.run));
+        }
+        if !skill.body.contains(&tool.name) {
+            report.warnings.push(format!(
+                "SKILL.md never mentions the tool {}; say when to call it and what to tell the user",
+                tool.name
+            ));
+        }
+    }
+    let description = skill.description.to_lowercase();
+    if !m.actions.is_empty() && !ACTING.iter().any(|word| description.contains(word)) {
+        report.warnings.push(
+            "the skill can send transactions (it declares actions) but its description never says so; a user reading the skill list would not expect that".into(),
+        );
+    }
+}
+
+/// `Some(reason)` when python3 is present and rejects the file's syntax. Without python3 there
+/// is nothing to say. Parses only: nothing in the file runs, and no `__pycache__` is written.
+fn python_syntax(script: &Path) -> Option<String> {
+    let out = Command::new("python3")
+        .args([
+            "-I",
+            "-c",
+            "import ast,sys; ast.parse(open(sys.argv[1], encoding='utf-8').read(), sys.argv[1])",
+        ])
+        .arg(script)
+        .output()
+        .ok()?;
+    if out.status.success() {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Some(format!(
+        "Python syntax error: {}",
+        stderr.lines().last().unwrap_or("unknown")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +359,139 @@ mod tests {
                 .is_err()
         );
         assert_eq!(std::fs::read_to_string(outside).unwrap(), "keep");
+    }
+
+    use std::process::Command;
+
+    fn draft(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("demo");
+        for (path, content) in files {
+            let target = dir.join(path);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::write(target, content).unwrap();
+        }
+        (root, dir)
+    }
+
+    const GOOD_MD: &str = "---\nname: demo\ndescription: Look up the ETH balance of any address. Use when the user asks what an address holds.\n---\nCall balance_of with the address. Say which chain the number is from.\n";
+    const READ_TOML: &str = "version = \"0.1.0\"\n[[read_tool]]\nname = \"balance_of\"\nrun = \"scripts/balance.py\"\ndescription = \"ETH balance of an address\"\nschema = { type = \"object\", required = [\"address\"], properties = { address = { type = \"string\" } } }\n";
+
+    #[test]
+    fn a_clean_knowledge_skill_has_no_findings() {
+        let (_root, dir) = draft(&[("SKILL.md", GOOD_MD)]);
+        let report = check(&dir);
+        assert!(report.ok(), "{report:?}");
+        assert!(report.warnings.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn a_draft_that_does_not_load_reports_the_loader_error() {
+        let (_root, dir) = draft(&[("SKILL.md", "no frontmatter")]);
+        let report = check(&dir);
+        assert!(!report.ok());
+        assert!(report.errors[0].contains("frontmatter"), "{report:?}");
+    }
+
+    #[test]
+    fn a_vague_description_is_an_error_and_a_long_one_a_warning() {
+        let short = "---\nname: demo\ndescription: stuff\n---\nbody\n";
+        let (_a, dir) = draft(&[("SKILL.md", short)]);
+        assert!(check(&dir).errors.iter().any(|e| e.contains("description")));
+        let long = format!(
+            "---\nname: demo\ndescription: {}\n---\nbody\n",
+            "word ".repeat(80)
+        );
+        let (_b, dir) = draft(&[("SKILL.md", &long)]);
+        let report = check(&dir);
+        assert!(report.ok());
+        assert!(report.warnings.iter().any(|w| w.contains("description")));
+    }
+
+    #[test]
+    fn capital_letter_rules_are_a_warning() {
+        let md = GOOD_MD.replace("Call balance_of", "ALWAYS call balance_of");
+        let (_root, dir) = draft(&[("SKILL.md", &md)]);
+        assert!(check(&dir).warnings.iter().any(|w| w.contains("capital")));
+    }
+
+    #[test]
+    fn a_tool_whose_script_is_missing_is_an_error() {
+        let (_root, dir) = draft(&[("SKILL.md", GOOD_MD), ("skill.toml", READ_TOML)]);
+        let report = check(&dir);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("scripts/balance.py")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn a_tool_the_instructions_never_mention_is_a_warning() {
+        let md = GOOD_MD.replace("balance_of", "the lookup");
+        let (_root, dir) = draft(&[
+            ("SKILL.md", &md),
+            ("skill.toml", READ_TOML),
+            ("scripts/balance.py", "print(1)\n"),
+        ]);
+        assert!(
+            check(&dir)
+                .warnings
+                .iter()
+                .any(|w| w.contains("balance_of"))
+        );
+    }
+
+    #[test]
+    fn an_action_the_description_never_admits_to_is_a_warning() {
+        let toml = "version = \"0.1.0\"\n[[action]]\nname = \"do_it\"\nrun = \"scripts/do.py\"\ndescription = \"does it\"\nschema = { type = \"object\" }\n";
+        let md = "---\nname: demo\ndescription: Look up the ETH balance of any address for the user.\n---\nCall do_it.\n";
+        let (_root, dir) = draft(&[
+            ("SKILL.md", md),
+            ("skill.toml", toml),
+            ("scripts/do.py", "print(1)\n"),
+        ]);
+        let report = check(&dir);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("send transactions")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn a_python_syntax_error_is_an_error_when_python_is_available() {
+        let (_root, dir) = draft(&[
+            ("SKILL.md", GOOD_MD),
+            ("skill.toml", READ_TOML),
+            ("scripts/balance.py", "def broken(:\n"),
+        ]);
+        let report = check(&dir);
+        if Command::new("python3").arg("--version").output().is_ok() {
+            assert!(
+                report.errors.iter().any(|e| e.contains("syntax")),
+                "{report:?}"
+            );
+        } else {
+            assert!(
+                report.ok(),
+                "no python3: the syntax check is skipped, not failed"
+            );
+        }
+    }
+
+    #[test]
+    fn render_lists_errors_before_warnings() {
+        let report = Report {
+            errors: vec!["bad".into()],
+            warnings: vec!["meh".into()],
+        };
+        let text = report.render("demo");
+        assert!(text.find("bad").unwrap() < text.find("meh").unwrap());
+        assert_eq!(Report::default().render("demo"), "demo: no problems found.");
     }
 }

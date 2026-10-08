@@ -147,6 +147,9 @@ pub enum SkillOp {
     Enable(String),
     /// Only skills the user added.
     Delete(String),
+    /// The user's own command: copy the model's draft into their skills; its approval card
+    /// comes next.
+    InstallDraft(String),
 }
 
 pub type Events = mpsc::UnboundedSender<AgentEvent>;
@@ -1025,6 +1028,7 @@ impl SessionState {
                 skills_mod::enable(&paths, &name).map(|()| None)
             }
             SkillOp::Delete(name) => skills_mod::delete(&paths, &name).map(|()| None),
+            SkillOp::InstallDraft(name) => skills_mod::install_draft(&paths, &name).map(Some),
         };
         match done {
             Ok(added) => {

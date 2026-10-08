@@ -143,6 +143,14 @@ and the conversation, model and loaded skills carry over.
 
 A card you decline is not shown again this session, until you enable that skill.
 
+**Creating a skill.** `/skill new <goal>` or `/skill from-chat` (turn what you just did into a
+skill) loads the shipped `skill-creator` skill. The model writes a draft into
+`~/.config/edw-tui/skills-drafts/<name>` (`EDW_TUI_SKILLS_DRAFTS_DIR`) with `skill_draft_write`
+and checks it with `skill_draft_check`: it loads, scripts parse, and contracts are compared
+with Sourcify. You then run `/skill install <name>`, which copies the draft into your skills
+folder and shows the usual approval card. The model cannot install a draft; only your command
+does. A skill with actions still goes through the plan checker and per-transaction review.
+
 **Scripts run in Docker** (`skills/_sdk/edw_skill.py` is the protocol helper), one throwaway
 container per call: no network, read-only root and mounts, no capabilities, the `nobody` user,
 none of the host's environment, 20 s and 1 MiB of output at most. A script gets data only by

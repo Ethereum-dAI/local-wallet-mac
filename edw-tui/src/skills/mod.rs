@@ -40,6 +40,8 @@ pub struct Paths {
     /// Skills the user added from the Skills tab are copied here.
     pub user_dir: PathBuf,
     pub lock: PathBuf,
+    /// Where the model's skill drafts are written; never read as skills.
+    pub drafts: PathBuf,
 }
 
 impl Paths {
@@ -64,10 +66,14 @@ impl Paths {
         let user_dir = std::env::var("EDW_TUI_SKILLS_USER_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| lock.with_file_name("skills"));
+        let drafts = std::env::var("EDW_TUI_SKILLS_DRAFTS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| lock.with_file_name("skills-drafts"));
         Self {
             dirs,
             user_dir,
             lock,
+            drafts,
         }
     }
 
@@ -195,6 +201,21 @@ pub fn add(paths: &Paths, source: &Path) -> Result<String, String> {
     Ok(skill.name)
 }
 
+/// Copies the user's draft `name` into their skills, after the same checks `/skill install`
+/// promises: it loads and has no errors. It is not trusted: its approval card comes next. The
+/// model cannot reach this; only the user's command does.
+pub fn install_draft(paths: &Paths, name: &str) -> Result<String, String> {
+    let dir = author::DraftStore::new(paths.drafts.clone()).dir(name)?;
+    if !dir.is_dir() {
+        return Err(format!("no draft named {name}; ask the model to write one"));
+    }
+    let report = author::check(&dir);
+    if !report.ok() {
+        return Err(format!("{name} has problems: {}", report.errors.join("; ")));
+    }
+    add(paths, &dir)
+}
+
 /// Deletes a skill the user added (never a shipped one) and forgets its approval.
 pub fn delete(paths: &Paths, name: &str) -> Result<(), String> {
     let installed = installed_named(paths, name)?;
@@ -233,6 +254,7 @@ pub struct Discovery {
     installed: Vec<Installed>,
     lock: lock::Lock,
     lock_path: PathBuf,
+    drafts: PathBuf,
     /// In discovery order; the TUI shows one approval card per request.
     pub requests: Vec<consent::ConsentRequest>,
 }
@@ -255,6 +277,7 @@ pub fn discover(paths: &Paths) -> Discovery {
         installed,
         lock,
         lock_path: paths.lock.clone(),
+        drafts: paths.drafts.clone(),
         requests,
     }
 }
@@ -266,6 +289,7 @@ pub async fn finish(discovery: Discovery, answers: &BTreeMap<String, bool>) -> S
         mut installed,
         mut lock,
         lock_path,
+        drafts,
         requests,
     } = discovery;
     let mut notes = Vec::new();
@@ -317,7 +341,8 @@ pub async fn finish(discovery: Discovery, answers: &BTreeMap<String, bool>) -> S
         catalog::Catalog::from_installed(&installed),
         &installed,
         runner,
-    );
+    )
+    .with_drafts(author::DraftStore::new(drafts));
     Startup {
         set: Arc::new(set),
         installed,
@@ -369,6 +394,7 @@ mod tests {
             dirs: vec![root.path().to_owned()],
             user_dir: root.path().join("user"),
             lock: root.path().join("state/skills.lock"),
+            drafts: root.path().join("drafts"),
         };
         let found = discover(&paths);
         let asked: Vec<(&str, Reason)> = found
@@ -396,6 +422,48 @@ mod tests {
         assert_eq!(asked, ["beta"]);
     }
 
+    fn write_draft(paths: &Paths, name: &str, md: &str) {
+        let store = author::DraftStore::new(paths.drafts.clone());
+        store.write(name, "SKILL.md", md).unwrap();
+    }
+
+    const DRAFT_MD: &str = "---\nname: fresh-skill\ndescription: Explain what a fresh skill does and when to use it.\n---\nSay hello.\n";
+
+    #[test]
+    fn install_draft_copies_a_clean_draft_into_the_users_skills() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = layout(root.path());
+        write_draft(&paths, "fresh-skill", DRAFT_MD);
+        assert_eq!(install_draft(&paths, "fresh-skill").unwrap(), "fresh-skill");
+        assert!(paths.user_dir.join("fresh-skill/SKILL.md").is_file());
+    }
+
+    #[test]
+    fn install_draft_refuses_a_missing_draft_a_broken_draft_and_a_name_in_use() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = layout(root.path());
+        assert!(
+            install_draft(&paths, "nothing-here")
+                .unwrap_err()
+                .contains("no draft")
+        );
+        write_draft(&paths, "broken-one", "no frontmatter");
+        assert!(
+            install_draft(&paths, "broken-one")
+                .unwrap_err()
+                .contains("problems")
+        );
+        write_draft(&paths, "fresh-skill", DRAFT_MD);
+        install_draft(&paths, "fresh-skill").unwrap();
+        assert!(
+            install_draft(&paths, "fresh-skill")
+                .unwrap_err()
+                .contains("already installed"),
+            "installing twice (or over a shipped skill) is refused"
+        );
+        assert!(install_draft(&paths, "../escape").is_err());
+    }
+
     #[tokio::test]
     async fn no_answer_is_a_no() {
         let root = tempfile::tempdir().unwrap();
@@ -404,6 +472,7 @@ mod tests {
             dirs: vec![root.path().to_owned()],
             user_dir: root.path().join("user"),
             lock: root.path().join("skills.lock"),
+            drafts: root.path().join("drafts"),
         };
         let startup = finish(discover(&paths), &BTreeMap::new()).await;
         assert!(startup.set.catalog.skills.is_empty());
@@ -417,6 +486,7 @@ mod tests {
             dirs: vec![root.join("skills")],
             user_dir: root.join("user"),
             lock: root.join("skills.lock"),
+            drafts: root.join("drafts"),
         }
     }
 

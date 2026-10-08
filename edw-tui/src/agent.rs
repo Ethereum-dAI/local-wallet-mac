@@ -36,9 +36,10 @@ use crate::{
     interim::{self, Interim, InterimConfig},
     scripted::ScriptedModel,
     skills::{
-        self as skills_mod, LOAD_SKILL, Paths, SkillRow,
+        self as skills_mod, LOAD_SKILL, Paths, SkillRow, author, author_tools,
         catalog::Catalog,
         consent::ConsentRequest,
+        facts,
         host::Log,
         plan,
         sandbox::{self, Output},
@@ -342,6 +343,29 @@ impl Shared {
 
     /// Runs one skill tool: a read tool's result goes back to the model; an action's plan is
     /// checked, simulated, reviewed and only then sent.
+    /// Runs one authoring tool against the drafts folder. Address aliases in the arguments are
+    /// resolved first, so a skill.toml the model writes holds real addresses.
+    async fn author_call(&self, tool: &str, args: Value) -> String {
+        let Some(store) = self.skills.drafts() else {
+            return "skill authoring is not available".into();
+        };
+        let args = self.addresses.reveal_json(args);
+        let name = args.get("name").and_then(Value::as_str).unwrap_or_default();
+        let command = format!("{tool} {name}");
+        self.log(AgentEvent::ToolStarted {
+            command: command.clone(),
+        });
+        let (exit_code, output) =
+            author_tools::call(store, &facts::Sourcify::new(), tool, &args).await;
+        let output: String = output.chars().take(MAX_SKILL_RESULT).collect();
+        self.log(AgentEvent::ToolFinished(EdwResult {
+            command,
+            exit_code,
+            output: output.clone(),
+        }));
+        output
+    }
+
     async fn skill_call(&self, tool: &str, args: Value) -> String {
         let Some(skill) = self.skills.catalog.skill_of_tool(tool).cloned() else {
             return format!("`{tool}` is not a tool of any loaded skill; nothing was run.");
@@ -636,6 +660,23 @@ fn dynamic_tools(shared: &Arc<Shared>) -> Vec<DynamicTool> {
             Box::pin(async move { Ok(ToolOutput::text(s.load_skill(&args))) })
         },
     ));
+    if shared.skills.catalog.get(author::CREATOR).is_some() && shared.skills.drafts().is_some() {
+        for (name, description, schema) in author_tools::specs() {
+            let s = shared.clone();
+            tools.push(DynamicTool::new(
+                name,
+                description,
+                schema,
+                move |_context, args| {
+                    let s = s.clone();
+                    Box::pin(async move {
+                        let output = s.author_call(name, args).await;
+                        Ok(ToolOutput::text(s.addresses.hide(&output)))
+                    })
+                },
+            ));
+        }
+    }
     for skill in &shared.skills.catalog.skills {
         let m = &skill.manifest;
         for tool in m.read_tools.iter().chain(m.actions.iter().map(|a| &a.tool)) {

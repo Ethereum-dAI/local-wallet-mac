@@ -90,6 +90,7 @@ async fn the_skills_tab_adds_disables_enables_and_deletes_live() {
         dirs: vec![root.path().join("skills")],
         user_dir: root.path().join("user"),
         lock: root.path().join("skills.lock"),
+        drafts: root.path().join("drafts"),
     };
     let model = Recorder::new(vec![
         AssistantContent::text("hello"),
@@ -218,6 +219,7 @@ async fn a_declined_skill_is_not_asked_again_until_enabled() {
         dirs: vec![root.path().join("skills")],
         user_dir: root.path().join("user"),
         lock: root.path().join("skills.lock"),
+        drafts: root.path().join("drafts"),
     };
     let mut s = start(&wallet, paths, Recorder::new(vec![]));
     assert!(matches!(s.settle().await, AgentEvent::Consents(c) if c.len() == 2));

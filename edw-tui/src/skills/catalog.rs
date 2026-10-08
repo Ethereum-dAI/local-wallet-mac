@@ -117,6 +117,7 @@ pub fn resolve(installed: &mut [Installed], builtin_tools: &[&str], docker: bool
 
     let mut taken: BTreeSet<String> = builtin_tools.iter().map(|t| t.to_string()).collect();
     taken.insert(super::LOAD_SKILL.into());
+    taken.extend(super::author::TOOL_NAMES.map(str::to_owned));
     for i in installed.iter_mut().filter(|i| ready(i)) {
         let tools: Vec<String> = i
             .skill
@@ -348,6 +349,17 @@ mod tests {
         assert!(matches!(&s[0].1, SkillState::Broken(w) if w.contains("balance")));
         assert_eq!(s[1].1, SkillState::Ready);
         assert!(matches!(&s[2].1, SkillState::Broken(w) if w.contains("shared")));
+    }
+
+    #[test]
+    fn authoring_tool_names_are_reserved() {
+        let root = tempfile::tempdir().unwrap();
+        write_skill(root.path(), "a", &[], Some("skill_draft_write"));
+        let mut installed = discover(&[root.path().to_owned()]);
+        all_trusted(&mut installed);
+        resolve(&mut installed, &[], true);
+        let s = states(&installed);
+        assert!(matches!(&s[0].1, SkillState::Broken(w) if w.contains("skill_draft_write")));
     }
 
     #[test]

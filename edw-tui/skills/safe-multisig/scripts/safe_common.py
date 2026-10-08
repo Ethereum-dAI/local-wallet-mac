@@ -137,6 +137,126 @@ def amount(raw, decimals):
     return text
 
 
+# --- Reading calldata ourselves -----------------------------------------------------------------
+# The service's `dataDecoded` is a convenience, not evidence: it can say "transfer 1" over data that
+# approves everything. These labels come from the bytes the Safe would run; the service's version
+# is only compared against them.
+_SIGNATURES = {
+    "transfer": "transfer(address,uint256)", "approve": "approve(address,uint256)",
+    "transferFrom": "transferFrom(address,address,uint256)", "multiSend": "multiSend(bytes)",
+    "addOwnerWithThreshold": "addOwnerWithThreshold(address,uint256)", "removeOwner": "removeOwner(address,address,uint256)",
+    "swapOwner": "swapOwner(address,address,address)", "changeThreshold": "changeThreshold(uint256)",
+    "enableModule": "enableModule(address)", "disableModule": "disableModule(address,address)",
+    "setGuard": "setGuard(address)", "setFallbackHandler": "setFallbackHandler(address)",
+    "setPreSignature": "setPreSignature(bytes,bool)",
+}
+_SELECTORS = {keccak256(sig.encode())[:4].hex(): name for name, sig in _SIGNATURES.items()}
+_STATIC = {  # method -> kinds of its static words
+    "transfer": "au", "approve": "au", "transferFrom": "aau", "addOwnerWithThreshold": "au", "removeOwner": "aau",
+    "swapOwner": "aaa", "changeThreshold": "u", "enableModule": "a", "disableModule": "aa", "setGuard": "a",
+    "setFallbackHandler": "a",
+}
+
+
+def _hex_bytes(text):
+    text = (text or "0x")
+    return bytes.fromhex(text[2:]) if text.startswith("0x") and len(text) % 2 == 0 else None
+
+
+def selector_of(data):
+    raw = _hex_bytes(data)
+    return raw[:4].hex() if raw and len(raw) >= 4 else ""
+
+
+def _unpack_multisend(blob):
+    calls, at = [], 0
+    while at < len(blob):
+        head = blob[at:at + 85]
+        if len(head) < 85:
+            return None
+        length = int.from_bytes(head[53:85], "big")
+        body = blob[at + 85:at + 85 + length]
+        if len(body) != length:
+            return None
+        calls.append({
+            "operation": head[0], "to": checksum("0x" + head[1:21].hex()),
+            "value": str(int.from_bytes(head[21:53], "big")), "data": "0x" + body.hex(),
+        })
+        at += 85 + length
+    return calls
+
+
+def raw_decode(data):
+    """{"method", "parameters": [{"value"}]} for a call we can read from its bytes, else None."""
+    raw = _hex_bytes(data)
+    if raw is None or len(raw) < 4:
+        return None
+    method = _SELECTORS.get(raw[:4].hex())
+    body = raw[4:]
+    if method in _STATIC:
+        kinds = _STATIC[method]
+        if len(body) < 32 * len(kinds):
+            return None
+        values = []
+        for i, kind in enumerate(kinds):
+            word = body[32 * i:32 * i + 32]
+            if kind == "a":
+                if any(word[:12]):
+                    return None
+                values.append(checksum("0x" + word[12:].hex()))
+            else:
+                values.append(str(int.from_bytes(word, "big")))
+        return {"method": method, "parameters": [{"value": v} for v in values]}
+    if method in ("multiSend", "setPreSignature"):
+        if len(body) < 64:
+            return None
+        offset = int.from_bytes(body[:32], "big")
+        length = int.from_bytes(body[offset:offset + 32], "big") if offset + 32 <= len(body) else None
+        blob = body[offset + 32:offset + 32 + length] if length is not None else None
+        if blob is None or len(blob) != length:
+            return None
+        if method == "multiSend":
+            subs = _unpack_multisend(blob)
+            if subs is None:
+                return None
+            for sub in subs:
+                sub["dataDecoded"] = raw_decode(sub["data"]) if sub["data"] != "0x" else None
+            return {"method": "multiSend", "parameters": [{"value": "0x" + blob.hex(), "valueDecoded": subs}]}
+        # setPreSignature(bytes orderUid, bool signed): the bool is the second head word.
+        signed = int.from_bytes(body[32:64], "big") if offset == 64 else None
+        if signed is None:
+            return None
+        return {"method": method, "parameters": [{"value": "0x" + blob.hex()}, {"value": bool(signed)}]}
+    return None
+
+
+def trusted(tx):
+    """A copy of `tx` whose decoded fields come from its own bytes, and whether the service's
+    description disagrees with them. Unknown selectors have no decoding at all."""
+    ours = raw_decode(tx.get("data")) if tx.get("data") not in (None, "", "0x") else None
+    theirs = tx.get("dataDecoded") or None
+    mismatch = False
+    if ours is not None:
+        if theirs is None or theirs.get("method") != ours["method"]:
+            mismatch = True
+        elif ours["method"] == "multiSend":
+            their_subs = (theirs.get("parameters") or [{}])[0].get("valueDecoded") or []
+            our_subs = ours["parameters"][0]["valueDecoded"]
+            if len(their_subs) != len(our_subs) or any(
+                a["to"].lower() != b["to"].lower() or (a.get("dataDecoded") or {}).get("method") != (b.get("dataDecoded") or {}).get("method")
+                for a, b in zip(their_subs, our_subs)
+            ):
+                mismatch = True
+        else:
+            if [str(p["value"]).lower() for p in theirs.get("parameters") or []] != [str(p["value"]).lower() for p in ours["parameters"]]:
+                mismatch = True
+    elif theirs is not None and theirs.get("method") in _SIGNATURES:
+        mismatch = True  # the service names a call we know, over bytes that are not that call
+    out = dict(tx)
+    out["dataDecoded"] = ours
+    return out, mismatch
+
+
 def _arg(call, index):
     """The index-th decoded argument. Names differ per token (to/recipient/dst), positions do not."""
     params = (call.get("dataDecoded") or {}).get("parameters") or []
@@ -204,6 +324,11 @@ def _payout(calls, parts, short, chain_id):
 def summarize(tx, short, chain_id):
     """{"summary", "kind", "warnings"} for one multisig transaction from the service."""
     warnings = []
+    tx, mismatch = trusted(tx)
+    if mismatch:
+        warnings.append(
+            "the Safe service's description of this transaction does not match its calldata; do not trust the service's text"
+        )
     to = tx["to"].lower()
     decoded = tx.get("dataDecoded") or {}
     batched = decoded.get("method") == "multiSend"
@@ -216,21 +341,27 @@ def summarize(tx, short, chain_id):
             "summary": f"Rejects the proposal at nonce {tx['nonce']} (an empty call to itself that takes its place)",
             "kind": "rejection",
             "warnings": warnings,
+            "mismatch": mismatch,
         }
     calls = list(inner_calls(tx))
     if tx.get("operation") == 1 and to in MULTISEND and not calls:
         # An undecoded MultiSend: the service did not understand the batch.
-        return {"summary": "a batch of calls the Safe service could not decode", "kind": "batch", "warnings": warnings + ["undecoded batch; check it in the Safe app before signing"]}
+        return {"summary": "a batch of calls the Safe service could not decode", "kind": "batch", "warnings": warnings + ["undecoded batch; check it in the Safe app before signing"], "mismatch": mismatch}
     for sub in calls if batched else []:
         if sub.get("operation") == 1:
             warnings.append(f"a call in the batch is a DELEGATECALL to {_short(sub['to'])}")
     if any((c.get("dataDecoded") or {}).get("method") == "approve" and int(_arg(c, 1) or 0) >= 2 ** 255 for c in calls):
         warnings.append("unlimited approval: that address can spend all of this token the Safe holds, now and later")
+    for c in calls:
+        if c.get("data") not in (None, "", "0x") and not c.get("dataDecoded"):
+            warnings.append(
+                f"UNKNOWN CALL: selector 0x{selector_of(c['data'])} on {_short(c['to'])}; this skill cannot read what it does"
+            )
     parts = [describe_call(c, short, chain_id) for c in calls]
     kinds = {k for _, k in parts}
     payout = _payout(calls, parts, short, chain_id)
     if payout:
-        return {"summary": payout, "kind": "payout", "warnings": warnings}
+        return {"summary": payout, "kind": "payout", "warnings": warnings, "mismatch": mismatch}
     if len(calls) == 0:
         text, kind = "an empty transaction", "call"
     elif len(parts) == 1:
@@ -241,7 +372,7 @@ def summarize(tx, short, chain_id):
         text = f"{len(parts)} calls in one batch: {shown}"
     if "control" in kinds:
         warnings.append("changes who controls the Safe")
-    return {"summary": text[0].upper() + text[1:] if text else text, "kind": kind, "warnings": warnings}
+    return {"summary": text[0].upper() + text[1:] if text else text, "kind": kind, "warnings": warnings, "mismatch": mismatch}
 
 
 # --- Acting on a waiting transaction ---------------------------------------------------------------
@@ -265,15 +396,63 @@ def wallet_chain(args, context, doing):
     return chain_id, short
 
 
+SINGLETONS = {  # official Safe singletons, as the Transaction Service reports them
+    "0xd9db270c1b5e3bd161e8c8503c55ceabee709552": "1.3.0", "0x3e5c63644e683549055b9be8653de26e0b4cd36e": "1.3.0+L2",
+    "0x69f4d1788e39c87893c980c06edf4b7f686e2938": "1.3.0", "0xfb1bffc9d739b8d520daf37df666da4c687191ea": "1.3.0+L2",
+    "0x41675c099f32341bf84bfc5382af534df5c7461a": "1.4.1", "0x29fcb43b46531bca003ddc8fcb67ffe91900c762": "1.4.1+L2",
+    "0xff51a5898e281db6dfc7855790607438df2ca44b": "1.5.0", "0xedd160febbd92e350d4d398fb636302fccd67c7e": "1.5.0+L2",
+}
+VERSION = "function VERSION() view returns (string)"
+MASTER_COPY = "function masterCopy() view returns (address)"
+GET_OWNERS = "function getOwners() view returns (address[])"
+GET_THRESHOLD = "function getThreshold() view returns (uint256)"
+APPROVED = "function approvedHashes(address owner,bytes32 hash) view returns (uint256)"
+
+
+def version_tuple(text):
+    try:
+        return tuple(int(x) for x in str(text).split("+")[0].split(".")[:3])
+    except ValueError:
+        return (0, 0, 0)
+
+
+def require_safe(address, chain_id):
+    """The Safe's version, once the address is shown to be one of Safe's own deployments and new
+    enough to put the chain in its hash (before 1.3.0 an approval could be replayed elsewhere)."""
+    try:
+        singleton = str(edw_skill.call(address, MASTER_COPY)[0]).lower()
+        version = str(edw_skill.call(address, VERSION)[0])
+    except edw_skill.HostError:
+        edw_skill.fail(f"{address} is not a Safe on {CHAIN_LABEL.get(chain_id, chain_id)}")
+    if singleton not in SINGLETONS:
+        edw_skill.fail(
+            f"{address} is not running one of Safe's own contracts (its code points at {singleton}); "
+            "check the address, and use the Safe app for anything else"
+        )
+    if version_tuple(version) < (1, 3, 0):
+        edw_skill.fail(f"this Safe is version {version}; before 1.3.0 an approval can be replayed on other chains, so it is not offered")
+    return version
+
+
+def parse_nonce(value):
+    if value is None or value == "":
+        return None
+    text = str(value).strip()
+    if not text.isdigit():
+        edw_skill.fail(f"the nonce must be a whole number, not {value!r}")
+    return int(text)
+
+
 def waiting_tx(address, short, args, current, only_next=False):
     """The one waiting transaction asked for, its hash confirmed by the Safe itself."""
-    page = service(
-        short, f"safes/{address}/multisig-transactions/?executed=false&nonce__gte={current}&ordering=nonce&limit=20"
-    ) or {}
-    pending = page.get("results", [])
-    nonce = args.get("nonce")
-    if nonce is None or nonce == "":
-        nonces = sorted({tx["nonce"] for tx in pending})
+    nonce = parse_nonce(args.get("nonce"))
+    if nonce is None:
+        page = service(
+            short, f"safes/{address}/multisig-transactions/?executed=false&nonce__gte={current}&ordering=nonce&limit=20"
+        ) or {}
+        if page.get("next"):
+            edw_skill.fail("more than 20 transactions are waiting; give the nonce of the one you mean")
+        nonces = sorted({tx["nonce"] for tx in page.get("results", [])})
         if only_next:
             nonces = [n for n in nonces if n == current]
         if len(nonces) != 1:
@@ -281,12 +460,15 @@ def waiting_tx(address, short, args, current, only_next=False):
                 "say which transaction (its nonce); waiting nonces: " + (", ".join(map(str, nonces)) or "none")
             )
         nonce = nonces[0]
-    nonce = int(nonce)
     if nonce < current:
         edw_skill.fail(f"nonce {nonce} has already been used; the Safe's next nonce is {current}")
-    rows = [tx for tx in pending if tx["nonce"] == nonce]
+    # Exactly this nonce, so every proposal at it is seen however long the queue is.
+    page = service(short, f"safes/{address}/multisig-transactions/?executed=false&nonce={nonce}&limit=20") or {}
+    rows = [tx for tx in page.get("results", []) if tx["nonce"] == nonce]
     wanted = (args.get("safe_tx_hash") or "").lower()
     if wanted:
+        if not re.fullmatch(r"0x[0-9a-f]{64}", wanted):
+            edw_skill.fail("safe_tx_hash must be a 0x-prefixed 32-byte hash")
         rows = [tx for tx in rows if tx["safeTxHash"].lower() == wanted]
     if not rows:
         edw_skill.fail(f"no transaction is waiting at nonce {nonce}")
@@ -313,7 +495,14 @@ def waiting_tx(address, short, args, current, only_next=False):
 
 
 def check_warnings(tx, short, chain_id, args):
+    """What the transaction does, read from its own bytes. Refuses outright when the service's
+    description disagrees; otherwise every warning must have been heard by the user."""
     described = summarize(tx, short, chain_id)
+    if described.get("mismatch"):
+        edw_skill.fail(
+            f"nonce {tx['nonce']}: the Safe service's description does not match the transaction's calldata. "
+            "Not going ahead; check it in the Safe app."
+        )
     if described["warnings"] and not args.get("acknowledge_warnings"):
         edw_skill.fail(
             f"nonce {tx['nonce']} is: {described['summary']}. Warnings: " + " | ".join(described["warnings"])

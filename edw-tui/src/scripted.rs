@@ -71,17 +71,39 @@ fn address_in(prompt: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The address right after the word `safe` (`safe 0x…`, `safe at ADDR_1`): `is it safe to send 5
+/// USDC to 0x…` is not a Safe request.
+fn safe_address_in(prompt: &str) -> Option<String> {
+    let words: Vec<&str> = prompt.split_whitespace().collect();
+    words.iter().enumerate().find_map(|(i, w)| {
+        if !w
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .eq_ignore_ascii_case("safe")
+        {
+            return None;
+        }
+        let rest = &words[i + 1..];
+        let next = if rest.first().is_some_and(|w| w.eq_ignore_ascii_case("at")) {
+            rest.get(1)
+        } else {
+            rest.first()
+        };
+        address_in(next?)
+    })
+}
+
 /// Safe requests: `what is waiting for signatures on safe 0x…`, `who controls safe 0x…`,
 /// `what did safe 0x… do recently on gnosis`.
 fn safe_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
     if !has("safe") {
         return None;
     }
-    let mut args = json!({"address": address_in(prompt)?});
+    let mut args = json!({"address": safe_address_in(prompt)?});
     if has("gnosis") {
         args["chain"] = json!("gnosis");
     }
-    if has("approve") || has("execute") {
+    let asks_nonce = has("nonce");
+    if (has("approve") || has("execute")) && asks_nonce {
         // Look at what waits first, then act on the one asked for: `approve nonce 1445 on safe 0x…`.
         let nonce = prompt
             .split_whitespace()
@@ -93,9 +115,8 @@ fn safe_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
                     .ok()
             });
         let mut act = json!({"address": args["address"]});
-        if let Some(nonce) = nonce {
-            act["nonce"] = json!(nonce);
-        }
+        // `nonce <n>` is required for a write; without a number it is not a request to send.
+        act["nonce"] = json!(nonce?);
         let tool = if has("execute") {
             "safe_execute"
         } else {
@@ -626,6 +647,18 @@ mod tests {
                 ("safe_execute", json!({"address": safe, "nonce": 1446})),
             ])
         );
+        // Words that merely contain "safe", or a write without a nonce, are not Safe requests.
+        for prompt in [
+            format!("is it safe to send 5 USDC to {safe}?"),
+            format!("approve the router for 5 USDC, keep it safe {safe}"),
+            format!("approve safe {safe}"),
+            format!("execute safe {safe} now"),
+        ] {
+            assert!(
+                !matches!(script(&prompt), Script::Calls(ref c) if c.iter().any(|(t, _)| matches!(*t, "safe_approve_hash" | "safe_execute"))),
+                "{prompt}"
+            );
+        }
         // The harness hands the model an alias, not the address itself.
         assert_eq!(
             script("who controls safe ADDR_1?"),

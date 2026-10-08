@@ -55,13 +55,13 @@ fn fixtures() -> BTreeMap<String, String> {
         ),
         (
             format!(
-                "GET {BASE}/safes/{SAFE}/multisig-transactions/?executed=false&nonce__gte={nonce}&ordering=nonce&limit=20"
+                "GET {BASE}/safes/{SAFE}/multisig-transactions/?executed=false&nonce=1445&limit=20"
             ),
             fixture("queue.json"),
         ),
         (
             format!(
-                "GET {BASE}/safes/{SAFE}/multisig-transactions/?executed=false&nonce__gte=1446&ordering=nonce&limit=20"
+                "GET {BASE}/safes/{SAFE}/multisig-transactions/?executed=false&nonce=1446&limit=20"
             ),
             fixture("queue.json"),
         ),
@@ -90,14 +90,16 @@ async fn run(
     tool: &str,
     args: Value,
     context: Value,
-    mut extra: BTreeMap<String, String>,
+    extra: BTreeMap<String, String>,
 ) -> Result<Output, String> {
     let skill = skill();
     let def = skill
         .read_tool(tool)
         .or_else(|| skill.action(tool).map(|a| &a.tool))
         .unwrap();
-    extra.extend(fixtures());
+    let mut all = fixtures();
+    all.extend(extra);
+    let extra = all;
     let host = Host::new(
         HostConfig {
             skill: skill.name.clone(),
@@ -390,9 +392,14 @@ async fn safe_activity_labels_the_shapes_real_safes_use() {
         .iter()
         .find(|r| r["warnings"].to_string().contains("DELEGATECALL"))
         .unwrap();
+    // The delegatecall, and that this skill cannot read what the code behind it does.
     assert_eq!(
         call_row["warnings"].as_array().unwrap().len(),
-        1,
+        2,
+        "{call_row}"
+    );
+    assert!(
+        call_row["warnings"].to_string().contains("UNKNOWN CALL"),
         "{call_row}"
     );
     assert!(
@@ -431,7 +438,10 @@ sol! {
     function getTransactionHash(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, uint256 _nonce) returns (bytes32);
     function isOwner(address owner) returns (bool);
     function nonce() returns (uint256);
+    function masterCopy() returns (address);
+    function VERSION() returns (string);
     function approvedHashes(address owner, bytes32 hash) returns (uint256);
+    function approve(address spender, uint256 amount) returns (bool);
     function checkNSignatures(bytes32 dataHash, bytes data, bytes signatures, uint256 requiredSignatures);
 }
 
@@ -447,6 +457,30 @@ fn rpc(data: Vec<u8>, answer: &str) -> (String, String) {
         format!("\"{answer}\""),
     )
 }
+
+/// A Safe's own contracts, as the skill checks them before it proposes anything.
+fn identity(singleton: &str, version: &str) -> BTreeMap<String, String> {
+    let word = |hex: String| format!("0x{hex}");
+    let singleton: Address = singleton.parse().unwrap();
+    let string = {
+        let mut out = format!("{:064x}{:064x}", 32, version.len());
+        out.push_str(&alloy_primitives::hex::encode(version.as_bytes()));
+        out.push_str(&"0".repeat(64 - version.len() * 2 % 64));
+        out
+    };
+    BTreeMap::from([
+        rpc(
+            masterCopyCall {}.abi_encode(),
+            &word(format!(
+                "{:0>64}",
+                alloy_primitives::hex::encode(singleton.as_slice())
+            )),
+        ),
+        rpc(VERSIONCall {}.abi_encode(), &word(string)),
+    ])
+}
+
+const SINGLETON_130: &str = "0xd9Db270c1B5E3Bd161E8c8503c55cEABeE709552";
 
 /// What the Safe says on chain for the first waiting proposal (the 1 COW transfer at nonce 1445).
 fn approve_reads(owner: bool, hash: &str, approved: bool) -> BTreeMap<String, String> {
@@ -474,7 +508,8 @@ fn approve_reads(owner: bool, hash: &str, approved: bool) -> BTreeMap<String, St
         _nonce: number("nonce"),
     };
     let flag = |yes: bool| format!("0x{}", word(u64::from(yes)));
-    BTreeMap::from([
+    let mut reads = identity(SINGLETON_130, "1.3.0");
+    reads.extend([
         rpc(isOwnerCall { owner: me }.abi_encode(), &flag(owner)),
         rpc(nonceCall {}.abi_encode(), &format!("0x{}", word(1445))),
         rpc(hash_call.abi_encode(), hash),
@@ -486,7 +521,8 @@ fn approve_reads(owner: bool, hash: &str, approved: bool) -> BTreeMap<String, St
             .abi_encode(),
             &format!("0x{}", word(u64::from(approved))),
         ),
-    ])
+    ]);
+    reads
 }
 
 fn first_hash() -> String {
@@ -516,9 +552,16 @@ async fn approving_a_waiting_transaction_proposes_exactly_approve_hash_on_the_sa
     .unwrap() else {
         panic!("expected a plan")
     };
-    assert_eq!(
-        plan,
-        json!({"steps": [{"call": {"contract": "safe", "function": "approveHash", "args": [hash]}}]})
+    let call = &plan["steps"][0]["call"];
+    assert_eq!(call["function"], "approveHash");
+    assert_eq!(call["args"], json!([hash]));
+    // It names the transaction behind the hash, for the harness to check against the Safe.
+    assert_eq!(call["explain"]["nonce"], "1445");
+    assert_eq!(call["explain"]["to"], queued(0)["to"]);
+    let notes = plan["notes"].to_string();
+    assert!(
+        notes.contains("Sends 1 COW") && notes.contains("cannot be taken back"),
+        "{notes}"
     );
     // And the checker compiles it, at the Safe the user named and nowhere else.
     let skill = skill();
@@ -709,11 +752,16 @@ fn execute_reads(
 ) -> BTreeMap<String, String> {
     let tx = queued(index);
     let hash = tx["safeTxHash"].as_str().unwrap().to_owned();
-    let mut reads = BTreeMap::from([
+    let mut reads = identity(SINGLETON_130, "1.3.0");
+    reads.extend([
         rpc(nonceCall {}.abi_encode(), &format!("0x{}", word(next))),
         rpc(
             alloy_primitives::hex::decode("e75235b8").unwrap(),
             &format!("0x{}", word(threshold)),
+        ),
+        rpc(
+            alloy_primitives::hex::decode("a0e67e2b").unwrap(),
+            &owners_return(&owners()),
         ),
         rpc(hash_call_of(&tx).abi_encode(), &hash),
     ]);
@@ -824,4 +872,402 @@ async fn executing_refuses_what_is_not_ready() {
     )]);
     let error = refuse(json!({"address": SAFE, "nonce": 1446}), reads).await;
     assert!(error.contains("does not hash"), "{error}");
+}
+
+/// The service's page of waiting transactions, with the rows replaced.
+fn page(rows: Vec<Value>) -> String {
+    json!({"count": rows.len(), "next": null, "results": rows}).to_string()
+}
+
+fn service_at(nonce: u64) -> String {
+    format!("GET {BASE}/safes/{SAFE}/multisig-transactions/?executed=false&nonce={nonce}&limit=20")
+}
+
+/// The reads for a transaction the test has altered: the Safe computes the same hash for it.
+fn reads_for(tx: &Value, next: u64) -> BTreeMap<String, String> {
+    let hash = tx["safeTxHash"].as_str().unwrap().to_owned();
+    let mut reads = identity(SINGLETON_130, "1.3.0");
+    reads.extend([
+        rpc(nonceCall {}.abi_encode(), &format!("0x{}", word(next))),
+        rpc(
+            isOwnerCall {
+                owner: ME.parse().unwrap(),
+            }
+            .abi_encode(),
+            &format!("0x{}", word(1)),
+        ),
+        rpc(hash_call_of(tx).abi_encode(), &hash),
+        rpc(
+            approvedHashesCall {
+                owner: ME.parse().unwrap(),
+                hash: hash.parse().unwrap(),
+            }
+            .abi_encode(),
+            &format!("0x{}", word(0)),
+        ),
+    ]);
+    reads
+}
+
+#[tokio::test]
+async fn a_service_that_misdescribes_the_calldata_is_refused() {
+    if !docker().await {
+        return;
+    }
+    // The bytes approve the router for everything; the service says "transfer 1".
+    let mut tx = queued(0);
+    let data = approveCall {
+        spender: "0x1111111111111111111111111111111111111111"
+            .parse()
+            .unwrap(),
+        amount: U256::MAX,
+    }
+    .abi_encode();
+    tx["data"] = json!(format!("0x{}", alloy_primitives::hex::encode(data)));
+    tx["dataDecoded"] = json!({"method": "transfer", "parameters": [
+        {"name": "to", "type": "address", "value": "0x1111111111111111111111111111111111111111"},
+        {"name": "value", "type": "uint256", "value": "1"}]});
+    let mut reads = reads_for(&tx, 1445);
+    reads.insert(service_at(1445), page(vec![tx.clone()]));
+    let error = run(
+        "safe_approve_hash",
+        json!({"address": SAFE, "nonce": 1445, "acknowledge_warnings": true}),
+        wallet(),
+        reads,
+    )
+    .await
+    .expect_err("a refusal");
+    assert!(
+        error.contains("does not match the transaction's calldata"),
+        "{error}"
+    );
+
+    // Read straight from the bytes, the queue says what it really is, whatever the service said.
+    let mut queue = BTreeMap::from([(
+        format!(
+            "GET {BASE}/safes/{SAFE}/multisig-transactions/?executed=false&nonce__gte=1445&ordering=nonce&limit=5"
+        ),
+        page(vec![tx]),
+    )]);
+    queue.extend(chain_reads(&owners(), 4));
+    let out = call(
+        "safe_queue",
+        json!({"address": SAFE}),
+        json!({"chain_id": 1}),
+        queue,
+    )
+    .await
+    .unwrap();
+    let row = &out["transactions"][0];
+    assert!(
+        row["summary"].as_str().unwrap().contains("unlimited"),
+        "{row}"
+    );
+    assert_eq!(row["mismatch"], true, "{row}");
+    assert!(
+        row["warnings"]
+            .to_string()
+            .contains("does not match its calldata"),
+        "{row}"
+    );
+}
+
+#[tokio::test]
+async fn a_call_this_skill_cannot_read_needs_the_users_ok() {
+    if !docker().await {
+        return;
+    }
+    let mut tx = queued(0);
+    tx["data"] = json!("0xdeadbeef00");
+    tx["dataDecoded"] = Value::Null;
+    let mut reads = reads_for(&tx, 1445);
+    reads.insert(service_at(1445), page(vec![tx]));
+    let error = run(
+        "safe_approve_hash",
+        json!({"address": SAFE, "nonce": 1445}),
+        wallet(),
+        reads.clone(),
+    )
+    .await
+    .expect_err("a refusal");
+    assert!(
+        error.contains("UNKNOWN CALL") && error.contains("0xdeadbeef"),
+        "{error}"
+    );
+    // Once the user has heard it, it goes ahead, and the review is told about it.
+    let Output::Plan(plan) = run(
+        "safe_approve_hash",
+        json!({"address": SAFE, "nonce": 1445, "acknowledge_warnings": true}),
+        wallet(),
+        reads,
+    )
+    .await
+    .unwrap() else {
+        panic!("expected a plan")
+    };
+    assert!(
+        plan["notes"]
+            .to_string()
+            .contains("warning heard: UNKNOWN CALL"),
+        "{plan}"
+    );
+}
+
+#[tokio::test]
+async fn only_a_real_recent_safe_is_acted_on_and_only_at_its_next_nonce() {
+    if !docker().await {
+        return;
+    }
+    let hash = first_hash();
+    let args = json!({"address": SAFE, "nonce": 1445, "safe_tx_hash": hash});
+    // An address whose code is not one of Safe's own contracts.
+    let mut reads = approve_reads(true, &hash, false);
+    reads.extend(identity(
+        "0x1111111111111111111111111111111111111111",
+        "1.3.0",
+    ));
+    let error = run("safe_approve_hash", args.clone(), wallet(), reads)
+        .await
+        .expect_err("a refusal");
+    assert!(
+        error.contains("not running one of Safe's own contracts"),
+        "{error}"
+    );
+    // A Safe whose hash does not include the chain.
+    let mut reads = approve_reads(true, &hash, false);
+    reads.extend(identity(SINGLETON_130, "1.2.0"));
+    let error = run("safe_approve_hash", args.clone(), wallet(), reads)
+        .await
+        .expect_err("a refusal");
+    assert!(error.contains("before 1.3.0"), "{error}");
+    // A later nonce: an approval never expires, so it is not offered early.
+    let mut reads = approve_reads(true, &hash, false);
+    reads.extend(execute_reads(1445, 2, 4, true));
+    let error = run(
+        "safe_approve_hash",
+        json!({"address": SAFE, "nonce": 1446}),
+        wallet(),
+        reads,
+    )
+    .await
+    .expect_err("a refusal");
+    assert!(
+        error.contains("never expires") && error.contains("1445"),
+        "{error}"
+    );
+    // Not a number.
+    let error = run(
+        "safe_approve_hash",
+        json!({"address": SAFE, "nonce": "latest"}),
+        wallet(),
+        approve_reads(true, &hash, false),
+    )
+    .await
+    .expect_err("a refusal");
+    assert!(error.contains("whole number"), "{error}");
+}
+
+#[tokio::test]
+async fn a_service_claiming_the_senders_approval_does_not_make_the_signature() {
+    if !docker().await {
+        return;
+    }
+    // The service lists the sender as having approved the 4-of-4 payout and drops the others:
+    // it is not believed, because the Safe's own record has no such approval.
+    let mut tx = queued(2);
+    let me = ME.to_lowercase();
+    tx["confirmations"] = json!([{
+        "owner": ME, "signatureType": "APPROVED_HASH",
+        "signature": format!("0x{}{}{}01", "00".repeat(12), &me[2..], "00".repeat(32)),
+    }]);
+    let mut reads = execute_reads(1446, 2, 4, true);
+    reads.insert(service_at(1446), page(vec![tx]));
+    let error = run(
+        "safe_execute",
+        json!({"address": SAFE, "nonce": 1446}),
+        wallet(),
+        reads,
+    )
+    .await
+    .expect_err("a refusal");
+    assert!(
+        error.contains("not enough signatures") && error.contains("0 of 4"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn execute_counts_approvals_the_safe_itself_records() {
+    if !docker().await {
+        return;
+    }
+    // Three owners signed; the fourth approved on chain, which the service has not indexed.
+    let mut tx = queued(2);
+    let kept: Vec<Value> = tx["confirmations"].as_array().unwrap()[..3].to_vec();
+    let fourth = tx["confirmations"][3]["owner"].as_str().unwrap().to_owned();
+    tx["confirmations"] = json!(kept);
+    let mut reads = execute_reads(1446, 2, 4, true);
+    let hash = tx["safeTxHash"].as_str().unwrap();
+    reads.extend([rpc(
+        approvedHashesCall {
+            owner: fourth.parse().unwrap(),
+            hash: hash.parse().unwrap(),
+        }
+        .abi_encode(),
+        &format!("0x{}", word(1)),
+    )]);
+    // The Safe is then asked about the four signatures it will actually be handed.
+    let mut sigs: Vec<(U256, String)> = tx["confirmations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                U256::from_be_slice(
+                    c["owner"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<Address>()
+                        .unwrap()
+                        .as_slice(),
+                ),
+                c["signature"].as_str().unwrap()[2..].to_owned(),
+            )
+        })
+        .collect();
+    sigs.push((
+        U256::from_be_slice(fourth.parse::<Address>().unwrap().as_slice()),
+        format!(
+            "{}{}{}01",
+            "00".repeat(12),
+            &fourth.to_lowercase()[2..],
+            "00".repeat(32)
+        ),
+    ));
+    sigs.sort();
+    let joined: String = sigs.into_iter().map(|(_, s)| s).collect();
+    reads.extend([rpc(
+        checkNSignaturesCall {
+            dataHash: hash.parse().unwrap(),
+            data: Default::default(),
+            signatures: alloy_primitives::hex::decode(&joined).unwrap().into(),
+            requiredSignatures: U256::from(4),
+        }
+        .abi_encode(),
+        "0x",
+    )]);
+    reads.insert(service_at(1446), page(vec![tx]));
+    let Output::Plan(plan) = run(
+        "safe_execute",
+        json!({"address": SAFE, "nonce": 1446}),
+        wallet(),
+        reads,
+    )
+    .await
+    .unwrap() else {
+        panic!("expected a plan")
+    };
+    assert_eq!(plan["steps"][0]["call"]["args"][9], format!("0x{joined}"));
+    assert!(
+        plan["notes"]
+            .to_string()
+            .contains("1 of them approvals recorded on chain"),
+        "{plan}"
+    );
+}
+
+#[tokio::test]
+async fn a_signature_check_that_cannot_fail_is_not_believed() {
+    if !docker().await {
+        return;
+    }
+    // If the Safe also "accepts" a call with no signatures, the check is not real (an unknown
+    // selector fell through to the fallback), so nothing is proposed.
+    let tx = queued(2);
+    let hash = tx["safeTxHash"].as_str().unwrap();
+    let mut reads = execute_reads(1446, 2, 4, true);
+    reads.extend([rpc(
+        checkNSignaturesCall {
+            dataHash: hash.parse().unwrap(),
+            data: Default::default(),
+            signatures: Default::default(),
+            requiredSignatures: U256::from(4),
+        }
+        .abi_encode(),
+        "0x",
+    )]);
+    let error = run(
+        "safe_execute",
+        json!({"address": SAFE, "nonce": 1446}),
+        wallet(),
+        reads,
+    )
+    .await
+    .expect_err("a refusal");
+    assert!(
+        error.contains("could not be confirmed to be real"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn the_queue_and_info_follow_the_chain_not_the_service() {
+    if !docker().await {
+        return;
+    }
+    // The service says one signature is enough; the Safe says four.
+    let mut first = queued(0);
+    first["confirmationsRequired"] = json!(1);
+    let queue_key = format!(
+        "GET {BASE}/safes/{SAFE}/multisig-transactions/?executed=false&nonce__gte=1445&ordering=nonce&limit=5"
+    );
+    let mut reads = BTreeMap::from([(queue_key, page(vec![first]))]);
+    reads.extend(chain_reads(&owners(), 4));
+    let out = call(
+        "safe_queue",
+        json!({"address": SAFE}),
+        json!({"chain_id": 1}),
+        reads,
+    )
+    .await
+    .unwrap();
+    let row = &out["transactions"][0];
+    assert_eq!(row["ready_to_execute"], false, "{row}");
+    assert_eq!(row["signatures"], "1 of 4");
+    assert_eq!(row["signatures_checked_on_chain"], true);
+    // Elsewhere the same answer says plainly that it is the service's.
+    let mut elsewhere = BTreeMap::new();
+    elsewhere.insert(
+        format!("GET {BASE}/safes/{SAFE}/multisig-transactions/?executed=false&nonce__gte=1445&ordering=nonce&limit=5"),
+        page(vec![queued(0)]),
+    );
+    let out = call(
+        "safe_queue",
+        json!({"address": SAFE, "chain": "Ethereum"}),
+        json!({"chain_id": 100}),
+        elsewhere,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out["transactions"][0]["signatures_checked_on_chain"], false);
+    assert!(
+        out["signer_set"]
+            .as_str()
+            .unwrap()
+            .contains("not checked on chain"),
+        "{out}"
+    );
+
+    // A mismatch changes every field that depends on it, not just two.
+    let bad = call(
+        "safe_info",
+        json!({"address": SAFE}),
+        json!({"chain_id": 1, "me": ME}),
+        chain_reads(&owners()[..3], 2),
+    )
+    .await
+    .unwrap();
+    assert_eq!(bad["rule"], "2 of 3 owners must sign", "{bad}");
+    assert_eq!(bad["owner_count"], 3);
+    assert_eq!(bad["you_are_an_owner"], false);
 }

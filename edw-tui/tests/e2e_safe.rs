@@ -13,50 +13,26 @@
 
 mod common;
 
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_sol_types::{SolCall, sol};
-use common::scenario::{Chain, ETHER, Scenario};
-use edw_tui::skills::sandbox;
+use common::{
+    safe_fork::become_owner,
+    scenario::{Chain, ETHER, Scenario},
+};
+use edw_tui::{
+    interim::Interim,
+    skills::{
+        plan::{Binding, CheckedPlan, CheckedStep},
+        sandbox,
+    },
+};
 use serde_json::Value;
 
 sol! {
     function nonce() returns (uint256);
     function approvedHashes(address owner, bytes32 hash) returns (uint256);
     function approveHash(bytes32 hashToApprove);
-}
-
-/// `owners` is the Safe's mapping at storage slot 2; slot of `owners[key]`.
-fn owner_slot(key: Address) -> B256 {
-    let mut word = [0u8; 64];
-    word[12..32].copy_from_slice(key.as_slice());
-    word[63] = 2;
-    keccak256(word)
-}
-
-/// Makes `me` an owner of `safe` on the fork by taking over the first owner's place in the list.
-async fn become_owner(rpc: &str, safe: Address, me: Address) {
-    let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap());
-    let sentinel = Address::with_last_byte(1);
-    let head = provider
-        .get_storage_at(safe, owner_slot(sentinel).into())
-        .await
-        .unwrap();
-    let first = Address::from_word(head.into());
-    let after_first = provider
-        .get_storage_at(safe, owner_slot(first).into())
-        .await
-        .unwrap();
-    for (slot, value) in [
-        (owner_slot(sentinel), B256::from(me.into_word())),
-        (owner_slot(me), B256::from(after_first)),
-        (owner_slot(first), B256::ZERO),
-    ] {
-        let _: serde_json::Value = provider
-            .raw_request("anvil_setStorageAt".into(), (safe, slot, value))
-            .await
-            .unwrap();
-    }
 }
 
 /// A 4-of-11 mainnet Safe with a standing queue and many executed payouts.
@@ -148,6 +124,19 @@ const BUSY_SAFES: [&str; 80] = [
     "0x1d7783D227eE3d7940924a314686034a8557EC69",
 ];
 
+/// A transaction the skill can read and has nothing to warn about: a plain ETH send, or a token
+/// `transfer` (as the service decodes it, and the skill then decodes it again from the bytes).
+fn readable(row: &Value, safe: &str) -> bool {
+    let plain_eth = row["data"].as_str().is_none_or(|d| d == "0x")
+        && row["value"].as_str().is_some_and(|v| v != "0");
+    let transfer = row["dataDecoded"]["method"] == "transfer";
+    row["operation"] == 0
+        && (plain_eth || transfer)
+        && row["to"]
+            .as_str()
+            .is_some_and(|to| !to.eq_ignore_ascii_case(safe))
+}
+
 fn get(url: &str) -> Value {
     let body = std::process::Command::new("curl")
         .args(["-s", "--max-time", "30", url])
@@ -156,9 +145,10 @@ fn get(url: &str) -> Value {
     serde_json::from_slice(&body.stdout).unwrap_or(Value::Null)
 }
 
-/// A busy Safe with one plain call waiting at its next nonce (nobody else is proposing there,
-/// and it is not a call to the Safe itself), from the live Safe service: (Safe, nonce, hash).
-fn waiting_transaction() -> (Address, u64, B256) {
+/// A busy Safe whose next transaction is a plain, readable call that needs exactly one more
+/// signature, from the live Safe service: (Safe, nonce, hash, who signed). Approving it as the new owner
+/// completes it, so it can then be executed. Every signature so far is an ordinary owner signature.
+fn waiting_transaction() -> (Address, u64, B256, Vec<Address>) {
     let base = "https://api.safe.global/tx-service/eth/api/v1/safes";
     for safe in BUSY_SAFES {
         let current = get(&format!("{base}/{safe}/"))["nonce"]
@@ -170,49 +160,32 @@ fn waiting_transaction() -> (Address, u64, B256) {
         ));
         let rows = page["results"].as_array().cloned().unwrap_or_default();
         if let Some(row) = rows.iter().find(|r| {
-            rows.iter().filter(|o| o["nonce"] == r["nonce"]).count() == 1
-                && r["operation"] == 0
-                && r["to"]
-                    .as_str()
-                    .is_some_and(|to| !to.eq_ignore_ascii_case(safe))
+            let signed = r["confirmations"].as_array().cloned().unwrap_or_default();
+            r["nonce"].as_u64() == Some(current)
+                && rows.iter().filter(|o| o["nonce"] == r["nonce"]).count() == 1
+                && readable(r, safe)
+                && !signed.is_empty()
+                && signed
+                    .iter()
+                    .all(|c| matches!(c["signatureType"].as_str(), Some("EOA" | "ETH_SIGN")))
+                && signed.len() + 1 == r["confirmationsRequired"].as_u64().unwrap_or(0) as usize
         }) {
             return (
                 safe.parse().unwrap(),
                 row["nonce"].as_u64().unwrap(),
                 row["safeTxHash"].as_str().unwrap().parse().unwrap(),
+                row["confirmations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| c["owner"].as_str().unwrap().parse().unwrap())
+                    .collect(),
             );
         }
     }
-    panic!("none of the busy Safes has a transaction waiting; try again later");
-}
-
-/// A busy Safe whose next transaction has every signature it needs and is waiting to be sent
-/// (a plain call, not to the Safe itself), from the live Safe service: (Safe, nonce). `None`
-/// when no queue has one right now; that is common.
-fn ready_transaction() -> Option<(Address, u64)> {
-    let base = "https://api.safe.global/tx-service/eth/api/v1/safes";
-    for safe in BUSY_SAFES {
-        let current = get(&format!("{base}/{safe}/"))["nonce"]
-            .as_str()
-            .and_then(|n| n.parse::<u64>().ok())?;
-        let page = get(&format!(
-            "{base}/{safe}/multisig-transactions/?executed=false&nonce__gte={current}&ordering=nonce&limit=20"
-        ));
-        let rows = page["results"].as_array().cloned().unwrap_or_default();
-        if let Some(row) = rows.iter().find(|r| {
-            r["nonce"].as_u64() == Some(current)
-                && rows.iter().filter(|o| o["nonce"] == r["nonce"]).count() == 1
-                && r["operation"] == 0
-                && r["confirmations"].as_array().map_or(0, Vec::len)
-                    >= r["confirmationsRequired"].as_u64().unwrap_or(u64::MAX) as usize
-                && r["to"]
-                    .as_str()
-                    .is_some_and(|to| !to.eq_ignore_ascii_case(safe))
-        }) {
-            return Some((safe.parse().unwrap(), row["nonce"].as_u64().unwrap()));
-        }
-    }
-    None
+    panic!(
+        "none of the busy Safes has a readable transaction one signature short; try again later"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -223,13 +196,7 @@ async fn safe_questions_are_answered_from_the_chain_and_the_service() {
         return;
     }
     // Looked up first, so the recording does not sit through the search.
-    let (safe, waiting, hash) = waiting_transaction();
-    let ready = ready_transaction();
-    if ready.is_none() {
-        eprintln!(
-            "no fully signed transaction is waiting anywhere right now: skipping the execute step"
-        );
-    }
+    let (safe, waiting, hash, signers) = waiting_transaction();
     let Some(mut s) = Scenario::start_with_skills("safe", Chain::MainnetFork).await else {
         return;
     };
@@ -276,7 +243,7 @@ async fn safe_questions_are_answered_from_the_chain_and_the_service() {
     // the call to this Safe and to approveHash, and the user confirms the review.
     let me = s.address("0/0").await;
     s.fund(me, U256::from(10 * ETHER)).await;
-    become_owner(&s.rpc, safe, me).await;
+    become_owner(&s.rpc, safe, me, &signers).await;
     let call = |data: Vec<u8>| {
         alloy_rpc_types_eth::TransactionRequest::default()
             .to(safe)
@@ -288,6 +255,11 @@ async fn safe_questions_are_answered_from_the_chain_and_the_service() {
         "approval for that transaction",
     );
     s.screenshot("safe_approve");
+    // The review the user confirmed spelled out what the transaction does, from its own bytes.
+    let review = s.tui.screen();
+    assert!(review.contains("does:"), "{review}");
+    assert!(review.contains("you named"), "{review}");
+    assert!(review.contains("the Safe confirms this hash"), "{review}");
 
     let latest = provider.get_block_number().await.unwrap();
     let mut sent = Vec::new();
@@ -334,6 +306,69 @@ async fn safe_questions_are_answered_from_the_chain_and_the_service() {
     .unwrap();
     assert_eq!(approved, U256::from(1), "the Safe recorded the approval");
 
+    // The review only explains what the Safe itself hashes. The same approval with one field of
+    // the transaction changed (its nonce) is refused before anything is sent.
+    let row = get(&format!(
+        "https://api.safe.global/tx-service/eth/api/v1/safes/{safe}/multisig-transactions/?executed=false&nonce={waiting}&limit=20"
+    ))["results"][0]
+        .clone();
+    let text = |key: &str| row[key].as_str().unwrap().to_owned();
+    let number = |key: &str| {
+        row[key]
+            .as_str()
+            .map_or_else(|| row[key].as_u64().unwrap().to_string(), str::to_owned)
+            .parse::<U256>()
+            .unwrap()
+    };
+    let mut config = s.wallet.interim(Some(s.rpc.clone()), true);
+    config.mainnet_fork = true;
+    let interim = Interim::new(config);
+    let context = interim.skill_context().await.unwrap();
+    let tampered = CheckedPlan {
+        total_value: U256::ZERO,
+        notes: Vec::new(),
+        steps: vec![CheckedStep {
+            label: "approve (tampered)".into(),
+            to: safe,
+            value: U256::ZERO,
+            data: approveHashCall {
+                hashToApprove: hash,
+            }
+            .abi_encode()
+            .into(),
+            approval: None,
+            details: Vec::new(),
+            binding: Some(Binding {
+                safe,
+                hash,
+                to: text("to").parse().unwrap(),
+                value: number("value"),
+                data: alloy_primitives::hex::decode(row["data"].as_str().unwrap_or("0x"))
+                    .unwrap()
+                    .into(),
+                operation: 0,
+                safe_tx_gas: number("safeTxGas"),
+                base_gas: number("baseGas"),
+                gas_price: number("gasPrice"),
+                gas_token: text("gasToken").parse().unwrap(),
+                refund_receiver: text("refundReceiver").parse().unwrap(),
+                nonce: number("nonce") + U256::from(1),
+            }),
+        }],
+    };
+    let error = interim
+        .prepare_plan(
+            "tampered".into(),
+            Vec::new(),
+            tampered,
+            &Default::default(),
+            &context,
+        )
+        .await
+        .err()
+        .expect("a refusal");
+    assert!(error.contains("does not hash"), "{error}");
+
     // Read again: the queue now says the profile has approved it.
     s.ask(
         &format!("what is waiting for signatures on safe {safe}?"),
@@ -347,60 +382,60 @@ async fn safe_questions_are_answered_from_the_chain_and_the_service() {
         s.tui.screen()
     );
 
-    // The second write: execute a transaction that really has every signature it needs. Anyone
-    // may send it, so the profile need not be an owner. The skill hands the Safe the owners'
-    // signatures; the Safe checks them, so the fork runs it only because the owners signed it.
-    if let Some((ready_safe, ready_nonce)) = ready {
-        let nonce_of = |at: Address| {
-            let provider = provider.clone();
-            async move {
-                let tx = alloy_rpc_types_eth::TransactionRequest::default()
-                    .to(at)
-                    .input(nonceCall {}.abi_encode().into());
-                nonceCall::abi_decode_returns(&provider.call(tx).await.unwrap())
-                    .unwrap()
-                    .to::<u64>()
-            }
-        };
-        assert_eq!(nonce_of(ready_safe).await, ready_nonce);
-        let mined = provider.get_block_number().await.unwrap();
-        s.confirmed(
-            &format!("execute nonce {ready_nonce} on safe {ready_safe}"),
-            "nonce moved on",
-        );
-        s.screenshot("safe_execute");
-        let mut sent = Vec::new();
-        for number in mined + 1..=provider.get_block_number().await.unwrap() {
-            let block = provider
-                .get_block_by_number(number.into())
-                .await
+    // The second write, on the same transaction: with the profile's approval it now has every
+    // signature it needs (the owners' own signatures from the service, and this approval, which only
+    // the Safe's own record knows). Anyone may send it. The skill builds the signatures, has the
+    // Safe check them, and the review spells out what the transaction does; the fork then runs it.
+    let nonce_of = |at: Address| {
+        let provider = provider.clone();
+        async move {
+            let tx = alloy_rpc_types_eth::TransactionRequest::default()
+                .to(at)
+                .input(nonceCall {}.abi_encode().into());
+            nonceCall::abi_decode_returns(&provider.call(tx).await.unwrap())
                 .unwrap()
-                .unwrap();
-            for tx in block.transactions.hashes() {
-                let receipt = provider.get_transaction_receipt(tx).await.unwrap().unwrap();
-                let input = provider.get_transaction_by_hash(tx).await.unwrap().unwrap();
-                let data = serde_json::to_value(&input).unwrap()["input"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned();
-                sent.push((
-                    receipt.from,
-                    receipt.to,
-                    receipt.status(),
-                    data[..10].to_owned(),
-                ));
-            }
+                .to::<u64>()
         }
-        assert_eq!(
-            sent,
-            [(me, Some(ready_safe), true, "0x6a761202".to_owned())],
-            "exactly one execTransaction to the Safe"
-        );
-        assert_eq!(
-            nonce_of(ready_safe).await,
-            ready_nonce + 1,
-            "the Safe ran it"
-        );
+    };
+    assert_eq!(nonce_of(safe).await, waiting);
+    let mined = provider.get_block_number().await.unwrap();
+    s.confirmed(
+        &format!("execute nonce {waiting} on safe {safe}"),
+        "nonce moved on",
+    );
+    s.screenshot("safe_execute");
+    let review = s.tui.screen();
+    assert!(
+        review.contains("does:") && review.contains("signatures:"),
+        "{review}"
+    );
+    let mut sent = Vec::new();
+    for number in mined + 1..=provider.get_block_number().await.unwrap() {
+        let block = provider
+            .get_block_by_number(number.into())
+            .await
+            .unwrap()
+            .unwrap();
+        for tx in block.transactions.hashes() {
+            let receipt = provider.get_transaction_receipt(tx).await.unwrap().unwrap();
+            let input = provider.get_transaction_by_hash(tx).await.unwrap().unwrap();
+            let data = serde_json::to_value(&input).unwrap()["input"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            sent.push((
+                receipt.from,
+                receipt.to,
+                receipt.status(),
+                data[..10].to_owned(),
+            ));
+        }
     }
+    assert_eq!(
+        sent,
+        [(me, Some(safe), true, "0x6a761202".to_owned())],
+        "exactly one execTransaction to the Safe"
+    );
+    assert_eq!(nonce_of(safe).await, waiting + 1, "the Safe ran it");
     s.finish("safe");
 }

@@ -12,12 +12,14 @@ use alloy_sol_types::{SolCall, sol};
 use serde_json::Value;
 
 use super::{
-    abi,
+    abi, explain,
     manifest::{ActionDef, ContractDef, Skill},
 };
 use crate::interim::guards::{format_units, is_burn};
 
 pub const MAX_STEPS: usize = 6;
+const MAX_NOTES: usize = 6;
+const MAX_NOTE_CHARS: usize = 300;
 /// What a script writes for the sending profile.
 pub const SELF: &str = "$self";
 
@@ -34,12 +36,37 @@ pub struct CheckedStep {
     pub data: Bytes,
     /// `(token, amount)` for an approval, so the caller can check the balance covers it.
     pub approval: Option<(Address, U256)>,
+    /// Lines for the review under the step, written by the harness: where a user-named contract
+    /// is, and what a signed call's raw calldata does (see [`super::explain`]).
+    pub details: Vec<String>,
+    /// For an approval of a Safe transaction hash: the transaction's fields. The review confirms
+    /// with the Safe that they hash to the approved value, and only then explains them.
+    pub binding: Option<Binding>,
+}
+
+/// The fields of a Safe transaction, and the hash they are said to produce.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Binding {
+    pub safe: Address,
+    pub hash: alloy_primitives::B256,
+    pub to: Address,
+    pub value: U256,
+    pub data: Bytes,
+    pub operation: u8,
+    pub safe_tx_gas: U256,
+    pub base_gas: U256,
+    pub gas_price: U256,
+    pub gas_token: Address,
+    pub refund_receiver: Address,
+    pub nonce: U256,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckedPlan {
     pub steps: Vec<CheckedStep>,
     pub total_value: U256,
+    /// What the script says about its own plan. Shown in the review, labelled as unchecked.
+    pub notes: Vec<String>,
 }
 
 /// Checks `plan` (`{"steps": [...]}`) for `action` of `skill` on `chain_id`, sent by `me`.
@@ -90,9 +117,22 @@ pub fn check(
             .ok_or_else(|| format!("step {n}: the total value overflows"))?;
         checked.push(step);
     }
+    let notes = plan
+        .get("notes")
+        .and_then(Value::as_array)
+        .map(|notes| {
+            notes
+                .iter()
+                .filter_map(Value::as_str)
+                .take(MAX_NOTES)
+                .map(|n| one_line(&n.chars().take(MAX_NOTE_CHARS).collect::<String>()))
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(CheckedPlan {
         steps: checked,
         total_value,
+        notes,
     })
 }
 
@@ -202,6 +242,8 @@ impl Ctx<'_> {
             .abi_encode()
             .into(),
             approval: Some((token_address, amount)),
+            details: Vec::new(),
+            binding: None,
         })
     }
 
@@ -337,13 +379,125 @@ impl Ctx<'_> {
         if !value.is_zero() {
             label.push_str(&format!(" with {} ETH", format_units(value, 18)));
         }
+        let mut details = Vec::new();
+        if contract.address_arg.is_some() {
+            details.push(format!(
+                "{} you named: {to} (check every character)",
+                contract.label
+            ));
+        }
+        if signed {
+            details.extend(self.explain_signed(function, &args, to)?);
+        }
+        let binding = match step.get("explain") {
+            Some(explain) => Some(Self::binding(function, &args, to, explain)?),
+            None => None,
+        };
         Ok(CheckedStep {
             label,
             to,
             value,
             data: data.into(),
             approval: None,
+            details,
+            binding,
         })
+    }
+
+    /// The Safe transaction an `approveHash(hashToApprove)` call says it approves.
+    fn binding(
+        function: &Function,
+        args: &[Value],
+        safe: Address,
+        explain: &Value,
+    ) -> Result<Binding, String> {
+        if function.inputs.len() != 1 || function.inputs[0].name != "hashToApprove" {
+            return Err("`explain` is only for approving a Safe transaction hash".into());
+        }
+        let text = |key: &str| {
+            explain
+                .get(key)
+                .and_then(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .or_else(|| v.as_u64().map(|n| n.to_string()))
+                })
+                .ok_or_else(|| format!("explain: missing `{key}`"))
+        };
+        let address = |key: &str| -> Result<Address, String> {
+            text(key)?
+                .parse()
+                .map_err(|_| format!("explain: `{key}` is not an address"))
+        };
+        let number = |key: &str| -> Result<U256, String> { uint(Some(&Value::String(text(key)?))) };
+        let hash = args
+            .first()
+            .and_then(Value::as_str)
+            .and_then(|h| h.parse().ok())
+            .ok_or("the approved hash is not a 32-byte value")?;
+        let data = alloy_primitives::hex::decode(text("data")?)
+            .map_err(|e| format!("explain: data: {e}"))?;
+        let operation: u8 = text("operation")?
+            .parse()
+            .ok()
+            .filter(|o| *o <= 1)
+            .ok_or("explain: the operation must be 0 or 1")?;
+        Ok(Binding {
+            safe,
+            hash,
+            to: address("to")?,
+            value: number("value")?,
+            data: data.into(),
+            operation,
+            safe_tx_gas: number("safeTxGas")?,
+            base_gas: number("baseGas")?,
+            gas_price: number("gasPrice")?,
+            gas_token: address("gasToken")?,
+            refund_receiver: address("refundReceiver")?,
+            nonce: number("nonce")?,
+        })
+    }
+
+    /// What a signed `execTransaction`-shaped call does, read from its own arguments (by
+    /// parameter name: `to`, `value`, `data`, `operation`, `signatures`), for the review.
+    fn explain_signed(
+        &self,
+        function: &Function,
+        args: &[Value],
+        safe: Address,
+    ) -> Result<Vec<String>, String> {
+        let arg = |name: &str| {
+            function
+                .inputs
+                .iter()
+                .position(|p| p.name == name)
+                .and_then(|i| args.get(i))
+                .and_then(Value::as_str)
+        };
+        let hex = |text: &str| alloy_primitives::hex::decode(text).map_err(|e| e.to_string());
+        let mut lines = Vec::new();
+        if let (Some(to), Some(data)) = (arg("to"), arg("data")) {
+            let to: Address = to
+                .parse()
+                .map_err(|_| "`to` is not an address".to_string())?;
+            let value =
+                uint(arg("value").map(|v| Value::String(v.into())).as_ref()).unwrap_or(U256::ZERO);
+            let operation = arg("operation")
+                .and_then(|o| o.parse::<u8>().ok())
+                .unwrap_or(0);
+            if operation > 1 {
+                return Err("the operation must be 0 (call) or 1 (delegatecall)".into());
+            }
+            lines.extend(
+                explain::describe(safe, to, value, &hex(data)?, operation)
+                    .into_iter()
+                    .map(|l| format!("does: {l}")),
+            );
+        }
+        if let Some(signatures) = arg("signatures") {
+            lines.push(explain::signatures(&hex(signatures)?, self.me)?);
+        }
+        Ok(lines)
     }
 
     /// An argument of a signed call: the contract rejects it unless the owners signed exactly
@@ -826,7 +980,7 @@ approves = ["pool"]
                 json!("0"),
                 json!("0x0000000000000000000000000000000000000000"),
                 json!("0x0000000000000000000000000000000000000000"),
-                json!(format!("0x{}", "ab".repeat(65))),
+                json!(format!("0x{}1b", "11".repeat(64))),
             ]
         }
 
@@ -847,7 +1001,7 @@ approves = ["pool"]
                 step.label
             );
             assert!(
-                step.label.contains("signatures=0xabababab… (65 bytes)"),
+                step.label.contains("signatures=0x11111111… (65 bytes)"),
                 "{}",
                 step.label
             );
@@ -856,6 +1010,43 @@ approves = ["pool"]
                 &[0x6a, 0x76, 0x12, 0x02],
                 "execTransaction selector"
             );
+        }
+
+        #[test]
+        fn the_review_decodes_the_calldata_itself_and_names_the_signatures() {
+            let plan = exec_plan(exec_args().into()).unwrap();
+            let details = plan.steps[0].details.join("\n");
+            assert!(
+                details.contains(&format!("Safe you named: {SAFE}")),
+                "{details}"
+            );
+            // 1 COW to the recipient inside the data, whatever the service said it was.
+            assert!(details.contains("does: COW"), "{details}");
+            assert!(
+                details.contains("0x6C9F86423e5F36D6E42FbC1BAf966d3c1E0B5711"),
+                "{details}"
+            );
+            assert!(
+                details.contains("1 signatures: 1 signed, 0 approved on chain"),
+                "{details}"
+            );
+            // An approved-hash signature from the sender is named as the sender's own.
+            let mut args = exec_args();
+            args[9] = json!(format!(
+                "0x{}{}{}01",
+                "00".repeat(12),
+                &ME.to_string()[2..].to_lowercase(),
+                "00".repeat(32)
+            ));
+            let own = exec_plan(args.into()).unwrap().steps[0].details.join("\n");
+            assert!(own.contains("YOURS"), "{own}");
+        }
+
+        #[test]
+        fn an_unknown_signature_type_is_refused() {
+            let mut args = exec_args();
+            args[9] = json!(format!("0x{}00", "11".repeat(64)));
+            assert!(exec_plan(args.into()).unwrap_err().contains("type 0"));
         }
 
         #[test]
@@ -909,6 +1100,60 @@ approves = ["pool"]
             .unwrap();
             let error = manifest::load(&dir).unwrap_err();
             assert!(error.contains("raw bytes"), "{error}");
+        }
+
+        #[test]
+        fn an_approval_can_name_the_transaction_behind_its_hash() {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/safe-multisig");
+            let skill = manifest::load(&dir).unwrap();
+            let action = skill.action("safe_approve_hash").unwrap().clone();
+            let hash = format!("0x{}", "ab".repeat(32));
+            let explain = json!({
+                "to": "0x6C9F86423e5F36D6E42FbC1BAf966d3c1E0B5711", "value": "5", "data": "0x", "operation": 0,
+                "safeTxGas": "0", "baseGas": "0", "gasPrice": "0",
+                "gasToken": "0x0000000000000000000000000000000000000000",
+                "refundReceiver": "0x0000000000000000000000000000000000000000", "nonce": "7"
+            });
+            let plan = |call: Value| json!({"steps": [{"call": call}]});
+            let input = json!({"address": SAFE});
+            let ok = check(
+                &plan(json!({"contract": "safe", "function": "approveHash", "args": [hash], "explain": explain})),
+                &skill, &action, 1, ME, &input,
+            )
+            .unwrap();
+            let binding = ok.steps[0].binding.as_ref().unwrap();
+            assert_eq!(binding.safe, SAFE.parse::<Address>().unwrap());
+            assert_eq!(binding.nonce, U256::from(7));
+            assert_eq!(binding.value, U256::from(5));
+            // No `explain`, no binding: the step is exactly as before.
+            let plain = check(
+                &plan(json!({"contract": "safe", "function": "approveHash", "args": [hash]})),
+                &skill,
+                &action,
+                1,
+                ME,
+                &input,
+            )
+            .unwrap();
+            assert!(plain.steps[0].binding.is_none());
+            // Malformed fields, a missing field, or `explain` on another function are refused.
+            let mut bad = explain.clone();
+            bad["operation"] = json!(2);
+            assert!(check(&plan(json!({"contract": "safe", "function": "approveHash", "args": [hash], "explain": bad})), &skill, &action, 1, ME, &input).is_err());
+            let mut missing = explain.clone();
+            missing.as_object_mut().unwrap().remove("nonce");
+            assert!(check(&plan(json!({"contract": "safe", "function": "approveHash", "args": [hash], "explain": missing})), &skill, &action, 1, ME, &input).unwrap_err().contains("nonce"));
+            let exec = check(
+                &plan(
+                    json!({"contract": "safe", "function": "execTransaction", "args": [], "explain": explain}),
+                ),
+                &skill,
+                &action,
+                1,
+                ME,
+                &input,
+            );
+            assert!(exec.is_err());
         }
 
         #[test]

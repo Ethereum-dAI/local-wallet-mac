@@ -4,7 +4,6 @@ import safe_common as safe
 import edw_skill
 
 MAX = 8
-APPROVED = "function approvedHashes(address owner,bytes32 hash) view returns (uint256)"
 
 
 def main():
@@ -20,11 +19,26 @@ def main():
         f"safes/{address}/multisig-transactions/?executed=false&nonce__gte={info['nonce']}&ordering=nonce&limit={limit}",
     ) or {}
     owners = [o.lower() for o in info["owners"]]
+    threshold = info["threshold"]
+    # On the wallet's own chain the signer set is read from the Safe, not taken from the service.
+    verified = False
+    if context.get("chain_id") == chain_id:
+        try:
+            threshold = int(edw_skill.call(address, safe.GET_THRESHOLD)[0])
+            owners = [o.lower() for o in edw_skill.call(address, safe.GET_OWNERS)[0]]
+            verified = True
+        except edw_skill.HostError:
+            pass
     me = (context.get("me") or "").lower()
     rows = []
     for tx in page.get("results", []):
         signed = [c["owner"].lower() for c in tx.get("confirmations") or []]
-        needed = tx.get("confirmationsRequired") or info["threshold"]
+        if verified:
+            # Only the Safe's own owners count, and the number needed is the Safe's own threshold.
+            signed = [o for o in signed if o in owners]
+            needed = threshold
+        else:
+            needed = tx.get("confirmationsRequired") or threshold
         row = safe.summarize(tx, short, chain_id)
         row.update({
             "nonce": tx["nonce"],
@@ -32,6 +46,7 @@ def main():
             "proposed": (tx.get("submissionDate") or "")[:10],
             "signatures": f"{len(signed)} of {needed}",
             "ready_to_execute": len(signed) >= needed,
+            "signatures_checked_on_chain": verified,
             "still_needs": [o for o in owners if o not in signed] if len(signed) < needed else [],
         })
         if me and me in owners:
@@ -40,7 +55,7 @@ def main():
             # An approval sent on chain (safe_approve_hash) is not in the service's list; the
             # Safe's own record is the truth.
             try:
-                approved = int(edw_skill.call(address, APPROVED, [me, tx["safeTxHash"]])[0]) != 0
+                approved = int(edw_skill.call(address, safe.APPROVED, [me, tx["safeTxHash"]])[0]) != 0
             except edw_skill.HostError:
                 approved = False
             if approved:
@@ -56,7 +71,8 @@ def main():
         "source": "Safe Transaction Service (api.safe.global)",
         "chain": safe.CHAIN_LABEL[chain_id],
         "safe": address,
-        "rule": f"{info['threshold']} of {len(owners)} owners must sign",
+        "rule": f"{threshold} of {len(owners)} owners must sign",
+        "signer_set": "read from the Safe on chain" if verified else "from the Safe service, not checked on chain (the wallet is on another chain)",
         "next_nonce": info["nonce"],
         "waiting": len(rows),
         "more_than_shown": bool(page.get("next")),

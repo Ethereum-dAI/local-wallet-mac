@@ -85,23 +85,28 @@ skills. The system prompt lists each skill's name and one-line description; the 
 - `aave-v3-lend`: supply USDC, USDT or DAI to Aave v3 and withdraw it, on Sepolia (Aave's faucet
   tokens) or an anvil mainnet fork. Requires `defi-data`.
 - `safe-multisig`: read a [Safe](https://safe.global) by address on Ethereum, Gnosis Chain,
-  Sepolia, Base and others: `safe_info` (owners, threshold, modules; the signer set is
-  cross-checked against the Safe on chain when the wallet is on that chain), `safe_queue` (what
-  is waiting for signatures, in plain English, with who has not signed) and `safe_activity`
-  (what it recently executed), all from the Safe Transaction Service. Two writes
-  on the Safe the user names: `safe_approve_hash` (approve a waiting transaction on chain as the
-  sending profile, an owner) and `safe_execute` (send the Safe's next transaction once enough
-  owners have signed). Both refuse unless the Safe's own `getTransactionHash` equals the
-  service's; execute also has the Safe check the signatures first. The review shows the Safe's
-  full address, and for execute the target, value, operation and the data and signatures sizes. Labels are rules,
-  not a model's guess: payouts, CoW Protocol pre-signed swap orders, approvals (unlimited ones
-  are flagged), owner/module changes, rejections, and any delegatecall that is not Safe's own
-  MultiSend. A user's Safe cannot be pinned, so its contract uses `address_arg`: the address
-  is the call's own `address` argument, never one the script chose, and only the listed functions
-  may be called there. `execTransaction` takes raw `bytes`, so it is declared in `signed_calls`:
-  the Safe itself runs it only if the owners signed exactly those arguments. Proposing,
-  rejecting and owner changes are not offered (they need an off-chain signature or the Safe
-  itself as the sender).
+  Sepolia, Base and others, and act on its next transaction: `safe_info` (owners, threshold,
+  modules), `safe_queue` (what is waiting for signatures, who has not signed), `safe_activity`
+  (what it recently executed), and two writes: `safe_approve_hash` and `safe_execute`. The signer
+  set and threshold are read from the Safe itself when the wallet is on that chain, and the chain
+  wins over the Safe Transaction Service. What a transaction does is read from its own calldata
+  (the service's text is only compared against it; a disagreement refuses the action, and a call
+  the skill cannot read is a warning the user must hear). The writes:
+  - They target the Safe the user names, after checking it runs one of Safe's own contracts
+    (version 1.3.0 or newer, so an approval cannot be replayed on another chain), and only its
+    next nonce (an on-chain approval cannot be taken back).
+  - Both need the Safe's own `getTransactionHash` to equal the service's. `safe_execute` builds the
+    signatures from the owners' own signatures and from approvals the Safe records on chain (never
+    from the service's word), and has the Safe check them first, with a control that must fail,
+    since a Safe with no fallback handler answers an unknown selector with an empty success.
+  - The review shows the Safe's full address, what the transaction does read from its bytes, and
+    how many signatures of which kind (the sender's own approval is named).
+  A user's Safe cannot be pinned in a manifest, so its contract uses `address_arg`: the address is
+  the call's own `address` argument, never one the script chose, and only the listed functions may
+  be called there. `execTransaction` takes raw `bytes`, so it is declared in `signed_calls`
+  (allowed only for such a contract): the Safe itself runs it only if the owners signed exactly
+  those arguments. Proposing, rejecting and owner changes are not offered (they need an off-chain
+  signature, or the Safe itself as the sender).
 
 A folder holds `SKILL.md` (frontmatter `name` and `description`, then at most 4 KiB the model
 reads) and, optionally, `skill.toml`, which is what edw-tui enforces:

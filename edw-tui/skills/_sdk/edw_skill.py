@@ -84,8 +84,13 @@ def result(value):
     sys.exit(0)
 
 
-def plan(steps):
-    _send({"type": "plan", "plan": {"steps": steps}})
+def plan(steps, notes=None):
+    """`notes` are lines for the review, shown as "Skill says (not checked)": say what the user
+    cannot see from the checked steps (the harness decodes calldata itself)."""
+    body = {"steps": steps}
+    if notes:
+        body["notes"] = [str(n) for n in notes]
+    _send({"type": "plan", "plan": body})
     sys.exit(0)
 
 

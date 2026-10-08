@@ -38,7 +38,8 @@ pub struct HostConfig {
     pub cache: BTreeMap<String, Duration>,
     pub rpc: Option<Url>,
     /// Tests: canned answers instead of the network. Keys are `GET <url>`, `POST <url>` and
-    /// `rpc <method> <params as JSON>`; an HTTP value may start with `status:<code>\n`.
+    /// `rpc <method> <params as JSON>`; an HTTP value may start with `status:<code>\n`. An `rpc`
+    /// call with no fixture goes to `rpc` when one is configured, and fails otherwise.
     pub fixtures: Option<Arc<BTreeMap<String, String>>>,
     pub log: Log,
 }
@@ -194,10 +195,14 @@ impl Host {
     async fn rpc(&self, method: &str, params: Value) -> Result<Value, String> {
         if let Some(fixtures) = &self.config.fixtures {
             let key = format!("rpc {method} {params}");
-            let canned = fixtures
-                .get(&key)
-                .ok_or_else(|| format!("no fixture for {key}"))?;
-            return serde_json::from_str(canned).map_err(|e| format!("fixture {key}: {e}"));
+            match fixtures.get(&key) {
+                Some(canned) => {
+                    return serde_json::from_str(canned).map_err(|e| format!("fixture {key}: {e}"));
+                }
+                // Tests may pair canned web answers with a real (forked) chain.
+                None if self.config.rpc.is_none() => return Err(format!("no fixture for {key}")),
+                None => {}
+            }
         }
         let url = self
             .config

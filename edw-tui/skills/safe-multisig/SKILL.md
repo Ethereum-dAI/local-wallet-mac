@@ -10,16 +10,19 @@ Use these tools when the user names a Safe (a 0x address) and asks about it:
   `signatures`, `still_needs` (who has not signed) and `warnings`. "What needs my signature?"
   means the rows where `you_have_signed` is false.
 - safe_activity: what it recently executed.
-- safe_approve_hash (sends a transaction): approves one waiting transaction on chain, as the
-  user's profile, which must be an owner. Call safe_queue first, tell the user what the
-  transaction does and every warning, then call it with the Safe's address and the `nonce`.
-  Pass `safe_tx_hash` only when proposals compete for a nonce. If it refuses and lists warnings,
-  repeat them and call again with `acknowledge_warnings` true only if the user still wants it.
-  The user reviews and confirms before anything is sent. An approval is not execution.
-- safe_execute (sends a transaction): runs the Safe's next waiting transaction once enough
-  owners have signed (`ready_to_execute` in safe_queue). Anyone may send it; the Safe runs it only
-  if the owners signed exactly those fields. Same flow as approving: safe_queue first, say what it
-  does and every warning, then call it. It only works on the Safe's next nonce.
+- safe_approve_hash (sends a transaction): approves the Safe's NEXT waiting transaction on chain,
+  as the user's profile, which must be an owner. An approval is permanent: it cannot be taken back
+  and stays valid until that nonce is used, which is why only the next nonce is offered.
+- safe_execute (sends a transaction): runs the Safe's next transaction once enough owners have
+  signed (`ready_to_execute` in safe_queue). Anyone may send it.
+
+For both: call safe_queue first, tell the user what the transaction does (the `summary`) and every
+warning, then call the tool with the Safe's address and `nonce`. Pass `safe_tx_hash` only when
+proposals compete for a nonce. A tool that refuses lists warnings: repeat them, and call again with
+`acknowledge_warnings` true only if the user still wants it. "UNKNOWN CALL" means this skill cannot
+read what the call does; say so plainly. The review the user confirms shows the decoded calldata,
+which is the thing to check. If `mismatch` is true the Safe service's text disagrees with the
+calldata: warn, and do not proceed.
 
 `chain` may be a name (Ethereum, Gnosis, Sepolia, Base) or a chain id; leave it out for the
 wallet's chain. A locked wallet reads Ethereum.

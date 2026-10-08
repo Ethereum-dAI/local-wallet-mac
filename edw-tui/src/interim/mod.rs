@@ -46,6 +46,7 @@ use crate::{
     addresses::AddressBook,
     edw::{self, EdwConfig, EdwResult},
     skills::{
+        explain,
         plan::CheckedPlan,
         simulate::{self, Deltas},
     },
@@ -236,6 +237,40 @@ fn is_stale_fork(error: &str) -> bool {
     ]
     .iter()
     .any(|needle| error.contains(needle))
+}
+
+sol! {
+    function getTransactionHash(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, uint256 _nonce) returns (bytes32);
+}
+
+/// The hash the Safe itself computes for a transaction's fields.
+async fn bound_hash<P: Provider>(
+    provider: &P,
+    b: &crate::skills::plan::Binding,
+) -> Result<alloy_primitives::B256, String> {
+    let call = getTransactionHashCall {
+        to: b.to,
+        value: b.value,
+        data: b.data.clone(),
+        operation: b.operation,
+        safeTxGas: b.safe_tx_gas,
+        baseGas: b.base_gas,
+        gasPrice: b.gas_price,
+        gasToken: b.gas_token,
+        refundReceiver: b.refund_receiver,
+        _nonce: b.nonce,
+    };
+    let request = TransactionRequest::default()
+        .to(b.safe)
+        .input(call.abi_encode().into());
+    let answer = provider.call(request).await.map_err(|e| {
+        format!(
+            "the Safe could not hash the transaction ({}), so nothing was sent",
+            evm_reason(&e.to_string())
+        )
+    })?;
+    getTransactionHashCall::abi_decode_returns(&answer)
+        .map_err(|e| format!("the Safe's answer to getTransactionHash was unreadable ({e})"))
 }
 
 /// The EVM's own words from a failed simulation, e.g. `InvalidFEOpcode` or a revert reason.
@@ -964,9 +999,23 @@ impl Interim {
             if index == 0 {
                 // What a call used is not what it needs: a Safe will not even start an inner call
                 // unless it was given its `safeTxGas` up front. The node's own estimate searches for
-                // the least gas that does not revert. (Later steps are re-estimated when sent.)
-                if let Ok(estimated) = provider.estimate_gas(tx.clone()).await {
-                    gas = gas.max(estimated * 12 / 10);
+                // the least gas that does not revert; when it cannot answer, nothing is sent rather
+                // than guessing low. (Later steps are re-estimated when sent.)
+                let estimated = provider.estimate_gas(tx.clone()).await.map_err(|error| {
+                    format!(
+                        "step 1 ({}): the node could not estimate its gas ({}), so nothing was sent",
+                        step.label,
+                        evm_reason(&error.to_string())
+                    )
+                })?;
+                gas = gas.max(estimated * 12 / 10);
+                // The review is only honest if the call also works with the gas it will be sent with.
+                if let Err(error) = provider.call(tx.clone().with_gas_limit(gas)).await {
+                    return Err(format!(
+                        "step 1 ({}) would fail with the gas it would be sent with ({}), so nothing was sent",
+                        step.label,
+                        evm_reason(&error.to_string())
+                    ));
                 }
             }
             max_cost += U256::from(gas) * U256::from(fees.max_fee_per_gas);
@@ -989,10 +1038,47 @@ impl Interim {
             ));
         }
 
+        // An approval of a Safe transaction hash names the transaction behind it. The Safe itself
+        // says whether those fields produce that hash; only then does the review explain them.
+        let mut explained: Vec<Vec<String>> = Vec::new();
+        for step in &plan.steps {
+            let mut lines = step.details.clone();
+            if let Some(binding) = &step.binding {
+                let computed = bound_hash(&provider, binding).await?;
+                if computed != binding.hash {
+                    return Err(format!(
+                        "the transaction this step approves does not hash to {} on the Safe (it computes {computed}), so nothing was sent",
+                        binding.hash
+                    ));
+                }
+                lines.push(format!(
+                    "the Safe confirms this hash is for nonce {}:",
+                    binding.nonce
+                ));
+                lines.extend(
+                    explain::describe(
+                        binding.safe,
+                        binding.to,
+                        binding.value,
+                        &binding.data,
+                        binding.operation,
+                    )
+                    .into_iter()
+                    .map(|l| format!("does: {l}")),
+                );
+            }
+            explained.push(lines);
+        }
         let mut preview = header;
         preview.push(format!("From     {}", account.describe()));
         for (index, step) in plan.steps.iter().enumerate() {
             preview.push(format!("Step {}   {}", index + 1, step.label));
+            for detail in &explained[index] {
+                preview.push(format!("           {detail}"));
+            }
+        }
+        for note in &plan.notes {
+            preview.push(format!("Skill says (not checked): {note}"));
         }
         preview.push(format!(
             "Changes  {} (simulated)",

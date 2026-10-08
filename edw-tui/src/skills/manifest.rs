@@ -469,6 +469,12 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         check_amounts(&c.id, &functions, &c.amounts)?;
+        if !c.signed_calls.is_empty() && c.address_arg.is_none() {
+            return Err(format!(
+                "{}: signed_calls is only for a contract at an address the user names (address_arg); a pinned contract may not take raw bytes",
+                c.id
+            ));
+        }
         if let Some(name) = c
             .signed_calls
             .iter()
@@ -724,6 +730,14 @@ approves = ["pool"]
                 &format!("{pool_address}\naddress_arg = \"safe\"")
             )
             .contains("not both")
+        );
+        // `signed_calls` lets raw bytes through, so it needs the user-named kind of contract.
+        assert!(
+            bad(
+                "functions = [\"function supply(",
+                "signed_calls = [\"supply\"]\nfunctions = [\"function supply("
+            )
+            .contains("only for a contract at an address the user names")
         );
         assert!(bad(pool_address, "").contains("needs an `address` or an `address_arg`"));
         // `amounts` must name a listed function, a uint parameter, and an address parameter

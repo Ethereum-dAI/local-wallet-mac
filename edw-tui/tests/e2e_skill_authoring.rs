@@ -66,8 +66,19 @@ async fn a_safe_skill_is_authored_installed_and_used() {
 
     // Author: the model drives the real tools; the check must really pass, and the model then
     // offers the draft: the user's approval card follows its reply.
-    s.tui
-        .submit("/skill new a read-only skill that shows who owns a Safe, its threshold and nonce");
+    s.ask(
+        "/skill new a read-only skill that shows who owns a Safe, its threshold and nonce",
+        "Is that what you want",
+    );
+    s.screenshot("question");
+    assert!(
+        !drafts.join("safe-multisig").exists(),
+        "nothing is written before the user answers"
+    );
+    s.tui.linger(2500);
+    s.tui.submit(
+        "Yes, build it: the Safe skill on Ethereum mainnet only, read-only, no other chains.",
+    );
     s.tui.wait_for_within("the approval card", 240, |s| {
         s.contains("Allow skill safe-multisig")
     });

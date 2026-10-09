@@ -385,6 +385,12 @@ impl Shared {
                 "Refused: `{key}` holds an address that came from neither the user nor a tool, so it may be made up. Ask the user for the address; nothing was written."
             ));
         }
+        if matches!(tool, author::WRITE | author::INSTALL) && !store.confirmed() {
+            return fail(
+                "Not yet, nothing was written. First tell the user in a few lines what you plan to build (what it reads or sends, which chain, which contracts or web hosts, when it is used), ask about anything missing, and wait for their reply."
+                    .into(),
+            );
+        }
         if tool == author::WRITE {
             let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
             // `allowed_path` refuses every other spelling, so this is the manifest or nothing.
@@ -997,6 +1003,11 @@ pub async fn run_session(
             }
             Request::Skill(op) => state.change(op).await,
             other => {
+                if let Request::Prompt(text) = &other
+                    && let Some(drafts) = state.set.drafts()
+                {
+                    drafts.user_message(text);
+                }
                 let event = match state.agent.as_mut() {
                     Some(agent) => {
                         answer(
@@ -1359,6 +1370,32 @@ mod tests {
         s.skills.load("skill-creator");
         let out = write_draft(&s, "SKILL.md", "x").await;
         assert!(out.starts_with("wrote SKILL.md"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn nothing_is_written_or_offered_until_the_user_has_answered() {
+        let root = tempfile::tempdir().unwrap();
+        let s = shared_with(creator_set(root.path(), true), root.path());
+        s.skills.load("skill-creator");
+        let drafts = s.skills.drafts().unwrap();
+        drafts.user_message(&format!("{} and help me: a skill", author::START));
+        let refused = write_draft(&s, "SKILL.md", "x").await;
+        assert!(
+            refused.contains("Not yet") && refused.contains("wait for their reply"),
+            "{refused}"
+        );
+        assert!(!root.path().join("drafts/demo").exists());
+        let offered = s
+            .author_call(author::INSTALL, serde_json::json!({"name": "demo"}))
+            .await;
+        assert!(offered.contains("Not yet"), "{offered}");
+        // Reading the guides is allowed meanwhile, and the user's next message is the answer.
+        let guide = s
+            .author_call(author::GUIDE, serde_json::json!({"topic": "example"}))
+            .await;
+        assert!(!guide.contains("Not yet"));
+        drafts.user_message("yes, mainnet only");
+        assert!(write_draft(&s, "SKILL.md", "x").await.starts_with("wrote"));
     }
 
     #[tokio::test]

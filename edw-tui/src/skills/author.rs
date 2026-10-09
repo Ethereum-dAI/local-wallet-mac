@@ -16,6 +16,8 @@ pub const CREATOR: &str = "skill-creator";
 pub const WRITE: &str = "skill_draft_write";
 pub const CHECK: &str = "skill_draft_check";
 pub const GUIDE: &str = "skill_draft_guide";
+/// Every authoring request the TUI sends starts with this; see [`DraftStore::user_message`].
+pub const START: &str = "Load the skill-creator skill";
 pub const INSTALL: &str = "skill_draft_install";
 pub const TOOL_NAMES: [&str; 4] = [WRITE, CHECK, GUIDE, INSTALL];
 
@@ -29,6 +31,9 @@ pub struct DraftStore {
     /// The draft the model asked to install this turn. The session takes it when the turn ends
     /// and shows the user's approval card; nothing is installed until the user allows it.
     requested: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// False from `/skill new` or `/skill from-chat` until the user's next message: the model
+    /// must first say what it plans to build and hear back before it writes or offers a draft.
+    confirmed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DraftStore {
@@ -36,7 +41,21 @@ impl DraftStore {
         Self {
             root,
             requested: Default::default(),
+            confirmed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
+    }
+
+    /// Called with every message the user sends: a new authoring request needs an answer
+    /// before anything is written; any other message is that answer.
+    pub fn user_message(&self, text: &str) {
+        self.confirmed.store(
+            !text.starts_with(START),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
+    pub fn confirmed(&self) -> bool {
+        self.confirmed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn request_install(&self, name: &str) {

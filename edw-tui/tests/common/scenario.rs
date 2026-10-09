@@ -115,7 +115,10 @@ impl Scenario {
 
         let config = &wallet.config;
         let mut env = vec![
-            ("EDW_TUI_MODEL", "scripted".into()),
+            (
+                "EDW_TUI_MODEL",
+                std::env::var("EDW_TUI_E2E_MODEL").unwrap_or_else(|_| "scripted".into()),
+            ),
             ("EDW_BIN", binary.display().to_string()),
             ("EDW_DATA_DIR", config.data_dir.display().to_string()),
             ("EDW_RUNTIME_DIR", config.runtime_dir.display().to_string()),

@@ -146,6 +146,9 @@ impl Report {
             for e in &self.errors {
                 out.push_str(&format!("- {e}\n"));
             }
+            out.push_str(
+                "If a field or format is unclear, read it: skill_draft_guide with topic manifest (skill.toml) or sdk (scripts), then rewrite the file.\n",
+            );
         }
         if !self.warnings.is_empty() {
             out.push_str("Warnings (fix them, or tell the user):\n");

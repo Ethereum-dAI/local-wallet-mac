@@ -121,3 +121,54 @@ async fn a_safe_skill_is_authored_installed_and_used() {
     assert!(answer.contains("4 of 11 owners must sign"), "{answer}");
     s.finish("skill-authoring");
 }
+
+/// A real Ollama model (`EDW_TUI_E2E_MODEL`, default qwen3:8b) is asked to author a skill. What
+/// it writes is not scripted, so this only reports: the screen, the files, and the real check.
+/// `cargo test --test e2e_skill_authoring real_model -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Ollama, Docker, anvil and edw; the outcome depends on the model"]
+async fn real_model_drafts_a_skill() {
+    if !sandbox::docker_available().await {
+        eprintln!("skipping: Docker is not running");
+        return;
+    }
+    let model = std::env::var("EDW_TUI_E2E_MODEL").unwrap_or_else(|_| "qwen3:8b".into());
+    // SAFETY: set before the scenario spawns anything, in a test with no other threads reading it.
+    unsafe { std::env::set_var("EDW_TUI_E2E_MODEL", &model) };
+    let Some(mut s) = Scenario::start_with_skills("real-model-authoring", Chain::Local).await
+    else {
+        return;
+    };
+    let drafts = s.wallet.config.data_dir.join("skills-state/drafts");
+    s.tui.submit(&format!(
+        "/skill new a read-only skill that shows who owns the Safe {MAINNET_SAFE} on chain 1, its threshold and nonce"
+    ));
+    // The turn cap (10) can stop a model mid-draft, as a user would see; a user says "continue".
+    for round in 0..4 {
+        s.tui.wait_for_within("the turn to end", 900, |s| {
+            s.contains("edw:") || s.contains("error:")
+        });
+        s.idle();
+        let screen = s.tui.screen();
+        if screen.contains("no problems found") || screen.contains("The draft loads") {
+            break;
+        }
+        eprintln!("round {round}: not checked clean yet; saying continue");
+        s.tui
+            .submit("Continue. Mainnet, read-only. Fix what the check reports.");
+    }
+    eprintln!("model={model}\n{}", s.tui.screen());
+    let mut any = false;
+    for entry in fs::read_dir(&drafts).into_iter().flatten().flatten() {
+        any = true;
+        let report = edw_tui::skills::author::check(&entry.path());
+        eprintln!(
+            "draft {:?}: ok={} errors={:?} warnings={:?}",
+            entry.file_name(),
+            report.ok(),
+            report.errors,
+            report.warnings
+        );
+    }
+    assert!(any, "the model wrote no draft");
+}

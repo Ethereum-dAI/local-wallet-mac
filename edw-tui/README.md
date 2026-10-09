@@ -143,6 +143,20 @@ and the conversation, model and loaded skills carry over.
 
 A card you decline is not shown again this session, until you enable that skill.
 
+**Creating a skill.** `/skill new <goal>` or `/skill from-chat` (turn what you just did into a
+skill) loads the shipped `skill-creator` skill. The model writes a draft into
+`~/.config/edw-tui/skills-drafts/<name>` (`EDW_TUI_SKILLS_DRAFTS_DIR`) with `skill_draft_write`
+and checks it with `skill_draft_check`: it loads, scripts parse, and contracts are compared
+with Sourcify (each lookup tells sourcify.dev the contract address and chain; set
+`EDW_TUI_SKILLS_FACTS=off` to skip it). The model first asks about anything unclear, then calls `skill_draft_plan`, which shows you its plan
+(what the skill reads or sends, chain, contracts and hosts) with `y`/`n`. Nothing is written until
+you press `y`, and each plan covers one skill: after the model offers a draft, a new plan is
+needed. When the check is clean the model calls `skill_draft_install`, and the usual approval card
+for the skill follows its reply. Allowing the card installs the skill for every session; declining
+it keeps nothing (the draft stays in the drafts folder). The model cannot approve its own plan or
+card, and `/skill install <name>` offers any draft the same way yourself. A draft whose check
+reports errors is never offered. A skill with actions still goes through the plan checker and per-transaction review.
+
 **Scripts run in Docker** (`skills/_sdk/edw_skill.py` is the protocol helper), one throwaway
 container per call: no network, read-only root and mounts, no capabilities, the `nobody` user,
 none of the host's environment, 20 s and 1 MiB of output at most. A script gets data only by

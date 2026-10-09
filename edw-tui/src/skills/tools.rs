@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 
 use super::{
     LOAD_SKILL,
+    author::{self, DraftStore},
     catalog::{Catalog, Installed},
     host::{Host, HostConfig, Log, SharedCache},
     manifest::Skill,
@@ -36,6 +37,7 @@ pub struct SkillSet {
     pub cache: SharedCache,
     hashes: BTreeMap<String, String>,
     loaded: Mutex<BTreeSet<String>>,
+    drafts: Option<DraftStore>,
 }
 
 impl SkillSet {
@@ -49,7 +51,23 @@ impl SkillSet {
             runner,
             cache: SharedCache::default(),
             loaded: Mutex::default(),
+            drafts: None,
         }
+    }
+
+    pub fn with_drafts(mut self, drafts: DraftStore) -> Self {
+        self.drafts = Some(drafts);
+        self
+    }
+
+    pub fn drafts(&self) -> Option<&DraftStore> {
+        self.drafts.as_ref()
+    }
+
+    /// Authoring tools are registered only when `skill-creator` is in the catalog and a drafts
+    /// folder is set.
+    pub fn authoring_enabled(&self) -> bool {
+        self.catalog.get(author::CREATOR).is_some() && self.drafts.is_some()
     }
 
     /// No skills: the agent behaves exactly as it did before skills existed.
@@ -163,6 +181,9 @@ impl SkillSet {
             .filter(|s| loaded.contains(&s.name))
         {
             names.extend(skill.tool_names().into_iter().map(str::to_owned));
+        }
+        if loaded.contains(author::CREATOR) {
+            names.extend(author::TOOL_NAMES.map(str::to_owned));
         }
         names
     }
@@ -317,6 +338,39 @@ mod tests {
             &installed,
             Runner::from_env(),
         )
+    }
+
+    fn set_with_creator(root: &std::path::Path) -> SkillSet {
+        let dir = root.join("skill-creator");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: skill-creator\ndescription: Create a new skill from a description or from this chat.\n---\nbody\n",
+        )
+        .unwrap();
+        let mut installed = catalog::discover(&[root.to_owned()]);
+        installed[0].state = SkillState::Ready;
+        SkillSet::new(
+            Catalog::from_installed(&installed),
+            &installed,
+            Runner::from_env(),
+        )
+    }
+
+    #[test]
+    fn authoring_tools_are_offered_only_once_skill_creator_is_loaded() {
+        let root = tempfile::tempdir().unwrap();
+        let set = set_with_creator(root.path());
+        let builtin = vec!["balance".to_owned()];
+        assert_eq!(set.active_tools(&builtin), builtin);
+        set.load("skill-creator");
+        let active = set.active_tools(&builtin);
+        for name in crate::skills::author::TOOL_NAMES {
+            assert!(
+                active.iter().any(|t| t == name),
+                "{name} missing: {active:?}"
+            );
+        }
     }
 
     #[test]

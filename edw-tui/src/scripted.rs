@@ -147,9 +147,116 @@ fn safe_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
     ]))
 }
 
+/// What `/skill new <goal>` sends (see `command()` in `app.rs`).
+const AUTHORING_PREFIX: &str = "Load the skill-creator skill and help me create a new skill:";
+
+/// What the user answers to the question the model asks first (the e2e test sends this).
+pub const AUTHORING_CONFIRM: &str = "Yes, build it:";
+
+const AUTHORING_PLAN: &str = "Read-only skill safe-multisig. Reads a Safe's owners, threshold and next nonce from Ethereum mainnet through your RPC. No web hosts; it can never send a transaction. Used when you ask who controls a Safe.";
+
+const AUTHORING_QUESTION: &str = "Before I write anything: I plan a read-only skill that reads a Safe's owners, threshold and next nonce from Ethereum mainnet through your RPC. It would use no web hosts and could never send a transaction. Is that what you want, and should it work on other chains too?";
+
+const DRAFT_SKILL_MD: &str = r#"---
+name: safe-multisig
+description: Read who owns a Safe multisig, how many owners must sign (its threshold) and its next nonce. Only reads; it never sends anything.
+---
+Use safe_info when the user names a Safe (a 0x address) and asks who controls it.
+
+Report the owners, the threshold as "N of M owners must sign", the Safe's version and its next
+nonce. This skill only reads the chain: it cannot approve or execute anything. If safe_info says
+the wallet must be unlocked, tell the user to unlock it and ask again.
+"#;
+
+const DRAFT_SKILL_TOML: &str = r#"version = "0.1.0"
+
+[[read_tool]]
+name = "safe_info"
+run = "scripts/safe_info.py"
+description = "Who owns a Safe: its owners, how many must sign (threshold), version and next nonce, read from the Safe itself."
+schema = { type = "object", required = ["address"], properties = { address = { type = "string", description = "The Safe's 0x address." } } }
+"#;
+
+const DRAFT_SAFE_INFO_PY: &str = r##""""safe_info: owners, threshold, version and next nonce of a Safe, read from the Safe itself."""
+
+import re
+
+import edw_skill
+
+OWNERS = "function getOwners() view returns (address[])"
+THRESHOLD = "function getThreshold() view returns (uint256)"
+NONCE = "function nonce() view returns (uint256)"
+VERSION = "function VERSION() view returns (string)"
+
+_, args, context = edw_skill.invoke()
+address = str(args.get("address", ""))
+if not re.fullmatch(r"0x[0-9a-fA-F]{40}", address):
+    edw_skill.fail("safe_info needs the Safe's 0x address")
+if context.get("wallet") != "unlocked":
+    edw_skill.fail("unlock the wallet first: reading a Safe needs a network")
+try:
+    owners = [str(o) for o in edw_skill.call(address, OWNERS)[0]]
+    threshold = int(edw_skill.call(address, THRESHOLD)[0])
+    nonce = int(edw_skill.call(address, NONCE)[0])
+    version = str(edw_skill.call(address, VERSION)[0])
+except edw_skill.HostError as error:
+    edw_skill.fail(f"{address} did not answer like a Safe: {error}")
+edw_skill.result({
+    "chain": "Ethereum" if context.get("chain_id") == 1 else str(context.get("network")),
+    "safe": address,
+    "version": version,
+    "threshold": threshold,
+    "owner_count": len(owners),
+    "owners": owners,
+    "rule": f"{threshold} of {len(owners)} owners must sign",
+    "next_nonce": nonce,
+    "onchain_check": "read from the Safe itself on the chain",
+    "warning": "Modules were not checked by this skill.",
+})
+"##;
+
+/// `/skill new <a Safe skill>`: the model drives the real authoring tools. The files are the
+/// model's work; the tools still write, check and refuse them exactly as for any model.
+fn authoring_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
+    if !has("safe") {
+        return None;
+    }
+    if prompt.starts_with(AUTHORING_PREFIX) {
+        // First the question: the harness refuses writes until the user has answered.
+        return Some(Script::Calls(vec![(
+            "load_skill",
+            json!({"name": "skill-creator"}),
+        )]));
+    }
+    if !prompt.starts_with(AUTHORING_CONFIRM) {
+        return None;
+    }
+    let write = |path: &str, content: &str| {
+        (
+            "skill_draft_write",
+            json!({"name": "safe-multisig", "path": path, "content": content}),
+        )
+    };
+    Some(Script::Calls(vec![
+        (
+            "skill_draft_plan",
+            json!({"name": "safe-multisig", "summary": AUTHORING_PLAN}),
+        ),
+        ("skill_draft_guide", json!({"topic": "example"})),
+        write("SKILL.md", DRAFT_SKILL_MD),
+        write("skill.toml", DRAFT_SKILL_TOML),
+        write("scripts/safe_info.py", DRAFT_SAFE_INFO_PY),
+        ("skill_draft_check", json!({"name": "safe-multisig"})),
+        ("skill_draft_install", json!({"name": "safe-multisig"})),
+    ]))
+}
+
 /// Skill requests: `what does aave pay`, `put <amount> <token> on aave`, `withdraw all my
 /// <token> from aave`, `best <token> lending rates on <chain>`.
 fn skill_script(prompt: &str, text: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
+    if let Some(authoring) = authoring_script(prompt, has) {
+        return Some(authoring);
+    }
     if let Some(safe) = safe_script(prompt, has) {
         return Some(safe);
     }
@@ -211,6 +318,17 @@ fn usd(amount: f64) -> String {
 /// The reply after a skill tool, from its result (`{"command","exit_code","output"}`), the way
 /// a model would put it; `None` for other tools, which keep the plain "Done".
 pub fn summary(tool: &str, result: &str) -> Option<String> {
+    if tool == "load_skill" && result.contains("# Skill skill-creator") {
+        return Some(AUTHORING_QUESTION.into());
+    }
+    if tool == "skill_draft_install" {
+        // Authoring tools answer in plain text, not the `{"output"}` envelope. Only an offered
+        // draft is called ready, and the name comes from the tool's own answer.
+        let name = result.strip_prefix("Offered ")?.split('.').next()?;
+        return Some(format!(
+            "The draft `{name}` passes the check. Review the approval card to add it to your skills."
+        ));
+    }
     let result: Value = serde_json::from_str(result).ok()?;
     let output = result.get("output")?.as_str()?;
     match tool {
@@ -572,6 +690,76 @@ mod tests {
                 )
             ])
         );
+    }
+
+    /// `/skill new` for a Safe skill: the model loads `skill-creator` and asks first; only the
+    /// user's answer starts the real authoring tools, in order, ending in the offer.
+    #[test]
+    fn scripts_a_safe_skill_through_the_authoring_tools() {
+        let goal = "a read-only skill that shows who owns a Safe, its threshold and nonce";
+        assert_eq!(
+            script(&format!("{AUTHORING_PREFIX} {goal}")),
+            Script::Calls(vec![("load_skill", json!({"name": "skill-creator"}))])
+        );
+        let reply = summary(
+            "load_skill",
+            "# Skill skill-creator\nbody\nTools now available: none (instructions only)",
+        )
+        .unwrap();
+        assert!(reply.contains("Is that what you want"), "{reply}");
+        let Script::Calls(calls) = script(&format!(
+            "{AUTHORING_CONFIRM} the Safe skill, mainnet, read-only"
+        )) else {
+            panic!("expected a call sequence");
+        };
+        let tools: Vec<&str> = calls.iter().map(|(t, _)| *t).collect();
+        assert_eq!(
+            tools,
+            [
+                "skill_draft_plan",
+                "skill_draft_guide",
+                "skill_draft_write",
+                "skill_draft_write",
+                "skill_draft_write",
+                "skill_draft_check",
+                "skill_draft_install"
+            ]
+        );
+        let paths: Vec<&str> = calls[2..5]
+            .iter()
+            .map(|(_, a)| a["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["SKILL.md", "skill.toml", "scripts/safe_info.py"]);
+        // The drafted skill reads the Safe from its arguments: no address is baked in.
+        for (_, args) in &calls[2..5] {
+            let content = args["content"].as_str().unwrap();
+            assert_eq!(address_in(content), None, "{content}");
+        }
+        // Other goals, and a Safe question that is not an authoring request, are not hijacked.
+        assert!(!matches!(
+            script(&format!("{AUTHORING_PREFIX} a skill that supplies USDC to Compound")),
+            Script::Calls(ref c) if c.iter().any(|(t, _)| *t == "skill_draft_write")
+        ));
+        assert_eq!(
+            script("who controls safe ADDR_1?"),
+            Script::Calls(vec![
+                ("load_skill", json!({"name": "safe-multisig"})),
+                ("safe_info", json!({"address": "ADDR_1"}))
+            ])
+        );
+    }
+
+    #[test]
+    fn an_offered_draft_points_at_the_approval_card() {
+        let ok = "Offered safe-multisig. The approval card appears when you finish this reply; the user decides.";
+        let reply = summary("skill_draft_install", ok).unwrap();
+        assert!(
+            reply.contains("safe-multisig") && reply.contains("approval card"),
+            "{reply}"
+        );
+        // A draft that was not offered is never called ready.
+        let bad = "not offered: Errors (fix these):\n- skill.toml: missing version";
+        assert_eq!(summary("skill_draft_install", bad), None);
     }
 
     /// After a skill tool the stand-in answers like a model would: the numbers, in a sentence.

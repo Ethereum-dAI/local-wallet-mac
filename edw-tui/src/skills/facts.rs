@@ -1,0 +1,300 @@
+//! Checks a draft's contract addresses and function signatures against verified source (Sourcify)
+//! so a model's invented address or function shows up before the user is asked to allow it.
+//! Findings are warnings: Sourcify may be down, and the approval card stays the real gate.
+
+use std::{future::Future, time::Duration};
+
+use alloy_json_abi::JsonAbi;
+use alloy_primitives::Address;
+
+use super::manifest::Skill;
+
+pub trait AbiSource {
+    /// `Ok(None)`: the contract is not verified there.
+    fn abi(
+        &self,
+        chain_id: u64,
+        address: Address,
+    ) -> impl Future<Output = Result<Option<JsonAbi>, String>> + Send;
+}
+
+/// `EDW_TUI_SKILLS_FACTS=off` stops `skill_draft_check` from contacting Sourcify. Each lookup
+/// tells sourcify.dev which contract and chain a skill is about, so it is opt-out.
+pub fn enabled() -> bool {
+    std::env::var("EDW_TUI_SKILLS_FACTS").map_or(true, |v| !v.eq_ignore_ascii_case("off"))
+}
+
+pub struct Sourcify {
+    client: reqwest::Client,
+}
+
+impl Sourcify {
+    /// One client for the process, so its connections are reused across checks.
+    pub fn new() -> Self {
+        static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let client = CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default()
+        });
+        Self {
+            client: client.clone(),
+        }
+    }
+}
+
+impl Default for Sourcify {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AbiSource for Sourcify {
+    async fn abi(&self, chain_id: u64, address: Address) -> Result<Option<JsonAbi>, String> {
+        let url = format!(
+            "https://sourcify.dev/server/v2/contract/{chain_id}/{}?fields=abi",
+            address.to_checksum(None)
+        );
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Sourcify unreachable ({e})"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(format!("Sourcify answered HTTP {}", response.status()));
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Sourcify sent unreadable JSON ({e})"))?;
+        let abi = body
+            .get("abi")
+            .cloned()
+            .ok_or("Sourcify's answer has no abi")?;
+        serde_json::from_value(abi)
+            .map(Some)
+            .map_err(|e| format!("Sourcify's abi did not parse ({e})"))
+    }
+}
+
+/// The most (contract, chain) addresses one check looks up (all at once).
+const MAX_LOOKUPS: usize = 8;
+
+/// One finding per problem: an address with no verified source, a source that cannot be reached,
+/// a declared function the verified ABI does not have. Contracts the user names at call time
+/// (`address_arg`) have nothing to check. At most [`MAX_LOOKUPS`] lookups are made, and the
+/// first failed lookup ends the check, so a Sourcify that is down costs one timeout (the lookups run together).
+pub async fn verify(skill: &Skill, source: &impl AbiSource) -> Vec<String> {
+    let mut findings = Vec::new();
+    let pairs: Vec<_> = skill
+        .manifest
+        .contracts
+        .iter()
+        .flat_map(|contract| {
+            contract
+                .address
+                .iter()
+                .map(move |(c, a)| (contract, *c, *a))
+        })
+        .collect();
+    let total = pairs.len();
+    let lookups = futures::future::join_all(
+        pairs
+            .iter()
+            .take(MAX_LOOKUPS)
+            .map(|(_, chain, address)| source.abi(*chain, *address)),
+    )
+    .await;
+    for (done, ((contract, chain, address), found)) in pairs.into_iter().zip(lookups).enumerate() {
+        let label = format!("{} ({address}) on chain {chain}", contract.label);
+        match found {
+            Err(why) => {
+                findings.push(format!(
+                    "Sourcify unreachable, skipped {} checks (first failure: {label}: {why})",
+                    total - done
+                ));
+                return findings;
+            }
+            Ok(None) => findings.push(format!(
+                "{label} has no verified source on Sourcify; confirm the address yourself before allowing the skill"
+            )),
+            Ok(Some(abi)) => {
+                for function in &contract.functions {
+                    let found = abi
+                        .functions()
+                        .any(|known| known.selector() == function.selector());
+                    if !found {
+                        findings.push(format!(
+                            "{label}: the verified ABI has no `{}` with these parameters (if this is a proxy, the ABI may be the proxy's own)",
+                            function.name
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if total > MAX_LOOKUPS {
+        findings.push(format!(
+            "checked {MAX_LOOKUPS} of {total} addresses; the rest were skipped"
+        ));
+    }
+    findings
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, fs};
+
+    use super::*;
+    use crate::skills::manifest;
+
+    struct Fake(BTreeMap<(u64, Address), Result<Option<JsonAbi>, String>>);
+
+    impl AbiSource for Fake {
+        async fn abi(&self, chain_id: u64, address: Address) -> Result<Option<JsonAbi>, String> {
+            self.0
+                .get(&(chain_id, address))
+                .cloned()
+                .unwrap_or(Ok(None))
+        }
+    }
+
+    const POOL: &str = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2";
+
+    fn skill(functions: &str, address_line: &str) -> (tempfile::TempDir, Skill) {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("demo");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: Supply to a pool, for testing the facts check.\n---\nbody\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("skill.toml"),
+            format!(
+                "version = \"0.1.0\"\n[[contract]]\nid = \"pool\"\nlabel = \"Pool\"\nfunctions = [{functions}]\n{address_line}\n"
+            ),
+        )
+        .unwrap();
+        let skill = manifest::load(&dir).unwrap();
+        (root, skill)
+    }
+
+    fn abi(sigs: &[&str]) -> JsonAbi {
+        JsonAbi::parse(sigs.iter().copied()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_matching_verified_contract_has_no_findings() {
+        let (_r, skill) = skill(
+            r#""function supply(address asset,uint256 amount,address onBehalfOf,uint16 referralCode)""#,
+            &format!("address = {{ 1 = \"{POOL}\" }}"),
+        );
+        let source = Fake(BTreeMap::from([(
+            (1, POOL.parse().unwrap()),
+            Ok(Some(abi(&[
+                "function supply(address,uint256,address,uint16)",
+            ]))),
+        )]));
+        assert_eq!(verify(&skill, &source).await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_function_the_verified_abi_lacks_is_named() {
+        let (_r, skill) = skill(
+            r#""function supplyAll(address asset)""#,
+            &format!("address = {{ 1 = \"{POOL}\" }}"),
+        );
+        let source = Fake(BTreeMap::from([(
+            (1, POOL.parse().unwrap()),
+            Ok(Some(abi(&[
+                "function supply(address,uint256,address,uint16)",
+            ]))),
+        )]));
+        let findings = verify(&skill, &source).await;
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("supplyAll"), "{findings:?}");
+    }
+
+    #[tokio::test]
+    async fn an_unverified_address_and_an_unreachable_source_are_findings_not_failures() {
+        let (_r, skill) = skill(
+            r#""function supply(address asset)""#,
+            &format!(
+                "address = {{ 1 = \"{POOL}\", 11155111 = \"0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951\" }}"
+            ),
+        );
+        let source = Fake(BTreeMap::from([(
+            (
+                11155111,
+                "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951"
+                    .parse()
+                    .unwrap(),
+            ),
+            Err("Sourcify unreachable".to_owned()),
+        )]));
+        let findings = verify(&skill, &source).await;
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(findings.iter().any(|f| f.contains("no verified source")));
+        assert!(findings.iter().any(|f| f.contains("unreachable")));
+    }
+
+    /// Counts lookups, and fails every one.
+    struct Down(std::sync::atomic::AtomicUsize);
+
+    impl AbiSource for Down {
+        async fn abi(&self, _: u64, _: Address) -> Result<Option<JsonAbi>, String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("timed out".into())
+        }
+    }
+
+    fn many_chains(n: u64) -> String {
+        let entries: Vec<String> = (1..=n).map(|c| format!("{c} = \"{POOL}\"")).collect();
+        format!("address = {{ {} }}", entries.join(", "))
+    }
+
+    #[tokio::test]
+    async fn a_source_that_is_down_is_reported_once() {
+        let (_r, skill) = skill(r#""function supply(address asset)""#, &many_chains(5));
+        let source = Down(Default::default());
+        let findings = verify(&skill, &source).await;
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].contains("Sourcify unreachable, skipped 5 checks"),
+            "{findings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lookups_are_capped_and_the_cap_is_reported() {
+        let (_r, skill) = skill(r#""function supply(address asset)""#, &many_chains(10));
+        let findings = verify(&skill, &Fake(BTreeMap::new())).await;
+        let unverified = findings
+            .iter()
+            .filter(|f| f.contains("no verified source"))
+            .count();
+        assert_eq!(unverified, 8, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f == "checked 8 of 10 addresses; the rest were skipped"),
+            "{findings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_contract_with_no_pinned_address_is_skipped() {
+        let (_r, skill) = skill(
+            r#""function supply(address asset)""#,
+            "address_arg = \"safe\"",
+        );
+        assert!(verify(&skill, &Fake(BTreeMap::new())).await.is_empty());
+    }
+}

@@ -16,7 +16,7 @@ use crate::{
     agent::{MAX_TURNS, additional_params, preamble_with},
     edw::{self, TOOLS},
     skills::{
-        LOAD_SKILL,
+        LOAD_SKILL, author, author_tools,
         catalog::{self, Catalog, Installed, SkillState},
         tools::{LOAD_SKILL_DESCRIPTION, load_skill_parameters},
     },
@@ -77,12 +77,21 @@ pub fn dump() -> Value {
                 .iter()
                 .find(|i| i.name == skill.name)
                 .map_or("", |i| i.hash.as_str());
-            let tools: Vec<ollama::ToolDefinition> = m
+            let mut tools: Vec<ollama::ToolDefinition> = m
                 .read_tools
                 .iter()
                 .chain(m.actions.iter().map(|a| &a.tool))
                 .map(|t| wire(&t.name, &t.description, t.schema.clone()))
                 .collect();
+            // The authoring tools come from the harness, not a manifest: loading
+            // skill-creator is what offers them.
+            if skill.name == author::CREATOR {
+                tools.extend(
+                    author_tools::specs()
+                        .into_iter()
+                        .map(|(name, description, schema)| wire(name, description, schema)),
+                );
+            }
             json!({
                 "name": skill.name,
                 "version": m.version,

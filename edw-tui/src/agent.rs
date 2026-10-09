@@ -8,7 +8,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     convert::Infallible,
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -36,9 +36,10 @@ use crate::{
     interim::{self, Interim, InterimConfig},
     scripted::ScriptedModel,
     skills::{
-        self as skills_mod, LOAD_SKILL, Paths, SkillRow,
+        self as skills_mod, LOAD_SKILL, Paths, SkillRow, author, author_tools,
         catalog::Catalog,
         consent::ConsentRequest,
+        facts,
         host::Log,
         plan,
         sandbox::{self, Output},
@@ -80,8 +81,9 @@ pub fn preamble_with(catalog: &Catalog) -> String {
 /// The most of a read tool's result the model is given.
 pub const MAX_SKILL_RESULT: usize = 8 * 1024;
 
-/// Model calls per user message; each tool round-trip uses one.
-pub const MAX_TURNS: usize = 10;
+/// Model calls per user message; each tool round-trip uses one. Writing a skill is the longest
+/// job: load, two guides, three files and a check or two take about ten.
+pub const MAX_TURNS: usize = 16;
 
 /// Everything the agent tells the UI.
 #[derive(Debug)]
@@ -146,6 +148,9 @@ pub enum SkillOp {
     Enable(String),
     /// Only skills the user added.
     Delete(String),
+    /// The user's own command: copy the model's draft into their skills; its approval card
+    /// comes next.
+    InstallDraft(String),
 }
 
 pub type Events = mpsc::UnboundedSender<AgentEvent>;
@@ -338,6 +343,120 @@ impl Shared {
             output,
         }));
         text
+    }
+
+    /// Runs one authoring tool against the drafts folder. It needs `skill-creator` loaded.
+    /// Addresses the model writes must have come from the user or a tool, and an `ADDR_n`
+    /// alias is resolved only inside `skill.toml`: a script or SKILL.md is written as typed.
+    async fn author_call(&self, tool: &str, mut args: Value) -> String {
+        let Some(store) = self.skills.drafts() else {
+            return "skill authoring is not available".into();
+        };
+        let name = args
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let command = format!("{tool} {name}");
+        let fail = |output: String| {
+            self.log(AgentEvent::ToolFinished(EdwResult {
+                command: command.clone(),
+                exit_code: 1,
+                output: output.clone(),
+            }));
+            output
+        };
+        if !self.skills.is_loaded(author::CREATOR) {
+            return fail(format!(
+                "load the {} skill first (call load_skill); nothing was written.",
+                author::CREATOR
+            ));
+        }
+        // Every text the model supplied is echoed somewhere in the reply (a path, a name, a
+        // topic), and the reply goes through `hide`, which would register an invented address.
+        // So all of it is scanned, and a refusal names only the argument.
+        if let Some((key, _)) = args.as_object().and_then(|o| {
+            o.iter().find(|(_, v)| {
+                v.as_str()
+                    .is_some_and(|t| self.addresses.invented(t).is_some())
+            })
+        }) {
+            return fail(format!(
+                "Refused: `{key}` holds an address that came from neither the user nor a tool, so it may be made up. Ask the user for the address; nothing was written."
+            ));
+        }
+        if tool == author::PLAN {
+            let summary = args
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            if let Err(why) = store.dir(&name) {
+                return fail(why);
+            }
+            if summary.is_empty() || summary.len() > 1500 {
+                return fail(
+                    "summary is required: the plan in a few lines (at most 1500 characters)".into(),
+                );
+            }
+            // The user reads the plan and answers; nothing else unlocks writing.
+            let mut preview = format!("Skill {name}\n{}", self.addresses.reveal(&summary));
+            if facts::enabled() {
+                preview.push_str("\n\nChecking the draft asks sourcify.dev about its contracts (address and chain); set EDW_TUI_SKILLS_FACTS=off to skip.");
+            }
+            if self.confirm(&command, Some(preview)).await {
+                store.approve_plan(&name);
+                return "The user approved the plan. Write the draft now, then check it and offer it."
+                    .into();
+            }
+            return "The user did not approve the plan. Ask what to change, then call skill_draft_plan again; nothing was written."
+                .into();
+        }
+        if matches!(tool, author::WRITE | author::INSTALL) && !store.approved_for(&name) {
+            return fail(format!(
+                "Not yet, nothing was written. First ask the user about anything unclear, then call skill_draft_plan for `{name}` with your plan; the user must approve it with y before you write or offer that skill. An approval covers one skill and one turn."
+            ));
+        }
+        if tool == author::WRITE && store.offer_pending() {
+            return fail("This draft was already offered; the user's approval card is next. Do not change it now.".into());
+        }
+        if tool == author::WRITE {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
+            // `allowed_path` refuses every other spelling, so this is the manifest or nothing.
+            let is_manifest = Path::new(path)
+                .components()
+                .eq([Component::Normal("skill.toml".as_ref())]);
+            if is_manifest && let Some(content) = args.get("content").and_then(Value::as_str) {
+                let revealed = self.addresses.reveal_uppercase(content);
+                args["content"] = Value::String(revealed);
+            }
+        }
+        self.log(AgentEvent::ToolStarted {
+            command: command.clone(),
+        });
+        let (exit_code, mut output) =
+            author_tools::call(store, &facts::Sourcify::new(), tool, &args).await;
+        if output.len() > MAX_SKILL_RESULT {
+            let mut end = MAX_SKILL_RESULT;
+            while !output.is_char_boundary(end) {
+                end -= 1;
+            }
+            output.truncate(end);
+        }
+        self.log(AgentEvent::ToolFinished(EdwResult {
+            command,
+            exit_code,
+            output: output.clone(),
+        }));
+        output
+    }
+
+    /// What the model reads after an authoring call: [`Self::author_call`]'s text with every
+    /// address hidden. Refusals never contain the address they refuse (see `author_call`).
+    async fn author_reply(&self, tool: &str, args: Value) -> String {
+        let output = self.author_call(tool, args).await;
+        self.addresses.hide(&output)
     }
 
     /// Runs one skill tool: a read tool's result goes back to the model; an action's plan is
@@ -636,6 +755,20 @@ fn dynamic_tools(shared: &Arc<Shared>) -> Vec<DynamicTool> {
             Box::pin(async move { Ok(ToolOutput::text(s.load_skill(&args))) })
         },
     ));
+    if shared.skills.authoring_enabled() {
+        for (name, description, schema) in author_tools::specs() {
+            let s = shared.clone();
+            tools.push(DynamicTool::new(
+                name,
+                description,
+                schema,
+                move |_context, args| {
+                    let s = s.clone();
+                    Box::pin(async move { Ok(ToolOutput::text(s.author_reply(name, args).await)) })
+                },
+            ));
+        }
+    }
     for skill in &shared.skills.catalog.skills {
         let m = &skill.manifest;
         for tool in m.read_tools.iter().chain(m.actions.iter().map(|a| &a.tool)) {
@@ -900,6 +1033,11 @@ pub async fn run_session(
             }
             Request::Skill(op) => state.change(op).await,
             other => {
+                if let Request::Prompt(_) = &other
+                    && let Some(drafts) = state.set.drafts()
+                {
+                    drafts.new_turn();
+                }
                 let event = match state.agent.as_mut() {
                     Some(agent) => {
                         answer(
@@ -915,6 +1053,11 @@ pub async fn run_session(
                 };
                 if state.events.send(event).is_err() {
                     return;
+                }
+                // The model offered a finished draft: the user's approval card follows its
+                // reply. Only the user's answer to that card installs anything.
+                if let Some(name) = state.set.drafts().and_then(|d| d.take_install_request()) {
+                    state.change(SkillOp::InstallDraft(name)).await;
                 }
             }
         }
@@ -984,6 +1127,14 @@ impl SessionState {
                 skills_mod::enable(&paths, &name).map(|()| None)
             }
             SkillOp::Delete(name) => skills_mod::delete(&paths, &name).map(|()| None),
+            SkillOp::InstallDraft(name) => {
+                // Checking a draft runs python3 per script: off the async session loop.
+                let paths = paths.clone();
+                tokio::task::spawn_blocking(move || skills_mod::install_draft(&paths, &name))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("the install did not finish: {e}")))
+                    .map(Some)
+            }
         };
         match done {
             Ok(added) => {
@@ -1165,5 +1316,273 @@ mod tests {
     async fn other_errors_pass_through_untouched() {
         let (answer, calls) = ask(1, || CompletionError::ResponseError("boom".into()), true).await;
         assert!(answer.unwrap_err().contains("boom") && calls == 1);
+    }
+
+    fn creator_set(root: &std::path::Path, with_drafts: bool) -> Arc<SkillSet> {
+        use crate::skills::{
+            author::DraftStore,
+            catalog::{self, Catalog, SkillState},
+            sandbox::Runner,
+        };
+        let dir = root.join("skills/skill-creator");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: skill-creator\ndescription: Create a new skill.\n---\nbody\n",
+        )
+        .unwrap();
+        let mut installed = catalog::discover(&[root.join("skills")]);
+        installed[0].state = SkillState::Ready;
+        let mut set = SkillSet::new(
+            Catalog::from_installed(&installed),
+            &installed,
+            Runner::from_env(),
+        );
+        if with_drafts {
+            set = set.with_drafts(DraftStore::new(root.join("drafts")));
+        }
+        Arc::new(set)
+    }
+
+    fn shared_with(skills: Arc<SkillSet>, root: &std::path::Path) -> Arc<Shared> {
+        shared_with_events(skills, root).0
+    }
+
+    fn shared_with_events(
+        skills: Arc<SkillSet>,
+        root: &std::path::Path,
+    ) -> (Arc<Shared>, mpsc::UnboundedReceiver<AgentEvent>) {
+        let edw = EdwConfig {
+            binary: "edw".into(),
+            data_dir: root.join("data"),
+            runtime_dir: root.join("run"),
+            password: String::new(),
+        };
+        let mut interim = InterimConfig::from_env(edw.clone());
+        interim.addresses = AddressBook::new(true);
+        let (events, rx) = mpsc::unbounded_channel();
+        let shared = Arc::new(Shared {
+            config: edw,
+            addresses: interim.addresses.clone(),
+            interim: Interim::new(interim),
+            events,
+            skills,
+        });
+        (shared, rx)
+    }
+
+    const KNOWN: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+    const MADE_UP: &str = "0x1111111111111111111111111111111111111111";
+
+    async fn write_draft(s: &Shared, path: &str, content: &str) -> String {
+        s.author_call(
+            author::WRITE,
+            serde_json::json!({"name": "demo", "path": path, "content": content}),
+        )
+        .await
+    }
+
+    fn authoring_tool_names(shared: &Arc<Shared>) -> usize {
+        dynamic_tools(shared)
+            .iter()
+            .filter(|t| author::TOOL_NAMES.contains(&t.name()))
+            .count()
+    }
+
+    #[test]
+    fn authoring_tools_are_registered_only_with_skill_creator_and_a_drafts_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let with = shared_with(creator_set(root.path(), true), root.path());
+        assert_eq!(authoring_tool_names(&with), 5);
+        let root = tempfile::tempdir().unwrap();
+        let no_drafts = shared_with(creator_set(root.path(), false), root.path());
+        assert_eq!(authoring_tool_names(&no_drafts), 0);
+        let root = tempfile::tempdir().unwrap();
+        let empty = SkillSet::empty().with_drafts(crate::skills::author::DraftStore::new(
+            root.path().join("drafts"),
+        ));
+        let no_creator = shared_with(Arc::new(empty), root.path());
+        assert_eq!(authoring_tool_names(&no_creator), 0);
+    }
+
+    #[tokio::test]
+    async fn an_authoring_call_is_refused_until_skill_creator_is_loaded() {
+        let root = tempfile::tempdir().unwrap();
+        let s = shared_with(creator_set(root.path(), true), root.path());
+        let out = write_draft(&s, "SKILL.md", "x").await;
+        assert!(out.contains("load the skill-creator skill first"), "{out}");
+        assert!(!root.path().join("drafts/demo").exists());
+        s.skills.load("skill-creator");
+        s.skills.drafts().unwrap().approve_plan("demo");
+        let out = write_draft(&s, "SKILL.md", "x").await;
+        assert!(out.starts_with("wrote SKILL.md"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn nothing_is_written_or_offered_until_the_user_approves_the_plan() {
+        let root = tempfile::tempdir().unwrap();
+        let (s, mut rx) = shared_with_events(creator_set(root.path(), true), root.path());
+        s.skills.load("skill-creator");
+        let drafts = s.skills.drafts().unwrap();
+        // Another message from the user is not an approval.
+        drafts.new_turn();
+        let refused = write_draft(&s, "SKILL.md", "x").await;
+        assert!(
+            refused.contains("Not yet") && refused.contains("skill_draft_plan"),
+            "{refused}"
+        );
+        assert!(!root.path().join("drafts/demo").exists());
+        let offered = s
+            .author_call(author::INSTALL, serde_json::json!({"name": "demo"}))
+            .await;
+        assert!(offered.contains("Not yet"), "{offered}");
+        // Reading the guides is allowed meanwhile.
+        let guide = s
+            .author_call(author::GUIDE, serde_json::json!({"topic": "example"}))
+            .await;
+        assert!(!guide.contains("Not yet"));
+
+        // The user declines the plan: still nothing.
+        let plan = serde_json::json!({"name": "demo", "summary": "A read-only skill."});
+        let declined = tokio::join!(s.author_call(author::PLAN, plan.clone()), async {
+            while let Some(event) = rx.recv().await {
+                if let AgentEvent::Confirm { preview, reply, .. } = event {
+                    assert!(preview.unwrap().contains("A read-only skill."));
+                    reply.send(false).unwrap();
+                    break;
+                }
+            }
+        })
+        .0;
+        assert!(declined.contains("did not approve"), "{declined}");
+        assert!(write_draft(&s, "SKILL.md", "x").await.contains("Not yet"));
+
+        // The user approves: one skill can be written and offered, then the plan is spent.
+        let approved = tokio::join!(s.author_call(author::PLAN, plan), async {
+            while let Some(event) = rx.recv().await {
+                if let AgentEvent::Confirm { reply, .. } = event {
+                    reply.send(true).unwrap();
+                    break;
+                }
+            }
+        })
+        .0;
+        assert!(approved.contains("approved"), "{approved}");
+        // The approval is for `demo` only.
+        let other = s
+            .author_call(
+                author::WRITE,
+                serde_json::json!({"name": "other", "path": "SKILL.md", "content": "x"}),
+            )
+            .await;
+        assert!(other.contains("Not yet"), "{other}");
+        assert!(write_draft(&s, "SKILL.md", "x").await.starts_with("wrote"));
+        // Once offered, the draft no longer changes, and the approval is spent.
+        drafts.request_install("demo");
+        let late = write_draft(&s, "SKILL.md", "y").await;
+        assert!(late.contains("already offered"), "{late}");
+        assert_eq!(drafts.take_install_request().as_deref(), Some("demo"));
+        assert!(write_draft(&s, "SKILL.md", "x").await.contains("Not yet"));
+        // A new user message clears an approval and a queued offer from an earlier turn.
+        drafts.approve_plan("demo");
+        drafts.request_install("demo");
+        drafts.new_turn();
+        assert!(drafts.take_install_request().is_none());
+        assert!(write_draft(&s, "SKILL.md", "x").await.contains("Not yet"));
+    }
+
+    #[tokio::test]
+    async fn a_draft_write_refuses_addresses_from_neither_user_nor_tool() {
+        let root = tempfile::tempdir().unwrap();
+        let s = shared_with(creator_set(root.path(), true), root.path());
+        s.skills.load("skill-creator");
+        s.skills.drafts().unwrap().approve_plan("demo");
+        s.addresses.hide(KNOWN);
+        let ok = write_draft(&s, "skill.toml", &format!("a = \"{KNOWN}\"\n")).await;
+        assert!(ok.starts_with("wrote"), "{ok}");
+        let refused = write_draft(&s, "scripts/a.py", &format!("A = \"{MADE_UP}\"\n")).await;
+        assert!(
+            refused.contains("Refused")
+                && refused.contains("`content`")
+                && refused.contains("nothing was written"),
+            "{refused}"
+        );
+        assert!(!root.path().join("drafts/demo/scripts/a.py").exists());
+    }
+
+    #[tokio::test]
+    async fn a_refusal_does_not_launder_the_invented_address() {
+        let root = tempfile::tempdir().unwrap();
+        let s = shared_with(creator_set(root.path(), true), root.path());
+        s.skills.load("skill-creator");
+        s.skills.drafts().unwrap().approve_plan("demo");
+        let args = |content: &str| serde_json::json!({"name": "demo", "path": "skill.toml", "content": content});
+        let bad = format!("a = \"{MADE_UP}\"\n");
+        let first = s.author_reply(author::WRITE, args(&bad)).await;
+        assert!(
+            first.contains("Refused") && !first.contains(MADE_UP),
+            "{first}"
+        );
+        assert!(!first.contains("ADDR_"), "{first}");
+        let retry = s.author_reply(author::WRITE, args(&bad)).await;
+        assert!(retry.contains("Refused"), "{retry}");
+        s.author_reply(author::WRITE, args("a = \"ADDR_1\"\n"))
+            .await;
+        let written = std::fs::read_to_string(root.path().join("drafts/demo/skill.toml")).unwrap();
+        assert!(!written.contains(MADE_UP), "{written}");
+    }
+
+    #[tokio::test]
+    async fn a_path_or_name_holding_an_invented_address_is_refused_not_echoed() {
+        let root = tempfile::tempdir().unwrap();
+        let s = shared_with(creator_set(root.path(), true), root.path());
+        s.skills.load("skill-creator");
+        s.skills.drafts().unwrap().approve_plan("demo");
+        let path = format!("scripts/{MADE_UP}.py");
+        let reply = s
+            .author_reply(
+                author::WRITE,
+                serde_json::json!({"name": "demo", "path": path, "content": "x = 1\n"}),
+            )
+            .await;
+        assert!(
+            reply.contains("Refused") && !reply.contains("ADDR_"),
+            "{reply}"
+        );
+        // No alias was handed out, so the model cannot write one into skill.toml.
+        assert!(!s.addresses.reveal_uppercase("ADDR_1").contains(MADE_UP));
+        let guide = s
+            .author_reply(author::GUIDE, serde_json::json!({"topic": MADE_UP}))
+            .await;
+        assert!(
+            guide.contains("Refused") && !guide.contains("ADDR_"),
+            "{guide}"
+        );
+    }
+
+    #[tokio::test]
+    async fn aliases_resolve_only_in_skill_toml() {
+        let root = tempfile::tempdir().unwrap();
+        let s = shared_with(creator_set(root.path(), true), root.path());
+        s.skills.load("skill-creator");
+        s.skills.drafts().unwrap().approve_plan("demo");
+        s.addresses.hide(KNOWN);
+        let script = "addr_1 = ctx['to']\nprint(addr_1)\n";
+        write_draft(&s, "scripts/run.py", script).await;
+        write_draft(&s, "skill.toml", "to = \"ADDR_1\"\n").await;
+        write_draft(&s, "SKILL.md", "use ADDR_1\n").await;
+        let dir = root.path().join("drafts/demo");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("scripts/run.py")).unwrap(),
+            script
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("skill.toml")).unwrap(),
+            format!("to = \"{KNOWN}\"\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+            "use ADDR_1\n"
+        );
     }
 }

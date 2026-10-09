@@ -116,6 +116,12 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     let hint = if !app.consents.is_empty() {
         "y allow · n decline · ↑↓ scroll"
+    } else if app
+        .pending
+        .front()
+        .is_some_and(|p| p.command.starts_with(crate::skills::author::PLAN))
+    {
+        "y approve the plan · n decline"
     } else if !app.pending.is_empty() {
         "y run · n cancel"
     } else if app.view == View::Skills {
@@ -520,7 +526,9 @@ fn render_confirm(frame: &mut Frame, pending: &PendingConfirm, queued: usize) {
     }
     lines.push(Line::from(format!("  {}", pending.command)).add_modifier(Modifier::BOLD));
     lines.push(Line::default());
-    let (yes, title) = if preview.is_empty() {
+    let (yes, title) = if pending.command.starts_with(crate::skills::author::PLAN) {
+        ("approve   ", "Build this skill?")
+    } else if preview.is_empty() {
         ("run   ", "Run this command?")
     } else {
         ("send  ", "Send this transaction?")

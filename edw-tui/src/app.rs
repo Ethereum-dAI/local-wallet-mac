@@ -15,7 +15,7 @@ use crate::{
     skills::{SkillRow, consent::ConsentRequest},
 };
 
-pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /skills (or Tab) opens the Skills tab: enable, disable, add, delete · /copy [reply|log|address] copies to the clipboard · ↑↓ scroll the chat, Shift+↑↓ the command log (PgUp/PgDn too) · ←→ Home End move in the message · Tab shows one panel at a time, for selecting text · /help";
+pub const HELP: &str = "/models lists installed models · /model <name or number> switches (history is kept) · /profile <name or 0/1> picks who sends · /skills (or Tab) opens the Skills tab: enable, disable, add, delete · /skill new <goal> or /skill from-chat has the model draft a skill, /skill install <name> reviews and installs the draft · /copy [reply|log|address] copies to the clipboard · ↑↓ scroll the chat, Shift+↑↓ the command log (PgUp/PgDn too) · ←→ Home End move in the message · Tab shows one panel at a time, for selecting text · /help";
 
 /// How long a confirmation must be on screen before y or n counts.
 pub const CONFIRM_GRACE: Duration = Duration::from_millis(400);
@@ -583,6 +583,32 @@ impl App {
                 self.view = View::Skills;
                 None
             }
+            (Some("/skill"), Some("new")) => {
+                let goal = words.collect::<Vec<_>>().join(" ");
+                if goal.is_empty() {
+                    self.chat.push(ChatLine::Error(
+                        "describe the skill: /skill new <what it should do>".into(),
+                    ));
+                    None
+                } else {
+                    Some(Request::Prompt(format!(
+                        "Load the skill-creator skill and help me create a new skill: {goal}"
+                    )))
+                }
+            }
+            (Some("/skill"), Some("from-chat")) => Some(Request::Prompt(
+                "Load the skill-creator skill and turn what we just did in this conversation into a new skill."
+                    .into(),
+            )),
+            (Some("/skill"), Some("install")) => match words.next() {
+                Some(name) => Some(Request::Skill(SkillOp::InstallDraft(name.to_owned()))),
+                None => {
+                    self.chat.push(ChatLine::Error(
+                        "which draft? /skill install <name>, the name the model gave it".into(),
+                    ));
+                    None
+                }
+            },
             (Some("/help"), _) => {
                 self.chat.push(ChatLine::Info(HELP.into()));
                 None
@@ -1157,6 +1183,54 @@ mod tests {
     fn submit(app: &mut App, text: &str) -> Action {
         type_text(app, text);
         app.on_key(key(KeyCode::Enter))
+    }
+
+    #[test]
+    fn skill_new_asks_the_model_to_load_skill_creator_with_the_goal() {
+        let mut app = App::new("m", "d");
+        match submit(&mut app, "/skill new supply USDC to Compound on Base") {
+            Action::Send(Request::Prompt(p)) => {
+                assert!(p.contains("skill-creator"), "{p}");
+                assert!(p.contains("supply USDC to Compound on Base"), "{p}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut app = App::new("m", "d");
+        assert_eq!(submit(&mut app, "/skill new"), Action::None);
+        assert!(matches!(app.chat.last(), Some(ChatLine::Error(t)) if t.contains("/skill new <")));
+    }
+
+    #[test]
+    fn skill_from_chat_and_install_are_requests() {
+        let mut app = App::new("m", "d");
+        match submit(&mut app, "/skill from-chat") {
+            Action::Send(Request::Prompt(p)) => {
+                assert!(
+                    p.contains("skill-creator") && p.contains("conversation"),
+                    "{p}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut app = App::new("m", "d");
+        assert_eq!(
+            submit(&mut app, "/skill install compound-lend"),
+            Action::Send(Request::Skill(SkillOp::InstallDraft(
+                "compound-lend".into()
+            )))
+        );
+        let mut app = App::new("m", "d");
+        assert_eq!(submit(&mut app, "/skill install"), Action::None);
+        assert!(
+            matches!(app.chat.last(), Some(ChatLine::Error(t)) if t.contains("/skill install <"))
+        );
+    }
+
+    #[test]
+    fn help_lists_the_skill_commands() {
+        for part in ["/skill new", "/skill from-chat", "/skill install"] {
+            assert!(HELP.contains(part), "{part}");
+        }
     }
 
     #[test]

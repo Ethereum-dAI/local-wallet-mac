@@ -18,8 +18,10 @@ decides whether it is installed, on the approval card. Work in these steps and k
    addresses; they read them from `context`.
    Then call skill_draft_plan with the plan in a few lines: what the skill reads or sends,
    the chain, the contracts or web hosts, and when it is used. The user answers y or n. The
-   harness refuses skill_draft_write and skill_draft_install until they say y, and again
-   after each offer. If they say n, ask what to change and call it again.
+   harness refuses skill_draft_write and skill_draft_install for that skill until they say y.
+   The approval lasts for one skill and one user message, and ends after each offer: if you run
+   out of turns and the user says continue, call skill_draft_plan again. If they say n, ask what
+   to change and call it again.
 3. Read the references you need with skill_draft_guide: `example` first, then `manifest` for
    skill.toml and `sdk` for scripts. They are long, so read them one at a time as needed.
 4. Write the draft with skill_draft_write: SKILL.md, then skill.toml and scripts/ if the skill

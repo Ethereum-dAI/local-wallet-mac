@@ -7,6 +7,7 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
     process::Command,
+    sync::LazyLock,
 };
 
 use super::manifest::{self, Skill};
@@ -16,7 +17,7 @@ pub const CREATOR: &str = "skill-creator";
 pub const WRITE: &str = "skill_draft_write";
 pub const CHECK: &str = "skill_draft_check";
 pub const GUIDE: &str = "skill_draft_guide";
-/// Every authoring request the TUI sends starts with this; see [`DraftStore::user_message`].
+/// Every authoring request the TUI sends starts with this; see the agent's turn handling.
 pub const START: &str = "Load the skill-creator skill";
 pub const PLAN: &str = "skill_draft_plan";
 pub const INSTALL: &str = "skill_draft_install";
@@ -32,10 +33,9 @@ pub struct DraftStore {
     /// The draft the model asked to install this turn. The session takes it when the turn ends
     /// and shows the user's approval card; nothing is installed until the user allows it.
     requested: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// True only while the user's `y` on the model's plan (`skill_draft_plan`) is in force. It
-    /// is cleared by every `/skill new` or `/skill from-chat` and by every offer of a draft, so
-    /// one approved plan covers one skill.
-    confirmed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The skill the user approved a plan for (their `y` on `skill_draft_plan`), for this turn
+    /// only: every user message clears it, as does every offer of a draft.
+    approved: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl DraftStore {
@@ -43,27 +43,37 @@ impl DraftStore {
         Self {
             root,
             requested: Default::default(),
-            confirmed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            approved: Default::default(),
         }
     }
 
-    /// Called with every message the user sends: a new authoring request starts over, and
-    /// needs its own approved plan before anything is written.
-    pub fn user_message(&self, text: &str) {
-        if text.starts_with(START) {
-            self.confirmed
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-        }
+    /// A new message from the user starts a new turn: nothing approved or offered before it
+    /// carries over, so a later turn (or tool output steering it) needs its own plan.
+    pub fn new_turn(&self) {
+        *self.approved.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.requested.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    /// The user answered `y` to the plan.
-    pub fn approve_plan(&self) {
-        self.confirmed
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    /// The user answered `y` to the plan for skill `name`.
+    pub fn approve_plan(&self, name: &str) {
+        *self.approved.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_owned());
     }
 
-    pub fn confirmed(&self) -> bool {
-        self.confirmed.load(std::sync::atomic::Ordering::SeqCst)
+    /// Whether the user approved a plan for exactly this skill.
+    pub fn approved_for(&self, name: &str) -> bool {
+        self.approved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref()
+            == Some(name)
+    }
+
+    /// A draft was offered this turn and waits for the user's card: it no longer changes.
+    pub fn offer_pending(&self) -> bool {
+        self.requested
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     pub fn request_install(&self, name: &str) {
@@ -79,8 +89,7 @@ impl DraftStore {
             .unwrap_or_else(|e| e.into_inner())
             .take();
         if name.is_some() {
-            self.confirmed
-                .store(false, std::sync::atomic::Ordering::SeqCst);
+            *self.approved.lock().unwrap_or_else(|e| e.into_inner()) = None;
         }
         name
     }
@@ -258,20 +267,51 @@ const ACTING: &[&str] = &[
     "harvest",
 ];
 
-/// `token` is `word` or an ordinary inflection of it (sends, sending, signed), so that
-/// "design" does not count as "sign" nor "sender" as "send".
+/// `token` is `word` or an ordinary inflection of it (sends, sending, signed, supplies,
+/// transferred), so that "design" does not count as "sign" nor "sender" as "send".
 fn is_form_of(token: &str, word: &str) -> bool {
     let stem = word.strip_suffix('e').unwrap_or(word);
+    let last = word.chars().last().map(String::from).unwrap_or_default();
+    let ies = word.strip_suffix('y');
     token
         .strip_prefix(word)
         .is_some_and(|rest| matches!(rest, "" | "s" | "es" | "ed" | "d" | "ing"))
         || token.strip_prefix(stem).is_some_and(|rest| rest == "ing")
+        || token
+            .strip_prefix(&format!("{word}{last}"))
+            .is_some_and(|rest| matches!(rest, "ed" | "ing"))
+        || ies.is_some_and(|y| {
+            token
+                .strip_prefix(y)
+                .is_some_and(|rest| matches!(rest, "ies" | "ied"))
+        })
 }
 
 fn mentions_acting(description: &str) -> bool {
     description
         .split(|c: char| !c.is_ascii_alphabetic())
         .any(|token| ACTING.iter().any(|word| is_form_of(token, word)))
+}
+
+static SHOUTING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(ALWAYS|NEVER|MUST)\b").expect("valid pattern"));
+static HEX_ADDRESS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[0-9a-fA-F]{40}").expect("valid pattern"));
+
+/// Every `.py` under `dir`, at most three folders deep (what `allowed_path` lets a draft hold).
+fn python_files(dir: &Path, depth: usize) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() && depth < 3 => found.extend(python_files(&path, depth + 1)),
+            Ok(kind) if kind.is_file() && path.extension().is_some_and(|e| e == "py") => {
+                found.push(path)
+            }
+            _ => {}
+        }
+    }
+    found
 }
 
 fn lint(skill: &Skill, report: &mut Report) {
@@ -289,12 +329,8 @@ fn lint(skill: &Skill, report: &mut Report) {
             "the description is {len} characters; every skill's description is in every request, so keep it under 300"
         ));
     }
-    let has_script = fs::read_dir(skill.dir.join("scripts"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().ends_with(".py"));
-    if has_script && !skill.has_scripts() {
+    let scripts = python_files(&skill.dir.join("scripts"), 0);
+    if !scripts.is_empty() && !skill.has_scripts() {
         report.errors.push(
             "scripts/ has a script but skill.toml declares no `[[read_tool]]` or `[[action]]` that runs it, so the skill would load with no tools; add one (skill_draft_guide with topic manifest shows how)".into(),
         );
@@ -309,15 +345,21 @@ fn lint(skill: &Skill, report: &mut Report) {
             .errors
             .push("SKILL.md has no instructions below the frontmatter".into());
     }
-    if Regex::new(r"\b(ALWAYS|NEVER|MUST)\b")
-        .expect("valid pattern")
-        .is_match(&skill.body)
-    {
+    if SHOUTING.is_match(&skill.body) {
         report.warnings.push(
             "SKILL.md uses ALWAYS/NEVER/MUST in capital letters; models follow a stated reason better than shouting, so say why".into(),
         );
     }
+    for script in &scripts {
+        if fs::read_to_string(script).is_ok_and(|code| HEX_ADDRESS.is_match(&code)) {
+            report.warnings.push(format!(
+                "{} holds a 40-digit hex string, which looks like an address; scripts read addresses from `context`, and contracts go in skill.toml",
+                script.strip_prefix(&skill.dir).unwrap_or(script).display()
+            ));
+        }
+    }
     let m = &skill.manifest;
+    let mut to_parse = Vec::new();
     for tool in m.read_tools.iter().chain(m.actions.iter().map(|a| &a.tool)) {
         let script = skill.dir.join(&tool.run);
         if !script.is_file() {
@@ -325,8 +367,8 @@ fn lint(skill: &Skill, report: &mut Report) {
                 "{} runs {}, which is not in the draft",
                 tool.name, tool.run
             ));
-        } else if let Some(why) = python_syntax(&script) {
-            report.errors.push(format!("{}: {why}", tool.run));
+        } else {
+            to_parse.push((tool.run.clone(), script));
         }
         if !skill.body.contains(&tool.name) {
             report.warnings.push(format!(
@@ -334,6 +376,9 @@ fn lint(skill: &Skill, report: &mut Report) {
                 tool.name
             ));
         }
+    }
+    for (run, why) in python_syntax(&to_parse) {
+        report.errors.push(format!("{run}: {why}"));
     }
     let description = skill.description.to_lowercase();
     if !m.actions.is_empty() && !mentions_acting(&description) {
@@ -343,26 +388,34 @@ fn lint(skill: &Skill, report: &mut Report) {
     }
 }
 
-/// `Some(reason)` when python3 is present and rejects the file's syntax. Without python3 there
-/// is nothing to say. Parses only: nothing in the file runs, and no `__pycache__` is written.
-fn python_syntax(script: &Path) -> Option<String> {
-    let out = Command::new("python3")
+/// The scripts python3 rejects, as (label, reason), all checked by one python3 run. Without
+/// python3 there is nothing to say. Parses only: nothing in a file runs, and no `__pycache__`
+/// is written.
+fn python_syntax(scripts: &[(String, PathBuf)]) -> Vec<(String, String)> {
+    if scripts.is_empty() {
+        return Vec::new();
+    }
+    let Ok(out) = Command::new("python3")
         .args([
             "-I",
             "-c",
-            "import ast,sys; ast.parse(open(sys.argv[1], encoding='utf-8').read(), sys.argv[1])",
+            "import ast,sys\nfor f in sys.argv[1:]:\n    try:\n        ast.parse(open(f, encoding='utf-8').read(), f)\n    except SyntaxError as e:\n        print(f + '\\t' + str(e).replace('\\n', ' '))",
         ])
-        .arg(script)
+        .args(scripts.iter().map(|(_, path)| path))
         .output()
-        .ok()?;
-    if out.status.success() {
-        return None;
-    }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    Some(format!(
-        "Python syntax error: {}",
-        stderr.lines().last().unwrap_or("unknown")
-    ))
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (file, why) = line.split_once('\t')?;
+            let (label, _) = scripts
+                .iter()
+                .find(|(_, path)| path.to_string_lossy() == file)?;
+            Some((label.clone(), format!("Python syntax error: {why}")))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -629,6 +682,28 @@ mod tests {
         let report = check(&dir);
         assert!(
             report.errors.iter().any(|e| e.contains("no tool")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn nested_scripts_and_address_like_hex_are_noticed() {
+        let toml = "version = \"1\"\n";
+        let (_root, dir) = draft(&[
+            ("SKILL.md", GOOD_MD),
+            ("skill.toml", toml),
+            (
+                "scripts/a/b.py",
+                "A = \"11111111111111111111111111111111111111aa\"\n",
+            ),
+        ]);
+        let report = check(&dir);
+        assert!(
+            report.errors.iter().any(|e| e.contains("declares no")),
+            "{report:?}"
+        );
+        assert!(
+            report.warnings.iter().any(|w| w.contains("40-digit hex")),
             "{report:?}"
         );
     }

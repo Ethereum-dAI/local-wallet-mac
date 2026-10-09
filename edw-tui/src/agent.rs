@@ -401,20 +401,25 @@ impl Shared {
                 );
             }
             // The user reads the plan and answers; nothing else unlocks writing.
-            let preview = format!("Skill {name}\n{}", self.addresses.reveal(&summary));
+            let mut preview = format!("Skill {name}\n{}", self.addresses.reveal(&summary));
+            if facts::enabled() {
+                preview.push_str("\n\nChecking the draft asks sourcify.dev about its contracts (address and chain); set EDW_TUI_SKILLS_FACTS=off to skip.");
+            }
             if self.confirm(&command, Some(preview)).await {
-                store.approve_plan();
+                store.approve_plan(&name);
                 return "The user approved the plan. Write the draft now, then check it and offer it."
                     .into();
             }
             return "The user did not approve the plan. Ask what to change, then call skill_draft_plan again; nothing was written."
                 .into();
         }
-        if matches!(tool, author::WRITE | author::INSTALL) && !store.confirmed() {
-            return fail(
-                "Not yet, nothing was written. First ask the user about anything unclear, then call skill_draft_plan with your plan; the user must approve it with y before you write or offer a draft."
-                    .into(),
-            );
+        if matches!(tool, author::WRITE | author::INSTALL) && !store.approved_for(&name) {
+            return fail(format!(
+                "Not yet, nothing was written. First ask the user about anything unclear, then call skill_draft_plan for `{name}` with your plan; the user must approve it with y before you write or offer that skill. An approval covers one skill and one turn."
+            ));
+        }
+        if tool == author::WRITE && store.offer_pending() {
+            return fail("This draft was already offered; the user's approval card is next. Do not change it now.".into());
         }
         if tool == author::WRITE {
             let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
@@ -1028,10 +1033,10 @@ pub async fn run_session(
             }
             Request::Skill(op) => state.change(op).await,
             other => {
-                if let Request::Prompt(text) = &other
+                if let Request::Prompt(_) = &other
                     && let Some(drafts) = state.set.drafts()
                 {
-                    drafts.user_message(text);
+                    drafts.new_turn();
                 }
                 let event = match state.agent.as_mut() {
                     Some(agent) => {
@@ -1122,7 +1127,14 @@ impl SessionState {
                 skills_mod::enable(&paths, &name).map(|()| None)
             }
             SkillOp::Delete(name) => skills_mod::delete(&paths, &name).map(|()| None),
-            SkillOp::InstallDraft(name) => skills_mod::install_draft(&paths, &name).map(Some),
+            SkillOp::InstallDraft(name) => {
+                // Checking a draft runs python3 per script: off the async session loop.
+                let paths = paths.clone();
+                tokio::task::spawn_blocking(move || skills_mod::install_draft(&paths, &name))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("the install did not finish: {e}")))
+                    .map(Some)
+            }
         };
         match done {
             Ok(added) => {
@@ -1401,7 +1413,7 @@ mod tests {
         assert!(out.contains("load the skill-creator skill first"), "{out}");
         assert!(!root.path().join("drafts/demo").exists());
         s.skills.load("skill-creator");
-        s.skills.drafts().unwrap().approve_plan();
+        s.skills.drafts().unwrap().approve_plan("demo");
         let out = write_draft(&s, "SKILL.md", "x").await;
         assert!(out.starts_with("wrote SKILL.md"), "{out}");
     }
@@ -1413,8 +1425,7 @@ mod tests {
         s.skills.load("skill-creator");
         let drafts = s.skills.drafts().unwrap();
         // Another message from the user is not an approval.
-        drafts.user_message(&format!("{} and help me: a skill", author::START));
-        drafts.user_message("yes, mainnet only");
+        drafts.new_turn();
         let refused = write_draft(&s, "SKILL.md", "x").await;
         assert!(
             refused.contains("Not yet") && refused.contains("skill_draft_plan"),
@@ -1457,9 +1468,26 @@ mod tests {
         })
         .0;
         assert!(approved.contains("approved"), "{approved}");
+        // The approval is for `demo` only.
+        let other = s
+            .author_call(
+                author::WRITE,
+                serde_json::json!({"name": "other", "path": "SKILL.md", "content": "x"}),
+            )
+            .await;
+        assert!(other.contains("Not yet"), "{other}");
         assert!(write_draft(&s, "SKILL.md", "x").await.starts_with("wrote"));
+        // Once offered, the draft no longer changes, and the approval is spent.
         drafts.request_install("demo");
+        let late = write_draft(&s, "SKILL.md", "y").await;
+        assert!(late.contains("already offered"), "{late}");
         assert_eq!(drafts.take_install_request().as_deref(), Some("demo"));
+        assert!(write_draft(&s, "SKILL.md", "x").await.contains("Not yet"));
+        // A new user message clears an approval and a queued offer from an earlier turn.
+        drafts.approve_plan("demo");
+        drafts.request_install("demo");
+        drafts.new_turn();
+        assert!(drafts.take_install_request().is_none());
         assert!(write_draft(&s, "SKILL.md", "x").await.contains("Not yet"));
     }
 
@@ -1468,7 +1496,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let s = shared_with(creator_set(root.path(), true), root.path());
         s.skills.load("skill-creator");
-        s.skills.drafts().unwrap().approve_plan();
+        s.skills.drafts().unwrap().approve_plan("demo");
         s.addresses.hide(KNOWN);
         let ok = write_draft(&s, "skill.toml", &format!("a = \"{KNOWN}\"\n")).await;
         assert!(ok.starts_with("wrote"), "{ok}");
@@ -1487,7 +1515,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let s = shared_with(creator_set(root.path(), true), root.path());
         s.skills.load("skill-creator");
-        s.skills.drafts().unwrap().approve_plan();
+        s.skills.drafts().unwrap().approve_plan("demo");
         let args = |content: &str| serde_json::json!({"name": "demo", "path": "skill.toml", "content": content});
         let bad = format!("a = \"{MADE_UP}\"\n");
         let first = s.author_reply(author::WRITE, args(&bad)).await;
@@ -1509,7 +1537,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let s = shared_with(creator_set(root.path(), true), root.path());
         s.skills.load("skill-creator");
-        s.skills.drafts().unwrap().approve_plan();
+        s.skills.drafts().unwrap().approve_plan("demo");
         let path = format!("scripts/{MADE_UP}.py");
         let reply = s
             .author_reply(
@@ -1537,7 +1565,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let s = shared_with(creator_set(root.path(), true), root.path());
         s.skills.load("skill-creator");
-        s.skills.drafts().unwrap().approve_plan();
+        s.skills.drafts().unwrap().approve_plan("demo");
         s.addresses.hide(KNOWN);
         let script = "addr_1 = ctx['to']\nprint(addr_1)\n";
         write_draft(&s, "scripts/run.py", script).await;

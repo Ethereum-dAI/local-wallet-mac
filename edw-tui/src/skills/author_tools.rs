@@ -39,6 +39,13 @@ pub fn specs() -> Vec<(&'static str, &'static str, Value)> {
                 "topic": {"type": "string", "enum": ["manifest", "sdk", "example"]}
             }}),
         ),
+        (
+            author::INSTALL,
+            "Offer the finished draft to the user: after a clean skill_draft_check, call this once. The user then sees the approval card (what the skill can read, send and reach) and decides; if they allow it the skill is installed for every session. Say nothing more about installing.",
+            json!({"type": "object", "required": ["name"], "properties": {
+                "name": {"type": "string"}
+            }}),
+        ),
     ]
 }
 
@@ -62,6 +69,7 @@ pub async fn call(
             }
         }
         author::CHECK => check_draft(store, source, name).await,
+        author::INSTALL => offer_draft(store, name).await,
         author::GUIDE => match text("topic").unwrap_or_default() {
             "manifest" => (0, GUIDE_MANIFEST.to_owned()),
             "sdk" => (0, GUIDE_SDK.to_owned()),
@@ -73,6 +81,34 @@ pub async fn call(
         },
         other => (1, format!("`{other}` is not an authoring tool")),
     }
+}
+
+/// Asks for the user's approval card; installs nothing itself. A draft whose check has errors is
+/// never offered.
+async fn offer_draft(store: &DraftStore, name: &str) -> (i32, String) {
+    let dir = match store.dir(name) {
+        Ok(dir) if dir.is_dir() => dir,
+        Ok(_) => {
+            return (
+                1,
+                format!("there is no draft named {name}; write SKILL.md first"),
+            );
+        }
+        Err(why) => return (1, why),
+    };
+    let report = tokio::task::spawn_blocking(move || author::check(&dir))
+        .await
+        .unwrap_or_default();
+    if !report.ok() {
+        return (1, format!("not offered: {}", report.render(name)));
+    }
+    store.request_install(name);
+    (
+        0,
+        format!(
+            "Offered {name}. The approval card appears when you finish this reply; the user decides. Tell them in one or two lines what the skill does."
+        ),
+    )
 }
 
 async fn check_draft(store: &DraftStore, source: &impl AbiSource, name: &str) -> (i32, String) {
@@ -108,9 +144,7 @@ async fn check_draft(store: &DraftStore, source: &impl AbiSource, name: &str) ->
     }
     let mut out = report.render(name);
     if report.ok() {
-        out.push_str(&format!(
-            "\nThe draft loads. Tell the user to run `/skill install {name}` to review and allow it; you cannot install it yourself."
-        ));
+        out.push_str("\nThe draft loads. Call skill_draft_install now to offer it to the user.");
     }
     (i32::from(!report.ok()), out)
 }
@@ -160,6 +194,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_a_clean_draft_is_offered_and_offering_installs_nothing() {
+        let (root, store) = store();
+        let (code, text) = call(
+            &store,
+            &Offline,
+            author::INSTALL,
+            &json!({"name": "nothing"}),
+        )
+        .await;
+        assert_eq!(code, 1, "{text}");
+        assert!(store.take_install_request().is_none());
+        for (path, content) in &example_files() {
+            call(
+                &store,
+                &Offline,
+                author::WRITE,
+                &json!({"name": "balance-of", "path": path, "content": content}),
+            )
+            .await;
+        }
+        let (code, text) = call(
+            &store,
+            &Offline,
+            author::INSTALL,
+            &json!({"name": "balance-of"}),
+        )
+        .await;
+        assert_eq!(code, 0, "{text}");
+        assert_eq!(store.take_install_request().as_deref(), Some("balance-of"));
+        assert!(store.take_install_request().is_none(), "taken once");
+        // A draft with errors is not offered.
+        std::fs::write(
+            root.path().join("drafts/balance-of/SKILL.md"),
+            "no frontmatter",
+        )
+        .unwrap();
+        let (code, text) = call(
+            &store,
+            &Offline,
+            author::INSTALL,
+            &json!({"name": "balance-of"}),
+        )
+        .await;
+        assert_eq!(code, 1, "{text}");
+        assert!(store.take_install_request().is_none());
+    }
+
+    #[tokio::test]
     async fn the_example_guide_is_a_draft_that_passes_the_check() {
         let (_root, store) = store();
         let files = example_files();
@@ -182,7 +264,7 @@ mod tests {
         )
         .await;
         assert_eq!(code, 0, "{text}");
-        assert!(text.contains("/skill install balance-of"), "{text}");
+        assert!(text.contains("skill_draft_install"), "{text}");
     }
 
     #[tokio::test]
@@ -253,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn three_tools_are_specified_and_none_installs() {
+    fn the_tools_are_specified() {
         let names: Vec<&str> = specs().iter().map(|(n, _, _)| *n).collect();
         assert_eq!(names, author::TOOL_NAMES);
         for (_, description, schema) in specs() {

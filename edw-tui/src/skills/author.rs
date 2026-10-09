@@ -16,7 +16,8 @@ pub const CREATOR: &str = "skill-creator";
 pub const WRITE: &str = "skill_draft_write";
 pub const CHECK: &str = "skill_draft_check";
 pub const GUIDE: &str = "skill_draft_guide";
-pub const TOOL_NAMES: [&str; 3] = [WRITE, CHECK, GUIDE];
+pub const INSTALL: &str = "skill_draft_install";
+pub const TOOL_NAMES: [&str; 4] = [WRITE, CHECK, GUIDE, INSTALL];
 
 pub const MAX_FILE: usize = 64 * 1024;
 pub const MAX_FILES: usize = 24;
@@ -25,11 +26,28 @@ pub const MAX_FILES: usize = 24;
 #[derive(Clone, Debug)]
 pub struct DraftStore {
     root: PathBuf,
+    /// The draft the model asked to install this turn. The session takes it when the turn ends
+    /// and shows the user's approval card; nothing is installed until the user allows it.
+    requested: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl DraftStore {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            requested: Default::default(),
+        }
+    }
+
+    pub fn request_install(&self, name: &str) {
+        *self.requested.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_owned());
+    }
+
+    pub fn take_install_request(&self) -> Option<String> {
+        self.requested
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     /// The folder for draft `name`, after checking `name` is a plain skill name.

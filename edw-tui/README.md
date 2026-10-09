@@ -148,10 +148,11 @@ skill) loads the shipped `skill-creator` skill. The model writes a draft into
 `~/.config/edw-tui/skills-drafts/<name>` (`EDW_TUI_SKILLS_DRAFTS_DIR`) with `skill_draft_write`
 and checks it with `skill_draft_check`: it loads, scripts parse, and contracts are compared
 with Sourcify (each lookup tells sourcify.dev the contract address and chain; set
-`EDW_TUI_SKILLS_FACTS=off` to skip it). You then run `/skill install <name>`, which copies the draft into your skills
-folder and shows the usual approval card. The model cannot install a draft; only your command
-does. Declining the approval card discards the installed copy (the draft stays in the drafts
-folder), and `/skill install` refuses a draft whose check reports errors. A skill with actions still goes through the plan checker and per-transaction review.
+`EDW_TUI_SKILLS_FACTS=off` to skip it). When the check is clean the model calls `skill_draft_install`, and the usual approval card for the
+skill follows its reply. Allowing the card installs the skill for every session; declining it
+keeps nothing (the draft stays in the drafts folder). The model cannot approve its own card, and
+`/skill install <name>` offers any draft the same way yourself. A draft whose check reports errors
+is never offered. A skill with actions still goes through the plan checker and per-transaction review.
 
 **Scripts run in Docker** (`skills/_sdk/edw_skill.py` is the protocol helper), one throwaway
 container per call: no network, read-only root and mounts, no capabilities, the `nobody` user,

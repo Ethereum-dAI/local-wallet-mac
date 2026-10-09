@@ -227,6 +227,7 @@ fn authoring_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> 
         write("skill.toml", DRAFT_SKILL_TOML),
         write("scripts/safe_info.py", DRAFT_SAFE_INFO_PY),
         ("skill_draft_check", json!({"name": "safe-multisig"})),
+        ("skill_draft_install", json!({"name": "safe-multisig"})),
     ]))
 }
 
@@ -297,12 +298,12 @@ fn usd(amount: f64) -> String {
 /// The reply after a skill tool, from its result (`{"command","exit_code","output"}`), the way
 /// a model would put it; `None` for other tools, which keep the plain "Done".
 pub fn summary(tool: &str, result: &str) -> Option<String> {
-    if tool == "skill_draft_check" {
-        // Authoring tools answer in plain text, not the `{"output"}` envelope. Only a draft that
-        // loads is called ready, and the name comes from the tool's own instruction.
-        let name = result.split("`/skill install ").nth(1)?.split('`').next()?;
+    if tool == "skill_draft_install" {
+        // Authoring tools answer in plain text, not the `{"output"}` envelope. Only an offered
+        // draft is called ready, and the name comes from the tool's own answer.
+        let name = result.strip_prefix("Offered ")?.split('.').next()?;
         return Some(format!(
-            "The draft `{name}` is ready and passes the check. Run `/skill install {name}` to review it and allow it."
+            "The draft `{name}` passes the check. Review the approval card to add it to your skills."
         ));
     }
     let result: Value = serde_json::from_str(result).ok()?;
@@ -684,7 +685,8 @@ mod tests {
                 "skill_draft_write",
                 "skill_draft_write",
                 "skill_draft_write",
-                "skill_draft_check"
+                "skill_draft_check",
+                "skill_draft_install"
             ]
         );
         assert_eq!(calls[0].1, json!({"name": "skill-creator"}));
@@ -713,14 +715,16 @@ mod tests {
     }
 
     #[test]
-    fn a_passing_draft_check_points_at_the_install_command() {
-        let ok = "safe-multisig: no problems found.\nThe draft loads. Tell the user to run `/skill install safe-multisig` to review and allow it; you cannot install it yourself.";
-        let reply = summary("skill_draft_check", ok).unwrap();
-        assert!(reply.contains("/skill install safe-multisig"), "{reply}");
-        assert!(reply.contains("ready"), "{reply}");
-        // A failing check never says the draft is ready.
-        let bad = "Errors (fix these):\n- skill.toml: missing version";
-        assert_eq!(summary("skill_draft_check", bad), None);
+    fn an_offered_draft_points_at_the_approval_card() {
+        let ok = "Offered safe-multisig. The approval card appears when you finish this reply; the user decides.";
+        let reply = summary("skill_draft_install", ok).unwrap();
+        assert!(
+            reply.contains("safe-multisig") && reply.contains("approval card"),
+            "{reply}"
+        );
+        // A draft that was not offered is never called ready.
+        let bad = "not offered: Errors (fix these):\n- skill.toml: missing version";
+        assert_eq!(summary("skill_draft_install", bad), None);
     }
 
     /// After a skill tool the stand-in answers like a model would: the numbers, in a sentence.

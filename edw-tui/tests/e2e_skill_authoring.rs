@@ -1,7 +1,7 @@
 //! Skill authoring end to end through the real terminal, on an anvil fork of Ethereum mainnet:
 //! the shipped skills are approved except `safe-multisig` (it is left out of the skills folder),
 //! then `/skill new` has the scripted model drive the real authoring tools to draft a read-only
-//! Safe skill, `/skill install` reviews and installs it on the normal approval card, and the new
+//! Safe skill, the model offers it and the user allows it on the normal approval card, and the new
 //! skill answers a question about a real Safe from the chain, in the Docker sandbox. Uses the
 //! scripted model, the pinned edw, and Docker.
 //!
@@ -64,29 +64,27 @@ async fn a_safe_skill_is_authored_installed_and_used() {
     let drafts = state.join("drafts");
     let added = state.join("added");
 
-    // Author: the model drives the real tools; the check must really pass.
-    s.ask(
-        "/skill new a read-only skill that shows who owns a Safe, its threshold and nonce",
-        "/skill install safe-multisig",
-    );
+    // Author: the model drives the real tools; the check must really pass, and the model then
+    // offers the draft: the user's approval card follows its reply.
+    s.tui
+        .submit("/skill new a read-only skill that shows who owns a Safe, its threshold and nonce");
+    s.tui.wait_for_within("the approval card", 240, |s| {
+        s.contains("Allow skill safe-multisig")
+    });
     s.screenshot("draft_ready");
     let screen = s.tui.screen();
     for step in [
         "skill_draft_write safe-multisig",
         "skill_draft_check safe-multisig",
+        "skill_draft_install safe-multisig",
     ] {
         assert!(screen.contains(step), "{step} missing:\n{screen}");
     }
     for file in ["SKILL.md", "skill.toml", "scripts/safe_info.py"] {
         assert!(drafts.join("safe-multisig").join(file).is_file(), "{file}");
     }
-    assert!(!added.join("safe-multisig").exists(), "not installed yet");
 
-    // Install: the normal approval card, read, then allowed.
-    s.tui.submit("/skill install safe-multisig");
-    s.tui.wait_for_within("the approval card", 120, |s| {
-        s.contains("Allow skill safe-multisig")
-    });
+    // The card is read, then allowed.
     s.tui.linger(2500);
     s.screenshot("consent_card");
     s.tui.answer(b"y");
@@ -252,7 +250,10 @@ async fn real_model_authors_installs_and_uses_a_skill() {
         .expect("the model wrote no draft with a tool that passes the check");
     eprintln!("model={model} draft={draft}");
 
-    s.tui.submit(&format!("/skill install {draft}"));
+    // The model offers a clean draft itself; if it did not, the user's own command does.
+    if !s.tui.screen().contains(&format!("Allow skill {draft}")) {
+        s.tui.submit(&format!("/skill install {draft}"));
+    }
     s.tui.wait_for_within("the approval card", 120, |s| {
         s.contains(&format!("Allow skill {draft}"))
     });

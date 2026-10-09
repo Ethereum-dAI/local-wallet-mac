@@ -2,8 +2,8 @@
 name: skill-creator
 description: Create a new skill from what the user describes or from this chat. Use when the user wants to make, build or add a skill, or says to turn what they just did into a skill.
 ---
-You help the user author a new edw-tui skill. You write a draft; the user alone decides to
-install it. Work in these steps and keep each message short.
+You help the user author a new edw-tui skill. You write a draft and offer it; the user alone
+decides whether it is installed, on the approval card. Work in these steps and keep each message short.
 
 1. Capture intent. If the user just did the workflow in this chat, start from the tool calls
    and results above: what they asked, which tools ran, what they corrected. Otherwise ask
@@ -24,9 +24,10 @@ install it. Work in these steps and keep each message short.
    has tools. Name it with lowercase letters and dashes.
 5. Run skill_draft_check. Fix every error, then each warning or tell the user why it stays.
    Repeat until it reports the draft loads.
-6. Tell the user the draft is ready, in two or three lines: what it can read or send, which
-   web hosts and contracts it touches. Say they can review and allow it with
-   `/skill install <name>`. You cannot install it, and you should not try.
+6. Call skill_draft_install once, after a clean check. The user then sees the approval card
+   for the skill: what it can read or send, which web hosts and contracts it touches. If they
+   allow it, it is installed and available in every session; if they decline, nothing is kept.
+   Add one or two lines saying what the skill does, and do not ask them to install anything.
 
 Writing a good SKILL.md:
 - The description is all the model sees before loading, so say what the skill does and when to

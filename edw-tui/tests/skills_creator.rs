@@ -16,12 +16,11 @@ fn skill_creator_is_shipped_as_instructions_only() {
 }
 
 #[test]
-fn its_instructions_name_every_authoring_tool_and_the_install_command() {
+fn its_instructions_name_every_authoring_tool() {
     let skill = creator();
     for tool in author::TOOL_NAMES {
         assert!(skill.body.contains(tool), "{tool} not mentioned");
     }
-    assert!(skill.body.contains("/skill install"));
     assert!(!skill.body.contains("ALWAYS") && !skill.body.contains("NEVER"));
 }
 

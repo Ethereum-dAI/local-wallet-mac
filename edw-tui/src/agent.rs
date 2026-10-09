@@ -1013,6 +1013,11 @@ pub async fn run_session(
                 if state.events.send(event).is_err() {
                     return;
                 }
+                // The model offered a finished draft: the user's approval card follows its
+                // reply. Only the user's answer to that card installs anything.
+                if let Some(name) = state.set.drafts().and_then(|d| d.take_install_request()) {
+                    state.change(SkillOp::InstallDraft(name)).await;
+                }
             }
         }
     }
@@ -1332,7 +1337,7 @@ mod tests {
     fn authoring_tools_are_registered_only_with_skill_creator_and_a_drafts_folder() {
         let root = tempfile::tempdir().unwrap();
         let with = shared_with(creator_set(root.path(), true), root.path());
-        assert_eq!(authoring_tool_names(&with), 3);
+        assert_eq!(authoring_tool_names(&with), 4);
         let root = tempfile::tempdir().unwrap();
         let no_drafts = shared_with(creator_set(root.path(), false), root.path());
         assert_eq!(authoring_tool_names(&no_drafts), 0);

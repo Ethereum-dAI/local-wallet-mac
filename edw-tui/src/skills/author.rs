@@ -114,7 +114,10 @@ fn count_files(dir: &Path) -> usize {
         .flatten()
         .map(|entry| {
             let path = entry.path();
-            if path.is_dir() { count_files(&path) } else { 1 }
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => count_files(&path),
+                _ => 1,
+            }
         })
         .sum()
 }
@@ -166,7 +169,7 @@ pub fn check(dir: &Path) -> Report {
 }
 
 /// Words that tell a reader a skill can send transactions.
-const ACTING: [&str; 16] = [
+const ACTING: &[&str] = &[
     "send",
     "supply",
     "withdraw",
@@ -183,7 +186,28 @@ const ACTING: [&str; 16] = [
     "borrow",
     "repay",
     "transaction",
+    "claim",
+    "mint",
+    "bridge",
+    "vote",
+    "harvest",
 ];
+
+/// `token` is `word` or an ordinary inflection of it (sends, sending, signed), so that
+/// "design" does not count as "sign" nor "sender" as "send".
+fn is_form_of(token: &str, word: &str) -> bool {
+    let stem = word.strip_suffix('e').unwrap_or(word);
+    token
+        .strip_prefix(word)
+        .is_some_and(|rest| matches!(rest, "" | "s" | "es" | "ed" | "d" | "ing"))
+        || token.strip_prefix(stem).is_some_and(|rest| rest == "ing")
+}
+
+fn mentions_acting(description: &str) -> bool {
+    description
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .any(|token| ACTING.iter().any(|word| is_form_of(token, word)))
+}
 
 fn lint(skill: &Skill, report: &mut Report) {
     let len = skill.description.chars().count();
@@ -232,7 +256,7 @@ fn lint(skill: &Skill, report: &mut Report) {
         }
     }
     let description = skill.description.to_lowercase();
-    if !m.actions.is_empty() && !ACTING.iter().any(|word| description.contains(word)) {
+    if !m.actions.is_empty() && !mentions_acting(&description) {
         report.warnings.push(
             "the skill can send transactions (it declares actions) but its description never says so; a user reading the skill list would not expect that".into(),
         );
@@ -494,6 +518,15 @@ mod tests {
                 "no python3: the syntax check is skipped, not failed"
             );
         }
+    }
+
+    #[test]
+    fn the_acting_lint_matches_words_not_substrings() {
+        assert!(mentions_acting("Sends tokens and signs the plan"));
+        assert!(mentions_acting("Claims rewards, then bridges them"));
+        assert!(!mentions_acting(
+            "Shows the sender and the design of a vault"
+        ));
     }
 
     #[test]

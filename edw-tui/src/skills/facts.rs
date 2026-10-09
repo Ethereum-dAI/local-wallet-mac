@@ -18,17 +18,28 @@ pub trait AbiSource {
     ) -> impl Future<Output = Result<Option<JsonAbi>, String>> + Send;
 }
 
+/// `EDW_TUI_SKILLS_FACTS=off` stops `skill_draft_check` from contacting Sourcify. Each lookup
+/// tells sourcify.dev which contract and chain a skill is about, so it is opt-out.
+pub fn enabled() -> bool {
+    std::env::var("EDW_TUI_SKILLS_FACTS").map_or(true, |v| !v.eq_ignore_ascii_case("off"))
+}
+
 pub struct Sourcify {
     client: reqwest::Client,
 }
 
 impl Sourcify {
+    /// One client for the process, so its connections are reused across checks.
     pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::builder()
+        static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let client = CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
-                .unwrap_or_default(),
+                .unwrap_or_default()
+        });
+        Self {
+            client: client.clone(),
         }
     }
 }
@@ -71,13 +82,13 @@ impl AbiSource for Sourcify {
     }
 }
 
-/// The most (contract, chain) addresses one check looks up.
+/// The most (contract, chain) addresses one check looks up (all at once).
 const MAX_LOOKUPS: usize = 8;
 
 /// One finding per problem: an address with no verified source, a source that cannot be reached,
 /// a declared function the verified ABI does not have. Contracts the user names at call time
 /// (`address_arg`) have nothing to check. At most [`MAX_LOOKUPS`] lookups are made, and the
-/// first failed lookup ends the check, so a Sourcify that is down costs one timeout.
+/// first failed lookup ends the check, so a Sourcify that is down costs one timeout (the lookups run together).
 pub async fn verify(skill: &Skill, source: &impl AbiSource) -> Vec<String> {
     let mut findings = Vec::new();
     let pairs: Vec<_> = skill
@@ -92,9 +103,16 @@ pub async fn verify(skill: &Skill, source: &impl AbiSource) -> Vec<String> {
         })
         .collect();
     let total = pairs.len();
-    for (done, (contract, chain, address)) in pairs.into_iter().take(MAX_LOOKUPS).enumerate() {
+    let lookups = futures::future::join_all(
+        pairs
+            .iter()
+            .take(MAX_LOOKUPS)
+            .map(|(_, chain, address)| source.abi(*chain, *address)),
+    )
+    .await;
+    for (done, ((contract, chain, address), found)) in pairs.into_iter().zip(lookups).enumerate() {
         let label = format!("{} ({address}) on chain {chain}", contract.label);
-        match source.abi(chain, address).await {
+        match found {
             Err(why) => {
                 findings.push(format!(
                     "Sourcify unreachable, skipped {} checks (first failure: {label}: {why})",
@@ -243,7 +261,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_source_that_is_down_is_asked_once_and_reported_once() {
+    async fn a_source_that_is_down_is_reported_once() {
         let (_r, skill) = skill(r#""function supply(address asset)""#, &many_chains(5));
         let source = Down(Default::default());
         let findings = verify(&skill, &source).await;
@@ -252,7 +270,6 @@ mod tests {
             findings[0].contains("Sourcify unreachable, skipped 5 checks"),
             "{findings:?}"
         );
-        assert_eq!(source.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

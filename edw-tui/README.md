@@ -147,7 +147,8 @@ A card you decline is not shown again this session, until you enable that skill.
 skill) loads the shipped `skill-creator` skill. The model writes a draft into
 `~/.config/edw-tui/skills-drafts/<name>` (`EDW_TUI_SKILLS_DRAFTS_DIR`) with `skill_draft_write`
 and checks it with `skill_draft_check`: it loads, scripts parse, and contracts are compared
-with Sourcify. You then run `/skill install <name>`, which copies the draft into your skills
+with Sourcify (each lookup tells sourcify.dev the contract address and chain; set
+`EDW_TUI_SKILLS_FACTS=off` to skip it). You then run `/skill install <name>`, which copies the draft into your skills
 folder and shows the usual approval card. The model cannot install a draft; only your command
 does. Declining the approval card discards the installed copy (the draft stays in the drafts
 folder), and `/skill install` refuses a draft whose check reports errors. A skill with actions still goes through the plan checker and per-transaction review.

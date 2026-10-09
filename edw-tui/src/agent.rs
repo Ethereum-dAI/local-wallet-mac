@@ -8,7 +8,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     convert::Infallible,
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -371,22 +371,28 @@ impl Shared {
                 author::CREATOR
             ));
         }
+        // Every text the model supplied is echoed somewhere in the reply (a path, a name, a
+        // topic), and the reply goes through `hide`, which would register an invented address.
+        // So all of it is scanned, and a refusal names only the argument.
+        if let Some((key, _)) = args.as_object().and_then(|o| {
+            o.iter().find(|(_, v)| {
+                v.as_str()
+                    .is_some_and(|t| self.addresses.invented(t).is_some())
+            })
+        }) {
+            return fail(format!(
+                "Refused: `{key}` holds an address that came from neither the user nor a tool, so it may be made up. Ask the user for the address; nothing was written."
+            ));
+        }
         if tool == author::WRITE {
             let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
-            let is_manifest = path == "skill.toml";
-            if let Some(content) = args.get("content").and_then(Value::as_str) {
-                if let Some(invented) = self.addresses.invented(content) {
-                    // The address is left out of the text: the reply goes back through `hide`,
-                    // which would register it as known and let the model use it.
-                    let _ = invented;
-                    return fail(format!(
-                        "Refused: an address in {path} came from neither the user nor a tool, so it may be made up. Ask the user for the address; nothing was written."
-                    ));
-                }
-                if is_manifest {
-                    let revealed = self.addresses.reveal_uppercase(content);
-                    args["content"] = Value::String(revealed);
-                }
+            // `allowed_path` refuses every other spelling, so this is the manifest or nothing.
+            let is_manifest = Path::new(path)
+                .components()
+                .eq([Component::Normal("skill.toml".as_ref())]);
+            if is_manifest && let Some(content) = args.get("content").and_then(Value::as_str) {
+                let revealed = self.addresses.reveal_uppercase(content);
+                args["content"] = Value::String(revealed);
             }
         }
         self.log(AgentEvent::ToolStarted {
@@ -1360,7 +1366,7 @@ mod tests {
         let refused = write_draft(&s, "scripts/a.py", &format!("A = \"{MADE_UP}\"\n")).await;
         assert!(
             refused.contains("Refused")
-                && refused.contains("scripts/a.py")
+                && refused.contains("`content`")
                 && refused.contains("nothing was written"),
             "{refused}"
         );
@@ -1386,6 +1392,33 @@ mod tests {
             .await;
         let written = std::fs::read_to_string(root.path().join("drafts/demo/skill.toml")).unwrap();
         assert!(!written.contains(MADE_UP), "{written}");
+    }
+
+    #[tokio::test]
+    async fn a_path_or_name_holding_an_invented_address_is_refused_not_echoed() {
+        let root = tempfile::tempdir().unwrap();
+        let s = shared_with(creator_set(root.path(), true), root.path());
+        s.skills.load("skill-creator");
+        let path = format!("scripts/{MADE_UP}.py");
+        let reply = s
+            .author_reply(
+                author::WRITE,
+                serde_json::json!({"name": "demo", "path": path, "content": "x = 1\n"}),
+            )
+            .await;
+        assert!(
+            reply.contains("Refused") && !reply.contains("ADDR_"),
+            "{reply}"
+        );
+        // No alias was handed out, so the model cannot write one into skill.toml.
+        assert!(!s.addresses.reveal_uppercase("ADDR_1").contains(MADE_UP));
+        let guide = s
+            .author_reply(author::GUIDE, serde_json::json!({"topic": MADE_UP}))
+            .await;
+        assert!(
+            guide.contains("Refused") && !guide.contains("ADDR_"),
+            "{guide}"
+        );
     }
 
     #[tokio::test]

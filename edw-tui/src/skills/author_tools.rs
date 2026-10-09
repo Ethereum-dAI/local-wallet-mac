@@ -86,11 +86,25 @@ async fn check_draft(store: &DraftStore, source: &impl AbiSource, name: &str) ->
             format!("there is no draft named {name}; write SKILL.md first"),
         );
     }
-    let mut report = author::check(&dir);
+    // The check parses scripts with python3, so it runs off the async workers.
+    let checked = dir.clone();
+    let mut report = tokio::task::spawn_blocking(move || author::check(&checked))
+        .await
+        .unwrap_or_else(|_| author::Report {
+            errors: vec!["the check did not finish".into()],
+            ..Default::default()
+        });
     if report.ok()
         && let Ok(skill) = manifest::load(&dir)
     {
-        report.warnings.extend(facts::verify(&skill, source).await);
+        if facts::enabled() {
+            report.warnings.extend(facts::verify(&skill, source).await);
+        } else {
+            report.warnings.push(
+                "contract addresses were not compared with Sourcify (EDW_TUI_SKILLS_FACTS=off)"
+                    .into(),
+            );
+        }
     }
     let mut out = report.render(name);
     if report.ok() {

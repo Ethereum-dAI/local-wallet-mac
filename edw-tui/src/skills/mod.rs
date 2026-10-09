@@ -213,13 +213,25 @@ pub fn install_draft(paths: &Paths, name: &str) -> Result<String, String> {
     if !report.ok() {
         return Err(format!("{name} has problems: {}", report.errors.join("; ")));
     }
-    add(paths, &dir).map_err(|error| {
+    let installed = add(paths, &dir).map_err(|error| {
         if error.contains("already installed") {
             format!("{error}; delete it in the Skills tab (x), then install again.")
         } else {
             error
         }
-    })
+    })?;
+    // The draft may have changed between the check and the copy; what is judged is the copy
+    // that the approval card will show.
+    let copy = paths.user_dir.join(&installed);
+    let report = author::check(&copy);
+    if !report.ok() {
+        let _ = fs::remove_dir_all(&copy);
+        return Err(format!(
+            "{name} changed while it was being installed and now has problems: {}",
+            report.errors.join("; ")
+        ));
+    }
+    Ok(installed)
 }
 
 /// Deletes a skill the user added (never a shipped one) and forgets its approval.

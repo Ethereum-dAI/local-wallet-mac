@@ -79,6 +79,17 @@ async fn a_safe_skill_is_authored_installed_and_used() {
     s.tui.submit(
         "Yes, build it: the Safe skill on Ethereum mainnet only, read-only, no other chains.",
     );
+    // The model's plan: nothing is written until the user says y.
+    s.tui.wait_for_within("the plan", 240, |s| {
+        s.contains("skill_draft_plan safe-multisig") && s.contains("[y] ")
+    });
+    s.screenshot("plan");
+    assert!(
+        !drafts.join("safe-multisig").exists(),
+        "nothing is written before the plan is approved"
+    );
+    s.tui.linger(3000);
+    s.tui.answer(b"y");
     s.tui.wait_for_within("the approval card", 240, |s| {
         s.contains("Allow skill safe-multisig")
     });
@@ -183,10 +194,22 @@ async fn real_model_drafts_a_skill() {
     assert!(any, "the model wrote no draft");
 }
 
-/// A real model can take minutes for one answer.
-fn wait_idle(s: &Scenario) {
-    s.tui
-        .wait_for_within("the agent to finish", 900, |s| !s.contains("thinking…"));
+/// A real model can take minutes for one answer. The user approves the model's plan (`y`) when
+/// it asks, as the person at the keyboard would.
+fn wait_idle(s: &mut Scenario) {
+    for _ in 0..6 {
+        s.tui
+            .wait_for_within("the agent to finish or ask", 900, |s| {
+                !s.contains("thinking…") || s.contains("[y] ")
+            });
+        let screen = s.tui.screen();
+        if screen.contains("[y] ") && screen.contains("skill_draft_plan") {
+            s.tui.linger(2500);
+            s.tui.answer(b"y");
+        } else {
+            return;
+        }
+    }
 }
 
 /// The whole flow with a real Ollama model (`EDW_TUI_E2E_MODEL`, default qwen3:8b) on a mainnet
@@ -232,7 +255,7 @@ async fn real_model_authors_installs_and_uses_a_skill() {
         s.tui.wait_for_within("the turn to end", 900, |s| {
             s.contains("edw:") || s.contains("error:")
         });
-        wait_idle(&s);
+        wait_idle(&mut s);
         let screen = s.tui.screen();
         let has_tool = fs::read_dir(state.join("drafts"))
             .into_iter()
@@ -283,7 +306,7 @@ async fn real_model_authors_installs_and_uses_a_skill() {
     s.tui.wait_for_within("a skill run", 900, |s| {
         s.contains(&format!("skill {draft}/"))
     });
-    wait_idle(&s);
+    wait_idle(&mut s);
     s.tui.linger(2500);
     s.screenshot("skill_answer");
     let answer = s.tui.screen();

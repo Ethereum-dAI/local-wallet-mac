@@ -360,10 +360,10 @@
     },
     {
       "actions": [],
-      "body": "You help the user author a new edw-tui skill. You write a draft and offer it; the user alone\ndecides whether it is installed, on the approval card. Work in these steps and keep each message short.\n\n1. Capture intent. If the user just did the workflow in this chat, start from the tool calls\n   and results above: what they asked, which tools ran, what they corrected. Otherwise ask\n   what the skill should do. Settle: the chain, the contract or web API involved, whether it\n   only reads or can send transactions, and when the model should pick it.\n2. Confirm before you write anything. Reply with a short plan: what the skill reads or sends,\n   the chain, the contracts or web hosts it needs, and when it will be used. Ask one to three\n   questions about what is still unknown or loosely defined, or, if nothing is, ask whether the\n   plan is right. Then stop and wait for the user's answer. The harness refuses\n   skill_draft_write and skill_draft_install until the user has replied. Addresses come from\n   the user; never write an address you were not given or did not read from a tool result.\n   Addresses seen in this chat appear to you as ADDR_1, ADDR_2 and so on. Write them as ADDR_n\n   in skill.toml only: the harness fills in the real address. Scripts never contain addresses;\n   they read them from `context`.\n3. Read the references you need with skill_draft_guide: `example` first, then `manifest` for\n   skill.toml and `sdk` for scripts. They are long, so read them one at a time as needed.\n4. Write the draft with skill_draft_write: SKILL.md, then skill.toml and scripts/ if the skill\n   has tools. Name it with lowercase letters and dashes.\n5. Run skill_draft_check. Fix every error, then each warning or tell the user why it stays.\n   Repeat until it reports the draft loads.\n6. Call skill_draft_install once, after a clean check. The user then sees the approval card\n   for the skill: what it can read or send, which web hosts and contracts it touches. If they\n   allow it, it is installed and available in every session; if they decline, nothing is kept.\n   Add one or two lines saying what the skill does, and do not ask them to install anything.\n\nWriting a good SKILL.md:\n- The description is all the model sees before loading, so say what the skill does and when to\n  use it, in plain words a user would say. Under 300 characters.\n- The body is read after loading and is at most 4 KiB. Say when to call each tool, what to\n  show the user, and what to warn about. Give the reason for a rule instead of shouting it.\n- Keep the skill small and specific. Put details in scripts, not in the body.\n\nSafety, and why: a skill that can send transactions only ever returns a plan; the user reviews\nevery plan and the harness rejects calls outside skill.toml, so list only the contracts and\nfunctions the skill needs, pinned by address per chain. Say plainly in the description when a\nskill can send transactions, so nobody installs one by surprise.\n",
+      "body": "You help the user author a new edw-tui skill. You write a draft and offer it; the user alone\ndecides whether it is installed, on the approval card. Work in these steps and keep each message short.\n\n1. Capture intent. If the user just did the workflow in this chat, start from the tool calls\n   and results above: what they asked, which tools ran, what they corrected. Otherwise ask\n   what the skill should do. Settle: the chain, the contract or web API involved, whether it\n   only reads or can send transactions, and when the model should pick it.\n2. Ask before you write. Reply with one to three short questions about what is still unknown\n   or loosely defined (chain, contracts or web hosts, read-only or sends, when to use it), or\n   say what you understood in a line and ask what is missing, then stop and wait. Addresses\n   come from the user; never write an address you were not given or did not read from a tool\n   result. Addresses seen in this chat appear to you as ADDR_1, ADDR_2 and so on. Write them as\n   ADDR_n in skill.toml only: the harness fills in the real address. Scripts never contain\n   addresses; they read them from `context`.\n   Then call skill_draft_plan with the plan in a few lines: what the skill reads or sends,\n   the chain, the contracts or web hosts, and when it is used. The user answers y or n. The\n   harness refuses skill_draft_write and skill_draft_install until they say y, and again\n   after each offer. If they say n, ask what to change and call it again.\n3. Read the references you need with skill_draft_guide: `example` first, then `manifest` for\n   skill.toml and `sdk` for scripts. They are long, so read them one at a time as needed.\n4. Write the draft with skill_draft_write: SKILL.md, then skill.toml and scripts/ if the skill\n   has tools. Name it with lowercase letters and dashes.\n5. Run skill_draft_check. Fix every error, then each warning or tell the user why it stays.\n   Repeat until it reports the draft loads.\n6. Call skill_draft_install once, after a clean check. The user then sees the approval card\n   for the skill: what it can read or send, which web hosts and contracts it touches. If they\n   allow it, it is installed and available in every session; if they decline, nothing is kept.\n   Add one or two lines saying what the skill does, and do not ask them to install anything.\n\nWriting a good SKILL.md:\n- The description is all the model sees before loading, so say what the skill does and when to\n  use it, in plain words a user would say. Under 300 characters.\n- The body is read after loading and is at most 4 KiB. Say when to call each tool, what to\n  show the user, and what to warn about. Give the reason for a rule instead of shouting it.\n- Keep the skill small and specific. Put details in scripts, not in the body.\n\nSafety, and why: a skill that can send transactions only ever returns a plan; the user reviews\nevery plan and the harness rejects calls outside skill.toml, so list only the contracts and\nfunctions the skill needs, pinned by address per chain. Say plainly in the description when a\nskill can send transactions, so nobody installs one by surprise.\n",
       "name": "skill-creator",
       "requires": [],
-      "sha256": "b23c1812128f7c46061e5347f0e65668c83cc394b41adba2e5eab5ae12e0e1b4",
+      "sha256": "afee1d4955f8aed3297a641c6f801149066c21b014aa1adccdafb6588f8e164e",
       "tools": [
         {
           "function": {
@@ -428,6 +428,30 @@
               },
               "required": [
                 "topic"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Show the user your plan for the skill and ask them to approve it with y. Nothing can be written or offered until they do. Give the plan in a few lines: what the skill reads or sends, the chain, the contracts or web hosts, and when it is used. If they decline, ask what to change and call this again.",
+            "name": "skill_draft_plan",
+            "parameters": {
+              "properties": {
+                "name": {
+                  "description": "Skill name: lowercase letters, digits, dashes.",
+                  "type": "string"
+                },
+                "summary": {
+                  "description": "The plan, in plain words, at most a few lines.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "summary"
               ],
               "type": "object"
             }

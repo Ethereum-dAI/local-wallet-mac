@@ -40,6 +40,14 @@ pub fn specs() -> Vec<(&'static str, &'static str, Value)> {
             }}),
         ),
         (
+            author::PLAN,
+            "Show the user your plan for the skill and ask them to approve it with y. Nothing can be written or offered until they do. Give the plan in a few lines: what the skill reads or sends, the chain, the contracts or web hosts, and when it is used. If they decline, ask what to change and call this again.",
+            json!({"type": "object", "required": ["name", "summary"], "properties": {
+                "name": {"type": "string", "description": "Skill name: lowercase letters, digits, dashes."},
+                "summary": {"type": "string", "description": "The plan, in plain words, at most a few lines."}
+            }}),
+        ),
+        (
             author::INSTALL,
             "Offer the finished draft to the user: after a clean skill_draft_check, call this once. The user then sees the approval card (what the skill can read, send and reach) and decides; if they allow it the skill is installed for every session. Say nothing more about installing.",
             json!({"type": "object", "required": ["name"], "properties": {
@@ -70,6 +78,10 @@ pub async fn call(
         }
         author::CHECK => check_draft(store, source, name).await,
         author::INSTALL => offer_draft(store, name).await,
+        author::PLAN => (
+            1,
+            "the plan needs the user's answer, which only the TUI can ask".into(),
+        ),
         author::GUIDE => match text("topic").unwrap_or_default() {
             "manifest" => (0, GUIDE_MANIFEST.to_owned()),
             "sdk" => (0, GUIDE_SDK.to_owned()),

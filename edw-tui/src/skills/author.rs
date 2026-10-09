@@ -18,8 +18,9 @@ pub const CHECK: &str = "skill_draft_check";
 pub const GUIDE: &str = "skill_draft_guide";
 /// Every authoring request the TUI sends starts with this; see [`DraftStore::user_message`].
 pub const START: &str = "Load the skill-creator skill";
+pub const PLAN: &str = "skill_draft_plan";
 pub const INSTALL: &str = "skill_draft_install";
-pub const TOOL_NAMES: [&str; 4] = [WRITE, CHECK, GUIDE, INSTALL];
+pub const TOOL_NAMES: [&str; 5] = [WRITE, CHECK, GUIDE, PLAN, INSTALL];
 
 pub const MAX_FILE: usize = 64 * 1024;
 pub const MAX_FILES: usize = 24;
@@ -31,8 +32,9 @@ pub struct DraftStore {
     /// The draft the model asked to install this turn. The session takes it when the turn ends
     /// and shows the user's approval card; nothing is installed until the user allows it.
     requested: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// False from `/skill new` or `/skill from-chat` until the user's next message: the model
-    /// must first say what it plans to build and hear back before it writes or offers a draft.
+    /// True only while the user's `y` on the model's plan (`skill_draft_plan`) is in force. It
+    /// is cleared by every `/skill new` or `/skill from-chat` and by every offer of a draft, so
+    /// one approved plan covers one skill.
     confirmed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -41,17 +43,23 @@ impl DraftStore {
         Self {
             root,
             requested: Default::default(),
-            confirmed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            confirmed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
-    /// Called with every message the user sends: a new authoring request needs an answer
-    /// before anything is written; any other message is that answer.
+    /// Called with every message the user sends: a new authoring request starts over, and
+    /// needs its own approved plan before anything is written.
     pub fn user_message(&self, text: &str) {
-        self.confirmed.store(
-            !text.starts_with(START),
-            std::sync::atomic::Ordering::SeqCst,
-        );
+        if text.starts_with(START) {
+            self.confirmed
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// The user answered `y` to the plan.
+    pub fn approve_plan(&self) {
+        self.confirmed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn confirmed(&self) -> bool {
@@ -62,11 +70,19 @@ impl DraftStore {
         *self.requested.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_owned());
     }
 
+    /// The offered draft, once; taking it also ends the approved plan (another skill, or a
+    /// retry after the card is declined, needs a new plan).
     pub fn take_install_request(&self) -> Option<String> {
-        self.requested
+        let name = self
+            .requested
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take()
+            .take();
+        if name.is_some() {
+            self.confirmed
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        name
     }
 
     /// The folder for draft `name`, after checking `name` is a plain skill name.

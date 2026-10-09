@@ -385,9 +385,34 @@ impl Shared {
                 "Refused: `{key}` holds an address that came from neither the user nor a tool, so it may be made up. Ask the user for the address; nothing was written."
             ));
         }
+        if tool == author::PLAN {
+            let summary = args
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            if let Err(why) = store.dir(&name) {
+                return fail(why);
+            }
+            if summary.is_empty() || summary.len() > 1500 {
+                return fail(
+                    "summary is required: the plan in a few lines (at most 1500 characters)".into(),
+                );
+            }
+            // The user reads the plan and answers; nothing else unlocks writing.
+            let preview = format!("Skill {name}\n{}", self.addresses.reveal(&summary));
+            if self.confirm(&command, Some(preview)).await {
+                store.approve_plan();
+                return "The user approved the plan. Write the draft now, then check it and offer it."
+                    .into();
+            }
+            return "The user did not approve the plan. Ask what to change, then call skill_draft_plan again; nothing was written."
+                .into();
+        }
         if matches!(tool, author::WRITE | author::INSTALL) && !store.confirmed() {
             return fail(
-                "Not yet, nothing was written. First tell the user in a few lines what you plan to build (what it reads or sends, which chain, which contracts or web hosts, when it is used), ask about anything missing, and wait for their reply."
+                "Not yet, nothing was written. First ask the user about anything unclear, then call skill_draft_plan with your plan; the user must approve it with y before you write or offer a draft."
                     .into(),
             );
         }
@@ -1308,6 +1333,13 @@ mod tests {
     }
 
     fn shared_with(skills: Arc<SkillSet>, root: &std::path::Path) -> Arc<Shared> {
+        shared_with_events(skills, root).0
+    }
+
+    fn shared_with_events(
+        skills: Arc<SkillSet>,
+        root: &std::path::Path,
+    ) -> (Arc<Shared>, mpsc::UnboundedReceiver<AgentEvent>) {
         let edw = EdwConfig {
             binary: "edw".into(),
             data_dir: root.join("data"),
@@ -1316,14 +1348,15 @@ mod tests {
         };
         let mut interim = InterimConfig::from_env(edw.clone());
         interim.addresses = AddressBook::new(true);
-        let (events, _rx) = mpsc::unbounded_channel();
-        Arc::new(Shared {
+        let (events, rx) = mpsc::unbounded_channel();
+        let shared = Arc::new(Shared {
             config: edw,
             addresses: interim.addresses.clone(),
             interim: Interim::new(interim),
             events,
             skills,
-        })
+        });
+        (shared, rx)
     }
 
     const KNOWN: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
@@ -1348,7 +1381,7 @@ mod tests {
     fn authoring_tools_are_registered_only_with_skill_creator_and_a_drafts_folder() {
         let root = tempfile::tempdir().unwrap();
         let with = shared_with(creator_set(root.path(), true), root.path());
-        assert_eq!(authoring_tool_names(&with), 4);
+        assert_eq!(authoring_tool_names(&with), 5);
         let root = tempfile::tempdir().unwrap();
         let no_drafts = shared_with(creator_set(root.path(), false), root.path());
         assert_eq!(authoring_tool_names(&no_drafts), 0);
@@ -1368,20 +1401,23 @@ mod tests {
         assert!(out.contains("load the skill-creator skill first"), "{out}");
         assert!(!root.path().join("drafts/demo").exists());
         s.skills.load("skill-creator");
+        s.skills.drafts().unwrap().approve_plan();
         let out = write_draft(&s, "SKILL.md", "x").await;
         assert!(out.starts_with("wrote SKILL.md"), "{out}");
     }
 
     #[tokio::test]
-    async fn nothing_is_written_or_offered_until_the_user_has_answered() {
+    async fn nothing_is_written_or_offered_until_the_user_approves_the_plan() {
         let root = tempfile::tempdir().unwrap();
-        let s = shared_with(creator_set(root.path(), true), root.path());
+        let (s, mut rx) = shared_with_events(creator_set(root.path(), true), root.path());
         s.skills.load("skill-creator");
         let drafts = s.skills.drafts().unwrap();
+        // Another message from the user is not an approval.
         drafts.user_message(&format!("{} and help me: a skill", author::START));
+        drafts.user_message("yes, mainnet only");
         let refused = write_draft(&s, "SKILL.md", "x").await;
         assert!(
-            refused.contains("Not yet") && refused.contains("wait for their reply"),
+            refused.contains("Not yet") && refused.contains("skill_draft_plan"),
             "{refused}"
         );
         assert!(!root.path().join("drafts/demo").exists());
@@ -1389,13 +1425,42 @@ mod tests {
             .author_call(author::INSTALL, serde_json::json!({"name": "demo"}))
             .await;
         assert!(offered.contains("Not yet"), "{offered}");
-        // Reading the guides is allowed meanwhile, and the user's next message is the answer.
+        // Reading the guides is allowed meanwhile.
         let guide = s
             .author_call(author::GUIDE, serde_json::json!({"topic": "example"}))
             .await;
         assert!(!guide.contains("Not yet"));
-        drafts.user_message("yes, mainnet only");
+
+        // The user declines the plan: still nothing.
+        let plan = serde_json::json!({"name": "demo", "summary": "A read-only skill."});
+        let declined = tokio::join!(s.author_call(author::PLAN, plan.clone()), async {
+            while let Some(event) = rx.recv().await {
+                if let AgentEvent::Confirm { preview, reply, .. } = event {
+                    assert!(preview.unwrap().contains("A read-only skill."));
+                    reply.send(false).unwrap();
+                    break;
+                }
+            }
+        })
+        .0;
+        assert!(declined.contains("did not approve"), "{declined}");
+        assert!(write_draft(&s, "SKILL.md", "x").await.contains("Not yet"));
+
+        // The user approves: one skill can be written and offered, then the plan is spent.
+        let approved = tokio::join!(s.author_call(author::PLAN, plan), async {
+            while let Some(event) = rx.recv().await {
+                if let AgentEvent::Confirm { reply, .. } = event {
+                    reply.send(true).unwrap();
+                    break;
+                }
+            }
+        })
+        .0;
+        assert!(approved.contains("approved"), "{approved}");
         assert!(write_draft(&s, "SKILL.md", "x").await.starts_with("wrote"));
+        drafts.request_install("demo");
+        assert_eq!(drafts.take_install_request().as_deref(), Some("demo"));
+        assert!(write_draft(&s, "SKILL.md", "x").await.contains("Not yet"));
     }
 
     #[tokio::test]
@@ -1403,6 +1468,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let s = shared_with(creator_set(root.path(), true), root.path());
         s.skills.load("skill-creator");
+        s.skills.drafts().unwrap().approve_plan();
         s.addresses.hide(KNOWN);
         let ok = write_draft(&s, "skill.toml", &format!("a = \"{KNOWN}\"\n")).await;
         assert!(ok.starts_with("wrote"), "{ok}");
@@ -1421,6 +1487,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let s = shared_with(creator_set(root.path(), true), root.path());
         s.skills.load("skill-creator");
+        s.skills.drafts().unwrap().approve_plan();
         let args = |content: &str| serde_json::json!({"name": "demo", "path": "skill.toml", "content": content});
         let bad = format!("a = \"{MADE_UP}\"\n");
         let first = s.author_reply(author::WRITE, args(&bad)).await;
@@ -1442,6 +1509,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let s = shared_with(creator_set(root.path(), true), root.path());
         s.skills.load("skill-creator");
+        s.skills.drafts().unwrap().approve_plan();
         let path = format!("scripts/{MADE_UP}.py");
         let reply = s
             .author_reply(
@@ -1469,6 +1537,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let s = shared_with(creator_set(root.path(), true), root.path());
         s.skills.load("skill-creator");
+        s.skills.drafts().unwrap().approve_plan();
         s.addresses.hide(KNOWN);
         let script = "addr_1 = ctx['to']\nprint(addr_1)\n";
         write_draft(&s, "scripts/run.py", script).await;

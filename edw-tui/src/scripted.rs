@@ -153,6 +153,8 @@ const AUTHORING_PREFIX: &str = "Load the skill-creator skill and help me create 
 /// What the user answers to the question the model asks first (the e2e test sends this).
 pub const AUTHORING_CONFIRM: &str = "Yes, build it:";
 
+const AUTHORING_PLAN: &str = "Read-only skill safe-multisig. Reads a Safe's owners, threshold and next nonce from Ethereum mainnet through your RPC. No web hosts; it can never send a transaction. Used when you ask who controls a Safe.";
+
 const AUTHORING_QUESTION: &str = "Before I write anything: I plan a read-only skill that reads a Safe's owners, threshold and next nonce from Ethereum mainnet through your RPC. It would use no web hosts and could never send a transaction. Is that what you want, and should it work on other chains too?";
 
 const DRAFT_SKILL_MD: &str = r#"---
@@ -236,6 +238,10 @@ fn authoring_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> 
         )
     };
     Some(Script::Calls(vec![
+        (
+            "skill_draft_plan",
+            json!({"name": "safe-multisig", "summary": AUTHORING_PLAN}),
+        ),
         ("skill_draft_guide", json!({"topic": "example"})),
         write("SKILL.md", DRAFT_SKILL_MD),
         write("skill.toml", DRAFT_SKILL_TOML),
@@ -710,6 +716,7 @@ mod tests {
         assert_eq!(
             tools,
             [
+                "skill_draft_plan",
                 "skill_draft_guide",
                 "skill_draft_write",
                 "skill_draft_write",
@@ -718,13 +725,13 @@ mod tests {
                 "skill_draft_install"
             ]
         );
-        let paths: Vec<&str> = calls[1..4]
+        let paths: Vec<&str> = calls[2..5]
             .iter()
             .map(|(_, a)| a["path"].as_str().unwrap())
             .collect();
         assert_eq!(paths, ["SKILL.md", "skill.toml", "scripts/safe_info.py"]);
         // The drafted skill reads the Safe from its arguments: no address is baked in.
-        for (_, args) in &calls[1..4] {
+        for (_, args) in &calls[2..5] {
             let content = args["content"].as_str().unwrap();
             assert_eq!(address_in(content), None, "{content}");
         }

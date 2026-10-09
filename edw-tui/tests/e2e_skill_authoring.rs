@@ -154,8 +154,9 @@ async fn real_model_drafts_a_skill() {
             break;
         }
         eprintln!("round {round}: not checked clean yet; saying continue");
-        s.tui
-            .submit("Continue. Mainnet, read-only. Fix what the check reports.");
+        s.tui.submit(&format!(
+            "Continue the Safe skill (a script tool that reads the owners, threshold and nonce of {MAINNET_SAFE}): call skill_draft_check, fix each error it reports with skill_draft_write, then tell me it is ready."
+        ));
     }
     eprintln!("model={model}\n{}", s.tui.screen());
     let mut any = false;
@@ -171,4 +172,110 @@ async fn real_model_drafts_a_skill() {
         );
     }
     assert!(any, "the model wrote no draft");
+}
+
+/// A real model can take minutes for one answer.
+fn wait_idle(s: &Scenario) {
+    s.tui
+        .wait_for_within("the agent to finish", 900, |s| !s.contains("thinking…"));
+}
+
+/// The whole flow with a real Ollama model (`EDW_TUI_E2E_MODEL`, default qwen3:8b) on a mainnet
+/// fork: it drafts a Safe skill, the user installs it, and the model then uses it. Nothing is
+/// scripted, so the outcome depends on the model. `EDW_TUI_E2E_RECORD=1` records
+/// `target/e2e-screenshots/skill-authoring-real-model.mp4`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Ollama, Docker, anvil, edw and the network; the outcome depends on the model"]
+async fn real_model_authors_installs_and_uses_a_skill() {
+    if !sandbox::docker_available().await {
+        eprintln!("skipping: Docker is not running");
+        return;
+    }
+    let model = std::env::var("EDW_TUI_E2E_MODEL").unwrap_or_else(|_| "qwen3:8b".into());
+    // SAFETY: set before the scenario spawns anything, in a test with no other threads reading it.
+    unsafe { std::env::set_var("EDW_TUI_E2E_MODEL", &model) };
+    let shipped = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills");
+    let without_safe = tempfile::tempdir().unwrap();
+    copy_skills_without(&shipped, without_safe.path(), "safe-multisig");
+    let Some(mut s) = Scenario::start_with_skills_dir(
+        "skill-authoring-real-model",
+        Chain::MainnetFork,
+        without_safe.path().to_owned(),
+    )
+    .await
+    else {
+        return;
+    };
+    let state = s.wallet.config.data_dir.join("skills-state");
+
+    // Reads on chain need the wallet unlocked.
+    s.tui.submit("unlock mainnet");
+    s.tui
+        .wait_for_within("a confirmation", 600, |s| s.contains("[y] "));
+    s.tui.linger(2000);
+    s.tui.answer(b"y");
+    s.idle();
+
+    s.tui.submit(&format!(
+        "/skill new a read-only skill with a script tool that reads who owns the Safe {MAINNET_SAFE} on chain 1, its threshold and nonce from the chain"
+    ));
+    for round in 0..4 {
+        s.tui.wait_for_within("the turn to end", 900, |s| {
+            s.contains("edw:") || s.contains("error:")
+        });
+        wait_idle(&s);
+        let screen = s.tui.screen();
+        let has_tool = fs::read_dir(state.join("drafts"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|d| d.path().join("skill.toml").is_file());
+        if has_tool && (screen.contains("no problems found") || screen.contains("The draft loads"))
+        {
+            break;
+        }
+        eprintln!("round {round}: not checked clean yet; saying continue");
+        s.tui.submit(&format!(
+            "Continue the Safe skill (a script tool that reads the owners, threshold and nonce of {MAINNET_SAFE}): call skill_draft_check, fix each error it reports with skill_draft_write, then tell me it is ready."
+        ));
+    }
+    s.screenshot("draft_ready");
+    eprintln!("{}", s.tui.screen());
+    let draft = fs::read_dir(state.join("drafts"))
+        .unwrap()
+        .flatten()
+        .filter(|d| {
+            d.path().join("skill.toml").is_file() && edw_tui::skills::author::check(&d.path()).ok()
+        })
+        .map(|d| d.file_name().to_string_lossy().into_owned())
+        .next()
+        .expect("the model wrote no draft with a tool that passes the check");
+    eprintln!("model={model} draft={draft}");
+
+    s.tui.submit(&format!("/skill install {draft}"));
+    s.tui.wait_for_within("the approval card", 120, |s| {
+        s.contains(&format!("Allow skill {draft}"))
+    });
+    s.tui.linger(2500);
+    s.screenshot("consent_card");
+    s.tui.answer(b"y");
+    s.tui.wait_for_within("the card to close", 60, |s| {
+        !s.contains(&format!("Allow skill {draft}"))
+    });
+    s.idle();
+    assert!(state.join("added").join(&draft).join("SKILL.md").is_file());
+
+    s.tui.submit(&format!(
+        "Load the {draft} skill and use it to look up the owners, threshold and nonce of the Safe {MAINNET_SAFE} (read only, nothing to send)."
+    ));
+    s.tui.wait_for_within("a skill run", 900, |s| {
+        s.contains(&format!("skill {draft}/"))
+    });
+    wait_idle(&s);
+    s.tui.linger(2500);
+    s.screenshot("skill_answer");
+    let answer = s.tui.screen();
+    eprintln!("{answer}");
+    assert!(answer.contains(&format!("skill {draft}/")), "{answer}");
+    s.finish("skill-authoring-real-model");
 }

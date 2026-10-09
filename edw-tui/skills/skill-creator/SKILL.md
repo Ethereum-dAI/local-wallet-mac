@@ -16,6 +16,8 @@ install it. Work in these steps and keep each message short.
    Addresses seen in this chat appear to you as ADDR_1, ADDR_2 and so on. Write them as ADDR_n
    in skill.toml only: the harness fills in the real address. Scripts never contain addresses;
    they read them from `context`.
+   A skill with only SKILL.md has no tools: it can give instructions but cannot read a chain or
+   an API. Anything that fetches data or sends a transaction needs skill.toml and a script.
 3. Read the references you need with skill_draft_guide: `example` first, then `manifest` for
    skill.toml and `sdk` for scripts. They are long, so read them one at a time as needed.
 4. Write the draft with skill_draft_write: SKILL.md, then skill.toml and scripts/ if the skill

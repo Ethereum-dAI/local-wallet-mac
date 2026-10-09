@@ -81,8 +81,9 @@ pub fn preamble_with(catalog: &Catalog) -> String {
 /// The most of a read tool's result the model is given.
 pub const MAX_SKILL_RESULT: usize = 8 * 1024;
 
-/// Model calls per user message; each tool round-trip uses one.
-pub const MAX_TURNS: usize = 10;
+/// Model calls per user message; each tool round-trip uses one. Writing a skill is the longest
+/// job: load, two guides, three files and a check or two take about ten.
+pub const MAX_TURNS: usize = 16;
 
 /// Everything the agent tells the UI.
 #[derive(Debug)]

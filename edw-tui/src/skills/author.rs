@@ -146,9 +146,18 @@ impl Report {
             for e in &self.errors {
                 out.push_str(&format!("- {e}\n"));
             }
-            out.push_str(
-                "If a field or format is unclear, read it: skill_draft_guide with topic manifest (skill.toml) or sdk (scripts), then rewrite the file.\n",
-            );
+            let all = self.errors.join("\n");
+            if all.contains("SKILL.md") {
+                out.push_str("SKILL.md starts with this frontmatter, then the instructions:\n---\nname: <the draft's name>\ndescription: <20-300 characters: what it does and when to use it>\n---\n");
+            }
+            if all.contains("skill.toml") {
+                out.push_str("Do not guess skill.toml fields: call skill_draft_guide with topic manifest now (note the tables are `[[contract]]`, `[[read_tool]]` and `[[action]]`, each written with double brackets), then rewrite the file.\n");
+            }
+            if all.contains(".py") {
+                out.push_str(
+                    "For scripts, call skill_draft_guide with topic sdk, then rewrite the file.\n",
+                );
+            }
         }
         if !self.warnings.is_empty() {
             out.push_str("Warnings (fix them, or tell the user):\n");
@@ -226,6 +235,21 @@ fn lint(skill: &Skill, report: &mut Report) {
         report.warnings.push(format!(
             "the description is {len} characters; every skill's description is in every request, so keep it under 300"
         ));
+    }
+    let has_script = fs::read_dir(skill.dir.join("scripts"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy().ends_with(".py"));
+    if has_script && !skill.has_scripts() {
+        report.errors.push(
+            "scripts/ has a script but skill.toml declares no `[[read_tool]]` or `[[action]]` that runs it, so the skill would load with no tools; add one (skill_draft_guide with topic manifest shows how)".into(),
+        );
+    }
+    if !skill.has_scripts() && !skill.manifest.contracts.is_empty() {
+        report.errors.push(
+            "skill.toml declares contracts but no `[[read_tool]]` or `[[action]]`, so the skill has no tool that can use them and cannot read anything; add a tool and its script (skill_draft_guide with topic manifest shows how)".into(),
+        );
     }
     if skill.body.trim().is_empty() {
         report
@@ -521,6 +545,39 @@ mod tests {
                 "no python3: the syntax check is skipped, not failed"
             );
         }
+    }
+
+    #[test]
+    fn a_script_no_tool_runs_is_an_error() {
+        let (_root, dir) = draft(&[
+            (
+                "SKILL.md",
+                "---\nname: demo\ndescription: Shows something useful about a demo, when asked.\n---\nUse it.\n",
+            ),
+            ("skill.toml", "version = \"1\"\n"),
+            ("scripts/run.py", "print(1)\n"),
+        ]);
+        let report = check(&dir);
+        assert!(
+            report.errors.iter().any(|e| e.contains("declares no")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn contracts_without_a_tool_are_an_error() {
+        let (_root, dir) = draft(&[
+            ("SKILL.md", GOOD_MD),
+            (
+                "skill.toml",
+                "version = \"1\"\n[[contract]]\nid = \"x\"\nlabel = \"X\"\nfunctions = []\naddress = { 1 = \"0x0000000000000000000000000000000000000001\" }\n",
+            ),
+        ]);
+        let report = check(&dir);
+        assert!(
+            report.errors.iter().any(|e| e.contains("no tool")),
+            "{report:?}"
+        );
     }
 
     #[test]

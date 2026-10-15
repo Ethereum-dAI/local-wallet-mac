@@ -129,6 +129,8 @@ async fn main() -> anyhow::Result<()> {
                     _ => {}
                 },
                 Some(event) = events.recv() => app.on_agent(event),
+                // Redraw while a card has a running step, so its spinner turns.
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)), if app.flow_active() => {}
             }
         }
     }

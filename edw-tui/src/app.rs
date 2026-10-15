@@ -12,6 +12,7 @@ use tokio::sync::oneshot;
 use crate::{
     agent::{AgentEvent, Request, SkillOp},
     edw::EdwResult,
+    flow::{Flow, FlowEvent},
     skills::{SkillRow, consent::ConsentRequest},
 };
 
@@ -60,6 +61,8 @@ pub enum ChatLine {
     Error(String),
     /// Harness messages: help, model lists, model switches.
     Info(String),
+    /// One action's trigger and progress, updated in place as it runs.
+    Flow(Flow),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +166,11 @@ pub struct App {
     pub view: View,
     pub chat: Vec<ChatLine>,
     pub log: Vec<LogEntry>,
+    /// The last message the user typed (not a `/command`), shown on the card of the action it
+    /// leads to.
+    last_prompt: String,
+    /// For the spinner on a running step.
+    started: Instant,
     pub input: String,
     pub busy: bool,
     /// The last `/models` listing, so `/model 2` can pick by number.
@@ -208,6 +216,8 @@ impl App {
             view: View::default(),
             chat: Vec::new(),
             log: Vec::new(),
+            last_prompt: String::new(),
+            started: Instant::now(),
             input: String::new(),
             busy: false,
             models: Vec::new(),
@@ -318,6 +328,7 @@ impl App {
                         None => return Action::None,
                     }
                 } else {
+                    self.last_prompt = prompt.clone();
                     Request::Prompt(prompt)
                 };
                 self.busy = true;
@@ -632,8 +643,61 @@ impl App {
         self.confirm_shown = (!self.pending.is_empty()).then(Instant::now);
     }
 
+    /// The newest action card, if any.
+    fn flow_mut(&mut self) -> Option<&mut Flow> {
+        self.chat.iter_mut().rev().find_map(|line| match line {
+            ChatLine::Flow(flow) => Some(flow),
+            _ => None,
+        })
+    }
+
+    /// An action card is still changing, so the screen must redraw for its spinner.
+    pub fn flow_active(&self) -> bool {
+        self.chat
+            .iter()
+            .rev()
+            .find_map(|line| match line {
+                ChatLine::Flow(flow) => Some(flow.is_active()),
+                _ => None,
+            })
+            .unwrap_or(false)
+    }
+
+    /// The braille frame for a running step, a new one every 100 ms.
+    pub fn spinner(&self) -> &'static str {
+        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        FRAMES[(self.started.elapsed().as_millis() / 100) as usize % FRAMES.len()]
+    }
+
+    fn on_flow(&mut self, event: FlowEvent) {
+        match event {
+            FlowEvent::Begin {
+                trigger,
+                title,
+                stages,
+            } => {
+                // An action that never finished (the turn moved on) stops waiting.
+                if let Some(previous) = self.flow_mut() {
+                    previous.abandon();
+                }
+                let flow = Flow::new(trigger, title, self.last_prompt.clone(), &stages);
+                self.chat.push(ChatLine::Flow(flow));
+            }
+            FlowEvent::Step {
+                stage,
+                state,
+                detail,
+            } => {
+                if let Some(flow) = self.flow_mut() {
+                    flow.apply(stage, state, detail, Instant::now());
+                }
+            }
+        }
+    }
+
     pub fn on_agent(&mut self, event: AgentEvent) {
         match event {
+            AgentEvent::Flow(event) => self.on_flow(event),
             AgentEvent::Consents(requests) => {
                 self.skill_notice = None;
                 self.ask_consents(requests);
@@ -650,6 +714,14 @@ impl App {
             }
             AgentEvent::ToolStarted { command } => self.log.push(LogEntry::Running(command)),
             AgentEvent::ToolFinished(result) => {
+                // A command that fails while a card step runs is that step's failure; the
+                // stages after it are never reached.
+                if !result.ok()
+                    && let Some(flow) = self.flow_mut()
+                {
+                    let reason = result.output.lines().next().unwrap_or("failed");
+                    flow.fail_running(reason.to_owned(), Instant::now());
+                }
                 let running = self
                     .log
                     .iter()
@@ -690,6 +762,9 @@ impl App {
             }
             AgentEvent::Reply(text) => {
                 self.busy = false;
+                if let Some(flow) = self.flow_mut() {
+                    flow.abandon();
+                }
                 self.chat
                     .push(ChatLine::Assistant(if text.trim().is_empty() {
                         "(no answer)".into()
@@ -699,6 +774,9 @@ impl App {
             }
             AgentEvent::Error(error) => {
                 self.busy = false;
+                if let Some(flow) = self.flow_mut() {
+                    flow.abandon();
+                }
                 // A failed Skills-tab change is shown where it was made, too.
                 if self.view == View::Skills {
                     self.skill_notice = Some(error.clone());
@@ -739,7 +817,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::consent::Reason;
+    use crate::{
+        flow::{Stage, StepState, Trigger},
+        skills::consent::Reason,
+    };
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -1336,5 +1417,187 @@ mod tests {
         app.on_paste("send 1 ETH to\n0xabc\r\n");
         assert_eq!(app.input, "send 1 ETH to 0xabc  ");
         assert!(!app.busy && app.chat.is_empty());
+    }
+
+    // --- action cards ---
+
+    fn begin_skill(app: &mut App) {
+        app.on_agent(AgentEvent::Flow(FlowEvent::Begin {
+            trigger: Trigger::Skill {
+                skill: "aave-v3-lend".into(),
+                action: "supply".into(),
+            },
+            title: "skill aave-v3-lend/supply".into(),
+            stages: Stage::SKILL_ACTION.to_vec(),
+        }));
+    }
+
+    fn step(app: &mut App, stage: Stage, state: StepState) {
+        app.on_agent(AgentEvent::Flow(FlowEvent::Step {
+            stage,
+            state,
+            detail: None,
+        }));
+    }
+
+    fn card(app: &App) -> &Flow {
+        app.chat
+            .iter()
+            .rev()
+            .find_map(|line| match line {
+                ChatLine::Flow(flow) => Some(flow),
+                _ => None,
+            })
+            .expect("a card")
+    }
+
+    fn states(app: &App) -> Vec<StepState> {
+        card(app).steps.iter().map(|s| s.state).collect()
+    }
+
+    fn failed(command: &str, output: &str) -> AgentEvent {
+        AgentEvent::ToolFinished(EdwResult {
+            command: command.into(),
+            exit_code: 1,
+            output: output.into(),
+        })
+    }
+
+    #[test]
+    fn a_card_carries_the_prompt_that_led_to_it() {
+        let mut app = App::new("m", "d");
+        type_text(&mut app, "supply 100 USDC on aave");
+        app.on_key(key(KeyCode::Enter));
+        begin_skill(&mut app);
+        assert_eq!(card(&app).prompt, "supply 100 USDC on aave");
+        assert!(app.flow_active());
+    }
+
+    #[test]
+    fn a_slash_command_is_not_a_card_prompt() {
+        let mut app = App::new("m", "d");
+        type_text(&mut app, "ask the model");
+        app.on_key(key(KeyCode::Enter));
+        app.on_agent(AgentEvent::Reply("ok".into()));
+        type_text(&mut app, "/skills");
+        app.on_key(key(KeyCode::Enter));
+        begin_skill(&mut app);
+        assert_eq!(card(&app).prompt, "ask the model");
+    }
+
+    #[test]
+    fn stage_events_move_the_card_and_it_stays_in_the_chat_order() {
+        let mut app = App::new("m", "d");
+        app.chat.push(ChatLine::User("supply".into()));
+        begin_skill(&mut app);
+        step(&mut app, Stage::Script, StepState::Running);
+        step(&mut app, Stage::Script, StepState::Done);
+        step(&mut app, Stage::Plan, StepState::Running);
+        assert_eq!(
+            states(&app),
+            [
+                StepState::Done,
+                StepState::Running,
+                StepState::Pending,
+                StepState::Pending,
+                StepState::Pending,
+            ]
+        );
+        app.on_agent(AgentEvent::Reply("done".into()));
+        assert!(matches!(app.chat[0], ChatLine::User(_)));
+        assert!(matches!(app.chat[1], ChatLine::Flow(_)));
+        assert!(matches!(app.chat[2], ChatLine::Assistant(_)));
+    }
+
+    #[test]
+    fn a_failing_command_fails_the_running_step() {
+        let mut app = App::new("m", "d");
+        begin_skill(&mut app);
+        step(&mut app, Stage::Script, StepState::Done);
+        step(&mut app, Stage::Plan, StepState::Running);
+        app.on_agent(failed(
+            "skill aave-v3-lend/supply {}",
+            "the plan was refused (calls a function the manifest does not list)\nnothing was sent.",
+        ));
+        assert_eq!(
+            states(&app),
+            [
+                StepState::Done,
+                StepState::Failed,
+                StepState::Skipped,
+                StepState::Skipped,
+                StepState::Skipped,
+            ]
+        );
+        assert_eq!(
+            card(&app).steps[1].detail.as_deref(),
+            Some("the plan was refused (calls a function the manifest does not list)")
+        );
+        assert!(!app.flow_active());
+    }
+
+    #[test]
+    fn a_successful_log_line_does_not_touch_the_card() {
+        let mut app = App::new("m", "d");
+        begin_skill(&mut app);
+        step(&mut app, Stage::Script, StepState::Running);
+        app.on_agent(AgentEvent::ToolFinished(EdwResult {
+            command: "dex_pool: fetching".into(),
+            exit_code: 0,
+            output: String::new(),
+        }));
+        assert_eq!(states(&app)[0], StepState::Running);
+    }
+
+    #[test]
+    fn a_declined_review_ends_the_card() {
+        let mut app = App::new("m", "d");
+        begin_skill(&mut app);
+        for stage in [Stage::Script, Stage::Plan, Stage::Simulate] {
+            step(&mut app, stage, StepState::Done);
+        }
+        step(&mut app, Stage::Review, StepState::Running);
+        step(&mut app, Stage::Review, StepState::Declined);
+        assert_eq!(states(&app)[3..], [StepState::Declined, StepState::Skipped]);
+        assert!(!app.flow_active());
+    }
+
+    #[test]
+    fn a_new_action_supersedes_one_that_never_finished() {
+        let mut app = App::new("m", "d");
+        begin_skill(&mut app);
+        step(&mut app, Stage::Script, StepState::Running);
+        begin_skill(&mut app);
+        let cards: Vec<_> = app
+            .chat
+            .iter()
+            .filter_map(|line| match line {
+                ChatLine::Flow(flow) => Some(flow),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards.len(), 2);
+        assert!(!cards[0].is_active(), "the first card stops waiting");
+        assert!(cards[1].is_active());
+    }
+
+    #[test]
+    fn a_reply_or_error_stops_a_card_that_is_still_waiting() {
+        for end in [
+            AgentEvent::Reply("done".into()),
+            AgentEvent::Error("boom".into()),
+        ] {
+            let mut app = App::new("m", "d");
+            begin_skill(&mut app);
+            step(&mut app, Stage::Script, StepState::Running);
+            app.on_agent(end);
+            assert!(!app.flow_active());
+        }
+    }
+
+    #[test]
+    fn no_card_means_no_redraw_tick() {
+        let app = App::new("m", "d");
+        assert!(!app.flow_active());
     }
 }

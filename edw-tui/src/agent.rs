@@ -33,6 +33,7 @@ use crate::{
     addresses::AddressBook,
     app_contract::SAFETY_CLAUSE,
     edw::{self, Backend, EdwConfig, EdwResult, TOOLS},
+    flow::{FlowEvent, Stage, StepState, Trigger},
     interim::{self, Interim, InterimConfig},
     scripted::ScriptedModel,
     skills::{
@@ -101,6 +102,8 @@ pub enum AgentEvent {
     },
     Reply(String),
     Error(String),
+    /// An action's card changed: it began, or one of its stages moved on.
+    Flow(FlowEvent),
     /// Startup finished: the skills are settled and the agent is listening. `lines` are for
     /// `/skills`, `notes` for the chat (Docker missing, a skill unavailable, …).
     SkillsReady {
@@ -168,6 +171,27 @@ impl Shared {
         let _ = self.events.send(event);
     }
 
+    /// Opens an action card in the chat; its stages all start pending.
+    fn flow_begin(&self, trigger: Trigger, title: String, stages: &[Stage]) {
+        self.log(AgentEvent::Flow(FlowEvent::Begin {
+            trigger,
+            title,
+            stages: stages.to_vec(),
+        }));
+    }
+
+    fn flow_step(&self, stage: Stage, state: StepState) {
+        self.flow_detail(stage, state, None);
+    }
+
+    fn flow_detail(&self, stage: Stage, state: StepState, detail: Option<String>) {
+        self.log(AgentEvent::Flow(FlowEvent::Step {
+            stage,
+            state,
+            detail,
+        }));
+    }
+
     /// Asks the user and waits; `false` if they decline or the UI is gone.
     async fn confirm(&self, command: &str, preview: Option<String>) -> bool {
         let (reply, answer) = oneshot::channel();
@@ -227,6 +251,12 @@ impl Shared {
                 result.to_model_json()
             }
             "transfer" | "swap" => {
+                self.flow_begin(
+                    Trigger::User,
+                    interim::display_command(tool, args, &self.interim.profile()),
+                    &Stage::TRANSFER,
+                );
+                self.flow_step(Stage::Prepare, StepState::Running);
                 let prepared = if tool == "swap" {
                     self.interim.prepare_swap(args).await
                 } else {
@@ -244,15 +274,23 @@ impl Shared {
                     exit_code: 0,
                     output: prepared.preview.clone(),
                 }));
+                self.flow_step(Stage::Prepare, StepState::Done);
+                self.flow_step(Stage::Review, StepState::Running);
                 let command = prepared.command.clone();
                 if !self.confirm(&command, Some(prepared.preview.clone())).await {
+                    self.flow_detail(Stage::Review, StepState::Declined, Some("declined".into()));
                     return format!("The user declined `{command}`; nothing was sent.");
                 }
+                self.flow_step(Stage::Review, StepState::Done);
+                self.flow_step(Stage::Send, StepState::Running);
                 self.log(AgentEvent::ToolStarted {
                     command: command.clone(),
                 });
                 let result = self.interim.broadcast(prepared).await;
                 self.log(AgentEvent::ToolFinished(result.clone()));
+                if result.ok() {
+                    self.flow_step(Stage::Send, StepState::Done);
+                }
                 result.to_model_json()
             }
             other => {
@@ -497,6 +535,24 @@ impl Shared {
         }
         let args = self.addresses.reveal_json(args);
         let command = format!("{short} {args}");
+        // Only an action sends something, so only an action gets a card.
+        let is_action = skill.action(tool).is_some();
+        let step = |stage, state| {
+            if is_action {
+                self.flow_step(stage, state);
+            }
+        };
+        if is_action {
+            self.flow_begin(
+                Trigger::Skill {
+                    skill: skill.name.clone(),
+                    action: tool.to_owned(),
+                },
+                command.clone(),
+                &Stage::SKILL_ACTION,
+            );
+            step(Stage::Script, StepState::Running);
+        }
         self.log(AgentEvent::ToolStarted {
             command: command.clone(),
         });
@@ -576,6 +632,8 @@ impl Shared {
                 "the wallet is locked; unlock a network first".into(),
             );
         };
+        step(Stage::Script, StepState::Done);
+        step(Stage::Plan, StepState::Running);
         let checked = match plan::check(&plan, &skill, action, at.chain_id, at.me, &args) {
             Ok(checked) => checked,
             Err(error) => {
@@ -585,6 +643,15 @@ impl Shared {
                 );
             }
         };
+        self.flow_detail(
+            Stage::Plan,
+            StepState::Done,
+            Some(match checked.steps.len() {
+                1 => "1 step".to_owned(),
+                n => format!("{n} steps"),
+            }),
+        );
+        step(Stage::Simulate, StepState::Running);
         let hash = self.skills.hash(&skill.name);
         let header = vec![format!(
             "Skill    {} {} (sha256 {})",
@@ -606,14 +673,22 @@ impl Shared {
             exit_code: 0,
             output: prepared.preview.clone(),
         }));
+        step(Stage::Simulate, StepState::Done);
+        step(Stage::Review, StepState::Running);
         if !self.confirm(&command, Some(prepared.preview.clone())).await {
+            self.flow_detail(Stage::Review, StepState::Declined, Some("declined".into()));
             return format!("The user declined `{short}`; nothing was sent.");
         }
+        step(Stage::Review, StepState::Done);
+        step(Stage::Send, StepState::Running);
         self.log(AgentEvent::ToolStarted {
             command: command.clone(),
         });
         let result = self.interim.broadcast(prepared).await;
         self.log(AgentEvent::ToolFinished(result.clone()));
+        if result.ok() {
+            step(Stage::Send, StepState::Done);
+        }
         result.to_model_json()
     }
 

@@ -445,6 +445,11 @@ fn chat_text(app: &App) -> Text<'static> {
             ChatLine::Assistant(t) => ("edw", Style::new().fg(Color::Green).bold(), t),
             ChatLine::Error(t) => ("error", Style::new().fg(Color::Red).bold(), t),
             ChatLine::Info(t) => ("info", Style::new().fg(Color::Yellow).bold(), t),
+            ChatLine::Flow(flow) => {
+                lines.extend(flow.lines(app.spinner()));
+                lines.push(Line::default());
+                continue;
+            }
         };
         let mut body = text.lines();
         lines.push(Line::from(vec![
@@ -914,5 +919,76 @@ mod tests {
         app.view = View::Log;
         let text = screen(&app);
         assert!(text.contains("interim balance") && !text.contains("You have 10 ETH."));
+    }
+
+    #[test]
+    fn the_card_shows_in_the_left_panel_of_the_split_view() {
+        use crate::flow::{Flow, Stage, StepState, Trigger};
+        let mut app = App::new("gemma4:latest", ".edw/data");
+        app.chat
+            .push(ChatLine::User("supply 100 USDC on aave".into()));
+        let mut flow = Flow::new(
+            Trigger::Skill {
+                skill: "aave-v3-lend".into(),
+                action: "supply".into(),
+            },
+            "skill aave-v3-lend/supply".into(),
+            "supply 100 USDC on aave".into(),
+            &Stage::SKILL_ACTION,
+        );
+        let now = std::time::Instant::now();
+        for stage in [Stage::Script, Stage::Plan, Stage::Simulate] {
+            flow.apply(stage, StepState::Done, None, now);
+        }
+        flow.apply(Stage::Review, StepState::Running, None, now);
+        app.chat.push(ChatLine::Flow(flow));
+        app.on_agent(AgentEvent::ToolFinished(EdwResult {
+            command: "edw balance".into(),
+            exit_code: 0,
+            output: "10 ETH".into(),
+        }));
+        let screen = screen(&app);
+        // 100 columns, 55% for the chat: the card must sit inside the left panel.
+        let left_width = 55;
+        for needle in [
+            "trigger  skill aave-v3-lend › supply",
+            "✓ skill script",
+            "✓ plan check",
+            "your review",
+            "○ send",
+        ] {
+            let row = screen
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?} in\n{screen}"));
+            let at = row.find(needle).unwrap();
+            let column = row[..at].chars().count();
+            assert!(
+                column < left_width,
+                "{needle:?} is not in the left panel:\n{screen}"
+            );
+        }
+        assert!(
+            screen.contains("✓ $ edw balance"),
+            "the log is still on the right"
+        );
+    }
+
+    #[test]
+    fn the_card_shows_in_the_single_chat_view() {
+        use crate::flow::{Flow, Stage, Trigger};
+        let mut app = App::new("m", "d");
+        app.view = View::Chat;
+        app.chat.push(ChatLine::Flow(Flow::new(
+            Trigger::User,
+            "transfer 0.1 ETH to bob".into(),
+            "send 0.1 ETH to bob".into(),
+            &Stage::TRANSFER,
+        )));
+        let screen = screen(&app);
+        assert!(
+            screen.contains("trigger  you") && screen.contains("○ prepare"),
+            "{screen}"
+        );
     }
 }

@@ -13,6 +13,7 @@ use edw_tui::{
     addresses::AddressBook,
     agent::{self, AgentEvent, ModelSource, Request},
     edw::{self, EdwConfig, EdwResult},
+    flow::FlowEvent,
     interim::{InterimConfig, SendingProfile},
     scripted::ScriptedModel,
     skills::tools::SkillSet,
@@ -91,6 +92,8 @@ pub struct Turn {
     pub outputs: Vec<String>,
     /// Sending-profile switches the model made with `use_profile`.
     pub switched: Vec<String>,
+    /// The action card's events, in order.
+    pub flow: Vec<FlowEvent>,
     pub reply: String,
 }
 
@@ -197,6 +200,7 @@ impl Harness {
                     result.command, result.exit_code, result.output
                 )),
                 AgentEvent::ProfileChanged { selector, .. } => turn.switched.push(selector),
+                AgentEvent::Flow(event) => turn.flow.push(event),
                 AgentEvent::Reply(reply) => {
                     turn.reply = reply;
                     return turn;

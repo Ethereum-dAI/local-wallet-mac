@@ -7,11 +7,26 @@
 
 mod common;
 
+/// The (stage, state) pairs of the action card, in the order the agent reported them.
+fn stages(turn: &Turn) -> Vec<(Stage, StepState)> {
+    turn.flow
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Step { stage, state, .. } => Some((*stage, *state)),
+            FlowEvent::Begin { .. } => None,
+        })
+        .collect()
+}
+
 use alloy_node_bindings::{Anvil, AnvilInstance};
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{Provider, ProviderBuilder};
-use common::{Harness, TempWallet, edw_binary};
-use edw_tui::{interim::Interim, scripted::ScriptedModel};
+use common::{Harness, TempWallet, Turn, edw_binary};
+use edw_tui::{
+    flow::{FlowEvent, Stage, StepState},
+    interim::Interim,
+    scripted::ScriptedModel,
+};
 use rig_agent::ModelHandle;
 
 const BEEF: Address = address!("0x000000000000000000000000000000000000bEEF");
@@ -106,6 +121,17 @@ async fn sends_eth_only_after_a_reviewed_dry_run() {
     }
     assert!(turn.confirms[0].starts_with("interim transfer --to"));
     assert_eq!(eth(&rpc, BEEF).await, U256::ZERO);
+    // The card: prepared, then declined at the review. Send is never reached.
+    assert_eq!(
+        stages(&turn),
+        [
+            (Stage::Prepare, StepState::Running),
+            (Stage::Prepare, StepState::Done),
+            (Stage::Review, StepState::Running),
+            (Stage::Review, StepState::Declined),
+        ],
+        "{turn:?}"
+    );
 
     // Approved: exactly 0.1 ETH arrives.
     let turn = h.turn(&send, true).await;
@@ -114,6 +140,18 @@ async fn sends_eth_only_after_a_reviewed_dry_run() {
         "{turn:?}"
     );
     assert_eq!(eth(&rpc, BEEF).await, U256::from(ETHER / 10));
+    assert_eq!(
+        stages(&turn),
+        [
+            (Stage::Prepare, StepState::Running),
+            (Stage::Prepare, StepState::Done),
+            (Stage::Review, StepState::Running),
+            (Stage::Review, StepState::Done),
+            (Stage::Send, StepState::Running),
+            (Stage::Send, StepState::Done),
+        ],
+        "{turn:?}"
+    );
 
     // Guards and failed dry runs never reach the confirmation.
     for (prompt, reason) in [

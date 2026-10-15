@@ -323,6 +323,8 @@ impl App {
                     return self.copy(prompt.split_whitespace().nth(1));
                 }
                 let request = if prompt.starts_with('/') {
+                    // A command is not a message to quote on a card.
+                    self.last_prompt.clear();
                     match self.command(&prompt) {
                         Some(request) => request,
                         None => return Action::None,
@@ -651,16 +653,19 @@ impl App {
         })
     }
 
-    /// An action card is still changing, so the screen must redraw for its spinner.
+    /// An action card is still changing, so the screen must redraw for its spinner. Only while
+    /// a turn is running: once it has ended, nothing more will arrive for the card.
     pub fn flow_active(&self) -> bool {
-        self.chat
-            .iter()
-            .rev()
-            .find_map(|line| match line {
-                ChatLine::Flow(flow) => Some(flow.is_active()),
-                _ => None,
-            })
-            .unwrap_or(false)
+        self.busy
+            && self
+                .chat
+                .iter()
+                .rev()
+                .find_map(|line| match line {
+                    ChatLine::Flow(flow) => Some(flow.is_active()),
+                    _ => None,
+                })
+                .unwrap_or(false)
     }
 
     /// The braille frame for a running step, a new one every 100 ms.
@@ -1474,18 +1479,6 @@ mod tests {
     }
 
     #[test]
-    fn a_slash_command_is_not_a_card_prompt() {
-        let mut app = App::new("m", "d");
-        type_text(&mut app, "ask the model");
-        app.on_key(key(KeyCode::Enter));
-        app.on_agent(AgentEvent::Reply("ok".into()));
-        type_text(&mut app, "/skills");
-        app.on_key(key(KeyCode::Enter));
-        begin_skill(&mut app);
-        assert_eq!(card(&app).prompt, "ask the model");
-    }
-
-    #[test]
     fn stage_events_move_the_card_and_it_stays_in_the_chat_order() {
         let mut app = App::new("m", "d");
         app.chat.push(ChatLine::User("supply".into()));
@@ -1593,6 +1586,42 @@ mod tests {
             app.on_agent(end);
             assert!(!app.flow_active());
         }
+    }
+
+    #[test]
+    fn a_card_is_not_quoted_with_a_prompt_from_an_earlier_turn() {
+        let mut app = App::new("m", "d");
+        type_text(&mut app, "ask the model");
+        app.on_key(key(KeyCode::Enter));
+        app.on_agent(AgentEvent::Reply("ok".into()));
+        type_text(&mut app, "/skill new a goal");
+        app.on_key(key(KeyCode::Enter));
+        begin_skill(&mut app);
+        assert_eq!(card(&app).prompt, "");
+    }
+
+    #[test]
+    fn the_redraw_tick_stops_when_the_turn_is_over() {
+        let mut app = App::new("m", "d");
+        type_text(&mut app, "supply");
+        app.on_key(key(KeyCode::Enter));
+        begin_skill(&mut app);
+        assert!(app.flow_active());
+        // A turn that ends without a reply for the card (here a model switch).
+        app.on_agent(AgentEvent::ModelChanged("other".into()));
+        assert!(!app.flow_active());
+    }
+
+    #[test]
+    fn a_failed_card_stays_failed_when_the_agent_keeps_going() {
+        let mut app = App::new("m", "d");
+        begin_skill(&mut app);
+        step(&mut app, Stage::Script, StepState::Running);
+        app.on_agent(failed("skill aave-v3-lend/supply {}", "script crashed"));
+        step(&mut app, Stage::Script, StepState::Done);
+        step(&mut app, Stage::Plan, StepState::Running);
+        assert_eq!(states(&app)[0], StepState::Failed);
+        assert_eq!(states(&app)[1], StepState::Skipped);
     }
 
     #[test]

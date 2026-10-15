@@ -120,11 +120,16 @@ impl Flow {
     }
 
     /// Moves `stage` to `state`. A failed or declined step ends the action: the stages after it
-    /// are never reached. A stage this card does not list is ignored.
+    /// are never reached. A stage this card does not list is ignored, and so is any event for
+    /// a step that already finished, failed or was skipped: a late report cannot revive a
+    /// card that has ended.
     pub fn apply(&mut self, stage: Stage, state: StepState, detail: Option<String>, now: Instant) {
         let Some(step) = self.steps.iter_mut().find(|s| s.stage == stage) else {
             return;
         };
+        if !matches!(step.state, StepState::Pending | StepState::Running) {
+            return;
+        }
         match state {
             StepState::Running => step.started = Some(now),
             StepState::Done | StepState::Failed | StepState::Declined => {
@@ -156,11 +161,17 @@ impl Flow {
         true
     }
 
-    /// Stops waiting for the stages not yet done.
+    /// Stops waiting for the stages not yet done. A stage that was running never finished, so
+    /// it shows as failed; one that never started is skipped.
     pub fn abandon(&mut self) {
         for step in &mut self.steps {
-            if matches!(step.state, StepState::Pending | StepState::Running) {
-                step.state = StepState::Skipped;
+            match step.state {
+                StepState::Running => {
+                    step.state = StepState::Failed;
+                    step.detail.get_or_insert_with(|| "did not finish".into());
+                }
+                StepState::Pending => step.state = StepState::Skipped,
+                _ => {}
             }
         }
     }
@@ -394,6 +405,60 @@ mod tests {
         let before = flow.clone();
         assert!(!flow.fail_running("boom".into(), Instant::now()));
         assert_eq!(flow, before);
+    }
+
+    #[test]
+    fn a_failed_step_stays_failed_when_a_late_event_reports_it_done() {
+        let now = Instant::now();
+        let mut flow = skill_flow();
+        flow.apply(Stage::Script, StepState::Running, None, now);
+        flow.fail_running("boom".into(), now);
+        flow.apply(Stage::Script, StepState::Done, None, now);
+        assert_eq!(states(&flow)[0], StepState::Failed);
+        assert!(text(&flow).contains("boom"));
+    }
+
+    #[test]
+    fn an_ended_card_does_not_restart_when_a_late_event_arrives() {
+        let now = Instant::now();
+        let mut flow = skill_flow();
+        flow.apply(Stage::Script, StepState::Done, None, now);
+        flow.abandon();
+        let ended = flow.clone();
+        flow.apply(Stage::Plan, StepState::Running, None, now);
+        flow.apply(Stage::Review, StepState::Running, None, now);
+        assert_eq!(flow, ended);
+        assert!(!flow.is_active());
+    }
+
+    #[test]
+    fn a_declined_review_cannot_be_followed_by_a_send() {
+        let now = Instant::now();
+        let mut flow = skill_flow();
+        flow.apply(Stage::Review, StepState::Declined, None, now);
+        flow.apply(Stage::Send, StepState::Running, None, now);
+        flow.apply(Stage::Send, StepState::Done, None, now);
+        assert_eq!(states(&flow)[4], StepState::Skipped);
+    }
+
+    #[test]
+    fn a_stage_still_running_when_the_card_is_abandoned_shows_as_not_finished() {
+        let now = Instant::now();
+        let mut flow = skill_flow();
+        flow.apply(Stage::Script, StepState::Done, None, now);
+        flow.apply(Stage::Plan, StepState::Running, None, now);
+        flow.abandon();
+        assert_eq!(
+            states(&flow),
+            [
+                StepState::Done,
+                StepState::Failed,
+                StepState::Skipped,
+                StepState::Skipped,
+                StepState::Skipped,
+            ]
+        );
+        assert!(text(&flow).contains("did not finish"));
     }
 
     #[test]

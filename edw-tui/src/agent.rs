@@ -35,7 +35,7 @@ use crate::{
     edw::{self, Backend, EdwConfig, EdwResult, TOOLS},
     flow::{FlowEvent, Stage, StepState, Trigger},
     interim::{self, Interim, InterimConfig},
-    memory,
+    memory::{self, Window},
     scripted::ScriptedModel,
     skills::{
         self as skills_mod, LOAD_SKILL, Paths, SkillRow, author, author_tools,
@@ -871,6 +871,17 @@ fn dynamic_tools(shared: &Arc<Shared>) -> Vec<DynamicTool> {
 /// An Ollama model behind [`OllamaReplies`]. `nudge` turns on the empty-reply retry that
 /// gemma4 needs; the cut-off handling is always on.
 pub fn ollama_model(base_url: &str, model: &str, nudge: bool) -> anyhow::Result<ModelHandle> {
+    ollama_model_in(base_url, model, nudge, Window::default())
+}
+
+/// [`ollama_model`] whose requests are held to `window` (see [`Window::prepare`]); with a
+/// default `Window` no context size is sent and Ollama's own applies.
+pub fn ollama_model_in(
+    base_url: &str,
+    model: &str,
+    nudge: bool,
+    window: Window,
+) -> anyhow::Result<ModelHandle> {
     let client = ollama::Client::builder()
         .api_key(Nothing)
         .base_url(base_url)
@@ -880,6 +891,7 @@ pub fn ollama_model(base_url: &str, model: &str, nudge: bool) -> anyhow::Result<
         OllamaReplies {
             inner: client.completion_model(model),
             nudge,
+            window,
         },
     ))
 }
@@ -918,13 +930,15 @@ fn hiccup(error: &CompletionError) -> Option<Hiccup> {
 struct OllamaReplies<M> {
     inner: M,
     nudge: bool,
+    window: Window,
 }
 
 impl<M: CompletionModel> CompletionModel for OllamaReplies<M> {
     async fn completion(
         &self,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
     ) -> Result<CompletionResponse, CompletionError> {
+        self.window.prepare(&mut request);
         let kind = match self.inner.completion(request.clone()).await {
             Err(error) => match hiccup(&error) {
                 Some(Hiccup::Empty) if !self.nudge => return Err(error),
@@ -964,6 +978,8 @@ pub const SCRIPTED: &str = "scripted";
 pub struct ModelSource {
     pub ollama_url: String,
     pub nudge: bool,
+    /// The current model's context window, shared with every handle this source makes.
+    pub window: Window,
 }
 
 impl ModelSource {
@@ -971,7 +987,36 @@ impl ModelSource {
         if name == SCRIPTED {
             return Ok(ModelHandle::named(SCRIPTED, ScriptedModel::default()));
         }
-        ollama_model(&self.ollama_url, name, self.nudge)
+        ollama_model_in(&self.ollama_url, name, self.nudge, self.window.clone())
+    }
+
+    /// Settles the window for `name`: what [`memory::WINDOW_ENV`] asks for, lowered to the
+    /// context length Ollama reports for the model (`POST /api/show`). When Ollama cannot say,
+    /// the asked-for size stands. Call it whenever the model changes.
+    pub async fn resolve_window(&self, name: &str) -> usize {
+        let wanted = memory::wanted_window_from_env();
+        let trained = if name == SCRIPTED {
+            None
+        } else {
+            self.trained_context(name).await
+        };
+        let window = memory::pick_window(wanted, trained);
+        self.window.set(window);
+        window
+    }
+
+    async fn trained_context(&self, name: &str) -> Option<usize> {
+        let url = format!("{}/api/show", self.ollama_url.trim_end_matches('/'));
+        let reply = reqwest::Client::new()
+            .post(url)
+            .json(&serde_json::json!({ "model": name }))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        memory::context_length(&reply.json::<Value>().await.ok()?)
     }
 
     /// Installed Ollama models (`GET /api/tags`), then the scripted stand-in.
@@ -1024,7 +1069,7 @@ async fn answer(
     match request {
         Request::Prompt(prompt) => {
             let addresses = &interim.addresses;
-            if let Some(budget) = memory::budget_from_env() {
+            if let Some(budget) = source.window.history_budget() {
                 memory::compact(history, budget);
             }
             match agent.chat(addresses.hide(&prompt), history).await {
@@ -1293,6 +1338,7 @@ async fn switch_model(agent: &mut Agent, source: &ModelSource, name: &str) -> an
         );
     }
     agent.set_model_handle(source.handle(name)?);
+    source.resolve_window(name).await;
     Ok(())
 }
 
@@ -1367,6 +1413,7 @@ mod tests {
                 calls: calls.clone(),
             },
             nudge,
+            window: Window::default(),
         };
         let agent = AgentBuilder::from_model_handle(ModelHandle::named("flaky", model)).build();
         let answer = agent

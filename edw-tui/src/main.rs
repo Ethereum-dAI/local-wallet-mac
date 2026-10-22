@@ -72,7 +72,11 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| "http://127.0.0.1:11434".into()),
         // Only acts on an empty reply after a tool result (gemma4); a no-op for other models.
         nudge: std::env::var("EDW_TUI_NUDGE").map_or(true, |v| v != "0"),
+        window: Default::default(),
     };
+    // Before the first request: the window the model gets is set here, and the history budget
+    // follows from it.
+    source.resolve_window(&model_name).await;
     let config = EdwConfig::from_env();
     let interim = InterimConfig::from_env(config.clone());
     let model = source.handle(&model_name)?;

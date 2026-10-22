@@ -139,6 +139,7 @@ impl Harness {
         let source = ModelSource {
             ollama_url: ollama_url(),
             nudge: true,
+            window: Default::default(),
         };
         tokio::spawn(agent::run(agent, prompt_rx, event_tx, source, interim));
         Self {

@@ -67,6 +67,7 @@ fn start(wallet: &TempWallet, paths: Paths, model: Recorder) -> Running {
         source: ModelSource {
             ollama_url: common::ollama_url(),
             nudge: false,
+            window: Default::default(),
         },
         config: wallet.config.clone(),
         interim: wallet.interim(None, false),

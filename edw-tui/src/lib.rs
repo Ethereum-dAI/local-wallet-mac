@@ -6,6 +6,7 @@ pub mod contract;
 pub mod edw;
 pub mod flow;
 pub mod interim;
+pub mod memory;
 pub mod scripted;
 pub mod skills;
 pub mod ui;

@@ -35,6 +35,7 @@ use crate::{
     edw::{self, Backend, EdwConfig, EdwResult, TOOLS},
     flow::{FlowEvent, Stage, StepState, Trigger},
     interim::{self, Interim, InterimConfig},
+    memory,
     scripted::ScriptedModel,
     skills::{
         self as skills_mod, LOAD_SKILL, Paths, SkillRow, author, author_tools,
@@ -1023,6 +1024,9 @@ async fn answer(
     match request {
         Request::Prompt(prompt) => {
             let addresses = &interim.addresses;
+            if let Some(budget) = memory::budget_from_env() {
+                memory::compact(history, budget);
+            }
             match agent.chat(addresses.hide(&prompt), history).await {
                 Ok(answer) => {
                     AgentEvent::Reply(addresses.reveal(&addresses.flag_invented(&answer)))

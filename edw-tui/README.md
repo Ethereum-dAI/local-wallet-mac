@@ -26,6 +26,7 @@ The TUI warns at startup when the installed edw is not the pinned revision.
 | `EDW_TUI_MODEL` | `qwen3:8b` | Any installed Ollama model, or `scripted` (a fixed fake, for tests). Switch in the TUI with `/models` and `/model <n>`. |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | |
 | `EDW_TUI_NUDGE` | on | Retries once when a model goes silent after a tool result (gemma4 does). `0` turns it off. |
+| `EDW_TUI_HISTORY_TOKENS` | `5000` | Token budget for the chat history sent to the model. Over it, the oldest turns are folded into a short digest (what you asked, what the reply said; no tool output). `0` or `off` keeps the whole history. The history is not saved between runs. |
 | `EDW_BIN` | `edw` | |
 | `EDW_DATA_DIR`, `EDW_RUNTIME_DIR` | `.edw/data`, `.edw/runtime` | A throwaway wallet, never your real edw data. |
 | `EDW_DECRYPTION_PASSWORD` | `edw-tui-demo` | |

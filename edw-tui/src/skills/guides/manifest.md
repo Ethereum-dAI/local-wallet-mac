@@ -43,8 +43,8 @@ description = "Supply an asset."
 approves = ["pool"]                # contracts it may approve as spender (exact amounts only)
 schema = { type = "object", required = ["amount"], properties = { amount = { type = "string" } } }
 
-[[review_read]]                    # every action's review shows this view call, read in the
-label = "Aave account"             # plan's simulation before and after the plan
+[[review_read]]                    # every action's review shows this view call on a pinned
+label = "Aave account"             # contract, simulated before and after the plan; args like a call's
 contract = "pool"
 function = "function getUserAccountData(address user) view returns (uint256 collateral,uint256 debt,uint256 canBorrow,uint256 liquidationThreshold,uint256 ltv,uint256 healthFactor)"
 args = ["$self"]
@@ -62,8 +62,9 @@ Plans (what an action returns) are at most 6 steps. Each step is one of:
 
 - `{"approve": {"token", "spender", "amount"}}`: `token` is a token id and `spender` a contract id
   from this manifest, not addresses. The spender must be listed in the action's `approves`, and
-  in the token's `approve_to` when it has one. `amount` is exact (never unlimited). For a
-  `kind = "debt"` token the step is a credit delegation (`approveDelegation`) instead of `approve`.
+  in the token's `approve_to` when it has one. `amount` is exact (never unlimited), and the plan
+  must use all of it: anything left after the simulated plan refuses it. For a `kind = "debt"`
+  token the step is a credit delegation (`approveDelegation`) instead of `approve`.
 - `{"call": {"contract", "function", "args"}}`: `contract` is a contract id, `function` is one of
   that contract's listed function names, and `args` is a list. In `args`, an address may be a
   token id, a contract id, or `"$self"` (the sender). A raw `0x` address is refused.

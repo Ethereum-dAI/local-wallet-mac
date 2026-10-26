@@ -13,6 +13,7 @@ fn send(wei: u64) -> CheckedStep {
         value: U256::from(wei),
         data: Bytes::new(),
         approval: None,
+        grant_left: None,
         details: Vec::new(),
         binding: None,
     }

@@ -726,7 +726,7 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
     let review_reads = raw
         .review_reads
         .into_iter()
-        .map(|r| review_read(r, &contracts))
+        .map(|r| review_read(r, &contracts, &tokens))
         .collect::<Result<_, _>>()?;
     Ok(Manifest {
         version: raw.version,
@@ -740,15 +740,29 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
     })
 }
 
-/// A review read calls a view function of a manifest contract, and shows only uint outputs it
-/// names, each as `"<decimals>"` or `"<decimals> <unit>"`.
-fn review_read(raw: RawReviewRead, contracts: &[ContractDef]) -> Result<ReviewRead, String> {
+/// A review read calls a view function of a pinned manifest contract, with arguments a call
+/// could take (`$self`, manifest ids, plain decimals), and shows only uint outputs it names, each
+/// as `"<decimals>"` or `"<decimals> <unit>"`.
+fn review_read(
+    raw: RawReviewRead,
+    contracts: &[ContractDef],
+    tokens: &[TokenDef],
+) -> Result<ReviewRead, String> {
     let label = &raw.label;
-    if !contracts.iter().any(|c| c.id == raw.contract) {
-        return Err(format!(
-            "review_read {label}: `{}` is not a contract in this manifest",
-            raw.contract
-        ));
+    match contracts.iter().find(|c| c.id == raw.contract) {
+        None => {
+            return Err(format!(
+                "review_read {label}: `{}` is not a contract in this manifest",
+                raw.contract
+            ));
+        }
+        Some(c) if c.address_arg.is_some() => {
+            return Err(format!(
+                "review_read {label}: `{}` has no pinned address",
+                raw.contract
+            ));
+        }
+        Some(_) => {}
     }
     let function = Function::parse(&raw.function)
         .map_err(|e| format!("review_read {label}: `{}`: {e}", raw.function))?;
@@ -761,6 +775,9 @@ fn review_read(raw: RawReviewRead, contracts: &[ContractDef]) -> Result<ReviewRe
             function.name
         ));
     }
+    if let Some(why) = sidesteps_the_checker(&function, false) {
+        return Err(format!("review_read {label}: {why}"));
+    }
     if raw.args.len() != function.inputs.len() {
         return Err(format!(
             "review_read {label}: {} takes {} arguments, got {}",
@@ -768,6 +785,30 @@ fn review_read(raw: RawReviewRead, contracts: &[ContractDef]) -> Result<ReviewRe
             function.inputs.len(),
             raw.args.len()
         ));
+    }
+    let known = |id: &str| {
+        id == "$self"
+            || tokens.iter().any(|t| t.id == id)
+            || contracts
+                .iter()
+                .any(|c| c.id == id && c.address_arg.is_none())
+    };
+    for (param, arg) in function.inputs.iter().zip(&raw.args) {
+        let fits = match (param.ty.as_str(), arg) {
+            ("address", Value::String(id)) => known(id),
+            ("address", _) => false,
+            (ty, Value::String(n)) if ty.starts_with("uint") => {
+                !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
+            }
+            (ty, Value::Number(n)) if ty.starts_with("uint") => n.is_u64(),
+            (ty, _) => !ty.starts_with("uint"),
+        };
+        if !fits {
+            return Err(format!(
+                "review_read {label}: argument `{}` {arg} must be `$self`, a manifest id or a plain decimal",
+                param.name
+            ));
+        }
     }
     if raw.show.is_empty() {
         return Err(format!(
@@ -1028,6 +1069,21 @@ show = { healthFactor = "18", collateral = "8 USD" }
         assert!(bad("contract = \"pool\"", "contract = \"oracle\"").contains("oracle"));
         assert!(bad(") view returns", ") returns").contains("view"));
         assert!(bad("args = [\"$self\"]", "args = []").contains("1 arguments"));
+        for arg in [
+            "\"0x00000000000000000000000000000000000000E1\"",
+            "\"attacker\"",
+            "7",
+        ] {
+            let error = bad("args = [\"$self\"]", &format!("args = [{arg}]"));
+            assert!(error.contains("must be `$self`"), "{arg}: {error}");
+        }
+        assert!(
+            bad(
+                "function getUserAccountData(address user) view returns",
+                "function approve(address user) view returns"
+            )
+            .contains("not allowed")
+        );
         assert!(bad("healthFactor = \"18\"", "health = \"18\"").contains("health"));
         assert!(bad("\"18\"", "\"eighteen\"").contains("decimals"));
         assert!(

@@ -136,8 +136,11 @@ reads) and, optionally, `skill.toml`, which is what edw-tui enforces:
   `approve_to`.
 - `[[read_tool]]` and `[[action]]`: scripts, their JSON schemas, and for actions the contracts
   they may `approves`.
-- `[[review_read]]`: a view call every review shows, read in the plan's simulation before the plan
-  and after it, with the uint outputs it names (`show = { healthFactor = "18", debt = "8 USD" }`).
+- `[[review_read]]`: a view call on a pinned contract that every review shows, read in a
+  simulation before the plan and after it, with the uint outputs it names
+  (`show = { healthFactor = "18", debt = "8 USD" }`).
+- `self_only = { withdraw = ["to"] }` on a contract: address parameters where a call pays out;
+  a plan may only put the sender there.
 - `hosts`: the HTTP hosts its scripts may reach.
 
 **Consent.** On start, the TUI shows an approval card for each skill that is new, changed
@@ -184,16 +187,20 @@ have scripts are off; they never run unsandboxed.
 **Actions return a plan, never a transaction.** edw-tui checks every step against the
 manifest:
 - every call goes to a pinned contract and an allowed function on this chain;
-- every address argument is `$self` or a manifest id, never a raw address;
+- every address argument is `$self` or a manifest id, never a raw address, and where a call pays
+  out (a contract's `self_only` parameters) it is `$self`;
 - approvals are exact, to the action's own spenders (and the token's `approve_to`), and never
   unlimited; a debt token's is a credit delegation, read as such in the review;
+- every approval or delegation a plan grants is used up by the plan: the simulation reads what is
+  left of it afterwards, and anything left refuses the plan;
 - ETH goes only to payable functions, and the review shows it;
 - a plan has at most 6 steps.
 
-It then simulates the whole plan in one block with `eth_simulateV1`, with the manifest's review
-reads before and after it, and writes the review from the ABI, the simulated asset changes and
-those reads, never from the skill. An RPC without `eth_simulateV1` refuses skill actions. After
-`y`, the steps are sent in order like a swap's.
+It then simulates the whole plan in one block with `eth_simulateV1` and writes the review from the
+ABI and the simulated asset changes, never from the skill's scripts. The manifest's review reads
+run in a second simulation, before the same steps and after them, so they cannot change what the
+first one checked. An RPC without `eth_simulateV1` refuses skill actions. After `y`, the steps are
+sent in order like a swap's.
 
 ```text
 Skill    aave-v3-lend 0.2.0 (sha256 a5e11d2805e6)
@@ -201,7 +208,7 @@ From     default (0/0) 0xC853…C2Dd on mainnet (chain 1)
 Step 1   allow Aave WETH Gateway to take on up to 0.5 WETH debt in your name (credit delegation)
 Step 2   Aave WETH Gateway.borrowETH(pool=Aave Pool, amount=0.5 WETH (500000000000000000), referralCode=0)
 Changes  +0.5 ETH, +0.500000000000000001 WETH debt (simulated)
-Aave account (simulated, before → after)
+Read     Aave account (simulated, before → after)
            collateral     4618.59 → 4618.59 USD
            debt           0.00 → 1154.64 USD
            can borrow     3717.96 → 2563.31 USD

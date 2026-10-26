@@ -26,6 +26,8 @@ pub const SELF: &str = "$self";
 sol! {
     function approve(address spender, uint256 amount) returns (bool);
     function approveDelegation(address delegatee, uint256 amount);
+    function allowance(address owner, address spender) returns (uint256);
+    function borrowAllowance(address fromUser, address toUser) returns (uint256);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +40,9 @@ pub struct CheckedStep {
     /// `(token, amount)` for an ERC-20 approval, so the caller can check the balance covers it.
     /// A credit delegation has none: it lets the delegate borrow, it spends nothing held.
     pub approval: Option<(Address, U256)>,
+    /// For a grant (an approval or a credit delegation): a view on `to` that reads what is left
+    /// of it. The plan's simulation must leave it at 0: a plan spends what it grants.
+    pub grant_left: Option<Bytes>,
     /// Lines for the review under the step, written by the harness: where a user-named contract
     /// is, and what a signed call's raw calldata does (see [`super::explain`]).
     pub details: Vec<String>,
@@ -102,8 +107,9 @@ impl CheckedRead {
             .map(|s| words(&s.name).chars().count())
             .max()
             .unwrap_or(0);
+        // The harness's own tag leads, so a label cannot pass for another review line.
         let mut lines = vec![one_line(&format!(
-            "{} (simulated, before → after)",
+            "Read     {} (simulated, before → after)",
             read.label
         ))];
         for shown in &read.show {
@@ -323,7 +329,7 @@ impl Ctx<'_> {
             return Err("an unlimited approval is never allowed; approve the exact amount".into());
         }
         let shown = format_units(amount, token.decimals);
-        let (label, data, approval) = match token.approval {
+        let (label, data, approval, left) = match token.approval {
             Approval::Delegation { .. } => (
                 format!(
                     "allow {} to take on up to {shown} {} in your name (credit delegation)",
@@ -335,6 +341,11 @@ impl Ctx<'_> {
                 }
                 .abi_encode(),
                 None,
+                borrowAllowanceCall {
+                    fromUser: self.me,
+                    toUser: spender_address,
+                }
+                .abi_encode(),
             ),
             _ => (
                 format!("approve {shown} {} for {}", token.symbol, spender.label),
@@ -344,6 +355,11 @@ impl Ctx<'_> {
                 }
                 .abi_encode(),
                 Some((token_address, amount)),
+                allowanceCall {
+                    owner: self.me,
+                    spender: spender_address,
+                }
+                .abi_encode(),
             ),
         };
         Ok(CheckedStep {
@@ -352,6 +368,7 @@ impl Ctx<'_> {
             value: U256::ZERO,
             data: data.into(),
             approval,
+            grant_left: Some(left.into()),
             details: Vec::new(),
             binding: None,
         })
@@ -552,6 +569,7 @@ impl Ctx<'_> {
             value,
             data: data.into(),
             approval: None,
+            grant_left: None,
             details,
             binding,
         })
@@ -943,6 +961,17 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
             "allow WETH Gateway to take on up to 0.5 WETH debt in your name (credit delegation)"
         );
         assert_eq!(step.approval, None, "a delegation needs no balance");
+        assert_eq!(
+            step.grant_left,
+            Some(Bytes::from(
+                borrowAllowanceCall {
+                    fromUser: ME,
+                    toUser: GATEWAY
+                }
+                .abi_encode()
+            )),
+            "the simulation checks the plan uses the delegation up"
+        );
         assert_eq!(plan.total_value, U256::ZERO);
     }
 
@@ -1041,6 +1070,17 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
         );
         assert_eq!(a.approval, Some((USDC, U256::from(100_000_000u64))));
         assert_eq!(a.label, "approve 100 USDC for Aave Pool");
+        assert_eq!(
+            a.grant_left,
+            Some(Bytes::from(
+                allowanceCall {
+                    owner: ME,
+                    spender: POOL
+                }
+                .abi_encode()
+            )),
+            "the simulation checks the plan spends the approval"
+        );
 
         let s = &plan.steps[1];
         assert_eq!(s.to, POOL);
@@ -1127,7 +1167,7 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
         assert_eq!(
             plan.reads[0].describe(&before, &after).unwrap(),
             [
-                "Aave account (simulated, before → after)",
+                "Read     Aave account (simulated, before → after)",
                 "collateral     0.00 → 4123.45 USD",
                 "debt           0.00 → 1000.00 USD",
                 "health factor  ∞ → 1.41",

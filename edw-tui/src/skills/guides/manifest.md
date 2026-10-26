@@ -13,6 +13,7 @@ id = "pool"
 label = "Aave Pool"
 functions = ["function supply(address asset,uint256 amount,address onBehalfOf,uint16 referralCode)"]
 amounts = { supply = { amount = "asset" } }   # show `amount` in the units of the `asset` parameter
+                                               # (or of a token id, when the function implies it)
 address = { 1 = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2", 11155111 = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951" }
 # address_arg = "safe"             # instead of `address`: the address comes from the action's input
 

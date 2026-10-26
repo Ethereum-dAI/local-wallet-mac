@@ -597,16 +597,20 @@ impl Ctx<'_> {
     }
 
     /// A declared amount in its token's units, `2.5 USDC (2500000)`, when the argument it points
-    /// at is one of this skill's tokens; `None` (base units) otherwise, and for "all".
+    /// at (or the token it names) is one of this skill's tokens; `None` (base units) otherwise,
+    /// and for "all".
     fn in_token(
         &self,
         function: &Function,
-        token_param: &str,
+        token: &str,
         args: &[Value],
         amount: &Value,
     ) -> Option<String> {
-        let index = function.inputs.iter().position(|p| p.name == token_param)?;
-        let token = self.skill.manifest.token(args.get(index)?.as_str()?)?;
+        let id = match function.inputs.iter().position(|p| p.name == token) {
+            Some(index) => args.get(index)?.as_str()?,
+            None => token,
+        };
+        let token = self.skill.manifest.token(id)?;
         let raw: U256 = amount.as_str()?.parse().ok()?;
         if raw == U256::MAX {
             return None;
@@ -708,7 +712,15 @@ address = { 11155111 = "0x16dA4541aD1807f4443d92D26044C1147406EB80" }
 id = "gateway"
 label = "WETH Gateway"
 functions = ["function borrowETH(address pool,uint256 amount,uint16 referralCode)"]
+amounts = { borrowETH = { amount = "weth" } }
 address = { 11155111 = "0x387d311e47e80b498169e6fb51d3193167d89F7D" }
+
+[[token]]
+id = "weth"
+symbol = "WETH"
+decimals = 18
+approve_to = ["pool"]
+address = { 11155111 = "0xC558DBdd856501FCd9aaF1E62eae57A9F0629a3c" }
 
 [[token]]
 id = "aweth"
@@ -926,6 +938,21 @@ approves = ["pool", "gateway"]
             plan.steps[1].label.contains("amount=100000000,"),
             "supply declares nothing in this fixture: {}",
             plan.steps[1].label
+        );
+    }
+
+    /// A function whose token is implied (a WETH gateway's amount is always WETH) declares the
+    /// token by id instead of by parameter.
+    #[test]
+    fn a_declared_amount_may_name_its_token_directly() {
+        let plan = run_as(
+            "via_gateway",
+            json!({"steps": [{"call": {"contract": "gateway", "function": "borrowETH", "args": ["pool", "500000000000000000", "0"]}}]}),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.steps[0].label,
+            "WETH Gateway.borrowETH(pool=Aave Pool, amount=0.5 WETH (500000000000000000), referralCode=0)"
         );
     }
 

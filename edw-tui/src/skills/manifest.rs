@@ -53,8 +53,9 @@ pub struct ContractDef {
     /// contract itself rejects the call unless the owners signed exactly those arguments (a
     /// Safe's `execTransaction`). The review shows the arguments; the signatures are the check.
     pub signed_calls: Vec<String>,
-    /// function → uint parameter → the address parameter holding its token, so the review can
-    /// show that amount in the token's units (`amount=2.5 USDC (2500000)`).
+    /// function → uint parameter → the address parameter holding its token, or a token id when
+    /// the function's token is implied, so the review can show that amount in the token's units
+    /// (`amount=2.5 USDC (2500000)`).
     pub amounts: BTreeMap<String, BTreeMap<String, String>>,
 }
 
@@ -459,11 +460,12 @@ fn sidesteps_the_checker(function: &Function, signed: bool) -> Option<String> {
 }
 
 /// Every `amounts` entry names a listed function, one of its uint parameters, and one of its
-/// address parameters (the token).
+/// address parameters (the token) or one of the manifest's token ids.
 fn check_amounts(
     contract: &str,
     functions: &[Function],
     amounts: &BTreeMap<String, BTreeMap<String, String>>,
+    token_ids: &BTreeSet<&str>,
 ) -> Result<(), String> {
     for (name, params) in amounts {
         let function = functions.iter().find(|f| &f.name == name).ok_or_else(|| {
@@ -485,6 +487,14 @@ fn check_amounts(
             if !ty(amount)?.starts_with("uint") {
                 return Err(format!(
                     "{contract}: amounts.{name}.{amount} must be a uint parameter"
+                ));
+            }
+            if !function.inputs.iter().any(|p| &p.name == token) {
+                if token_ids.contains(token.as_str()) {
+                    continue;
+                }
+                return Err(format!(
+                    "{contract}: amounts.{name}.{amount} names `{token}`, which is neither a parameter of {name} nor a token id"
                 ));
             }
             if ty(token)? != "address" {
@@ -527,6 +537,7 @@ fn single_line(raw: &RawManifest) -> Result<(), String> {
 
 fn validate(raw: RawManifest) -> Result<Manifest, String> {
     single_line(&raw)?;
+    let token_ids: BTreeSet<&str> = raw.tokens.iter().map(|t| t.id.as_str()).collect();
     let mut ids = BTreeSet::new();
     let mut contracts = Vec::new();
     for c in raw.contracts {
@@ -545,7 +556,7 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
-        check_amounts(&c.id, &functions, &c.amounts)?;
+        check_amounts(&c.id, &functions, &c.amounts, &token_ids)?;
         if !c.signed_calls.is_empty() && c.address_arg.is_none() {
             return Err(format!(
                 "{}: signed_calls is only for a contract at an address the user names (address_arg); a pinned contract may not take raw bytes",
@@ -876,6 +887,15 @@ approves = ["pool"]
         };
         assert!(amounts("borrow = { amount = \"asset\" }").contains("borrow"));
         assert!(amounts("supply = { amount = \"nope\" }").contains("nope"));
+        // Or a token id, for a function whose token is implied.
+        let root = tempfile::tempdir().unwrap();
+        let by_id = SKILL_TOML.replacen(
+            "label = \"Aave Pool\"",
+            "label = \"Aave Pool\"\namounts = { supply = { amount = \"ausdc\" } }",
+            1,
+        );
+        let dir = folder(root.path(), "demo", SKILL_MD, Some(&by_id));
+        assert!(load(&dir).is_ok());
         assert!(amounts("supply = { amount = \"referralCode\" }").contains("address"));
         assert!(amounts("supply = { asset = \"onBehalfOf\" }").contains("uint"));
         // Functions that would get around the plan checker's approval and recipient rules.

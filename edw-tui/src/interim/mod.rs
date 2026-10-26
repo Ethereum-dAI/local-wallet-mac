@@ -1050,6 +1050,12 @@ impl Interim {
                 .collect();
             before = simulate::simulate(&account.rpc, me, &calls).await?;
             after = before.split_off(reads.len() + plan.steps.len());
+            if before[reads.len()..].iter().any(|r| !r.ok) {
+                return Err(
+                    "the plan's steps no longer succeed in the review-read simulation, so nothing was sent"
+                        .into(),
+                );
+            }
             before.truncate(reads.len());
         }
         for (read, (b, a)) in plan.reads.iter().zip(before.iter().zip(&after)) {

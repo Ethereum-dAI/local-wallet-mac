@@ -25,9 +25,12 @@ else:
             "to repay all of it, ask for all"
         )
 held = aave.held(info, native, me)
-if units > held:
+# A token's approval is reset to 0 afterwards and the pool pulls only the real debt, so holding the
+# debt is enough; ETH is sent as the call's value, so the whole margin must be held.
+needed = owed if everything and not native else units
+if needed > held:
     edw_skill.fail(
-        f"not enough {symbol}: repaying needs {aave.whole(units, info['decimals'])}"
+        f"not enough {symbol}: repaying needs {aave.whole(needed, info['decimals'])}"
         f"{' (the debt and interest until it is mined)' if everything else ''}, "
         f"the profile holds {aave.whole(held, info['decimals'])}"
     )

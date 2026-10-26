@@ -37,6 +37,29 @@ pub fn ollama_url() -> String {
     std::env::var("OLLAMA_HOST").unwrap_or("http://127.0.0.1:11434".into())
 }
 
+/// The before and after values a review read shows for `name`, as numbers (∞ as infinity): the
+/// row `debt           0.00 → 999.83 USD` gives (0.0, 999.83). Works on the review text and on
+/// a screen showing it.
+pub fn read_values(review: &str, name: &str) -> (f64, f64) {
+    let key = format!("{name}  ");
+    let rest = review
+        .lines()
+        .filter_map(|line| line.split_once(&key).map(|(_, rest)| rest))
+        .find(|rest| rest.contains('→'))
+        .unwrap_or_else(|| panic!("no `{name}` row in\n{review}"));
+    let number = |text: &str| {
+        let word = text.split_whitespace().next().unwrap_or_default();
+        if word == "∞" {
+            f64::INFINITY
+        } else {
+            word.parse()
+                .unwrap_or_else(|_| panic!("`{word}` is not a number in {rest:?}"))
+        }
+    };
+    let (before, after) = rest.split_once('→').unwrap();
+    (number(before), number(after))
+}
+
 /// A data and runtime dir that is removed when the test ends.
 pub struct TempWallet {
     pub config: EdwConfig,

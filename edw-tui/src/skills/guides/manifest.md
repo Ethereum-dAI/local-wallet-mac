@@ -13,6 +13,8 @@ id = "pool"
 label = "Aave Pool"
 functions = ["function supply(address asset,uint256 amount,address onBehalfOf,uint16 referralCode)"]
 amounts = { supply = { amount = "asset" } }   # show `amount` in the units of the `asset` parameter
+                                               # (or of a token id, when the function implies it)
+self_only = { supply = ["onBehalfOf"] }        # address parameters that must be "$self": who gets paid
 address = { 1 = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2", 11155111 = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951" }
 # address_arg = "safe"             # instead of `address`: the address comes from the action's input
 
@@ -22,6 +24,10 @@ symbol = "USDC"
 decimals = 6
 address = { 1 = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 11155111 = "0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8" }
 movable = true                     # false = named in the review, never approved
+# approve_to = ["pool"]            # only these contracts may be approved for it
+# kind = "debt"                    # an Aave debt token: approving it is credit delegation
+#                                  # (approveDelegation, the spender may borrow in the user's
+#                                  # name); needs approve_to
 
 [[read_tool]]                      # a script that only reads and returns data
 name = "pool_info"
@@ -36,6 +42,13 @@ run = "scripts/supply.py"
 description = "Supply an asset."
 approves = ["pool"]                # contracts it may approve as spender (exact amounts only)
 schema = { type = "object", required = ["amount"], properties = { amount = { type = "string" } } }
+
+[[review_read]]                    # every action's review shows this view call on a pinned
+label = "Aave account"             # contract, simulated before and after the plan; args like a call's
+contract = "pool"
+function = "function getUserAccountData(address user) view returns (uint256 collateral,uint256 debt,uint256 canBorrow,uint256 liquidationThreshold,uint256 ltv,uint256 healthFactor)"
+args = ["$self"]
+show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }   # uint outputs: "<decimals> [unit]"
 ```
 
 Rules the loader enforces: `hosts` are reached over HTTPS only. `run` stays inside the skill
@@ -45,11 +58,24 @@ are refused, and so are functions that take raw `bytes`, unless the contract is 
 contract and the function is listed in its `signed_calls`. Text fields are one line with no control
 characters. Tool names are unique across all skills and never a built-in's name.
 
-Plans (what an action returns) are at most 6 steps. Each step is one of:
+Plans (what an action returns) are at most 6 steps. Build them with the SDK, which writes the
+wire shapes below:
+
+```python
+steps = [
+    edw_skill.approve_step("usdc", "pool", amount),
+    edw_skill.call_step("pool", "supply", ["usdc", str(amount), "$self", "0"]),
+]
+edw_skill.call_step("gateway", "depositETH", ["pool", "$self", "0"], value=wei)
+```
+
+Each step is one of:
 
 - `{"approve": {"token", "spender", "amount"}}`: `token` is a token id and `spender` a contract id
-  from this manifest, not addresses. The spender must be listed in the action's `approves`.
-  `amount` is exact (never unlimited).
+  from this manifest, not addresses. The spender must be listed in the action's `approves`, and
+  in the token's `approve_to` when it has one. `amount` is exact (never unlimited), and the plan
+  must use all of it: anything left after the simulated plan refuses it. For a `kind = "debt"`
+  token the step is a credit delegation (`approveDelegation`) instead of `approve`.
 - `{"call": {"contract", "function", "args"}}`: `contract` is a contract id, `function` is one of
   that contract's listed function names, and `args` is a list. In `args`, an address may be a
   token id, a contract id, or `"$self"` (the sender). A raw `0x` address is refused.

@@ -41,16 +41,56 @@ pub fn next_call(script: &Script, made: usize) -> Option<(&'static str, Value)> 
     }
 }
 
-/// The stablecoin a skill request names; USDC when it names none.
-fn stablecoin(text: &str) -> &'static str {
+/// The asset a skill request names; USDC when it names none.
+fn asset_in(text: &str) -> &'static str {
     let words: Vec<String> = text
         .split(|c: char| !c.is_alphanumeric())
         .map(str::to_uppercase)
         .collect();
-    ["USDC", "USDT", "DAI"]
+    ["USDC", "USDT", "DAI", "WETH", "ETH"]
         .into_iter()
         .find(|t| words.iter().any(|w| w == t))
         .unwrap_or("USDC")
+}
+
+/// Aave requests: `what does aave pay`, `put <amount> <asset> on aave`, `borrow <amount> <asset>`,
+/// `repay <amount>|all <asset>`, `stop using <asset> as collateral`, `how healthy is my aave
+/// account`, `withdraw all my <asset> from aave`.
+fn aave_script(prompt: &str, text: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
+    let token = asset_in(text);
+    let amount = first_number(prompt);
+    let action = if has("withdraw") {
+        let amount = if has("all") { None } else { amount };
+        (
+            "aave_withdraw",
+            json!({"token": token, "amount": amount.unwrap_or("all".into())}),
+        )
+    } else if has("repay") {
+        let amount = if has("all") {
+            Some("all".into())
+        } else {
+            amount
+        };
+        ("aave_repay", json!({"token": token, "amount": amount?}))
+    } else if has("borrow") && amount.is_some() {
+        ("aave_borrow", json!({"token": token, "amount": amount}))
+    } else if has("collateral") {
+        let off = has("stop") || has("disable") || has("not") || has("off");
+        (
+            "aave_collateral",
+            json!({"token": token, "use_as_collateral": !off}),
+        )
+    } else if has("put") || has("supply") || has("deposit") || has("lend") {
+        ("aave_supply", json!({"token": token, "amount": amount?}))
+    } else if has("health") || has("healthy") || has("account") || has("borrow") {
+        ("aave_account", json!({}))
+    } else {
+        ("aave_markets", json!({}))
+    };
+    Some(Script::Calls(vec![
+        ("load_skill", json!({"name": "aave-v3-lend"})),
+        action,
+    ]))
 }
 
 /// The first address in a prompt: a `0x` + 40-hex word, or the `ADDR_n` alias the harness puts
@@ -251,8 +291,8 @@ fn authoring_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> 
     ]))
 }
 
-/// Skill requests: `what does aave pay`, `put <amount> <token> on aave`, `withdraw all my
-/// <token> from aave`, `best <token> lending rates on <chain>`.
+/// Skill requests: Aave ones (see [`aave_script`]), `best <token> lending rates on <chain>`,
+/// Safe and authoring requests.
 fn skill_script(prompt: &str, text: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
     if let Some(authoring) = authoring_script(prompt, has) {
         return Some(authoring);
@@ -260,28 +300,8 @@ fn skill_script(prompt: &str, text: &str, has: &dyn Fn(&str) -> bool) -> Option<
     if let Some(safe) = safe_script(prompt, has) {
         return Some(safe);
     }
-    let aave = ("load_skill", json!({"name": "aave-v3-lend"}));
     if has("aave") {
-        let token = stablecoin(text);
-        if has("withdraw") {
-            let amount = if has("all") {
-                "all".to_owned()
-            } else {
-                first_number(prompt).unwrap_or_else(|| "all".into())
-            };
-            return Some(Script::Calls(vec![
-                aave,
-                ("aave_withdraw", json!({"token": token, "amount": amount})),
-            ]));
-        }
-        if has("put") || has("supply") || has("deposit") || has("lend") {
-            let amount = first_number(prompt)?;
-            return Some(Script::Calls(vec![
-                aave,
-                ("aave_supply", json!({"token": token, "amount": amount})),
-            ]));
-        }
-        return Some(Script::Calls(vec![aave, ("aave_markets", json!({}))]));
+        return aave_script(prompt, text, has);
     }
     if (has("best") || has("top")) && (has("rates") || has("yields") || has("pools")) {
         let mut args = json!({"limit": 3});
@@ -294,7 +314,7 @@ fn skill_script(prompt: &str, text: &str, has: &dyn Fn(&str) -> bool) -> Option<
         {
             args["chain"] = json!(chain.trim_matches(|c: char| !c.is_alphanumeric()));
         }
-        let token = stablecoin(text);
+        let token = asset_in(text);
         if text.to_uppercase().contains(token) {
             args["symbol"] = json!(token);
         }
@@ -456,14 +476,49 @@ pub fn summary(tool: &str, result: &str) -> Option<String> {
         } else {
             format!("Not approved: {output}")
         }),
-        "aave_supply" | "aave_withdraw" => Some(if output.contains("succeeded") {
-            "Done: the transactions were sent and all succeeded.".to_owned()
-        } else {
-            format!(
-                "It did not go through: {}",
-                output.lines().next().unwrap_or("")
-            )
-        }),
+        "aave_account" => {
+            let v: Value = serde_json::from_str(output).ok()?;
+            let text = |key: &str| v[key].as_str().unwrap_or("?").to_owned();
+            let positions: Vec<String> = v["positions"]
+                .as_array()?
+                .iter()
+                .flat_map(|p| {
+                    let token = p["token"].as_str().unwrap_or("?");
+                    let supplied = p["supplied"].as_str().map(|s| {
+                        let collateral = if p["used_as_collateral"] == true {
+                            " (collateral)"
+                        } else {
+                            ""
+                        };
+                        format!("supplied {s} {token}{collateral}")
+                    });
+                    let owed = p["owed"].as_str().map(|o| format!("owe {o} {token}"));
+                    supplied.into_iter().chain(owed)
+                })
+                .collect();
+            let mut held = positions.join("; ");
+            if let Some(first) = held.get(..1) {
+                held = format!(" {}{}.", first.to_uppercase(), &held[1..]);
+            }
+            Some(format!(
+                "Your Aave account: health factor {}, collateral {} USD, debt {} USD. You can borrow about {} USD more ({} USD keeping the health factor above 1.5).{held}",
+                text("health_factor"),
+                text("collateral_usd"),
+                text("debt_usd"),
+                text("can_borrow_usd"),
+                text("can_borrow_keeping_health_factor_1_5_usd"),
+            ))
+        }
+        "aave_supply" | "aave_withdraw" | "aave_borrow" | "aave_repay" | "aave_collateral" => {
+            Some(if output.contains("succeeded") {
+                "Done: the transactions were sent and all succeeded.".to_owned()
+            } else {
+                format!(
+                    "It did not go through: {}",
+                    output.lines().next().unwrap_or("")
+                )
+            })
+        }
         _ => None,
     }
 }
@@ -689,6 +744,75 @@ mod tests {
                     json!({"chain": "Ethereum", "kind": "lend", "symbol": "USDC", "limit": 3})
                 )
             ])
+        );
+    }
+
+    /// Aave requests name an action, an asset (ETH included) and an amount or "all".
+    #[test]
+    fn scripts_aave_lending_and_borrowing_requests() {
+        let aave = ("load_skill", json!({"name": "aave-v3-lend"}));
+        let calls =
+            |tool: &'static str, args: Value| Script::Calls(vec![aave.clone(), (tool, args)]);
+        for (prompt, tool, args) in [
+            (
+                "put 2 ETH on aave",
+                "aave_supply",
+                json!({"token": "ETH", "amount": "2"}),
+            ),
+            (
+                "supply 1.5 WETH to Aave",
+                "aave_supply",
+                json!({"token": "WETH", "amount": "1.5"}),
+            ),
+            ("how healthy is my aave account?", "aave_account", json!({})),
+            ("how much can I borrow on aave?", "aave_account", json!({})),
+            (
+                "borrow 1000 USDC from aave",
+                "aave_borrow",
+                json!({"token": "USDC", "amount": "1000"}),
+            ),
+            (
+                "repay 400 USDC on aave",
+                "aave_repay",
+                json!({"token": "USDC", "amount": "400"}),
+            ),
+            (
+                "repay all my USDC debt on aave",
+                "aave_repay",
+                json!({"token": "USDC", "amount": "all"}),
+            ),
+            (
+                "stop using my ETH as collateral on aave",
+                "aave_collateral",
+                json!({"token": "ETH", "use_as_collateral": false}),
+            ),
+            (
+                "use my DAI as collateral on aave",
+                "aave_collateral",
+                json!({"token": "DAI", "use_as_collateral": true}),
+            ),
+            (
+                "withdraw all my ETH from aave",
+                "aave_withdraw",
+                json!({"token": "ETH", "amount": "all"}),
+            ),
+        ] {
+            assert_eq!(script(prompt), calls(tool, args), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn an_aave_account_is_summed_up_with_its_health_factor() {
+        let output = json!({
+            "health_factor": "4.95", "collateral_usd": "6200.00", "debt_usd": "1000.00",
+            "can_borrow_usd": "3990.00", "can_borrow_keeping_health_factor_1_5_usd": "2430.00",
+            "positions": [{"token": "WETH", "supplied": "2", "used_as_collateral": true}, {"token": "USDC", "owed": "1000"}],
+        });
+        let result =
+            json!({"command": "skill x", "exit_code": 0, "output": output.to_string()}).to_string();
+        assert_eq!(
+            summary("aave_account", &result).unwrap(),
+            "Your Aave account: health factor 4.95, collateral 6200.00 USD, debt 1000.00 USD. You can borrow about 3990.00 USD more (2430.00 USD keeping the health factor above 1.5). Supplied 2 WETH (collateral); owe 1000 USDC."
         );
     }
 

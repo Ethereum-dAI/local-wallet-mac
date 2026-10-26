@@ -327,6 +327,7 @@ async fn safe_questions_are_answered_from_the_chain_and_the_service() {
     let tampered = CheckedPlan {
         total_value: U256::ZERO,
         notes: Vec::new(),
+        reads: Vec::new(),
         steps: vec![CheckedStep {
             label: "approve (tampered)".into(),
             to: safe,
@@ -337,6 +338,7 @@ async fn safe_questions_are_answered_from_the_chain_and_the_service() {
             .abi_encode()
             .into(),
             approval: None,
+            grant_left: None,
             details: Vec::new(),
             binding: Some(Binding {
                 safe,

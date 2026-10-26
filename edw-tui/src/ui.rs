@@ -694,22 +694,24 @@ mod tests {
         let request = aave_request();
         let hash = request.short_hash.clone();
         app.ask_consents(vec![request, aave_request()]);
-        let screen = tall_screen(&app, 40);
+        let screen = tall_screen(&app, 60);
         for needle in [
             "Allow skill aave-v3-lend? (1 of 2)",
-            &format!("aave-v3-lend 0.1.0 · new · sha256 {hash}"),
-            "Earn interest on idle USDC",
+            &format!("aave-v3-lend 0.2.0 · new · sha256 {hash}"),
+            "Lend and borrow on Aave v3",
             "NEEDS",
             "defi-data",
             "WEB",
             "none (reads the chain through your RPC)",
             "TOOLS",
-            "aave_markets · aave_supply · aave_withdraw",
+            "aave_markets · aave_account · aave_supply",
             "CAN PROPOSE CALLS TO",
             "Ethereum (1)",
             "Aave Pool 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
-            "supply, withdraw",
-            "approve: USDC, USDT, DAI → Aave Pool (exact amounts)",
+            "supply, withdraw, borrow, repay",
+            "Aave WETH Gateway 0xd01607c3C5eCABa394D8be377a08590149325722",
+            "approve: USDC, USDT, DAI, WETH → Aave Pool (exact amounts)",
+            "approve: WETH debt → Aave WETH Gateway (credit delegation",
             "Sepolia (11155111)",
             "Every plan is still simulated and reviewed before you send it.",
             "[y] allow",
@@ -741,9 +743,13 @@ mod tests {
         let short = tall_screen(&app, 12);
         assert!(short.contains("[y] allow"), "keys always visible:\n{short}");
         assert!(!short.contains("Sepolia (11155111)"), "{short}");
-        app.consent_scroll = 30;
-        let scrolled = tall_screen(&app, 12);
-        assert!(scrolled.contains("Sepolia (11155111)"), "{scrolled}");
+        let scrolled = (1..200)
+            .map(|scroll| {
+                app.consent_scroll = scroll;
+                tall_screen(&app, 12)
+            })
+            .find(|screen| screen.contains("Sepolia (11155111)"))
+            .expect("scrolling reaches the Sepolia section");
         assert!(scrolled.contains("[y] allow"), "{scrolled}");
     }
 

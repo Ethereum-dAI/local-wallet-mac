@@ -1,27 +1,29 @@
 //! The shipped `aave-v3-lend` skill.
 //!
 //! Offline: the manifest pins what it should. With `-- --ignored` (network):
-//! - every pinned address is checked against Aave's own registry on mainnet and Sepolia;
-//! - supply and withdraw run end to end on an anvil mainnet fork, through the real agent loop,
-//!   Docker and edw (RPC: `ETH_RPC_URL`, default a public no-tracking endpoint).
+//! - every pinned address is checked against Aave's own registry on mainnet and Sepolia, on an
+//!   anvil fork of each;
+//! - USDC supply and withdraw, and ETH supply, borrow, repay and withdraw through the WETH gateway,
+//!   run end to end on anvil forks, through the real agent loop, Docker and edw (RPC:
+//!   `ETH_RPC_URL` and `EDW_TUI_SEPOLIA_RPC`, default public no-tracking endpoints).
 
 mod common;
 
 use std::{path::Path, sync::Arc};
 
-use alloy_node_bindings::Anvil;
-use alloy_primitives::{Address, U256, address};
+use alloy_node_bindings::{Anvil, AnvilInstance};
+use alloy_primitives::{Address, U256, address, keccak256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_sol_types::{SolCall, sol};
 use common::{
-    Harness, TempWallet, edw_binary,
+    Harness, TempWallet, Turn, edw_binary, read_values,
     recorder::{Recorder, call},
 };
 use edw_tui::{
     interim::Interim,
     skills::{
         catalog::{self, Catalog, SkillState},
-        manifest::{self, Skill},
+        manifest::{self, Approval, Skill},
         sandbox::{self, Runner},
         tools::SkillSet,
     },
@@ -39,6 +41,9 @@ sol! {
     function getPool() returns (address);
     function decimals() returns (uint8);
     function balanceOf(address owner) returns (uint256);
+    function allowance(address owner, address spender) returns (uint256);
+    function borrowAllowance(address fromUser, address toUser) returns (uint256);
+    function getWETHAddress() returns (address);
     struct ReserveDataLegacy {
         uint256 configuration;
         uint128 liquidityIndex;
@@ -67,32 +72,102 @@ fn skill() -> Skill {
     manifest::load(&root().join("skills/aave-v3-lend")).unwrap()
 }
 
+fn signatures(skill: &Skill, contract: &str) -> Vec<String> {
+    let c = skill.manifest.contract(contract).unwrap();
+    c.functions.iter().map(|f| f.signature()).collect()
+}
+
+/// What the skill may ever call, and what each of its actions may grant to whom.
 #[test]
-fn the_manifest_pins_the_pool_and_only_supply_and_withdraw() {
+fn the_manifest_pins_aaves_pool_and_weth_gateway_and_scopes_every_grant() {
     let skill = skill();
     let m = &skill.manifest;
     assert_eq!(m.requires, ["defi-data"]);
     assert!(m.hosts.is_empty(), "everything it needs comes over RPC");
-    assert_eq!(m.contracts.len(), 1);
-    let pool = m.contract("pool").unwrap();
-    let functions: Vec<String> = pool.functions.iter().map(|f| f.signature()).collect();
+    assert_eq!(m.contracts.len(), 2);
     assert_eq!(
-        functions,
+        signatures(&skill, "pool"),
         [
             "supply(address,uint256,address,uint16)",
-            "withdraw(address,uint256,address)"
+            "withdraw(address,uint256,address)",
+            "borrow(address,uint256,uint256,uint16,address)",
+            "repay(address,uint256,uint256,address)",
+            "setUserUseReserveAsCollateral(address,bool)",
         ]
     );
-    for action in &m.actions {
-        assert!(
-            action.approves.iter().all(|a| a == "pool"),
-            "{}",
-            action.tool.name
+    assert_eq!(
+        signatures(&skill, "gateway"),
+        [
+            "depositETH(address,address,uint16)",
+            "withdrawETH(address,uint256,address)",
+            "borrowETH(address,uint256,uint16)",
+            "borrowETH(address,uint256,uint256,uint16)",
+            "repayETH(address,uint256,address)",
+            "repayETH(address,uint256,uint256,address)",
+        ]
+    );
+    // Every parameter a call pays out to, or whose debt it touches, is the sender.
+    let payees = |contract: &str| {
+        let c = skill.manifest.contract(contract).unwrap();
+        c.self_only
+            .iter()
+            .flat_map(|(f, ps)| ps.iter().map(move |p| format!("{f}.{p}")))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        payees("pool"),
+        [
+            "borrow.onBehalfOf",
+            "repay.onBehalfOf",
+            "supply.onBehalfOf",
+            "withdraw.to"
+        ]
+    );
+    assert_eq!(
+        payees("gateway"),
+        [
+            "depositETH.onBehalfOf",
+            "repayETH.onBehalfOf",
+            "withdrawETH.to"
+        ]
+    );
+    let approves = |name: &str| skill.action(name).unwrap().approves.clone();
+    assert_eq!(approves("aave_supply"), ["pool"]);
+    assert_eq!(approves("aave_repay"), ["pool"]);
+    assert_eq!(approves("aave_withdraw"), ["gateway"]);
+    assert_eq!(approves("aave_borrow"), ["gateway"]);
+    assert!(approves("aave_collateral").is_empty());
+
+    let only = |ids: &[&str]| Some(ids.iter().map(|i| (*i).to_owned()).collect());
+    for id in ["usdc", "usdt", "dai", "weth"] {
+        let policy = |id: &str| m.token(id).unwrap().approval.clone();
+        assert_eq!(
+            policy(id),
+            Approval::Allowance {
+                only: only(&["pool"])
+            },
+            "{id}"
         );
-    }
-    for id in ["usdc", "usdt", "dai"] {
-        assert!(m.token(id).unwrap().movable, "{id}");
-        assert!(!m.token(&format!("a{id}")).unwrap().movable, "a{id}");
+        let receipt = format!("a{id}");
+        let debt = format!("{id}_debt");
+        if id == "weth" {
+            // The gateway pulls aWETH to withdraw ETH, and borrows ETH in the user's name.
+            assert_eq!(
+                policy(&receipt),
+                Approval::Allowance {
+                    only: only(&["gateway"])
+                }
+            );
+            assert_eq!(
+                policy(&debt),
+                Approval::Delegation {
+                    to: vec!["gateway".into()]
+                }
+            );
+        } else {
+            assert_eq!(policy(&receipt), Approval::Never, "{receipt}");
+            assert_eq!(policy(&debt), Approval::Never, "{debt}");
+        }
     }
     for t in &m.tokens {
         assert!(
@@ -101,7 +176,17 @@ fn the_manifest_pins_the_pool_and_only_supply_and_withdraw() {
             t.id
         );
     }
-    assert!(pool.address.contains_key(&MAINNET) && pool.address.contains_key(&SEPOLIA));
+    for c in &m.contracts {
+        assert!(
+            c.address.contains_key(&MAINNET) && c.address.contains_key(&SEPOLIA),
+            "{}",
+            c.id
+        );
+    }
+    let account = &m.review_reads[0];
+    assert_eq!(account.function.name, "getUserAccountData");
+    assert!(account.show.iter().any(|s| s.name == "healthFactor"));
+    assert!(account.show.iter().any(|s| s.name == "debt"));
 }
 
 async fn view<C: SolCall>(provider: &impl Provider, to: Address, call: C) -> C::Return {
@@ -112,8 +197,16 @@ async fn view<C: SolCall>(provider: &impl Provider, to: Address, call: C) -> C::
     C::abi_decode_returns(&out).unwrap()
 }
 
+/// Whether `code` dispatches `signature`: Solidity's selector table pushes each selector with
+/// PUSH4 (0x63).
+fn dispatches(code: &[u8], signature: &str) -> bool {
+    let selector = &keccak256(signature)[..4];
+    code.windows(5).any(|w| w[0] == 0x63 && &w[1..] == selector)
+}
+
 async fn check_against_aave(rpc: &str, chain: u64, registry: Address) {
-    let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap());
+    let node = Anvil::new().fork(rpc).try_spawn().expect("anvil fork");
+    let provider = ProviderBuilder::new().connect_http(node.endpoint_url());
     assert_eq!(provider.get_chain_id().await.unwrap(), chain);
     let skill = skill();
     let m = &skill.manifest;
@@ -123,23 +216,52 @@ async fn check_against_aave(rpc: &str, chain: u64, registry: Address) {
         pool,
         "chain {chain}: pool"
     );
-    for id in ["usdc", "usdt", "dai"] {
+    for id in ["usdc", "usdt", "dai", "weth"] {
         let token = m.token(id).unwrap();
         let address = token.address[&chain];
         let reserve = view(&provider, pool, getReserveDataCall { asset: address }).await;
         let a_token = m.token(&format!("a{id}")).unwrap();
+        let debt = m.token(&format!("{id}_debt")).unwrap();
         assert_eq!(
             reserve.aTokenAddress, a_token.address[&chain],
             "chain {chain}: a{id}"
         );
         assert_eq!(
-            view(&provider, address, decimalsCall {}).await,
-            token.decimals,
-            "chain {chain}: {id}"
+            reserve.variableDebtTokenAddress, debt.address[&chain],
+            "chain {chain}: {id}_debt"
         );
+        for t in [token, a_token, debt] {
+            assert_eq!(
+                view(&provider, t.address[&chain], decimalsCall {}).await,
+                t.decimals,
+                "chain {chain}: {} decimals",
+                t.id
+            );
+        }
+    }
+    let gateway = m.contract("gateway").unwrap().address[&chain];
+    let code = provider.get_code_at(gateway).await.unwrap();
+    assert!(!code.is_empty(), "chain {chain}: the gateway has code");
+    assert_eq!(
+        view(&provider, gateway, getWETHAddressCall {}).await,
+        m.token("weth").unwrap().address[&chain],
+        "chain {chain}: the gateway wraps the pinned WETH"
+    );
+    // The forms the scripts send here (aave_common.GATEWAY_TAKES_RATE_MODE): Aave v3.2 dropped
+    // the rate-mode argument; Sepolia's gateway predates that.
+    let legacy = chain == SEPOLIA;
+    for (signature, expected) in [
+        ("depositETH(address,address,uint16)", true),
+        ("withdrawETH(address,uint256,address)", true),
+        ("borrowETH(address,uint256,uint16)", !legacy),
+        ("repayETH(address,uint256,address)", !legacy),
+        ("borrowETH(address,uint256,uint256,uint16)", legacy),
+        ("repayETH(address,uint256,uint256,address)", legacy),
+    ] {
         assert_eq!(
-            view(&provider, a_token.address[&chain], decimalsCall {}).await,
-            a_token.decimals
+            dispatches(&code, signature),
+            expected,
+            "chain {chain}: gateway {signature}"
         );
     }
 }
@@ -148,13 +270,16 @@ fn mainnet_rpc() -> String {
     std::env::var("ETH_RPC_URL").unwrap_or_else(|_| "https://ethereum-rpc.publicnode.com".into())
 }
 
+fn sepolia_rpc() -> String {
+    std::env::var("EDW_TUI_SEPOLIA_RPC")
+        .unwrap_or_else(|_| "https://ethereum-sepolia-rpc.publicnode.com".into())
+}
+
 #[tokio::test]
-#[ignore = "reads mainnet and Sepolia over the network"]
+#[ignore = "forks mainnet and Sepolia over the network; needs anvil"]
 async fn every_pinned_address_is_aaves_own() {
     check_against_aave(&mainnet_rpc(), MAINNET, MAINNET_PROVIDER).await;
-    let sepolia = std::env::var("EDW_TUI_SEPOLIA_RPC")
-        .unwrap_or_else(|_| "https://ethereum-sepolia-rpc.publicnode.com".into());
-    check_against_aave(&sepolia, SEPOLIA, SEPOLIA_PROVIDER).await;
+    check_against_aave(&sepolia_rpc(), SEPOLIA, SEPOLIA_PROVIDER).await;
 }
 
 fn shipped() -> Arc<SkillSet> {
@@ -170,93 +295,379 @@ fn shipped() -> Arc<SkillSet> {
     ))
 }
 
+/// An anvil fork of `rpc`, a fresh wallet unlocked on `network` with 10 ETH, and the real agent
+/// loop over the shipped skills, driven by `replies`. `None` (with a message) without edw or
+/// Docker.
+struct Fork {
+    h: Harness,
+    rpc: String,
+    me: Address,
+    chain: u64,
+    _node: AnvilInstance,
+}
+
+impl Fork {
+    async fn start(
+        name: &str,
+        rpc: String,
+        network: &str,
+        replies: Vec<AssistantContent>,
+    ) -> Option<Self> {
+        let Some(binary) = edw_binary() else {
+            eprintln!("skipping: edw is not installed");
+            return None;
+        };
+        if !sandbox::docker_available().await {
+            eprintln!("skipping: Docker is not running");
+            return None;
+        }
+        let node = Anvil::new().fork(rpc).try_spawn().expect("anvil fork");
+        let rpc = node.endpoint();
+        let wallet = TempWallet::new(binary, name);
+        wallet.edw(&["unlock", "--network", network]).await;
+        let mut interim = wallet.interim(Some(rpc.clone()), network == "sepolia");
+        interim.mainnet_fork = network == "mainnet";
+        let me = Interim::new(interim.clone()).address(None).await.unwrap();
+        let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap());
+        let _: () = provider
+            .raw_request("anvil_setBalance".into(), (me, U256::from(10u128.pow(19))))
+            .await
+            .unwrap();
+        let chain = provider.get_chain_id().await.unwrap();
+        let h = Harness::start_with_skills(
+            wallet,
+            ModelHandle::named("recorder", Recorder::new(replies)),
+            Some(interim),
+            shipped(),
+        );
+        Some(Self {
+            h,
+            rpc,
+            me,
+            chain,
+            _node: node,
+        })
+    }
+
+    fn provider(&self) -> impl Provider + use<> {
+        ProviderBuilder::new().connect_http(self.rpc.parse().unwrap())
+    }
+
+    async fn balance(&self, token: Address) -> U256 {
+        view(&self.provider(), token, balanceOfCall { owner: self.me }).await
+    }
+
+    fn token(&self, id: &str) -> Address {
+        skill().manifest.token(id).unwrap().address[&self.chain]
+    }
+
+    fn contract(&self, id: &str) -> Address {
+        skill().manifest.contract(id).unwrap().address[&self.chain]
+    }
+
+    /// One user turn, approved; returns its review after checking it reads `needles` and that
+    /// every transaction succeeded.
+    async fn approved(&mut self, prompt: &str, needles: &[&str]) -> String {
+        let turn: Turn = self.h.turn(prompt, true).await;
+        let preview = turn
+            .previews
+            .first()
+            .unwrap_or_else(|| panic!("no review for {prompt:?}: {turn:?}"))
+            .clone();
+        eprintln!("{preview}");
+        for needle in needles {
+            assert!(preview.contains(needle), "missing {needle:?} in\n{preview}");
+        }
+        assert!(
+            turn.outputs.last().unwrap().contains("succeeded"),
+            "{turn:?}"
+        );
+        preview
+    }
+}
+
 #[tokio::test]
 #[ignore = "forks mainnet over the network; needs anvil, edw and Docker"]
 async fn supplies_and_withdraws_usdc_on_a_mainnet_fork() {
-    let Some(binary) = edw_binary() else {
-        eprintln!("skipping: edw is not installed");
+    let Some(mut f) = Fork::start(
+        "aave-usdc",
+        mainnet_rpc(),
+        "mainnet",
+        vec![
+            call("load_skill", json!({"name": "aave-v3-lend"})),
+            call("aave_supply", json!({"token": "USDC", "amount": "100"})),
+            AssistantContent::text("supplied"),
+            call("aave_withdraw", json!({"token": "USDC", "amount": "all"})),
+            AssistantContent::text("withdrawn"),
+        ],
+    )
+    .await
+    else {
         return;
     };
-    if !sandbox::docker_available().await {
-        eprintln!("skipping: Docker is not running");
-        return;
-    }
-    let node = Anvil::new()
-        .fork(mainnet_rpc())
-        .try_spawn()
-        .expect("anvil fork");
-    let rpc = node.endpoint();
-    let wallet = TempWallet::new(binary, "aave-fork");
-    wallet.edw(&["unlock", "--network", "mainnet"]).await;
-    let mut interim = wallet.interim(Some(rpc.clone()), false);
-    interim.mainnet_fork = true;
-
-    let skill = skill();
-    let usdc = skill.manifest.token("usdc").unwrap().address[&MAINNET];
-    let ausdc = skill.manifest.token("ausdc").unwrap().address[&MAINNET];
-    let me = Interim::new(interim.clone()).address(None).await.unwrap();
-    let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap());
-    let _: () = provider
-        .raw_request("anvil_setBalance".into(), (me, U256::from(10u128.pow(19))))
-        .await
-        .unwrap();
-    let _: () = provider
+    let (usdc, ausdc) = (f.token("usdc"), f.token("ausdc"));
+    let _: () = f
+        .provider()
         .raw_request(
             "anvil_dealERC20".into(),
-            (me, usdc, U256::from(1_000_000_000u64)),
+            (f.me, usdc, U256::from(1_000_000_000u64)),
         )
         .await
         .unwrap();
-    let balance = |token: Address| {
-        let provider = provider.clone();
-        async move { view(&provider, token, balanceOfCall { owner: me }).await }
+    assert_eq!(f.balance(usdc).await, U256::from(1_000_000_000u64));
+
+    f.approved(
+        "put 100 USDC on aave",
+        &[
+            "Skill    aave-v3-lend",
+            "approve 100 USDC for Aave Pool",
+            "Aave Pool.supply(asset=USDC, amount=100 USDC (100000000), onBehalfOf=you, referralCode=0)",
+            "−100 USDC",
+            "aUSDC",
+            "Aave account (simulated, before → after)",
+        ],
+    )
+    .await;
+    assert_eq!(f.balance(usdc).await, U256::from(900_000_000u64));
+    assert!(f.balance(ausdc).await >= U256::from(99_990_000u64));
+
+    f.approved("take it all back", &["amount=all"]).await;
+    assert!(f.balance(usdc).await >= U256::from(999_990_000u64));
+    assert_eq!(f.balance(ausdc).await, U256::ZERO);
+}
+
+/// ETH through the WETH gateway: supplied as the value, borrowed under a credit delegation of
+/// exactly the amount, repaid in full with the gateway returning the margin, and withdrawn
+/// under an exact aWETH approval. Every grant is used up, so none is left behind.
+#[tokio::test]
+#[ignore = "forks mainnet over the network; needs anvil, edw and Docker"]
+async fn supplies_borrows_repays_and_withdraws_eth_through_the_gateway_on_a_mainnet_fork() {
+    let Some(mut f) = Fork::start(
+        "aave-eth",
+        mainnet_rpc(),
+        "mainnet",
+        vec![
+            call("load_skill", json!({"name": "aave-v3-lend"})),
+            call("aave_supply", json!({"token": "ETH", "amount": "2"})),
+            AssistantContent::text("supplied"),
+            call("aave_borrow", json!({"token": "ETH", "amount": "0.5"})),
+            AssistantContent::text("borrowed"),
+            call("aave_repay", json!({"token": "ETH", "amount": "all"})),
+            AssistantContent::text("repaid"),
+            call("aave_withdraw", json!({"token": "ETH", "amount": "all"})),
+            AssistantContent::text("withdrawn"),
+        ],
+    )
+    .await
+    else {
+        return;
     };
-    assert_eq!(balance(usdc).await, U256::from(1_000_000_000u64));
+    let (aweth, debt, gateway) = (
+        f.token("aweth"),
+        f.token("weth_debt"),
+        f.contract("gateway"),
+    );
+    let half = U256::from(5u64) * U256::from(10u64).pow(U256::from(17u64));
+    let two = U256::from(2u64) * U256::from(10u64).pow(U256::from(18u64));
 
-    let model = Recorder::new(vec![
-        call("load_skill", json!({"name": "aave-v3-lend"})),
-        call("aave_supply", json!({"token": "USDC", "amount": "100"})),
-        AssistantContent::text("supplied"),
-        call("aave_withdraw", json!({"token": "USDC", "amount": "all"})),
-        AssistantContent::text("withdrawn"),
-    ]);
-    let mut h = Harness::start_with_skills(
-        wallet,
-        ModelHandle::named("recorder", model),
-        Some(interim),
-        shipped(),
+    f.approved(
+        "put 2 ETH on aave",
+        &[
+            "Aave WETH Gateway.depositETH(pool=Aave Pool, onBehalfOf=you, referralCode=0) with 2 ETH",
+            "−2 ETH",
+            "aWETH",
+            "health factor  ∞ → ∞",
+        ],
+    )
+    .await;
+    let supplied = f.balance(aweth).await;
+    assert!(
+        supplied >= two - U256::from(2u8) && supplied < two + U256::from(10u64.pow(12)),
+        "about 2 aWETH, plus interest by the time it is read: {supplied}"
     );
 
-    let turn = h.turn("put 100 USDC on aave", true).await;
-    let preview = turn
-        .previews
-        .first()
-        .unwrap_or_else(|| panic!("no review: {turn:?}"));
-    eprintln!("{preview}");
-    for needle in [
-        "Skill    aave-v3-lend",
-        "approve 100 USDC for Aave Pool",
-        "Aave Pool.supply(asset=USDC, amount=100 USDC (100000000), onBehalfOf=you, referralCode=0)",
-        "−100 USDC",
-        "aUSDC",
+    let eth_before = f.provider().get_balance(f.me).await.unwrap();
+    let review = f
+        .approved(
+            "borrow 0.5 ETH from aave",
+            &[
+                "allow Aave WETH Gateway to take on up to 0.5 WETH debt in your name (credit delegation)",
+                "Aave WETH Gateway.borrowETH(pool=Aave Pool, amount=0.5 WETH (500000000000000000), referralCode=0)",
+                "+0.5 ETH",
+            ],
+        )
+        .await;
+    // A quarter of the collateral's worth is borrowed, so the debt reads a quarter of it.
+    let (_, collateral) = read_values(&review, "collateral");
+    let (debt_before, debt_after) = read_values(&review, "debt");
+    assert_eq!(debt_before, 0.0);
+    assert!(
+        (debt_after - collateral / 4.0).abs() < collateral * 0.01,
+        "debt {debt_after} for collateral {collateral}"
+    );
+    let (health_before, health_after) = read_values(&review, "health factor");
+    assert!(health_before.is_infinite() && health_after.is_finite() && health_after > 1.5);
+    assert!(f.balance(debt).await >= half);
+    assert!(f.provider().get_balance(f.me).await.unwrap() > eth_before);
+    let delegated = view(
+        &f.provider(),
+        debt,
+        borrowAllowanceCall {
+            fromUser: f.me,
+            toUser: gateway,
+        },
+    )
+    .await;
+    assert_eq!(
+        delegated,
+        U256::ZERO,
+        "the delegation was exactly the amount"
+    );
+
+    f.approved(
+        "repay all my ETH debt on aave",
+        &[
+            "Aave WETH Gateway.repayETH(pool=Aave Pool, amount=all, onBehalfOf=you) with 0.50005",
+            "Skill says (not checked): Covers the debt plus 0.01%",
+        ],
+    )
+    .await;
+    assert_eq!(f.balance(debt).await, U256::ZERO);
+
+    f.approved(
+        "withdraw all my ETH from aave",
+        &[
+            "aWETH for Aave WETH Gateway",
+            "Aave WETH Gateway.withdrawETH(pool=Aave Pool, amount=2",
+            "health factor  ∞ → ∞",
+        ],
+    )
+    .await;
+    let dust = f.balance(aweth).await;
+    assert!(
+        dust < U256::from(10u64.pow(12)),
+        "only interest dust stays: {dust}"
+    );
+    let left = view(
+        &f.provider(),
+        aweth,
+        allowanceCall {
+            owner: f.me,
+            spender: gateway,
+        },
+    )
+    .await;
+    assert_eq!(
+        left,
+        U256::ZERO,
+        "the aWETH approval was exactly what was pulled"
+    );
+}
+
+sol! {
+    function getACLAdmin() returns (address);
+    function getACLManager() returns (address);
+    function getPoolConfigurator() returns (address);
+    function addPoolAdmin(address admin);
+    function setReserveBorrowing(address asset, bool enabled);
+}
+
+/// Aave's Sepolia market does not lend WETH. Switches borrowing on in this fork, as Aave's own
+/// ACL admin, so the older gateway's borrow and repay forms can run.
+async fn enable_weth_borrowing(f: &Fork) {
+    let p = f.provider();
+    let admin = view(&p, SEPOLIA_PROVIDER, getACLAdminCall {}).await;
+    let acl = view(&p, SEPOLIA_PROVIDER, getACLManagerCall {}).await;
+    let configurator = view(&p, SEPOLIA_PROVIDER, getPoolConfiguratorCall {}).await;
+    let _: () = p
+        .raw_request("anvil_impersonateAccount".into(), (admin,))
+        .await
+        .unwrap();
+    let _: () = p
+        .raw_request(
+            "anvil_setBalance".into(),
+            (admin, U256::from(10u128.pow(18))),
+        )
+        .await
+        .unwrap();
+    for (to, input) in [
+        (acl, addPoolAdminCall { admin }.abi_encode()),
+        (
+            configurator,
+            setReserveBorrowingCall {
+                asset: f.token("weth"),
+                enabled: true,
+            }
+            .abi_encode(),
+        ),
     ] {
-        assert!(preview.contains(needle), "missing {needle:?} in\n{preview}");
+        let tx = alloy_rpc_types_eth::TransactionRequest::default()
+            .from(admin)
+            .to(to)
+            .input(input.into());
+        let receipt = p
+            .send_transaction(tx)
+            .await
+            .unwrap()
+            .get_receipt()
+            .await
+            .unwrap();
+        assert!(receipt.status(), "{receipt:?}");
     }
-    assert!(
-        turn.outputs.last().unwrap().contains("all succeeded"),
-        "{turn:?}"
-    );
-    assert_eq!(balance(usdc).await, U256::from(900_000_000u64));
-    assert!(balance(ausdc).await >= U256::from(99_990_000u64));
+}
 
-    let turn = h.turn("take it all back", true).await;
-    let preview = &turn.previews[0];
-    eprintln!("{preview}");
-    assert!(preview.contains("amount=all"), "{preview}");
+/// Sepolia's gateway predates Aave v3.2 and takes a rate-mode argument in borrowETH and
+/// repayETH; the skill sends that form there. Where Aave has borrowing off, the skill says so
+/// before anything is built.
+#[tokio::test]
+#[ignore = "forks Sepolia over the network; needs anvil, edw and Docker"]
+async fn borrows_and_repays_eth_through_sepolias_older_gateway() {
+    let borrow = || call("aave_borrow", json!({"token": "ETH", "amount": "0.1"}));
+    let Some(mut f) = Fork::start(
+        "aave-eth-sepolia",
+        sepolia_rpc(),
+        "sepolia",
+        vec![
+            call("load_skill", json!({"name": "aave-v3-lend"})),
+            call("aave_supply", json!({"token": "ETH", "amount": "1"})),
+            AssistantContent::text("supplied"),
+            borrow(),
+            AssistantContent::text("not lent"),
+            borrow(),
+            AssistantContent::text("borrowed"),
+            call("aave_repay", json!({"token": "ETH", "amount": "all"})),
+            AssistantContent::text("repaid"),
+        ],
+    )
+    .await
+    else {
+        return;
+    };
+    let debt = f.token("weth_debt");
+    f.approved("put 1 ETH on aave", &["depositETH"]).await;
+
+    let refused = f.h.turn("borrow 0.1 ETH from aave", true).await;
+    assert!(refused.previews.is_empty(), "{refused:?}");
     assert!(
-        turn.outputs.last().unwrap().contains("succeeded"),
-        "{turn:?}"
+        refused
+            .outputs
+            .last()
+            .unwrap()
+            .contains("borrowing it is turned off"),
+        "{refused:?}"
     );
-    assert!(balance(usdc).await >= U256::from(999_990_000u64));
-    assert_eq!(balance(ausdc).await, U256::ZERO);
+
+    enable_weth_borrowing(&f).await;
+    f.approved(
+        "borrow 0.1 ETH from aave",
+        &["Aave WETH Gateway.borrowETH(pool=Aave Pool, amount=0.1 WETH (100000000000000000), interestRateMode=2, referralCode=0)"],
+    )
+    .await;
+    assert!(f.balance(debt).await >= U256::from(10u64.pow(17)));
+    f.approved(
+        "repay all my ETH debt on aave",
+        &["Aave WETH Gateway.repayETH(pool=Aave Pool, amount=all, interestRateMode=2, onBehalfOf=you)"],
+    )
+    .await;
+    assert_eq!(f.balance(debt).await, U256::ZERO);
 }

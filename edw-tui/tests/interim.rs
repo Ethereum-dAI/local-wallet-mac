@@ -568,6 +568,7 @@ async fn a_checked_skill_plan_is_simulated_reviewed_and_sent_in_order() {
         value: U256::from(wei),
         data: Default::default(),
         approval: None,
+        grant_left: None,
         details: Vec::new(),
         binding: None,
     };
@@ -575,6 +576,7 @@ async fn a_checked_skill_plan_is_simulated_reviewed_and_sent_in_order() {
         total_value: steps.iter().map(|s| s.value).sum(),
         steps,
         notes: Vec::new(),
+        reads: Vec::new(),
     };
     let header = vec!["Skill    demo 1 (sha256 abc)".to_owned()];
     let names = Default::default();
@@ -644,4 +646,167 @@ async fn a_checked_skill_plan_is_simulated_reviewed_and_sent_in_order() {
         .err()
         .unwrap();
     assert!(error.contains("changed while the skill ran"), "{error}");
+}
+
+/// Runtime code for a stub contract at `at`.
+async fn stub(rpc: &str, at: Address, code: &str) {
+    let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap());
+    let _: () = provider
+        .raw_request("anvil_setCode".into(), (at, code))
+        .await
+        .unwrap();
+}
+
+/// SELFBALANCE PUSH0 MSTORE PUSH1 32 PUSH0 RETURN: answers any call with its own balance.
+const OWN_BALANCE: &str = "0x475f5260205ff3";
+
+fn pay(to: Address, wei: u128) -> edw_tui::skills::plan::CheckedStep {
+    edw_tui::skills::plan::CheckedStep {
+        label: format!("pay {to}"),
+        to,
+        value: U256::from(wei),
+        data: Default::default(),
+        approval: None,
+        grant_left: None,
+        details: Vec::new(),
+        binding: None,
+    }
+}
+
+fn plan_of(
+    steps: Vec<edw_tui::skills::plan::CheckedStep>,
+    reads: Vec<edw_tui::skills::plan::CheckedRead>,
+) -> edw_tui::skills::plan::CheckedPlan {
+    edw_tui::skills::plan::CheckedPlan {
+        total_value: steps.iter().map(|s| s.value).sum(),
+        steps,
+        notes: Vec::new(),
+        reads,
+    }
+}
+
+/// Review reads run before all the steps and after all of them, each read in its own place in
+/// the review, and a read that fails only after the steps still stops the plan.
+#[tokio::test]
+async fn review_reads_show_the_simulated_state_before_and_after_the_plan() {
+    use alloy_json_abi::Function;
+    use edw_tui::skills::{
+        manifest::{ReviewRead, Shown},
+        plan::CheckedRead,
+    };
+    let Some(node) = anvil(None) else { return };
+    let rpc = node.endpoint();
+    let Some(h) = start("interim-reads", "local", Some(rpc.clone()), false).await else {
+        return;
+    };
+    let interim = Interim::new(h.wallet.interim(Some(rpc.clone()), false));
+    let context = interim.skill_context().await.unwrap();
+    fund(&rpc, context.me, U256::from(10 * ETHER)).await;
+    let (a, b) = (
+        address!("0x0000000000000000000000000000000000000B01"),
+        address!("0x0000000000000000000000000000000000000B02"),
+    );
+    stub(&rpc, a, OWN_BALANCE).await;
+    stub(&rpc, b, OWN_BALANCE).await;
+    // Takes plain payments; a call with data reads 0 while it holds nothing, and reverts once it
+    // holds ETH.
+    let picky = address!("0x0000000000000000000000000000000000000B03");
+    stub(&rpc, picky, "0x36156012574715600d575f5ffd5b60205ff35b00").await;
+
+    let function = Function::parse("function held() view returns (uint256 held)").unwrap();
+    let read = |label: &str, to: Address| CheckedRead {
+        read: ReviewRead {
+            label: label.into(),
+            contract: "piggy".into(),
+            function: function.clone(),
+            args: Vec::new(),
+            show: vec![Shown {
+                output: 0,
+                name: "held".into(),
+                decimals: 18,
+                unit: Some("ETH".into()),
+            }],
+        },
+        to,
+        data: function.selector().to_vec().into(),
+    };
+    let names = std::collections::BTreeMap::new();
+    let prepare =
+        |plan| interim.prepare_plan("skill feed".into(), Vec::new(), plan, &names, &context);
+
+    let plan = plan_of(
+        vec![pay(a, ETHER / 5), pay(b, ETHER / 2), pay(a, ETHER / 10)],
+        vec![read("Piggy A", a), read("Piggy B", b)],
+    );
+    let prepared = prepare(plan).await.unwrap();
+    for needle in [
+        "Read     Piggy A (simulated, before → after)\n           held  0.00 → 0.30 ETH\nRead     Piggy B",
+        "Read     Piggy B (simulated, before → after)\n           held  0.00 → 0.50 ETH",
+    ] {
+        assert!(
+            prepared.preview.contains(needle),
+            "missing {needle:?} in\n{}",
+            prepared.preview
+        );
+    }
+    assert_eq!(eth(&rpc, a).await, U256::ZERO, "a dry run sends nothing");
+
+    let after_only = plan_of(
+        vec![pay(a, ETHER / 5), pay(picky, ETHER / 10)],
+        vec![read("Piggy A", a), read("Picky", picky)],
+    );
+    let error = prepare(after_only).await.err().unwrap();
+    assert!(error.contains("review read `Picky` failed"), "{error}");
+}
+
+/// A plan must use up what it grants: an approval or delegation still standing after the
+/// simulated plan stops it before review.
+#[tokio::test]
+async fn a_grant_the_plan_does_not_spend_is_refused() {
+    use alloy_sol_types::{SolCall, sol};
+    sol! {
+        function allowance(address owner, address spender) returns (uint256);
+    }
+    let Some(node) = anvil(None) else { return };
+    let rpc = node.endpoint();
+    let Some(h) = start("interim-grants", "local", Some(rpc.clone()), false).await else {
+        return;
+    };
+    let interim = Interim::new(h.wallet.interim(Some(rpc.clone()), false));
+    let context = interim.skill_context().await.unwrap();
+    fund(&rpc, context.me, U256::from(10 * ETHER)).await;
+    // Tokens whose every answer is 0, or 1: an allowance used up, or one still standing.
+    let spent = address!("0x0000000000000000000000000000000000000C00");
+    let standing = address!("0x0000000000000000000000000000000000000C01");
+    stub(&rpc, spent, "0x60205ff3").await;
+    stub(&rpc, standing, "0x600160005260206000f3").await;
+    let grant = |token: Address| {
+        let mut step = pay(token, 0);
+        step.label = "approve 1 T for Spender".into();
+        step.grant_left = Some(
+            allowanceCall {
+                owner: context.me,
+                spender: BEEF,
+            }
+            .abi_encode()
+            .into(),
+        );
+        step
+    };
+    let names = [(standing, ("T".to_owned(), 0u8))].into_iter().collect();
+    let prepare = |token| {
+        interim.prepare_plan(
+            "skill grant".into(),
+            Vec::new(),
+            plan_of(vec![grant(token)], Vec::new()),
+            &names,
+            &context,
+        )
+    };
+    assert!(prepare(spent).await.is_ok());
+    let error = prepare(standing).await.err().unwrap();
+    assert!(
+        error.contains("step 1 (approve 1 T for Spender) grants more than the plan uses: 1 T would be left granted"),
+        "{error}"
+    );
 }

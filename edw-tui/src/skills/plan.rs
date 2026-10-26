@@ -5,7 +5,7 @@
 //! sender or a manifest id (never a raw address the script made up), approvals are exact,
 //! never unlimited, and only to the action's declared spenders.
 
-use alloy_dyn_abi::{DynSolType, JsonAbiExt, Specifier};
+use alloy_dyn_abi::{DynSolType, DynSolValue, FunctionExt, JsonAbiExt, Specifier};
 use alloy_json_abi::{Function, StateMutability};
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_sol_types::{SolCall, sol};
@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use super::{
     abi, explain,
-    manifest::{ActionDef, ContractDef, Skill},
+    manifest::{ActionDef, Approval, ContractDef, ReviewRead, Skill},
 };
 use crate::interim::guards::{format_units, is_burn};
 
@@ -25,6 +25,9 @@ pub const SELF: &str = "$self";
 
 sol! {
     function approve(address spender, uint256 amount) returns (bool);
+    function approveDelegation(address delegatee, uint256 amount);
+    function allowance(address owner, address spender) returns (uint256);
+    function borrowAllowance(address fromUser, address toUser) returns (uint256);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,8 +37,12 @@ pub struct CheckedStep {
     pub to: Address,
     pub value: U256,
     pub data: Bytes,
-    /// `(token, amount)` for an approval, so the caller can check the balance covers it.
+    /// `(token, amount)` for an ERC-20 approval, so the caller can check the balance covers it.
+    /// A credit delegation has none: it lets the delegate borrow, it spends nothing held.
     pub approval: Option<(Address, U256)>,
+    /// For a grant (an approval or a credit delegation): a view on `to` that reads what is left
+    /// of it. The plan's simulation must leave it at 0: a plan spends what it grants.
+    pub grant_left: Option<Bytes>,
     /// Lines for the review under the step, written by the harness: where a user-named contract
     /// is, and what a signed call's raw calldata does (see [`super::explain`]).
     pub details: Vec<String>,
@@ -61,12 +68,94 @@ pub struct Binding {
     pub nonce: U256,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CheckedPlan {
     pub steps: Vec<CheckedStep>,
     pub total_value: U256,
     /// What the script says about its own plan. Shown in the review, labelled as unchecked.
     pub notes: Vec<String>,
+    /// The manifest's review reads on this chain, for the simulation to run before and after
+    /// the steps.
+    pub reads: Vec<CheckedRead>,
+}
+
+/// A [`ReviewRead`] resolved for this chain and sender.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CheckedRead {
+    pub read: ReviewRead,
+    pub to: Address,
+    pub data: Bytes,
+}
+
+impl CheckedRead {
+    /// The review's lines for this read, from the raw outputs of the simulated call before the
+    /// plan and after it: a title, then one row per shown output.
+    pub fn describe(&self, before: &[u8], after: &[u8]) -> Result<Vec<String>, String> {
+        let read = &self.read;
+        let decode = |raw: &[u8]| {
+            read.function.abi_decode_output(raw).map_err(|e| {
+                format!(
+                    "{}: cannot decode what {} returned ({e})",
+                    read.label, read.function.name
+                )
+            })
+        };
+        let (before, after) = (decode(before)?, decode(after)?);
+        let width = read
+            .show
+            .iter()
+            .map(|s| words(&s.name).chars().count())
+            .max()
+            .unwrap_or(0);
+        // The harness's own tag leads, so a label cannot pass for another review line.
+        let mut lines = vec![one_line(&format!(
+            "Read     {} (simulated, before → after)",
+            read.label
+        ))];
+        for shown in &read.show {
+            let value = |outputs: &[DynSolValue]| match outputs.get(shown.output) {
+                Some(DynSolValue::Uint(value, _)) => two_decimals(*value, shown.decimals),
+                _ => "?".into(),
+            };
+            let unit = shown
+                .unit
+                .as_ref()
+                .map_or_else(String::new, |u| format!(" {u}"));
+            lines.push(one_line(&format!(
+                "{:width$}  {} → {}{unit}",
+                words(&shown.name),
+                value(&before),
+                value(&after),
+            )));
+        }
+        Ok(lines)
+    }
+}
+
+/// `healthFactor` → `health factor`.
+fn words(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_uppercase() && !out.is_empty() {
+            out.push(' ');
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
+}
+
+/// Two decimals, cut rather than rounded so a health factor never reads higher than it is. The
+/// maximum uint (Aave's health factor with no debt) reads as ∞.
+fn two_decimals(value: U256, decimals: u8) -> String {
+    if value == U256::MAX {
+        return "∞".into();
+    }
+    let text = format_units(value, decimals);
+    if decimals == 0 {
+        return text;
+    }
+    let (whole, fraction) = text.split_once('.').unwrap_or((&text, ""));
+    format!("{whole}.{:0<2}", &fraction[..fraction.len().min(2)])
 }
 
 /// Checks `plan` (`{"steps": [...]}`) for `action` of `skill` on `chain_id`, sent by `me`.
@@ -129,10 +218,17 @@ pub fn check(
                 .collect()
         })
         .unwrap_or_default();
+    let reads = skill
+        .manifest
+        .review_reads
+        .iter()
+        .filter_map(|read| ctx.read(read).transpose())
+        .collect::<Result<_, _>>()?;
     Ok(CheckedPlan {
         steps: checked,
         total_value,
         notes,
+        reads,
     })
 }
 
@@ -206,7 +302,7 @@ impl Ctx<'_> {
         let token = m
             .token(token_id)
             .ok_or_else(|| format!("`{token_id}` is not a token of this skill"))?;
-        if !token.movable {
+        if token.approval == Approval::Never {
             return Err(format!("{} may not be approved by a plan", token.symbol));
         }
         let token_address = self.on_chain(token_id, token.address.get(&self.chain_id))?;
@@ -218,6 +314,12 @@ impl Ctx<'_> {
                 action.approves.join(", ")
             ));
         }
+        if !token.approval.allows(spender_id) {
+            return Err(format!(
+                "{} may not be approved to `{spender_id}`",
+                token.symbol
+            ));
+        }
         let spender = m
             .contract(spender_id)
             .ok_or_else(|| format!("`{spender_id}` is not a contract of this skill"))?;
@@ -226,25 +328,84 @@ impl Ctx<'_> {
         if amount == U256::MAX {
             return Err("an unlimited approval is never allowed; approve the exact amount".into());
         }
-        Ok(CheckedStep {
-            label: format!(
-                "approve {} {} for {}",
-                format_units(amount, token.decimals),
-                token.symbol,
-                spender.label
+        let shown = format_units(amount, token.decimals);
+        let (label, data, approval, left) = match token.approval {
+            Approval::Delegation { .. } => (
+                format!(
+                    "allow {} to take on up to {shown} {} in your name (credit delegation)",
+                    spender.label, token.symbol
+                ),
+                approveDelegationCall {
+                    delegatee: spender_address,
+                    amount,
+                }
+                .abi_encode(),
+                None,
+                borrowAllowanceCall {
+                    fromUser: self.me,
+                    toUser: spender_address,
+                }
+                .abi_encode(),
             ),
+            _ => (
+                format!("approve {shown} {} for {}", token.symbol, spender.label),
+                approveCall {
+                    spender: spender_address,
+                    amount,
+                }
+                .abi_encode(),
+                Some((token_address, amount)),
+                allowanceCall {
+                    owner: self.me,
+                    spender: spender_address,
+                }
+                .abi_encode(),
+            ),
+        };
+        Ok(CheckedStep {
+            label: one_line(&label),
             to: token_address,
             value: U256::ZERO,
-            data: approveCall {
-                spender: spender_address,
-                amount,
-            }
-            .abi_encode()
-            .into(),
-            approval: Some((token_address, amount)),
+            data: data.into(),
+            approval,
+            grant_left: Some(left.into()),
             details: Vec::new(),
             binding: None,
         })
+    }
+
+    /// `read` encoded for this chain and sender; `None` where its contract has no address.
+    fn read(&self, read: &ReviewRead) -> Result<Option<CheckedRead>, String> {
+        let fail = |e: String| format!("review read {}: {e}", read.label);
+        let contract = self
+            .skill
+            .manifest
+            .contract(&read.contract)
+            .ok_or_else(|| fail(format!("`{}` is not a contract", read.contract)))?;
+        if contract.address_arg.is_none() && !contract.address.contains_key(&self.chain_id) {
+            return Ok(None);
+        }
+        let to = self.contract_address(contract).map_err(fail)?;
+        let values = read
+            .function
+            .inputs
+            .iter()
+            .zip(&read.args)
+            .map(|(param, arg)| {
+                let ty = param.resolve().map_err(|e| format!("{}: {e}", param.ty))?;
+                abi::coerce(&ty, &self.addresses(&ty, arg)?)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(fail)?;
+        let data = read
+            .function
+            .abi_encode_input(&values)
+            .map_err(|e| fail(e.to_string()))?;
+        Ok(Some(CheckedRead {
+            read: read.clone(),
+            to,
+            data: data.into(),
+        }))
     }
 
     /// Where a contract of the manifest is: pinned for this chain, or the address the user gave
@@ -335,6 +496,15 @@ impl Ctx<'_> {
             } else {
                 param.name.clone()
             };
+            let to_sender = contract
+                .self_only
+                .get(name)
+                .is_some_and(|params| params.contains(&param.name));
+            if to_sender && arg.as_str() != Some(SELF) {
+                return Err(format!(
+                    "{name}({label}) must be the sender (`$self`), not {arg}"
+                ));
+            }
             let resolved = if signed {
                 self.signed_argument(&ty, arg)
             } else {
@@ -399,6 +569,7 @@ impl Ctx<'_> {
             value,
             data: data.into(),
             approval: None,
+            grant_left: None,
             details,
             binding,
         })
@@ -575,16 +746,20 @@ impl Ctx<'_> {
     }
 
     /// A declared amount in its token's units, `2.5 USDC (2500000)`, when the argument it points
-    /// at is one of this skill's tokens; `None` (base units) otherwise, and for "all".
+    /// at (or the token it names) is one of this skill's tokens; `None` (base units) otherwise,
+    /// and for "all".
     fn in_token(
         &self,
         function: &Function,
-        token_param: &str,
+        token: &str,
         args: &[Value],
         amount: &Value,
     ) -> Option<String> {
-        let index = function.inputs.iter().position(|p| p.name == token_param)?;
-        let token = self.skill.manifest.token(args.get(index)?.as_str()?)?;
+        let id = match function.inputs.iter().position(|p| p.name == token) {
+            Some(index) => args.get(index)?.as_str()?,
+            None => token,
+        };
+        let token = self.skill.manifest.token(id)?;
         let raw: U256 = amount.as_str()?.parse().ok()?;
         if raw == U256::MAX {
             return None;
@@ -682,12 +857,59 @@ decimals = 6
 movable = false
 address = { 11155111 = "0x16dA4541aD1807f4443d92D26044C1147406EB80" }
 
+[[contract]]
+id = "gateway"
+label = "WETH Gateway"
+functions = [
+  "function borrowETH(address pool,uint256 amount,uint16 referralCode)",
+  "function withdrawETH(address pool,uint256 amount,address to)",
+]
+amounts = { borrowETH = { amount = "weth" } }
+self_only = { withdrawETH = ["to"] }
+address = { 11155111 = "0x387d311e47e80b498169e6fb51d3193167d89F7D" }
+
+[[token]]
+id = "weth"
+symbol = "WETH"
+decimals = 18
+approve_to = ["pool"]
+address = { 11155111 = "0xC558DBdd856501FCd9aaF1E62eae57A9F0629a3c" }
+
+[[token]]
+id = "aweth"
+symbol = "aWETH"
+decimals = 18
+approve_to = ["gateway"]
+address = { 11155111 = "0x5b071b590a59395fE4025A0Ccc1FcC931AAc1830" }
+
+[[token]]
+id = "weth_debt"
+symbol = "WETH debt"
+decimals = 18
+kind = "debt"
+approve_to = ["gateway"]
+address = { 11155111 = "0x22a35DB253f4F6D0029025D6312A3BdAb20C2c6A" }
+
 [[action]]
 name = "supply_it"
 run = "s.py"
 description = "d"
 schema = { type = "object" }
 approves = ["pool"]
+
+[[action]]
+name = "via_gateway"
+run = "g.py"
+description = "d"
+schema = { type = "object" }
+approves = ["pool", "gateway"]
+
+[[review_read]]
+label = "Aave account"
+contract = "pool"
+function = "function getUserAccountData(address user) view returns (uint256 collateral,uint256 debt,uint256 canBorrow,uint256 liquidationThreshold,uint256 ltv,uint256 healthFactor)"
+args = ["$self"]
+show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
 "#,
         )
         .unwrap();
@@ -696,9 +918,114 @@ approves = ["pool"]
     }
 
     fn run(plan: Value) -> Result<CheckedPlan, String> {
+        run_as("supply_it", plan)
+    }
+
+    fn run_as(action: &str, plan: Value) -> Result<CheckedPlan, String> {
         let (_root, skill) = skill();
-        let action = skill.action("supply_it").unwrap().clone();
+        let action = skill.action(action).unwrap().clone();
         check(&plan, &skill, &action, SEPOLIA, ME, &json!({}))
+    }
+
+    const GATEWAY: Address = address!("0x387d311e47e80b498169e6fb51d3193167d89F7D");
+    const AWETH: Address = address!("0x5b071b590a59395fE4025A0Ccc1FcC931AAc1830");
+    const WETH_DEBT: Address = address!("0x22a35DB253f4F6D0029025D6312A3BdAb20C2c6A");
+
+    fn grant(token: &str, spender: &str, amount: &str) -> Value {
+        json!({"steps": [{"approve": {"token": token, "spender": spender, "amount": amount}}]})
+    }
+
+    /// Approving a debt token lets the spender borrow in the sender's name: the step calls
+    /// `approveDelegation`, reads as that in the token's units, and spends nothing the sender holds.
+    #[test]
+    fn a_debt_token_is_granted_by_credit_delegation() {
+        let plan = run_as(
+            "via_gateway",
+            grant("weth_debt", "gateway", "500000000000000000"),
+        )
+        .unwrap();
+        let step = &plan.steps[0];
+        assert_eq!(step.to, WETH_DEBT);
+        assert_eq!(
+            step.data,
+            Bytes::from(
+                approveDelegationCall {
+                    delegatee: GATEWAY,
+                    amount: U256::from(500_000_000_000_000_000u64)
+                }
+                .abi_encode()
+            )
+        );
+        assert_eq!(
+            step.label,
+            "allow WETH Gateway to take on up to 0.5 WETH debt in your name (credit delegation)"
+        );
+        assert_eq!(step.approval, None, "a delegation needs no balance");
+        assert_eq!(
+            step.grant_left,
+            Some(Bytes::from(
+                borrowAllowanceCall {
+                    fromUser: ME,
+                    toUser: GATEWAY
+                }
+                .abi_encode()
+            )),
+            "the simulation checks the plan uses the delegation up"
+        );
+        assert_eq!(plan.total_value, U256::ZERO);
+    }
+
+    #[test]
+    fn approve_to_limits_who_a_token_may_be_granted_to() {
+        let plan = run_as(
+            "via_gateway",
+            grant("aweth", "gateway", "1000000000000000000"),
+        )
+        .unwrap();
+        let one = U256::from(1_000_000_000_000_000_000u64);
+        assert_eq!(plan.steps[0].to, AWETH);
+        assert_eq!(
+            plan.steps[0].data,
+            Bytes::from(
+                approveCall {
+                    spender: GATEWAY,
+                    amount: one
+                }
+                .abi_encode()
+            )
+        );
+        assert_eq!(plan.steps[0].label, "approve 1 aWETH for WETH Gateway");
+        assert_eq!(plan.steps[0].approval, Some((AWETH, one)));
+
+        let refused_as = |action: &str, plan: Value, needle: &str| {
+            let error = run_as(action, plan).unwrap_err();
+            assert!(
+                error.contains(needle),
+                "`{error}` should mention `{needle}`"
+            );
+        };
+        // The action lists the Pool, but these tokens are only for the gateway.
+        refused_as(
+            "via_gateway",
+            grant("aweth", "pool", "1"),
+            "may not be approved to `pool`",
+        );
+        refused_as(
+            "via_gateway",
+            grant("weth_debt", "pool", "1"),
+            "may not be approved to `pool`",
+        );
+        // The token allows the gateway, but this action does not list it.
+        refused_as(
+            "supply_it",
+            grant("weth_debt", "gateway", "1"),
+            "may not approve `gateway`",
+        );
+        refused_as(
+            "via_gateway",
+            grant("weth_debt", "gateway", &U256::MAX.to_string()),
+            "unlimited",
+        );
     }
 
     fn approve(amount: &str) -> Value {
@@ -743,6 +1070,17 @@ approves = ["pool"]
         );
         assert_eq!(a.approval, Some((USDC, U256::from(100_000_000u64))));
         assert_eq!(a.label, "approve 100 USDC for Aave Pool");
+        assert_eq!(
+            a.grant_left,
+            Some(Bytes::from(
+                allowanceCall {
+                    owner: ME,
+                    spender: POOL
+                }
+                .abi_encode()
+            )),
+            "the simulation checks the plan spends the approval"
+        );
 
         let s = &plan.steps[1];
         assert_eq!(s.to, POOL);
@@ -782,6 +1120,86 @@ approves = ["pool"]
             plan.steps[1].label.contains("amount=100000000,"),
             "supply declares nothing in this fixture: {}",
             plan.steps[1].label
+        );
+    }
+
+    sol! {
+        function getUserAccountData(address user) returns (uint256, uint256, uint256, uint256, uint256, uint256);
+    }
+
+    fn encode_words(values: &[U256]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_be_bytes::<32>()).collect()
+    }
+
+    #[test]
+    fn every_plan_carries_the_review_reads_resolved_for_the_sender() {
+        let plan = run(json!({"steps": [approve("1")]})).unwrap();
+        assert_eq!(plan.reads.len(), 1);
+        assert_eq!(plan.reads[0].to, POOL);
+        assert_eq!(
+            plan.reads[0].data,
+            Bytes::from(getUserAccountDataCall { user: ME }.abi_encode())
+        );
+    }
+
+    /// The review shows each declared output as the simulation read it before the plan and
+    /// after it, cut to two decimals, with Aave's "no debt" health factor as ∞.
+    #[test]
+    fn a_review_read_reads_before_and_after() {
+        let plan = run(json!({"steps": [approve("1")]})).unwrap();
+        let usd = |cents: u64| U256::from(cents) * U256::from(1_000_000u64);
+        let before = encode_words(&[
+            U256::ZERO,
+            U256::ZERO,
+            U256::ZERO,
+            U256::ZERO,
+            U256::ZERO,
+            U256::MAX,
+        ]);
+        let after = encode_words(&[
+            usd(412_345) + U256::from(678_901u64),
+            usd(100_000),
+            usd(300_000),
+            U256::from(8_300u64),
+            U256::from(8_000u64),
+            U256::from(1_419_999_999_999_999_999u64),
+        ]);
+        assert_eq!(
+            plan.reads[0].describe(&before, &after).unwrap(),
+            [
+                "Read     Aave account (simulated, before → after)",
+                "collateral     0.00 → 4123.45 USD",
+                "debt           0.00 → 1000.00 USD",
+                "health factor  ∞ → 1.41",
+            ]
+        );
+        assert!(plan.reads[0].describe(&before, &[1, 2, 3]).is_err());
+    }
+
+    /// Where a call pays out, `self_only` keeps the payee the sender: a manifest id there (a
+    /// token contract would swallow the funds) is refused, `$self` is not.
+    #[test]
+    fn a_self_only_parameter_takes_only_the_sender() {
+        let withdraw = |to: &str| json!({"steps": [{"call": {"contract": "gateway", "function": "withdrawETH", "args": ["pool", "1", to]}}]});
+        assert!(run_as("via_gateway", withdraw("$self")).is_ok());
+        for to in ["weth", "pool", "gateway"] {
+            let error = run_as("via_gateway", withdraw(to)).unwrap_err();
+            assert!(error.contains("must be the sender"), "{to}: {error}");
+        }
+    }
+
+    /// A function whose token is implied (a WETH gateway's amount is always WETH) declares the
+    /// token by id instead of by parameter.
+    #[test]
+    fn a_declared_amount_may_name_its_token_directly() {
+        let plan = run_as(
+            "via_gateway",
+            json!({"steps": [{"call": {"contract": "gateway", "function": "borrowETH", "args": ["pool", "500000000000000000", "0"]}}]}),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.steps[0].label,
+            "WETH Gateway.borrowETH(pool=Aave Pool, amount=0.5 WETH (500000000000000000), referralCode=0)"
         );
     }
 

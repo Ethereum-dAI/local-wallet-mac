@@ -30,16 +30,16 @@ def main():
         edw_skill.result({"already_approved": True, "safe": address, "nonce": tx["nonce"], "safe_tx_hash": onchain})
     described = safe.check_warnings(tx, short, chain_id, args)
     edw_skill.plan(
-        [{"call": {
-            "contract": "safe", "function": "approveHash", "args": [onchain],
+        [edw_skill.call_step(
+            "safe", "approveHash", [onchain],
             # The harness asks the Safe whether these fields hash to the approved value, and only
             # then explains them in the review.
-            "explain": {
+            explain={
                 "to": tx["to"], "value": str(tx["value"]), "data": tx.get("data") or "0x", "operation": tx["operation"],
                 "safeTxGas": str(tx["safeTxGas"]), "baseGas": str(tx["baseGas"]), "gasPrice": str(tx["gasPrice"]),
                 "gasToken": tx["gasToken"], "refundReceiver": tx["refundReceiver"], "nonce": str(tx["nonce"]),
             },
-        }}],
+        )],
         notes=[
             f"nonce {tx['nonce']}: {described['summary']} (read from the calldata)",
             "an on-chain approval cannot be taken back: it stays valid until this nonce is used or you stop being an owner",

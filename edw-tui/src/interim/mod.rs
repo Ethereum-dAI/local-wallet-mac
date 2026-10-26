@@ -963,7 +963,31 @@ impl Interim {
             }
         }
 
-        let results = simulate::simulate(&account.rpc, me, &plan.steps).await?;
+        // The steps, then what is left of each grant they make: a plan spends what it grants.
+        let grants: Vec<(usize, simulate::Call)> = plan
+            .steps
+            .iter()
+            .enumerate()
+            .filter_map(|(index, step)| {
+                let data = step.grant_left.clone()?;
+                Some((
+                    index,
+                    simulate::Call {
+                        to: step.to,
+                        value: U256::ZERO,
+                        data,
+                    },
+                ))
+            })
+            .collect();
+        let calls: Vec<simulate::Call> = plan
+            .steps
+            .iter()
+            .map(simulate::Call::from)
+            .chain(grants.iter().map(|(_, call)| call.clone()))
+            .collect();
+        let mut results = simulate::simulate(&account.rpc, me, &calls).await?;
+        let left = results.split_off(plan.steps.len());
         for (index, (result, step)) in results.iter().zip(&plan.steps).enumerate() {
             if !result.ok {
                 let reason = result.error.as_deref().unwrap_or("reverted");
@@ -975,7 +999,78 @@ impl Interim {
                 ));
             }
         }
+        for ((index, call), result) in grants.iter().zip(&left) {
+            let remaining = (result.ok && result.output.len() == 32)
+                .then(|| U256::from_be_slice(&result.output));
+            let step = &plan.steps[*index];
+            match remaining {
+                Some(remaining) if remaining.is_zero() => {}
+                Some(remaining) => {
+                    let (symbol, decimals) = names
+                        .get(&call.to)
+                        .cloned()
+                        .unwrap_or_else(|| (call.to.to_string(), 0));
+                    return Err(format!(
+                        "step {} ({}) grants more than the plan uses: {} {symbol} would be left granted, so nothing was sent",
+                        index + 1,
+                        step.label,
+                        format_units(remaining, decimals)
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "step {} ({}): what is left of it cannot be read after the plan, so nothing was sent",
+                        index + 1,
+                        step.label
+                    ));
+                }
+            }
+        }
         let deltas = simulate::deltas(me, &results);
+
+        // The review reads run in a simulation of their own, before the steps and after them, so
+        // nothing they do can change the state the steps above were checked on.
+        let mut read_lines = Vec::new();
+        let (mut before, mut after) = (Vec::new(), Vec::new());
+        if !plan.reads.is_empty() {
+            let reads: Vec<simulate::Call> = plan
+                .reads
+                .iter()
+                .map(|r| simulate::Call {
+                    to: r.to,
+                    value: U256::ZERO,
+                    data: r.data.clone(),
+                })
+                .collect();
+            let calls: Vec<simulate::Call> = reads
+                .iter()
+                .cloned()
+                .chain(plan.steps.iter().map(simulate::Call::from))
+                .chain(reads.iter().cloned())
+                .collect();
+            before = simulate::simulate(&account.rpc, me, &calls).await?;
+            after = before.split_off(reads.len() + plan.steps.len());
+            if before[reads.len()..].iter().any(|r| !r.ok) {
+                return Err(
+                    "the plan's steps no longer succeed in the review-read simulation, so nothing was sent"
+                        .into(),
+                );
+            }
+            before.truncate(reads.len());
+        }
+        for (read, (b, a)) in plan.reads.iter().zip(before.iter().zip(&after)) {
+            if let Some(failed) = [b, a].into_iter().find(|r| !r.ok) {
+                return Err(format!(
+                    "the review read `{}` failed in the simulation ({}), so nothing was sent",
+                    read.read.label,
+                    evm_reason(failed.error.as_deref().unwrap_or("reverted"))
+                ));
+            }
+            // A title line, then its values under it like a step's details.
+            let mut lines = read.describe(&b.output, &a.output)?.into_iter();
+            read_lines.extend(lines.next());
+            read_lines.extend(lines.map(|row| format!("           {row}")));
+        }
 
         let fees = provider
             .estimate_eip1559_fees()
@@ -1084,6 +1179,7 @@ impl Interim {
             "Changes  {} (simulated)",
             describe_deltas(&deltas, names)
         ));
+        preview.extend(read_lines);
         preview.push(format!("Max fee  {} ETH", format_units(max_cost, 18)));
         preview.push("Signed by edw-tui's interim executor (edw-core), not edw's CLI".into());
         Ok(Prepared {

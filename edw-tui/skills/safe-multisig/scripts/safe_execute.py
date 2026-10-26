@@ -77,10 +77,10 @@ def main():
     described = safe.check_warnings(tx, short, chain_id, args)
     approved = sum(1 for _, sig in chosen if sig.endswith("01") and sig[:24] == "00" * 12 and len(sig) == 130 and sig[-66:-2] == "00" * 32)
     edw_skill.plan(
-        [{"call": {"contract": "safe", "function": "execTransaction", "args": [
+        [edw_skill.call_step("safe", "execTransaction", [
             tx["to"], str(tx["value"]), tx.get("data") or "0x", str(tx["operation"]), str(tx["safeTxGas"]),
             str(tx["baseGas"]), str(tx["gasPrice"]), tx["gasToken"], tx["refundReceiver"], joined,
-        ]}}],
+        ])],
         notes=[
             f"nonce {tx['nonce']}: {described['summary']} (read from the calldata)",
             f"{threshold} of {len(owners)} owners' signatures, {approved} of them approvals recorded on chain; the Safe accepted them in a dry check",

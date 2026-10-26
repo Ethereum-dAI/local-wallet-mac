@@ -79,6 +79,23 @@ def block_number():
     return int(_ask({"type": "eth_blockNumber"})["result"], 16)
 
 
+def call_step(contract, function, args, value=None, explain=None):
+    """A plan step calling `function` on the manifest contract id `contract`. `value` is wei and
+    needs a payable function; `explain` is only for approving a Safe transaction hash."""
+    step = {"contract": contract, "function": function, "args": list(args)}
+    if value is not None:
+        step["value"] = str(value)
+    if explain is not None:
+        step["explain"] = explain
+    return {"call": step}
+
+
+def approve_step(token, spender, amount):
+    """A plan step approving exactly `amount` base units of the token id `token` to the contract
+    id `spender` (a credit delegation for a debt token)."""
+    return {"approve": {"token": token, "spender": spender, "amount": str(amount)}}
+
+
 def result(value):
     _send({"type": "result", "value": value})
     sys.exit(0)

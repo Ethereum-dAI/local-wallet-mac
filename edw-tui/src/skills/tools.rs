@@ -26,7 +26,7 @@ use super::{
     author::{self, DraftStore},
     catalog::{Catalog, Installed},
     host::{Host, HostConfig, Log, SharedCache},
-    manifest::Skill,
+    manifest::{Approval, Skill},
     sandbox::Runner,
 };
 use crate::interim::SkillContext;
@@ -219,7 +219,7 @@ impl SkillSet {
                 let address = t.address.get(&at.chain_id)?;
                 Some((
                     t.id.clone(),
-                    json!({"address": address.to_string(), "symbol": t.symbol, "decimals": t.decimals, "movable": t.movable}),
+                    json!({"address": address.to_string(), "symbol": t.symbol, "decimals": t.decimals, "movable": t.approval != Approval::Never}),
                 ))
             })
             .collect();

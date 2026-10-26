@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use alloy_json_abi::Function;
+use alloy_json_abi::{Function, StateMutability};
 use alloy_primitives::Address;
 use serde::Deserialize;
 use serde_json::Value;
@@ -36,6 +36,29 @@ pub struct Manifest {
     pub tokens: Vec<TokenDef>,
     pub read_tools: Vec<ToolDef>,
     pub actions: Vec<ActionDef>,
+    pub review_reads: Vec<ReviewRead>,
+}
+
+/// A view call every action's review shows, run in the plan's own simulation before the plan
+/// and after it (an Aave account's debt and health factor, say), so those numbers come from the
+/// harness and never from the skill.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReviewRead {
+    pub label: String,
+    pub contract: String,
+    pub function: Function,
+    /// Like a call's: `$self`, manifest ids, plain decimals.
+    pub args: Vec<Value>,
+    /// The uint outputs shown, in the function's order.
+    pub show: Vec<Shown>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shown {
+    pub output: usize,
+    pub name: String,
+    pub decimals: u8,
+    pub unit: Option<String>,
 }
 
 /// A contract a plan may call: only the listed functions, only at the pinned addresses.
@@ -53,20 +76,48 @@ pub struct ContractDef {
     /// contract itself rejects the call unless the owners signed exactly those arguments (a
     /// Safe's `execTransaction`). The review shows the arguments; the signatures are the check.
     pub signed_calls: Vec<String>,
-    /// function → uint parameter → the address parameter holding its token, so the review can
-    /// show that amount in the token's units (`amount=2.5 USDC (2500000)`).
+    /// function → uint parameter → the address parameter holding its token, or a token id when
+    /// the function's token is implied, so the review can show that amount in the token's units
+    /// (`amount=2.5 USDC (2500000)`).
     pub amounts: BTreeMap<String, BTreeMap<String, String>>,
+    /// function → address parameters that must be the sender (`$self`): where the funds of a
+    /// call go, so a plan cannot pay out to a token or contract of the manifest instead.
+    pub self_only: BTreeMap<String, Vec<String>>,
 }
 
-/// An ERC-20 the skill names. `movable` tokens may be approved by a plan; the others are only
-/// listed so the review can name them in the simulated changes.
+/// A token the skill names, and what a plan may grant on it.
 #[derive(Clone, Debug)]
 pub struct TokenDef {
     pub id: String,
     pub symbol: String,
     pub decimals: u8,
     pub address: BTreeMap<u64, Address>,
-    pub movable: bool,
+    pub approval: Approval,
+}
+
+/// What a plan's approve step may grant on a token, and to which contracts of the manifest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Approval {
+    /// Never: the token is listed so the review can name it in the simulated changes.
+    Never,
+    /// ERC-20 `approve`, to any spender the action lists or, with `only`, just to those.
+    Allowance { only: Option<Vec<String>> },
+    /// Credit delegation of an Aave debt token (`approveDelegation`): the delegate may borrow up
+    /// to the amount in the sender's name. Only to the listed contracts.
+    Delegation { to: Vec<String> },
+}
+
+impl Approval {
+    /// Whether a plan may grant this to the contract `spender`.
+    pub fn allows(&self, spender: &str) -> bool {
+        match self {
+            Self::Never => false,
+            Self::Allowance { only: None } => true,
+            Self::Allowance { only: Some(ids) } | Self::Delegation { to: ids } => {
+                ids.iter().any(|id| id == spender)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -137,6 +188,20 @@ struct RawManifest {
     read_tools: Vec<RawTool>,
     #[serde(default, rename = "action")]
     actions: Vec<RawTool>,
+    #[serde(default, rename = "review_read")]
+    review_reads: Vec<RawReviewRead>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReviewRead {
+    label: String,
+    contract: String,
+    function: String,
+    #[serde(default)]
+    args: Vec<Value>,
+    /// output name → `"<decimals>"` or `"<decimals> <unit>"`, e.g. `"8 USD"`.
+    show: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -152,6 +217,8 @@ struct RawContract {
     signed_calls: Vec<String>,
     #[serde(default)]
     amounts: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(default)]
+    self_only: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -163,6 +230,18 @@ struct RawToken {
     address: BTreeMap<String, String>,
     #[serde(default = "yes")]
     movable: bool,
+    approve_to: Option<Vec<String>>,
+    #[serde(default)]
+    kind: TokenKind,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum TokenKind {
+    #[default]
+    Erc20,
+    /// An Aave debt token: not transferable, approved by credit delegation.
+    Debt,
 }
 
 fn yes() -> bool {
@@ -335,12 +414,54 @@ fn tool(raw: RawTool) -> Result<ToolDef, String> {
     })
 }
 
+/// What a plan may grant on token `t`: `movable = false` is never, `kind = "debt"` is a credit
+/// delegation, which must name its delegates, and `approve_to` narrows an ERC-20's spenders.
+fn approval(t: &RawToken, contracts: &[ContractDef]) -> Result<Approval, String> {
+    let id = &t.id;
+    if let Some(to) = &t.approve_to {
+        if to.is_empty() {
+            return Err(format!(
+                "{id}: approve_to is empty; write `movable = false` for a token that is never approved"
+            ));
+        }
+        for spender in to {
+            match contracts.iter().find(|c| &c.id == spender) {
+                None => {
+                    return Err(format!(
+                        "{id}: approve_to names `{spender}`, which is not a contract in this manifest"
+                    ));
+                }
+                Some(c) if c.address_arg.is_some() => {
+                    return Err(format!(
+                        "{id}: approve_to names `{spender}`, whose address the user names; only a pinned contract may be approved"
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    match (t.movable, t.kind, t.approve_to.clone()) {
+        (false, _, Some(_)) => Err(format!(
+            "{id}: give `movable = false` or `approve_to`, not both"
+        )),
+        (false, _, None) => Ok(Approval::Never),
+        (true, TokenKind::Erc20, only) => Ok(Approval::Allowance { only }),
+        (true, TokenKind::Debt, Some(to)) => Ok(Approval::Delegation { to }),
+        (true, TokenKind::Debt, None) => Err(format!(
+            "{id}: a debt token is delegated only to the contracts in `approve_to`; list them, or write `movable = false`"
+        )),
+    }
+}
+
 /// Token functions that grant or move funds directly. Plans approve only through the checker's
 /// own exact-amount step, so a manifest may not list these.
-const MOVES_TOKENS: [&str; 10] = [
+const MOVES_TOKENS: [&str; 15] = [
     "approve",
     "increaseallowance",
     "decreaseallowance",
+    "increaseapproval",
+    "decreaseapproval",
+    "authorizeoperator",
     "permit",
     "transfer",
     "transferfrom",
@@ -348,6 +469,8 @@ const MOVES_TOKENS: [&str; 10] = [
     "setapprovalforall",
     "approveandcall",
     "transferandcall",
+    "approvedelegation",
+    "delegationwithsig",
 ];
 
 /// A function a plan could use to get around the checker: one that moves or approves tokens
@@ -382,11 +505,12 @@ fn sidesteps_the_checker(function: &Function, signed: bool) -> Option<String> {
 }
 
 /// Every `amounts` entry names a listed function, one of its uint parameters, and one of its
-/// address parameters (the token).
+/// address parameters (the token) or one of the manifest's token ids.
 fn check_amounts(
     contract: &str,
     functions: &[Function],
     amounts: &BTreeMap<String, BTreeMap<String, String>>,
+    token_ids: &BTreeSet<&str>,
 ) -> Result<(), String> {
     for (name, params) in amounts {
         let function = functions.iter().find(|f| &f.name == name).ok_or_else(|| {
@@ -408,6 +532,14 @@ fn check_amounts(
             if !ty(amount)?.starts_with("uint") {
                 return Err(format!(
                     "{contract}: amounts.{name}.{amount} must be a uint parameter"
+                ));
+            }
+            if !function.inputs.iter().any(|p| &p.name == token) {
+                if token_ids.contains(token.as_str()) {
+                    continue;
+                }
+                return Err(format!(
+                    "{contract}: amounts.{name}.{amount} names `{token}`, which is neither a parameter of {name} nor a token id"
                 ));
             }
             if ty(token)? != "address" {
@@ -439,6 +571,15 @@ fn single_line(raw: &RawManifest) -> Result<(), String> {
         fields.push(("tool name", &t.name));
         fields.push(("tool description", &t.description));
     }
+    for r in &raw.review_reads {
+        fields.push(("review_read label", &r.label));
+        fields.extend(r.show.iter().flat_map(|(name, spec)| {
+            [
+                ("review_read show", name.as_str()),
+                ("review_read show", spec),
+            ]
+        }));
+    }
     match fields
         .iter()
         .find(|(_, text)| text.chars().any(char::is_control))
@@ -450,6 +591,7 @@ fn single_line(raw: &RawManifest) -> Result<(), String> {
 
 fn validate(raw: RawManifest) -> Result<Manifest, String> {
     single_line(&raw)?;
+    let token_ids: BTreeSet<&str> = raw.tokens.iter().map(|t| t.id.as_str()).collect();
     let mut ids = BTreeSet::new();
     let mut contracts = Vec::new();
     for c in raw.contracts {
@@ -468,7 +610,26 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
-        check_amounts(&c.id, &functions, &c.amounts)?;
+        check_amounts(&c.id, &functions, &c.amounts, &token_ids)?;
+        for (name, params) in &c.self_only {
+            let function = functions.iter().find(|f| &f.name == name).ok_or_else(|| {
+                format!(
+                    "{}: self_only names {name}, which is not in functions",
+                    c.id
+                )
+            })?;
+            if let Some(param) = params.iter().find(|p| {
+                !function
+                    .inputs
+                    .iter()
+                    .any(|i| &i.name == *p && i.ty == "address")
+            }) {
+                return Err(format!(
+                    "{}: self_only.{name} names `{param}`, which is not an address parameter of {name}",
+                    c.id
+                ));
+            }
+        }
         if !c.signed_calls.is_empty() && c.address_arg.is_none() {
             return Err(format!(
                 "{}: signed_calls is only for a contract at an address the user names (address_arg); a pinned contract may not take raw bytes",
@@ -501,6 +662,7 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
             address_arg: c.address_arg,
             signed_calls: c.signed_calls,
             amounts: c.amounts,
+            self_only: c.self_only,
             label: c.label.unwrap_or_else(|| c.id.clone()),
             address: addresses(&c.id, c.address)?,
             id: c.id,
@@ -513,11 +675,11 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
             return Err(format!("duplicate id `{}`", t.id));
         }
         tokens.push(TokenDef {
+            approval: approval(&t, &contracts)?,
             address: addresses(&t.id, t.address)?,
             id: t.id,
             symbol: t.symbol,
             decimals: t.decimals,
-            movable: t.movable,
         });
     }
     let mut names = BTreeSet::new();
@@ -561,6 +723,11 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
             tool: tool(a)?,
         });
     }
+    let review_reads = raw
+        .review_reads
+        .into_iter()
+        .map(|r| review_read(r, &contracts, &tokens))
+        .collect::<Result<_, _>>()?;
     Ok(Manifest {
         version: raw.version,
         requires: raw.requires,
@@ -569,6 +736,128 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
         tokens,
         read_tools,
         actions,
+        review_reads,
+    })
+}
+
+/// A review read calls a view function of a pinned manifest contract, with arguments a call
+/// could take (`$self`, manifest ids, plain decimals), and shows only uint outputs it names, each
+/// as `"<decimals>"` or `"<decimals> <unit>"`.
+fn review_read(
+    raw: RawReviewRead,
+    contracts: &[ContractDef],
+    tokens: &[TokenDef],
+) -> Result<ReviewRead, String> {
+    let label = &raw.label;
+    match contracts.iter().find(|c| c.id == raw.contract) {
+        None => {
+            return Err(format!(
+                "review_read {label}: `{}` is not a contract in this manifest",
+                raw.contract
+            ));
+        }
+        Some(c) if c.address_arg.is_some() => {
+            return Err(format!(
+                "review_read {label}: `{}` has no pinned address",
+                raw.contract
+            ));
+        }
+        Some(_) => {}
+    }
+    let function = Function::parse(&raw.function)
+        .map_err(|e| format!("review_read {label}: `{}`: {e}", raw.function))?;
+    if !matches!(
+        function.state_mutability,
+        StateMutability::View | StateMutability::Pure
+    ) {
+        return Err(format!(
+            "review_read {label}: {} must be a view function",
+            function.name
+        ));
+    }
+    if let Some(why) = sidesteps_the_checker(&function, false) {
+        return Err(format!("review_read {label}: {why}"));
+    }
+    if raw.args.len() != function.inputs.len() {
+        return Err(format!(
+            "review_read {label}: {} takes {} arguments, got {}",
+            function.name,
+            function.inputs.len(),
+            raw.args.len()
+        ));
+    }
+    let known = |id: &str| {
+        id == "$self"
+            || tokens.iter().any(|t| t.id == id)
+            || contracts
+                .iter()
+                .any(|c| c.id == id && c.address_arg.is_none())
+    };
+    for (param, arg) in function.inputs.iter().zip(&raw.args) {
+        let fits = match (param.ty.as_str(), arg) {
+            ("address", Value::String(id)) => known(id),
+            ("address", _) => false,
+            (ty, Value::String(n)) if ty.starts_with("uint") => {
+                !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
+            }
+            (ty, Value::Number(n)) if ty.starts_with("uint") => n.is_u64(),
+            (ty, _) => !ty.starts_with("uint"),
+        };
+        if !fits {
+            return Err(format!(
+                "review_read {label}: argument `{}` {arg} must be `$self`, a manifest id or a plain decimal",
+                param.name
+            ));
+        }
+    }
+    if raw.show.is_empty() {
+        return Err(format!(
+            "review_read {label}: `show` names no output to show"
+        ));
+    }
+    for name in raw.show.keys() {
+        match function.outputs.iter().find(|o| &o.name == name) {
+            Some(o) if o.ty.starts_with("uint") => {}
+            Some(_) => {
+                return Err(format!(
+                    "review_read {label}: `{name}` is not a uint output"
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "review_read {label}: {} has no output named `{name}`",
+                    function.name
+                ));
+            }
+        }
+    }
+    let show = function
+        .outputs
+        .iter()
+        .enumerate()
+        .filter_map(|(output, o)| Some((output, o, raw.show.get(&o.name)?)))
+        .map(|(output, o, spec)| {
+            let (decimals, unit) = spec.split_once(' ').unwrap_or((spec, ""));
+            let decimals = decimals.parse().map_err(|_| {
+                format!(
+                    "review_read {label}: show.{} must be \"<decimals>\" or \"<decimals> <unit>\", not `{spec}`",
+                    o.name
+                )
+            })?;
+            Ok(Shown {
+                output,
+                name: o.name.clone(),
+                decimals,
+                unit: (!unit.is_empty()).then(|| unit.to_owned()),
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    Ok(ReviewRead {
+        label: raw.label,
+        contract: raw.contract,
+        function,
+        args: raw.args,
+        show,
     })
 }
 
@@ -669,8 +958,11 @@ approves = ["pool"]
             pool.address[&1],
             address!("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")
         );
-        assert!(m.token("usdc").unwrap().movable);
-        assert!(!m.token("ausdc").unwrap().movable);
+        assert_eq!(
+            m.token("usdc").unwrap().approval,
+            Approval::Allowance { only: None }
+        );
+        assert_eq!(m.token("ausdc").unwrap().approval, Approval::Never);
         assert_eq!(m.token("usdc").unwrap().decimals, 6);
         assert_eq!(
             m.read_tools[0].cache["https://yields.llama.fi/pools"],
@@ -679,6 +971,130 @@ approves = ["pool"]
         assert_eq!(m.actions[0].approves, ["pool"]);
         assert!(skill.has_scripts());
         assert_eq!(skill.tool_names(), ["demo_read", "demo_supply"]);
+    }
+
+    /// `approve_to` narrows to whom a token may be approved; a `debt` token is approved by credit
+    /// delegation and must name its delegates; `movable = false` is never approved.
+    #[test]
+    fn token_approval_policies() {
+        let with = |token: &str| {
+            let toml = format!(
+                "{SKILL_TOML}\n[[contract]]\nid = \"gateway\"\nfunctions = [\"function depositETH(address pool,address onBehalfOf,uint16 referralCode) payable\"]\naddress = {{ 1 = \"0xd01607c3C5eCABa394D8be377a08590149325722\" }}\n\n[[token]]\nid = \"t\"\nsymbol = \"T\"\ndecimals = 18\naddress = {{ 1 = \"0x4d5F47FA6A74757f35C14fD3a6Ef8E3C9BC514E8\" }}\n{token}\n"
+            );
+            let root = tempfile::tempdir().unwrap();
+            let dir = folder(root.path(), "demo", SKILL_MD, Some(&toml));
+            load(&dir).map(|s| s.manifest.token("t").unwrap().approval.clone())
+        };
+        let gateway = || vec!["gateway".to_owned()];
+        assert_eq!(
+            with("approve_to = [\"gateway\"]").unwrap(),
+            Approval::Allowance {
+                only: Some(gateway())
+            }
+        );
+        assert_eq!(
+            with("kind = \"debt\"\napprove_to = [\"gateway\"]").unwrap(),
+            Approval::Delegation { to: gateway() }
+        );
+        assert_eq!(
+            with("kind = \"debt\"\nmovable = false").unwrap(),
+            Approval::Never
+        );
+        for (token, needle) in [
+            ("kind = \"debt\"", "debt token"),
+            ("movable = false\napprove_to = [\"gateway\"]", "not both"),
+            ("approve_to = []", "empty"),
+            ("approve_to = [\"router\"]", "router"),
+            ("kind = \"nft\"", "kind"),
+        ] {
+            let error = with(token).unwrap_err();
+            assert!(error.contains(needle), "{token}: {error}");
+        }
+        let a = Approval::Allowance {
+            only: Some(gateway()),
+        };
+        assert!(a.allows("gateway") && !a.allows("pool"));
+        assert!(Approval::Allowance { only: None }.allows("pool"));
+        assert!(!Approval::Never.allows("pool"));
+        assert!(!Approval::Delegation { to: gateway() }.allows("pool"));
+    }
+
+    const ACCOUNT: &str = r#"
+[[review_read]]
+label = "Aave account"
+contract = "pool"
+function = "function getUserAccountData(address user) view returns (uint256 collateral,uint256 debt,uint256 canBorrow,uint256 liquidationThreshold,uint256 ltv,uint256 healthFactor)"
+args = ["$self"]
+show = { healthFactor = "18", collateral = "8 USD" }
+"#;
+
+    #[test]
+    fn a_review_read_shows_the_uint_outputs_it_names_in_function_order() {
+        let root = tempfile::tempdir().unwrap();
+        let toml = format!("{SKILL_TOML}{ACCOUNT}");
+        let dir = folder(root.path(), "demo", SKILL_MD, Some(&toml));
+        let skill = load(&dir).unwrap();
+        let read = &skill.manifest.review_reads[0];
+        assert_eq!(read.label, "Aave account");
+        assert_eq!(read.contract, "pool");
+        assert_eq!(read.function.name, "getUserAccountData");
+        assert_eq!(read.args, [Value::String("$self".into())]);
+        assert_eq!(
+            read.show,
+            [
+                Shown {
+                    output: 0,
+                    name: "collateral".into(),
+                    decimals: 8,
+                    unit: Some("USD".into())
+                },
+                Shown {
+                    output: 5,
+                    name: "healthFactor".into(),
+                    decimals: 18,
+                    unit: None
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_review_read_must_be_a_view_of_a_manifest_contract_showing_uints() {
+        let bad = |from: &str, to: &str| {
+            load_err(
+                SKILL_MD,
+                Some(&format!("{SKILL_TOML}{}", ACCOUNT.replacen(from, to, 1))),
+            )
+        };
+        assert!(bad("contract = \"pool\"", "contract = \"oracle\"").contains("oracle"));
+        assert!(bad(") view returns", ") returns").contains("view"));
+        assert!(bad("args = [\"$self\"]", "args = []").contains("1 arguments"));
+        for arg in [
+            "\"0x00000000000000000000000000000000000000E1\"",
+            "\"attacker\"",
+            "7",
+        ] {
+            let error = bad("args = [\"$self\"]", &format!("args = [{arg}]"));
+            assert!(error.contains("must be `$self`"), "{arg}: {error}");
+        }
+        assert!(
+            bad(
+                "function getUserAccountData(address user) view returns",
+                "function approve(address user) view returns"
+            )
+            .contains("not allowed")
+        );
+        assert!(bad("healthFactor = \"18\"", "health = \"18\"").contains("health"));
+        assert!(bad("\"18\"", "\"eighteen\"").contains("decimals"));
+        assert!(
+            bad(
+                "show = { healthFactor = \"18\", collateral = \"8 USD\" }",
+                "show = {}"
+            )
+            .contains("no output")
+        );
+        assert!(bad("uint256 healthFactor)", "address healthFactor)").contains("not a uint"));
+        assert!(bad("\"8 USD\"", "\"8 U\\u001bSD\"").contains("control"));
     }
 
     #[test]
@@ -750,6 +1166,25 @@ approves = ["pool"]
         };
         assert!(amounts("borrow = { amount = \"asset\" }").contains("borrow"));
         assert!(amounts("supply = { amount = \"nope\" }").contains("nope"));
+        // `self_only` names a listed function's address parameter.
+        let self_only = |decl: &str| {
+            bad(
+                "label = \"Aave Pool\"",
+                &format!("label = \"Aave Pool\"\nself_only = {{ {decl} }}"),
+            )
+        };
+        assert!(self_only("borrow = [\"onBehalfOf\"]").contains("borrow"));
+        assert!(self_only("supply = [\"amount\"]").contains("not an address parameter"));
+        assert!(self_only("supply = [\"payee\"]").contains("payee"));
+        // Or a token id, for a function whose token is implied.
+        let root = tempfile::tempdir().unwrap();
+        let by_id = SKILL_TOML.replacen(
+            "label = \"Aave Pool\"",
+            "label = \"Aave Pool\"\namounts = { supply = { amount = \"ausdc\" } }",
+            1,
+        );
+        let dir = folder(root.path(), "demo", SKILL_MD, Some(&by_id));
+        assert!(load(&dir).is_ok());
         assert!(amounts("supply = { amount = \"referralCode\" }").contains("address"));
         assert!(amounts("supply = { asset = \"onBehalfOf\" }").contains("uint"));
         // Functions that would get around the plan checker's approval and recipient rules.
@@ -765,6 +1200,16 @@ approves = ["pool"]
             "function multicall(bytes[] data)",
             "function execute(address target,bytes data)",
             "function batch((address,bytes)[] calls)",
+        ] {
+            let error = bad(supply, sig);
+            assert!(error.contains("not allowed"), "{sig}: {error}");
+        }
+        for sig in [
+            "function approveDelegation(address delegatee,uint256 amount)",
+            "function delegationWithSig(address delegator,address delegatee,uint256 value,uint256 deadline,uint8 v,bytes32 r,bytes32 s)",
+            "function increaseApproval(address spender,uint256 addedValue)",
+            "function decreaseApproval(address spender,uint256 subtractedValue)",
+            "function authorizeOperator(address operator)",
         ] {
             let error = bad(supply, sig);
             assert!(error.contains("not allowed"), "{sig}: {error}");

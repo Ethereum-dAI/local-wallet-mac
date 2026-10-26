@@ -13,6 +13,7 @@ fn send(wei: u64) -> CheckedStep {
         value: U256::from(wei),
         data: Bytes::new(),
         approval: None,
+        grant_left: None,
         details: Vec::new(),
         binding: None,
     }
@@ -28,7 +29,11 @@ async fn two_sends_are_simulated_in_one_block_and_netted() {
         }
     };
     let from = anvil.addresses()[0];
-    let results = simulate::simulate(&anvil.endpoint_url(), from, &[send(5), send(7)])
+    let calls = [send(5), send(7)]
+        .iter()
+        .map(simulate::Call::from)
+        .collect::<Vec<_>>();
+    let results = simulate::simulate(&anvil.endpoint_url(), from, &calls)
         .await
         .unwrap();
     assert_eq!(results.len(), 2);

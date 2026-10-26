@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use alloy_json_abi::Function;
+use alloy_json_abi::{Function, StateMutability};
 use alloy_primitives::Address;
 use serde::Deserialize;
 use serde_json::Value;
@@ -36,6 +36,29 @@ pub struct Manifest {
     pub tokens: Vec<TokenDef>,
     pub read_tools: Vec<ToolDef>,
     pub actions: Vec<ActionDef>,
+    pub review_reads: Vec<ReviewRead>,
+}
+
+/// A view call every action's review shows, run in the plan's own simulation before the plan
+/// and after it (an Aave account's debt and health factor, say), so those numbers come from the
+/// harness and never from the skill.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReviewRead {
+    pub label: String,
+    pub contract: String,
+    pub function: Function,
+    /// Like a call's: `$self`, manifest ids, plain decimals.
+    pub args: Vec<Value>,
+    /// The uint outputs shown, in the function's order.
+    pub show: Vec<Shown>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shown {
+    pub output: usize,
+    pub name: String,
+    pub decimals: u8,
+    pub unit: Option<String>,
 }
 
 /// A contract a plan may call: only the listed functions, only at the pinned addresses.
@@ -162,6 +185,20 @@ struct RawManifest {
     read_tools: Vec<RawTool>,
     #[serde(default, rename = "action")]
     actions: Vec<RawTool>,
+    #[serde(default, rename = "review_read")]
+    review_reads: Vec<RawReviewRead>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReviewRead {
+    label: String,
+    contract: String,
+    function: String,
+    #[serde(default)]
+    args: Vec<Value>,
+    /// output name → `"<decimals>"` or `"<decimals> <unit>"`, e.g. `"8 USD"`.
+    show: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -526,6 +563,15 @@ fn single_line(raw: &RawManifest) -> Result<(), String> {
         fields.push(("tool name", &t.name));
         fields.push(("tool description", &t.description));
     }
+    for r in &raw.review_reads {
+        fields.push(("review_read label", &r.label));
+        fields.extend(r.show.iter().flat_map(|(name, spec)| {
+            [
+                ("review_read show", name.as_str()),
+                ("review_read show", spec),
+            ]
+        }));
+    }
     match fields
         .iter()
         .find(|(_, text)| text.chars().any(char::is_control))
@@ -649,6 +695,11 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
             tool: tool(a)?,
         });
     }
+    let review_reads = raw
+        .review_reads
+        .into_iter()
+        .map(|r| review_read(r, &contracts))
+        .collect::<Result<_, _>>()?;
     Ok(Manifest {
         version: raw.version,
         requires: raw.requires,
@@ -657,6 +708,87 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
         tokens,
         read_tools,
         actions,
+        review_reads,
+    })
+}
+
+/// A review read calls a view function of a manifest contract, and shows only uint outputs it
+/// names, each as `"<decimals>"` or `"<decimals> <unit>"`.
+fn review_read(raw: RawReviewRead, contracts: &[ContractDef]) -> Result<ReviewRead, String> {
+    let label = &raw.label;
+    if !contracts.iter().any(|c| c.id == raw.contract) {
+        return Err(format!(
+            "review_read {label}: `{}` is not a contract in this manifest",
+            raw.contract
+        ));
+    }
+    let function = Function::parse(&raw.function)
+        .map_err(|e| format!("review_read {label}: `{}`: {e}", raw.function))?;
+    if !matches!(
+        function.state_mutability,
+        StateMutability::View | StateMutability::Pure
+    ) {
+        return Err(format!(
+            "review_read {label}: {} must be a view function",
+            function.name
+        ));
+    }
+    if raw.args.len() != function.inputs.len() {
+        return Err(format!(
+            "review_read {label}: {} takes {} arguments, got {}",
+            function.name,
+            function.inputs.len(),
+            raw.args.len()
+        ));
+    }
+    if raw.show.is_empty() {
+        return Err(format!(
+            "review_read {label}: `show` names no output to show"
+        ));
+    }
+    for name in raw.show.keys() {
+        match function.outputs.iter().find(|o| &o.name == name) {
+            Some(o) if o.ty.starts_with("uint") => {}
+            Some(_) => {
+                return Err(format!(
+                    "review_read {label}: `{name}` is not a uint output"
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "review_read {label}: {} has no output named `{name}`",
+                    function.name
+                ));
+            }
+        }
+    }
+    let show = function
+        .outputs
+        .iter()
+        .enumerate()
+        .filter_map(|(output, o)| Some((output, o, raw.show.get(&o.name)?)))
+        .map(|(output, o, spec)| {
+            let (decimals, unit) = spec.split_once(' ').unwrap_or((spec, ""));
+            let decimals = decimals.parse().map_err(|_| {
+                format!(
+                    "review_read {label}: show.{} must be \"<decimals>\" or \"<decimals> <unit>\", not `{spec}`",
+                    o.name
+                )
+            })?;
+            Ok(Shown {
+                output,
+                name: o.name.clone(),
+                decimals,
+                unit: (!unit.is_empty()).then(|| unit.to_owned()),
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    Ok(ReviewRead {
+        label: raw.label,
+        contract: raw.contract,
+        function,
+        args: raw.args,
+        show,
     })
 }
 
@@ -816,6 +948,69 @@ approves = ["pool"]
         assert!(Approval::Allowance { only: None }.allows("pool"));
         assert!(!Approval::Never.allows("pool"));
         assert!(!Approval::Delegation { to: gateway() }.allows("pool"));
+    }
+
+    const ACCOUNT: &str = r#"
+[[review_read]]
+label = "Aave account"
+contract = "pool"
+function = "function getUserAccountData(address user) view returns (uint256 collateral,uint256 debt,uint256 canBorrow,uint256 liquidationThreshold,uint256 ltv,uint256 healthFactor)"
+args = ["$self"]
+show = { healthFactor = "18", collateral = "8 USD" }
+"#;
+
+    #[test]
+    fn a_review_read_shows_the_uint_outputs_it_names_in_function_order() {
+        let root = tempfile::tempdir().unwrap();
+        let toml = format!("{SKILL_TOML}{ACCOUNT}");
+        let dir = folder(root.path(), "demo", SKILL_MD, Some(&toml));
+        let skill = load(&dir).unwrap();
+        let read = &skill.manifest.review_reads[0];
+        assert_eq!(read.label, "Aave account");
+        assert_eq!(read.contract, "pool");
+        assert_eq!(read.function.name, "getUserAccountData");
+        assert_eq!(read.args, [Value::String("$self".into())]);
+        assert_eq!(
+            read.show,
+            [
+                Shown {
+                    output: 0,
+                    name: "collateral".into(),
+                    decimals: 8,
+                    unit: Some("USD".into())
+                },
+                Shown {
+                    output: 5,
+                    name: "healthFactor".into(),
+                    decimals: 18,
+                    unit: None
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_review_read_must_be_a_view_of_a_manifest_contract_showing_uints() {
+        let bad = |from: &str, to: &str| {
+            load_err(
+                SKILL_MD,
+                Some(&format!("{SKILL_TOML}{}", ACCOUNT.replacen(from, to, 1))),
+            )
+        };
+        assert!(bad("contract = \"pool\"", "contract = \"oracle\"").contains("oracle"));
+        assert!(bad(") view returns", ") returns").contains("view"));
+        assert!(bad("args = [\"$self\"]", "args = []").contains("1 arguments"));
+        assert!(bad("healthFactor = \"18\"", "health = \"18\"").contains("health"));
+        assert!(bad("\"18\"", "\"eighteen\"").contains("decimals"));
+        assert!(
+            bad(
+                "show = { healthFactor = \"18\", collateral = \"8 USD\" }",
+                "show = {}"
+            )
+            .contains("no output")
+        );
+        assert!(bad("uint256 healthFactor)", "address healthFactor)").contains("not a uint"));
+        assert!(bad("\"8 USD\"", "\"8 U\\u001bSD\"").contains("control"));
     }
 
     #[test]

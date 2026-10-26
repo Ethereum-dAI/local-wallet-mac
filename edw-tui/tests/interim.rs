@@ -575,6 +575,7 @@ async fn a_checked_skill_plan_is_simulated_reviewed_and_sent_in_order() {
         total_value: steps.iter().map(|s| s.value).sum(),
         steps,
         notes: Vec::new(),
+        reads: Vec::new(),
     };
     let header = vec!["Skill    demo 1 (sha256 abc)".to_owned()];
     let names = Default::default();
@@ -644,4 +645,103 @@ async fn a_checked_skill_plan_is_simulated_reviewed_and_sent_in_order() {
         .err()
         .unwrap();
     assert!(error.contains("changed while the skill ran"), "{error}");
+}
+
+/// A manifest's review reads run in the plan's own simulation, before the steps and after them,
+/// and a read that fails stops the plan before it is shown.
+#[tokio::test]
+async fn review_reads_show_the_simulated_state_before_and_after_the_plan() {
+    use alloy_json_abi::Function;
+    use edw_tui::skills::{
+        manifest::{ReviewRead, Shown},
+        plan::{CheckedPlan, CheckedRead, CheckedStep},
+    };
+    let Some(node) = anvil(None) else { return };
+    let rpc = node.endpoint();
+    let Some(h) = start("interim-reads", "local", Some(rpc.clone()), false).await else {
+        return;
+    };
+    let interim = Interim::new(h.wallet.interim(Some(rpc.clone()), false));
+    let context = interim.skill_context().await.unwrap();
+    fund(&rpc, context.me, U256::from(10 * ETHER)).await;
+    let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap());
+    // SELFBALANCE PUSH0 MSTORE PUSH1 32 PUSH0 RETURN: answers any call with its own balance.
+    let piggy = address!("0x0000000000000000000000000000000000000B0B");
+    let _: () = provider
+        .raw_request("anvil_setCode".into(), (piggy, "0x475f5260205ff3"))
+        .await
+        .unwrap();
+    // PUSH0 PUSH0 REVERT.
+    let broken = address!("0x0000000000000000000000000000000000000BAD");
+    let _: () = provider
+        .raw_request("anvil_setCode".into(), (broken, "0x5f5ffd"))
+        .await
+        .unwrap();
+
+    let function = Function::parse("function held() view returns (uint256 held)").unwrap();
+    let read = |to: Address| CheckedRead {
+        read: ReviewRead {
+            label: "Piggy bank".into(),
+            contract: "piggy".into(),
+            function: function.clone(),
+            args: Vec::new(),
+            show: vec![Shown {
+                output: 0,
+                name: "held".into(),
+                decimals: 18,
+                unit: Some("ETH".into()),
+            }],
+        },
+        to,
+        data: function.selector().to_vec().into(),
+    };
+    let plan = |to: Address| CheckedPlan {
+        steps: vec![CheckedStep {
+            label: "feed the piggy bank".into(),
+            to: piggy,
+            value: U256::from(ETHER / 5),
+            data: Default::default(),
+            approval: None,
+            details: Vec::new(),
+            binding: None,
+        }],
+        total_value: U256::from(ETHER / 5),
+        notes: Vec::new(),
+        reads: vec![read(to)],
+    };
+    let prepared = interim
+        .prepare_plan(
+            "skill feed".into(),
+            Vec::new(),
+            plan(piggy),
+            &Default::default(),
+            &context,
+        )
+        .await
+        .unwrap();
+    assert!(
+        prepared
+            .preview
+            .contains("Piggy bank (simulated, before → after)\n           held  0.00 → 0.20 ETH"),
+        "{}",
+        prepared.preview
+    );
+    assert_eq!(
+        eth(&rpc, piggy).await,
+        U256::ZERO,
+        "a dry run sends nothing"
+    );
+
+    let error = interim
+        .prepare_plan(
+            "skill feed".into(),
+            Vec::new(),
+            plan(broken),
+            &Default::default(),
+            &context,
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(error.contains("review read `Piggy bank` failed"), "{error}");
 }

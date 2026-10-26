@@ -41,6 +41,13 @@ run = "scripts/supply.py"
 description = "Supply an asset."
 approves = ["pool"]                # contracts it may approve as spender (exact amounts only)
 schema = { type = "object", required = ["amount"], properties = { amount = { type = "string" } } }
+
+[[review_read]]                    # every action's review shows this view call, read in the
+label = "Aave account"             # plan's simulation before and after the plan
+contract = "pool"
+function = "function getUserAccountData(address user) view returns (uint256 collateral,uint256 debt,uint256 canBorrow,uint256 liquidationThreshold,uint256 ltv,uint256 healthFactor)"
+args = ["$self"]
+show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }   # uint outputs: "<decimals> [unit]"
 ```
 
 Rules the loader enforces: `hosts` are reached over HTTPS only. `run` stays inside the skill

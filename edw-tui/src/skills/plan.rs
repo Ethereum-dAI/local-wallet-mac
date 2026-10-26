@@ -5,7 +5,7 @@
 //! sender or a manifest id (never a raw address the script made up), approvals are exact,
 //! never unlimited, and only to the action's declared spenders.
 
-use alloy_dyn_abi::{DynSolType, JsonAbiExt, Specifier};
+use alloy_dyn_abi::{DynSolType, DynSolValue, FunctionExt, JsonAbiExt, Specifier};
 use alloy_json_abi::{Function, StateMutability};
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_sol_types::{SolCall, sol};
@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use super::{
     abi, explain,
-    manifest::{ActionDef, Approval, ContractDef, Skill},
+    manifest::{ActionDef, Approval, ContractDef, ReviewRead, Skill},
 };
 use crate::interim::guards::{format_units, is_burn};
 
@@ -63,12 +63,93 @@ pub struct Binding {
     pub nonce: U256,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CheckedPlan {
     pub steps: Vec<CheckedStep>,
     pub total_value: U256,
     /// What the script says about its own plan. Shown in the review, labelled as unchecked.
     pub notes: Vec<String>,
+    /// The manifest's review reads on this chain, for the simulation to run before and after
+    /// the steps.
+    pub reads: Vec<CheckedRead>,
+}
+
+/// A [`ReviewRead`] resolved for this chain and sender.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CheckedRead {
+    pub read: ReviewRead,
+    pub to: Address,
+    pub data: Bytes,
+}
+
+impl CheckedRead {
+    /// The review's lines for this read, from the raw outputs of the simulated call before the
+    /// plan and after it: a title, then one row per shown output.
+    pub fn describe(&self, before: &[u8], after: &[u8]) -> Result<Vec<String>, String> {
+        let read = &self.read;
+        let decode = |raw: &[u8]| {
+            read.function.abi_decode_output(raw).map_err(|e| {
+                format!(
+                    "{}: cannot decode what {} returned ({e})",
+                    read.label, read.function.name
+                )
+            })
+        };
+        let (before, after) = (decode(before)?, decode(after)?);
+        let width = read
+            .show
+            .iter()
+            .map(|s| words(&s.name).chars().count())
+            .max()
+            .unwrap_or(0);
+        let mut lines = vec![one_line(&format!(
+            "{} (simulated, before → after)",
+            read.label
+        ))];
+        for shown in &read.show {
+            let value = |outputs: &[DynSolValue]| match outputs.get(shown.output) {
+                Some(DynSolValue::Uint(value, _)) => two_decimals(*value, shown.decimals),
+                _ => "?".into(),
+            };
+            let unit = shown
+                .unit
+                .as_ref()
+                .map_or_else(String::new, |u| format!(" {u}"));
+            lines.push(one_line(&format!(
+                "{:width$}  {} → {}{unit}",
+                words(&shown.name),
+                value(&before),
+                value(&after),
+            )));
+        }
+        Ok(lines)
+    }
+}
+
+/// `healthFactor` → `health factor`.
+fn words(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_uppercase() && !out.is_empty() {
+            out.push(' ');
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
+}
+
+/// Two decimals, cut rather than rounded so a health factor never reads higher than it is. The
+/// maximum uint (Aave's health factor with no debt) reads as ∞.
+fn two_decimals(value: U256, decimals: u8) -> String {
+    if value == U256::MAX {
+        return "∞".into();
+    }
+    let text = format_units(value, decimals);
+    if decimals == 0 {
+        return text;
+    }
+    let (whole, fraction) = text.split_once('.').unwrap_or((&text, ""));
+    format!("{whole}.{:0<2}", &fraction[..fraction.len().min(2)])
 }
 
 /// Checks `plan` (`{"steps": [...]}`) for `action` of `skill` on `chain_id`, sent by `me`.
@@ -131,10 +212,17 @@ pub fn check(
                 .collect()
         })
         .unwrap_or_default();
+    let reads = skill
+        .manifest
+        .review_reads
+        .iter()
+        .filter_map(|read| ctx.read(read).transpose())
+        .collect::<Result<_, _>>()?;
     Ok(CheckedPlan {
         steps: checked,
         total_value,
         notes,
+        reads,
     })
 }
 
@@ -267,6 +355,40 @@ impl Ctx<'_> {
             details: Vec::new(),
             binding: None,
         })
+    }
+
+    /// `read` encoded for this chain and sender; `None` where its contract has no address.
+    fn read(&self, read: &ReviewRead) -> Result<Option<CheckedRead>, String> {
+        let fail = |e: String| format!("review read {}: {e}", read.label);
+        let contract = self
+            .skill
+            .manifest
+            .contract(&read.contract)
+            .ok_or_else(|| fail(format!("`{}` is not a contract", read.contract)))?;
+        if contract.address_arg.is_none() && !contract.address.contains_key(&self.chain_id) {
+            return Ok(None);
+        }
+        let to = self.contract_address(contract).map_err(fail)?;
+        let values = read
+            .function
+            .inputs
+            .iter()
+            .zip(&read.args)
+            .map(|(param, arg)| {
+                let ty = param.resolve().map_err(|e| format!("{}: {e}", param.ty))?;
+                abi::coerce(&ty, &self.addresses(&ty, arg)?)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(fail)?;
+        let data = read
+            .function
+            .abi_encode_input(&values)
+            .map_err(|e| fail(e.to_string()))?;
+        Ok(Some(CheckedRead {
+            read: read.clone(),
+            to,
+            data: data.into(),
+        }))
     }
 
     /// Where a contract of the manifest is: pinned for this chain, or the address the user gave
@@ -750,6 +872,13 @@ run = "g.py"
 description = "d"
 schema = { type = "object" }
 approves = ["pool", "gateway"]
+
+[[review_read]]
+label = "Aave account"
+contract = "pool"
+function = "function getUserAccountData(address user) view returns (uint256 collateral,uint256 debt,uint256 canBorrow,uint256 liquidationThreshold,uint256 ltv,uint256 healthFactor)"
+args = ["$self"]
+show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
 "#,
         )
         .unwrap();
@@ -939,6 +1068,59 @@ approves = ["pool", "gateway"]
             "supply declares nothing in this fixture: {}",
             plan.steps[1].label
         );
+    }
+
+    sol! {
+        function getUserAccountData(address user) returns (uint256, uint256, uint256, uint256, uint256, uint256);
+    }
+
+    fn encode_words(values: &[U256]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_be_bytes::<32>()).collect()
+    }
+
+    #[test]
+    fn every_plan_carries_the_review_reads_resolved_for_the_sender() {
+        let plan = run(json!({"steps": [approve("1")]})).unwrap();
+        assert_eq!(plan.reads.len(), 1);
+        assert_eq!(plan.reads[0].to, POOL);
+        assert_eq!(
+            plan.reads[0].data,
+            Bytes::from(getUserAccountDataCall { user: ME }.abi_encode())
+        );
+    }
+
+    /// The review shows each declared output as the simulation read it before the plan and
+    /// after it, cut to two decimals, with Aave's "no debt" health factor as ∞.
+    #[test]
+    fn a_review_read_reads_before_and_after() {
+        let plan = run(json!({"steps": [approve("1")]})).unwrap();
+        let usd = |cents: u64| U256::from(cents) * U256::from(1_000_000u64);
+        let before = encode_words(&[
+            U256::ZERO,
+            U256::ZERO,
+            U256::ZERO,
+            U256::ZERO,
+            U256::ZERO,
+            U256::MAX,
+        ]);
+        let after = encode_words(&[
+            usd(412_345) + U256::from(678_901u64),
+            usd(100_000),
+            usd(300_000),
+            U256::from(8_300u64),
+            U256::from(8_000u64),
+            U256::from(1_419_999_999_999_999_999u64),
+        ]);
+        assert_eq!(
+            plan.reads[0].describe(&before, &after).unwrap(),
+            [
+                "Aave account (simulated, before → after)",
+                "collateral     0.00 → 4123.45 USD",
+                "debt           0.00 → 1000.00 USD",
+                "health factor  ∞ → 1.41",
+            ]
+        );
+        assert!(plan.reads[0].describe(&before, &[1, 2, 3]).is_err());
     }
 
     /// A function whose token is implied (a WETH gateway's amount is always WETH) declares the

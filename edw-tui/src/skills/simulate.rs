@@ -29,12 +29,31 @@ pub struct SimLog {
     pub data: Bytes,
 }
 
+/// One call of the simulated block.
+#[derive(Clone, Debug)]
+pub struct Call {
+    pub to: Address,
+    pub value: U256,
+    pub data: Bytes,
+}
+
+impl From<&CheckedStep> for Call {
+    fn from(step: &CheckedStep) -> Self {
+        Self {
+            to: step.to,
+            value: step.value,
+            data: step.data.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CallResult {
     pub ok: bool,
     pub gas_used: u64,
     pub error: Option<String>,
     pub logs: Vec<SimLog>,
+    pub output: Bytes,
 }
 
 /// Net changes for one account. ERC-20 amounts are in base units; NFTs as (contract, id).
@@ -46,27 +65,23 @@ pub struct Deltas {
     pub nfts_out: Vec<(Address, U256)>,
 }
 
-/// Simulates `steps` in order from `from`, at the latest block, without signatures or nonce
+/// Simulates `calls` in order from `from`, at the latest block, without signatures or nonce
 /// and balance checks on the sender beyond what the EVM itself does.
-pub async fn simulate(
-    rpc: &Url,
-    from: Address,
-    steps: &[CheckedStep],
-) -> Result<Vec<CallResult>, String> {
-    let calls: Vec<Value> = steps
+pub async fn simulate(rpc: &Url, from: Address, calls: &[Call]) -> Result<Vec<CallResult>, String> {
+    let wire: Vec<Value> = calls
         .iter()
-        .map(|s| {
+        .map(|c| {
             json!({
                 "from": format!("{from:#x}"),
-                "to": format!("{:#x}", s.to),
-                "value": format!("{:#x}", s.value),
-                "input": hex::encode_prefixed(&s.data),
+                "to": format!("{:#x}", c.to),
+                "value": format!("{:#x}", c.value),
+                "input": hex::encode_prefixed(&c.data),
             })
         })
         .collect();
     let request = json!({
         "jsonrpc": "2.0", "id": 1, "method": "eth_simulateV1",
-        "params": [{"blockStateCalls": [{"calls": calls}], "traceTransfers": true, "validation": false}, "latest"],
+        "params": [{"blockStateCalls": [{"calls": wire}], "traceTransfers": true, "validation": false}, "latest"],
     });
     let response: Value = reqwest::Client::new()
         .post(rpc.clone())
@@ -86,11 +101,11 @@ pub async fn simulate(
         return Err(rpc_error(error));
     }
     let results = parse(response.get("result").unwrap_or(&Value::Null))?;
-    if results.len() != steps.len() {
+    if results.len() != calls.len() {
         return Err(format!(
-            "the simulation returned {} results for {} steps",
+            "the simulation returned {} results for {} calls",
             results.len(),
-            steps.len()
+            calls.len()
         ));
     }
     Ok(results)
@@ -150,6 +165,12 @@ fn parse_call(call: &Value) -> Result<CallResult, String> {
             error.or_else(|| Some("reverted".into()))
         },
         logs,
+        output: call
+            .get("returnData")
+            .and_then(Value::as_str)
+            .and_then(|d| hex::decode(d).ok())
+            .unwrap_or_default()
+            .into(),
     })
 }
 
@@ -274,12 +295,13 @@ mod tests {
     #[test]
     fn a_failed_call_carries_its_reason() {
         let results = parse(&json!([{ "calls": [
-            {"status": "0x1", "gasUsed": "0x5208", "returnData": "0x", "logs": []},
+            {"status": "0x1", "gasUsed": "0x5208", "returnData": "0x2a", "logs": []},
             {"status": "0x0", "gasUsed": "0x6000", "returnData": "0x", "logs": [],
              "error": {"code": 3, "message": "execution reverted: 26"}}
         ]}]))
         .unwrap();
         assert!(results[0].ok);
+        assert_eq!(results[0].output, Bytes::from(vec![0x2a]));
         assert!(!results[1].ok);
         assert_eq!(results[1].error.as_deref(), Some("execution reverted: 26"));
     }

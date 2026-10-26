@@ -80,6 +80,9 @@ pub struct ContractDef {
     /// the function's token is implied, so the review can show that amount in the token's units
     /// (`amount=2.5 USDC (2500000)`).
     pub amounts: BTreeMap<String, BTreeMap<String, String>>,
+    /// function → address parameters that must be the sender (`$self`): where the funds of a
+    /// call go, so a plan cannot pay out to a token or contract of the manifest instead.
+    pub self_only: BTreeMap<String, Vec<String>>,
 }
 
 /// A token the skill names, and what a plan may grant on it.
@@ -214,6 +217,8 @@ struct RawContract {
     signed_calls: Vec<String>,
     #[serde(default)]
     amounts: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(default)]
+    self_only: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -450,10 +455,13 @@ fn approval(t: &RawToken, contracts: &[ContractDef]) -> Result<Approval, String>
 
 /// Token functions that grant or move funds directly. Plans approve only through the checker's
 /// own exact-amount step, so a manifest may not list these.
-const MOVES_TOKENS: [&str; 12] = [
+const MOVES_TOKENS: [&str; 15] = [
     "approve",
     "increaseallowance",
     "decreaseallowance",
+    "increaseapproval",
+    "decreaseapproval",
+    "authorizeoperator",
     "permit",
     "transfer",
     "transferfrom",
@@ -603,6 +611,25 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         check_amounts(&c.id, &functions, &c.amounts, &token_ids)?;
+        for (name, params) in &c.self_only {
+            let function = functions.iter().find(|f| &f.name == name).ok_or_else(|| {
+                format!(
+                    "{}: self_only names {name}, which is not in functions",
+                    c.id
+                )
+            })?;
+            if let Some(param) = params.iter().find(|p| {
+                !function
+                    .inputs
+                    .iter()
+                    .any(|i| &i.name == *p && i.ty == "address")
+            }) {
+                return Err(format!(
+                    "{}: self_only.{name} names `{param}`, which is not an address parameter of {name}",
+                    c.id
+                ));
+            }
+        }
         if !c.signed_calls.is_empty() && c.address_arg.is_none() {
             return Err(format!(
                 "{}: signed_calls is only for a contract at an address the user names (address_arg); a pinned contract may not take raw bytes",
@@ -635,6 +662,7 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
             address_arg: c.address_arg,
             signed_calls: c.signed_calls,
             amounts: c.amounts,
+            self_only: c.self_only,
             label: c.label.unwrap_or_else(|| c.id.clone()),
             address: addresses(&c.id, c.address)?,
             id: c.id,
@@ -1082,6 +1110,16 @@ show = { healthFactor = "18", collateral = "8 USD" }
         };
         assert!(amounts("borrow = { amount = \"asset\" }").contains("borrow"));
         assert!(amounts("supply = { amount = \"nope\" }").contains("nope"));
+        // `self_only` names a listed function's address parameter.
+        let self_only = |decl: &str| {
+            bad(
+                "label = \"Aave Pool\"",
+                &format!("label = \"Aave Pool\"\nself_only = {{ {decl} }}"),
+            )
+        };
+        assert!(self_only("borrow = [\"onBehalfOf\"]").contains("borrow"));
+        assert!(self_only("supply = [\"amount\"]").contains("not an address parameter"));
+        assert!(self_only("supply = [\"payee\"]").contains("payee"));
         // Or a token id, for a function whose token is implied.
         let root = tempfile::tempdir().unwrap();
         let by_id = SKILL_TOML.replacen(
@@ -1113,6 +1151,9 @@ show = { healthFactor = "18", collateral = "8 USD" }
         for sig in [
             "function approveDelegation(address delegatee,uint256 amount)",
             "function delegationWithSig(address delegator,address delegatee,uint256 value,uint256 deadline,uint8 v,bytes32 r,bytes32 s)",
+            "function increaseApproval(address spender,uint256 addedValue)",
+            "function decreaseApproval(address spender,uint256 subtractedValue)",
+            "function authorizeOperator(address operator)",
         ] {
             let error = bad(supply, sig);
             assert!(error.contains("not allowed"), "{sig}: {error}");

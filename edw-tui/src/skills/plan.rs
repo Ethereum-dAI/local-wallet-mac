@@ -479,6 +479,15 @@ impl Ctx<'_> {
             } else {
                 param.name.clone()
             };
+            let to_sender = contract
+                .self_only
+                .get(name)
+                .is_some_and(|params| params.contains(&param.name));
+            if to_sender && arg.as_str() != Some(SELF) {
+                return Err(format!(
+                    "{name}({label}) must be the sender (`$self`), not {arg}"
+                ));
+            }
             let resolved = if signed {
                 self.signed_argument(&ty, arg)
             } else {
@@ -833,8 +842,12 @@ address = { 11155111 = "0x16dA4541aD1807f4443d92D26044C1147406EB80" }
 [[contract]]
 id = "gateway"
 label = "WETH Gateway"
-functions = ["function borrowETH(address pool,uint256 amount,uint16 referralCode)"]
+functions = [
+  "function borrowETH(address pool,uint256 amount,uint16 referralCode)",
+  "function withdrawETH(address pool,uint256 amount,address to)",
+]
 amounts = { borrowETH = { amount = "weth" } }
+self_only = { withdrawETH = ["to"] }
 address = { 11155111 = "0x387d311e47e80b498169e6fb51d3193167d89F7D" }
 
 [[token]]
@@ -1121,6 +1134,18 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
             ]
         );
         assert!(plan.reads[0].describe(&before, &[1, 2, 3]).is_err());
+    }
+
+    /// Where a call pays out, `self_only` keeps the payee the sender: a manifest id there (a
+    /// token contract would swallow the funds) is refused, `$self` is not.
+    #[test]
+    fn a_self_only_parameter_takes_only_the_sender() {
+        let withdraw = |to: &str| json!({"steps": [{"call": {"contract": "gateway", "function": "withdrawETH", "args": ["pool", "1", to]}}]});
+        assert!(run_as("via_gateway", withdraw("$self")).is_ok());
+        for to in ["weth", "pool", "gateway"] {
+            let error = run_as("via_gateway", withdraw(to)).unwrap_err();
+            assert!(error.contains("must be the sender"), "{to}: {error}");
+        }
     }
 
     /// A function whose token is implied (a WETH gateway's amount is always WETH) declares the

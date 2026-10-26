@@ -178,7 +178,7 @@ impl Scenario {
             if !screen.contains("Allow skill") {
                 return;
             }
-            self.tui.linger(2500); // the card is the point of this moment in a recording
+            self.tui.hold(4000); // the card is the point of this moment in a recording
             self.tui.answer(b"y");
             self.tui
                 .wait_for_within("the card to close", 30, |s| s != screen);
@@ -188,13 +188,20 @@ impl Scenario {
     /// Types a request, answers its confirmation with `y`, and waits for `done` on screen and
     /// for the agent to finish.
     pub fn confirmed(&mut self, request: &str, done: &str) {
+        self.reviewed(request, done);
+    }
+
+    /// [`Self::confirmed`], returning the screen as the review showed it.
+    pub fn reviewed(&mut self, request: &str, done: &str) -> String {
         self.tui.submit(request);
         self.tui
             .wait_for_within("a confirmation", 240, |s| s.contains("[y] "));
-        self.tui.linger(2500); // time to read the review in a recording
+        self.tui.hold(6000); // time to read the review in a recording
+        let review = self.tui.screen();
         self.tui.answer(b"y");
         self.tui.wait_for_within(done, 240, |s| s.contains(done));
         self.idle();
+        review
     }
 
     /// Types a request that needs no confirmation and waits for `done` on screen.

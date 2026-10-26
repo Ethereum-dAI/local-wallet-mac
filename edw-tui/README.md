@@ -251,9 +251,11 @@ cargo test --test skills_aave -- --ignored --nocapture   # pinned Aave addresses
                                     # through the gateway on forks (network; ETH_RPC_URL, EDW_TUI_SEPOLIA_RPC,
                                     # Docker, edw)
 EDW_TUI_E2E_RECORD=1 cargo test --test e2e_aave -- --ignored --nocapture   # the same through the real
-                                    # terminal: approve the skills, look up rates, supply, withdraw;
-                                    # asserts the mined receipts and balances, records
-                                    # target/e2e-screenshots/aave.mp4
+                                    # terminal: approve the skills, look up rates, supply, withdraw
+                                    # (aave.mp4); supply ETH, read the account, borrow USDC, repay
+                                    # part then all, stop using the ETH as collateral, withdraw it
+                                    # (aave_borrow.mp4). Asserts the mined receipts, balances and
+                                    # leftover approvals; videos in target/e2e-screenshots/
 ```
 
 `edw_contract` is what should break when edw changes. To bump the pin: change

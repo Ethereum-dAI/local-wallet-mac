@@ -22,6 +22,9 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 struct Recorder {
     frames: Arc<Mutex<Vec<(Duration, String)>>>,
+    /// (since start, how long): moments the video shows in full, past [`MAX_STILL`].
+    holds: Mutex<Vec<(Duration, Duration)>>,
+    started: Instant,
     stop: Arc<AtomicBool>,
     thread: JoinHandle<()>,
 }
@@ -99,6 +102,8 @@ impl Tui {
         });
         self.recorder = Some(Recorder {
             frames,
+            holds: Mutex::default(),
+            started,
             stop,
             thread,
         });
@@ -112,7 +117,8 @@ impl Tui {
         recorder.stop.store(true, Ordering::Relaxed);
         recorder.thread.join().unwrap();
         let frames = std::mem::take(&mut *recorder.frames.lock().unwrap());
-        Some(encode(&frames, dir, name))
+        let holds = std::mem::take(&mut *recorder.holds.lock().unwrap());
+        Some(encode(&frames, &holds, dir, name))
     }
 
     /// The screen as text, one line per row.
@@ -216,6 +222,20 @@ impl Tui {
         }
     }
 
+    /// Like [`Self::linger`], but the video keeps this whole moment instead of cutting the still
+    /// screen to [`MAX_STILL`]: for a card someone has to read.
+    pub fn hold(&self, millis: u64) {
+        if let Some(recorder) = &self.recorder {
+            let length = Duration::from_millis(millis);
+            recorder
+                .holds
+                .lock()
+                .unwrap()
+                .push((recorder.started.elapsed(), length));
+            thread::sleep(length);
+        }
+    }
+
     /// Ctrl-C, then waits for the process to exit.
     pub fn quit(mut self) -> bool {
         self.press(&[0x03]);
@@ -301,8 +321,14 @@ fn render_svg(parser: &vt100::Parser, rows: u16, cols: u16) -> String {
     svg
 }
 
-/// Frames (time since start, SVG) → PNGs → an MP4, via rsvg-convert and ffmpeg.
-fn encode(frames: &[(Duration, String)], dir: &Path, name: &str) -> PathBuf {
+/// Frames (time since start, SVG) → PNGs → an MP4, via rsvg-convert and ffmpeg. A still frame is
+/// cut to [`MAX_STILL`], unless a hold starts while it is shown: it then lasts to the hold's end.
+fn encode(
+    frames: &[(Duration, String)],
+    holds: &[(Duration, Duration)],
+    dir: &Path,
+    name: &str,
+) -> PathBuf {
     assert!(!frames.is_empty(), "the recording has no frames");
     let work = dir.join(format!("{name}-frames"));
     let _ = std::fs::remove_dir_all(&work);
@@ -322,10 +348,15 @@ fn encode(frames: &[(Duration, String)], dir: &Path, name: &str) -> PathBuf {
         let until = frames
             .get(i + 1)
             .map_or(*at + Duration::from_secs(3), |(next, _)| *next);
+        let longest = holds
+            .iter()
+            .filter(|(start, _)| (*at..until).contains(start))
+            .map(|(start, length)| *start - *at + *length)
+            .fold(MAX_STILL, Duration::max);
         list.push_str(&format!(
             "file '{}'\nduration {:.3}\n",
             path(&png_path),
-            (until - *at).min(MAX_STILL).as_secs_f64()
+            (until - *at).min(longest).as_secs_f64()
         ));
     }
     // The demuxer ignores the last duration unless the final file is listed once more.

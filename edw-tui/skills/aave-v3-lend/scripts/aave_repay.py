@@ -38,23 +38,13 @@ if everything:
 
 if native:
     aave.gateway(context)
-    edw_skill.plan([{
-        "call": {
-            "contract": "gateway",
-            "function": "repayETH",
-            "args": ["pool", amount] + aave.gateway_rate_mode(context) + ["$self"],
-            "value": str(units),
-        }
-    }], notes)
+    edw_skill.plan(
+        [edw_skill.call_step("gateway", "repayETH", ["pool", amount] + aave.gateway_rate_mode(context) + ["$self"], value=units)],
+        notes,
+    )
 
 steps = aave.approve_steps(token_id, info["address"], "pool", pool, me, units)
-steps.append({
-    "call": {
-        "contract": "pool",
-        "function": "repay",
-        "args": [token_id, amount, aave.VARIABLE, "$self"],
-    }
-})
+steps.append(edw_skill.call_step("pool", "repay", [token_id, amount, aave.VARIABLE, "$self"]))
 if everything:
-    steps.append({"approve": {"token": token_id, "spender": "pool", "amount": "0"}})
+    steps.append(edw_skill.approve_step(token_id, "pool", 0))
 edw_skill.plan(steps, notes)

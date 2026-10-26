@@ -124,8 +124,8 @@ def approve_steps(token_id, token_address, spender_id, spender_address, owner, a
     steps = []
     if allowance > 0:
         # USDT refuses to change a non-zero allowance to another non-zero one.
-        steps.append({"approve": {"token": token_id, "spender": spender_id, "amount": "0"}})
-    steps.append({"approve": {"token": token_id, "spender": spender_id, "amount": str(amount)}})
+        steps.append(edw_skill.approve_step(token_id, spender_id, 0))
+    steps.append(edw_skill.approve_step(token_id, spender_id, amount))
     return steps
 
 

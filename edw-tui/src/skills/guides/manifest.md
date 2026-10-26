@@ -58,7 +58,18 @@ are refused, and so are functions that take raw `bytes`, unless the contract is 
 contract and the function is listed in its `signed_calls`. Text fields are one line with no control
 characters. Tool names are unique across all skills and never a built-in's name.
 
-Plans (what an action returns) are at most 6 steps. Each step is one of:
+Plans (what an action returns) are at most 6 steps. Build them with the SDK, which writes the
+wire shapes below:
+
+```python
+steps = [
+    edw_skill.approve_step("usdc", "pool", amount),
+    edw_skill.call_step("pool", "supply", ["usdc", str(amount), "$self", "0"]),
+]
+edw_skill.call_step("gateway", "depositETH", ["pool", "$self", "0"], value=wei)
+```
+
+Each step is one of:
 
 - `{"approve": {"token", "spender", "amount"}}`: `token` is a token id and `spender` a contract id
   from this manifest, not addresses. The spender must be listed in the action's `approves`, and

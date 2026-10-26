@@ -27,23 +27,11 @@ else:
 if native:
     gateway = aave.gateway(context)
     steps = aave.approve_steps("a" + token_id, receipt["address"], "gateway", gateway, me, units)
-    steps.append({
-        "call": {
-            "contract": "gateway",
-            "function": "withdrawETH",
-            "args": ["pool", str(units), "$self"],
-        }
-    })
+    steps.append(edw_skill.call_step("gateway", "withdrawETH", ["pool", str(units), "$self"]))
     notes = None
     if everything:
         # The gateway pulls aWETH under an exact approval, and the balance grows every second.
         notes = ["This withdraws what is supplied now; interest earned until it is mined (a few wei) stays supplied."]
     edw_skill.plan(steps, notes)
 
-edw_skill.plan([{
-    "call": {
-        "contract": "pool",
-        "function": "withdraw",
-        "args": [token_id, aave.UINT_MAX if everything else str(units), "$self"],
-    }
-}])
+edw_skill.plan([edw_skill.call_step("pool", "withdraw", [token_id, aave.UINT_MAX if everything else str(units), "$self"])])

@@ -17,10 +17,4 @@ if aave.balance(aave.a_token(context, token_id)["address"], me) == 0:
 if aave.is_collateral(pool, me, info["address"]) == use:
     edw_skill.fail(f"{symbol} is already {'' if use else 'not '}used as collateral; nothing to change")
 
-edw_skill.plan([{
-    "call": {
-        "contract": "pool",
-        "function": "setUserUseReserveAsCollateral",
-        "args": [token_id, use],
-    }
-}])
+edw_skill.plan([edw_skill.call_step("pool", "setUserUseReserveAsCollateral", [token_id, use])])

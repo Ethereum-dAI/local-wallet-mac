@@ -24,7 +24,10 @@ A script ends with exactly one of:
 - `edw_skill.result(value)`: a read tool's answer (JSON-serializable). Keep it small: at most 8 KiB
   reaches the model.
 - `edw_skill.plan(steps, notes=None)`: an action's transaction plan. `notes` are shown to the user as
-  "Skill says (not checked)".
+  "Skill says (not checked)". Build each step with
+  `edw_skill.approve_step(token, spender, amount)` or
+  `edw_skill.call_step(contract, function, args, value=None)` (see the manifest guide for the
+  rules a step must follow).
 - `edw_skill.fail("one sentence the user can act on")`.
 
 Validate arguments and fail early with a clear message. Read tools may run with the wallet locked

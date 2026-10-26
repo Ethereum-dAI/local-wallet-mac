@@ -39,20 +39,8 @@ if native:
     delegated = int(edw_skill.call(owed_token["address"], aave.BORROW_ALLOWANCE, [me, gateway])[0])
     steps = []
     if delegated < amount:
-        steps.append({"approve": {"token": token_id + "_debt", "spender": "gateway", "amount": str(amount)}})
-    steps.append({
-        "call": {
-            "contract": "gateway",
-            "function": "borrowETH",
-            "args": ["pool", str(amount)] + aave.gateway_rate_mode(context) + ["0"],
-        }
-    })
+        steps.append(edw_skill.approve_step(token_id + "_debt", "gateway", amount))
+    steps.append(edw_skill.call_step("gateway", "borrowETH", ["pool", str(amount)] + aave.gateway_rate_mode(context) + ["0"]))
     edw_skill.plan(steps, notes)
 
-edw_skill.plan([{
-    "call": {
-        "contract": "pool",
-        "function": "borrow",
-        "args": [token_id, str(amount), aave.VARIABLE, "0", "$self"],
-    }
-}], notes)
+edw_skill.plan([edw_skill.call_step("pool", "borrow", [token_id, str(amount), aave.VARIABLE, "0", "$self"])], notes)

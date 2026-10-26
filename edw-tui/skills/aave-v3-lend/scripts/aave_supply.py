@@ -19,21 +19,8 @@ if amount > held:
 
 if native:
     aave.gateway(context)
-    edw_skill.plan([{
-        "call": {
-            "contract": "gateway",
-            "function": "depositETH",
-            "args": ["pool", "$self", "0"],
-            "value": str(amount),
-        }
-    }])
+    edw_skill.plan([edw_skill.call_step("gateway", "depositETH", ["pool", "$self", "0"], value=amount)])
 
 steps = aave.approve_steps(token_id, info["address"], "pool", pool, me, amount)
-steps.append({
-    "call": {
-        "contract": "pool",
-        "function": "supply",
-        "args": [token_id, str(amount), "$self", "0"],
-    }
-})
+steps.append(edw_skill.call_step("pool", "supply", [token_id, str(amount), "$self", "0"]))
 edw_skill.plan(steps)

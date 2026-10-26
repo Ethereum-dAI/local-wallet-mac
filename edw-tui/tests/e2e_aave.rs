@@ -16,7 +16,10 @@ use std::path::Path;
 use alloy_primitives::{Address, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_sol_types::{SolCall, sol};
-use common::scenario::{Chain, ETHER, Scenario};
+use common::{
+    read_values,
+    scenario::{Chain, ETHER, Scenario},
+};
 use edw_tui::skills::{manifest, sandbox};
 
 sol! {
@@ -209,9 +212,19 @@ async fn aave_eth_collateral_borrow_and_repay_end_to_end() {
             "Aave Pool.borrow(asset=USDC, amount=1000 USDC (1000000000), interestRateMode=2, referralCode=0, onBehalfOf=you)",
             "+1000 USDC",
             "USDC debt",
-            "debt           0.00 → ",
-            "health factor  ∞ → ",
         ],
+    );
+    let (debt_before, debt_after) = read_values(&review, "debt");
+    assert_eq!(debt_before, 0.0);
+    assert!(
+        (990.0..1010.0).contains(&debt_after),
+        "about 1000 USD of debt after: {debt_after}"
+    );
+    let (health_before, health_after) = read_values(&review, "health factor");
+    assert!(health_before.is_infinite());
+    assert!(
+        health_after.is_finite() && health_after > 1.5,
+        "a finite, safe health factor after: {health_after}"
     );
     s.screenshot("aave_borrowed");
     assert_eq!(mined_since(&rpc, before).await, [(me, Some(pool), true)]);

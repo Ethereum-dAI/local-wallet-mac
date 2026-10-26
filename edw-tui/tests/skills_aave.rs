@@ -16,7 +16,7 @@ use alloy_primitives::{Address, U256, address, keccak256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_sol_types::{SolCall, sol};
 use common::{
-    Harness, TempWallet, Turn, edw_binary,
+    Harness, TempWallet, Turn, edw_binary, read_values,
     recorder::{Recorder, call},
 };
 use edw_tui::{
@@ -104,6 +104,31 @@ fn the_manifest_pins_aaves_pool_and_weth_gateway_and_scopes_every_grant() {
             "borrowETH(address,uint256,uint256,uint16)",
             "repayETH(address,uint256,address)",
             "repayETH(address,uint256,uint256,address)",
+        ]
+    );
+    // Every parameter a call pays out to, or whose debt it touches, is the sender.
+    let payees = |contract: &str| {
+        let c = skill.manifest.contract(contract).unwrap();
+        c.self_only
+            .iter()
+            .flat_map(|(f, ps)| ps.iter().map(move |p| format!("{f}.{p}")))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        payees("pool"),
+        [
+            "borrow.onBehalfOf",
+            "repay.onBehalfOf",
+            "supply.onBehalfOf",
+            "withdraw.to"
+        ]
+    );
+    assert_eq!(
+        payees("gateway"),
+        [
+            "depositETH.onBehalfOf",
+            "repayETH.onBehalfOf",
+            "withdrawETH.to"
         ]
     );
     let approves = |name: &str| skill.action(name).unwrap().approves.clone();
@@ -462,17 +487,26 @@ async fn supplies_borrows_repays_and_withdraws_eth_through_the_gateway_on_a_main
     );
 
     let eth_before = f.provider().get_balance(f.me).await.unwrap();
-    f.approved(
-        "borrow 0.5 ETH from aave",
-        &[
-            "allow Aave WETH Gateway to take on up to 0.5 WETH debt in your name (credit delegation)",
-            "Aave WETH Gateway.borrowETH(pool=Aave Pool, amount=0.5 WETH (500000000000000000), referralCode=0)",
-            "+0.5 ETH",
-            "debt           0.00 → ",
-            "health factor  ∞ → ",
-        ],
-    )
-    .await;
+    let review = f
+        .approved(
+            "borrow 0.5 ETH from aave",
+            &[
+                "allow Aave WETH Gateway to take on up to 0.5 WETH debt in your name (credit delegation)",
+                "Aave WETH Gateway.borrowETH(pool=Aave Pool, amount=0.5 WETH (500000000000000000), referralCode=0)",
+                "+0.5 ETH",
+            ],
+        )
+        .await;
+    // A quarter of the collateral's worth is borrowed, so the debt reads a quarter of it.
+    let (_, collateral) = read_values(&review, "collateral");
+    let (debt_before, debt_after) = read_values(&review, "debt");
+    assert_eq!(debt_before, 0.0);
+    assert!(
+        (debt_after - collateral / 4.0).abs() < collateral * 0.01,
+        "debt {debt_after} for collateral {collateral}"
+    );
+    let (health_before, health_after) = read_values(&review, "health factor");
+    assert!(health_before.is_infinite() && health_after.is_finite() && health_after > 1.5);
     assert!(f.balance(debt).await >= half);
     assert!(f.provider().get_balance(f.me).await.unwrap() > eth_before);
     let delegated = view(

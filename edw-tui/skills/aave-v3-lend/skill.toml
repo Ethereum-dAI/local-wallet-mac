@@ -17,6 +17,8 @@ functions = [
 ]
 # The review shows these amounts in the asset's own units.
 amounts = { supply = { amount = "asset" }, withdraw = { amount = "asset" }, borrow = { amount = "asset" }, repay = { amount = "asset" } }
+# Who each call pays out to, or whose debt it touches: only the sender.
+self_only = { supply = ["onBehalfOf"], withdraw = ["to"], borrow = ["onBehalfOf"], repay = ["onBehalfOf"] }
 address = { 1 = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2", 11155111 = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951" }
 
 # Moves ETH in and out of the WETH reserve. Aave v3.2 dropped the interest-rate-mode argument
@@ -34,6 +36,7 @@ functions = [
   "function repayETH(address pool,uint256 amount,uint256 interestRateMode,address onBehalfOf) payable",
 ]
 amounts = { withdrawETH = { amount = "weth" }, borrowETH = { amount = "weth" }, repayETH = { amount = "weth" } }
+self_only = { depositETH = ["onBehalfOf"], withdrawETH = ["to"], repayETH = ["onBehalfOf"] }
 address = { 1 = "0xd01607c3C5eCABa394D8be377a08590149325722", 11155111 = "0x387d311e47e80b498169e6fb51d3193167d89F7D" }
 
 # Every review shows the account as the simulation reads it before and after the plan.

@@ -191,17 +191,18 @@ impl Scenario {
         self.reviewed(request, done);
     }
 
-    /// [`Self::confirmed`], returning the screen as the review showed it.
+    /// [`Self::confirmed`], returning the review as the transaction modal showed it (only the
+    /// modal: the command log beside it holds earlier reviews).
     pub fn reviewed(&mut self, request: &str, done: &str) -> String {
         self.tui.submit(request);
         self.tui
             .wait_for_within("a confirmation", 240, |s| s.contains("[y] "));
         self.tui.hold(6000); // time to read the review in a recording
-        let review = self.tui.screen();
+        let screen = self.tui.screen();
         self.tui.answer(b"y");
         self.tui.wait_for_within(done, 240, |s| s.contains(done));
         self.idle();
-        review
+        modal(&screen).unwrap_or(screen)
     }
 
     /// Types a request that needs no confirmation and waits for `done` on screen.
@@ -263,6 +264,26 @@ impl Scenario {
         }
         video
     }
+}
+
+/// The inside of the "Send this transaction?" modal on `screen`, row by row.
+fn modal(screen: &str) -> Option<String> {
+    let rows: Vec<Vec<char>> = screen.lines().map(|l| l.chars().collect()).collect();
+    let top = rows.iter().position(|r| {
+        r.iter()
+            .collect::<String>()
+            .contains("Send this transaction?")
+    })?;
+    let left = rows[top].iter().position(|c| *c == '┌')?;
+    let right = left + 1 + rows[top][left + 1..].iter().position(|c| *c == '┐')?;
+    Some(
+        rows[top + 1..]
+            .iter()
+            .take_while(|r| r.get(left) != Some(&'└'))
+            .map(|r| r[left + 1..right.min(r.len())].iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 pub fn recording() -> bool {

@@ -33,7 +33,7 @@
       "requires": [
         "defi-data"
       ],
-      "sha256": "a5e11d2805e6d1866ab5b7bba9c0f5d69c2d6ec8ead5eb0c056a09345d34d897",
+      "sha256": "202b34a53dfb0501b50f22a95fdb6930ae69c27a4c53d2c004c526151c269c2f",
       "tools": [
         {
           "function": {

@@ -1,6 +1,6 @@
 """Shared by the aave-v3-lend scripts: token lookup, unit conversion, on-chain reads."""
 
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 
 import edw_skill
 
@@ -156,8 +156,13 @@ def account(pool, owner):
     return [int(v) for v in edw_skill.call(pool, ACCOUNT, [owner])]
 
 
+def cut(value):
+    """Two decimals, cut so a health factor never reads higher than it is (0.999 is not 1.00)."""
+    return str(Decimal(value).quantize(Decimal("0.01"), rounding=ROUND_DOWN))
+
+
 def health(value):
-    return "none (no debt)" if value == MAX else f"{Decimal(value) / 10**18:.2f}"
+    return "none (no debt)" if value == MAX else cut(Decimal(value) / 10**18)
 
 
 def usd(base):

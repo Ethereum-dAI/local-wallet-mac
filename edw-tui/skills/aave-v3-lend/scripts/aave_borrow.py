@@ -24,13 +24,14 @@ if value > can_borrow:
         f"Aave lets the profile borrow about {aave.usd(can_borrow)} USD more; "
         f"{aave.whole(amount, info['decimals'])} {symbol} is about {aave.usd(value)} USD"
     )
-after = Decimal(collateral) * threshold / 10_000 / (debt + value)
 notes = None
-if after < Decimal("1.5"):
-    notes = [
-        f"After this borrow the health factor would be about {after:.2f}, below 1.5: "
-        "a small price move could get the collateral liquidated."
-    ]
+if debt + value:
+    after = Decimal(collateral) * threshold / 10_000 / (debt + value)
+    if after < Decimal("1.5"):
+        notes = [
+            f"After this borrow the health factor would be about {aave.cut(after)}, below 1.5: "
+            "a small price move could get the collateral liquidated."
+        ]
 
 if native:
     gateway = aave.gateway(context)

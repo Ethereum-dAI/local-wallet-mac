@@ -65,6 +65,16 @@ pub struct ConsentRequest {
     pub named: Vec<(String, Vec<String>)>,
 }
 
+/// Function names in manifest order, an overloaded one once.
+fn names(functions: &[alloy_json_abi::Function]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    functions
+        .iter()
+        .filter(|f| seen.insert(f.name.as_str()))
+        .map(|f| f.name.clone())
+        .collect()
+}
+
 pub fn chain_name(id: u64) -> String {
     match id {
         1 => "Ethereum (1)".into(),
@@ -90,7 +100,7 @@ impl ConsentRequest {
                     .iter()
                     .filter_map(|c| {
                         let address = c.address.get(&chain)?;
-                        let functions = c.functions.iter().map(|f| f.name.clone()).collect();
+                        let functions = names(&c.functions);
                         Some((one_line(&c.label), address.to_string(), functions))
                     })
                     .collect();
@@ -154,12 +164,7 @@ impl ConsentRequest {
                 .contracts
                 .iter()
                 .filter(|c| c.address_arg.is_some())
-                .map(|c| {
-                    (
-                        one_line(&c.label),
-                        c.functions.iter().map(|f| f.name.clone()).collect(),
-                    )
-                })
+                .map(|c| (one_line(&c.label), names(&c.functions)))
                 .collect(),
         }
     }
@@ -189,22 +194,48 @@ mod tests {
         assert!(request.hosts.is_empty());
         assert_eq!(
             request.tools,
-            ["aave_markets", "aave_supply", "aave_withdraw"]
+            [
+                "aave_markets",
+                "aave_account",
+                "aave_supply",
+                "aave_withdraw",
+                "aave_borrow",
+                "aave_repay",
+                "aave_collateral"
+            ]
         );
         let names: Vec<&str> = request.chains.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["Ethereum (1)", "Sepolia (11155111)"]);
         let mainnet = &request.chains[0];
+        let strings = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
         assert_eq!(
             mainnet.calls,
-            [(
-                "Aave Pool".to_owned(),
-                "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2".to_owned(),
-                vec!["supply".to_owned(), "withdraw".to_owned()]
-            )]
+            [
+                (
+                    "Aave Pool".to_owned(),
+                    "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2".to_owned(),
+                    strings(&[
+                        "supply",
+                        "withdraw",
+                        "borrow",
+                        "repay",
+                        "setUserUseReserveAsCollateral"
+                    ])
+                ),
+                (
+                    "Aave WETH Gateway".to_owned(),
+                    "0xd01607c3C5eCABa394D8be377a08590149325722".to_owned(),
+                    strings(&["depositETH", "withdrawETH", "borrowETH", "repayETH"])
+                ),
+            ]
         );
         assert_eq!(
             mainnet.approvals,
-            ["USDC, USDT, DAI → Aave Pool (exact amounts)"]
+            [
+                "aWETH → Aave WETH Gateway (exact amounts)",
+                "WETH debt → Aave WETH Gateway (credit delegation: it may borrow in your name; exact amounts)",
+                "USDC, USDT, DAI, WETH → Aave Pool (exact amounts)",
+            ]
         );
     }
 

@@ -82,8 +82,19 @@ skills. The system prompt lists each skill's name and one-line description; the 
   any way ("Ethereum Mainnet", "mainnet", "Arbitrum One", "1"): CoinGecko's platform list and
   DefiLlama's chain list resolve it, and with none given it is the wallet's chain (Ethereum
   when the wallet is on a testnet).
-- `aave-v3-lend`: supply USDC, USDT or DAI to Aave v3 and withdraw it, on Sepolia (Aave's faucet
-  tokens) or an anvil mainnet fork. Requires `defi-data`.
+- `aave-v3-lend`: Aave v3 on Sepolia (Aave's faucet tokens) or an anvil mainnet fork. Requires
+  `defi-data`.
+  - Supply USDC, USDT, DAI, WETH or ETH, and withdraw it.
+  - Borrow at the variable rate, and repay an amount or all of it.
+  - Turn a supplied asset's use as collateral on or off.
+  - Read the account: collateral, debt, what it can still borrow, health factor (`aave_account`).
+  - ETH goes through Aave's WETH gateway. It is sent as the value to supply and repay. Withdrawing
+    approves exactly that much aWETH to the gateway. Borrowing lets the gateway borrow exactly
+    that amount in the user's name (credit delegation).
+  - Every review shows the account's collateral, debt and health factor before and after, from
+    the simulation.
+  - Where Aave has borrowing of an asset turned off (WETH on its Sepolia market, as of October
+    2026), the skill says so instead of building the plan.
 - `safe-multisig`: read a [Safe](https://safe.global) by address on Ethereum, Gnosis Chain,
   Sepolia, Base and others, and act on its next transaction: `safe_info` (owners, threshold,
   modules), `safe_queue` (what is waiting for signatures, who has not signed), `safe_activity`
@@ -115,12 +126,18 @@ reads) and, optionally, `skill.toml`, which is what edw-tui enforces:
   `address_arg`, at the address the user gave the action; never approvable; `signed_calls`
   names functions the contract authenticates by signature, which may then take raw bytes), with the
   functions allowed as signatures (`"function supply(address asset,uint256 amount,…)"`).
-  Functions that approve or move tokens themselves (`approve`, `permit`, `transfer`…) or take
-  raw `bytes` are refused. `amounts = { supply = { amount = "asset" } }` makes the review show
-  that amount in the asset's units.
-- `[[token]]`: tokens it names; `movable = false` ones are never approved.
+  Functions that approve or move tokens themselves (`approve`, `permit`, `transfer`,
+  `approveDelegation`…) or take raw `bytes` are refused. `amounts = { supply = { amount = "asset" } }`
+  makes the review show that amount in the asset's units (or name a token id, for a function whose
+  token is implied, like a WETH gateway's).
+- `[[token]]`: tokens it names. `movable = false` ones are never approved. `approve_to` lists the
+  only contracts it may be approved to. `kind = "debt"` marks an Aave debt token: approving it is a
+  credit delegation (`approveDelegation`, the spender may borrow in the user's name), and it needs
+  `approve_to`.
 - `[[read_tool]]` and `[[action]]`: scripts, their JSON schemas, and for actions the contracts
   they may `approves`.
+- `[[review_read]]`: a view call every review shows, read in the plan's simulation before the plan
+  and after it, with the uint outputs it names (`show = { healthFactor = "18", debt = "8 USD" }`).
 - `hosts`: the HTTP hosts its scripts may reach.
 
 **Consent.** On start, the TUI shows an approval card for each skill that is new, changed
@@ -168,20 +185,28 @@ have scripts are off; they never run unsandboxed.
 manifest:
 - every call goes to a pinned contract and an allowed function on this chain;
 - every address argument is `$self` or a manifest id, never a raw address;
-- approvals are exact, to the action's own spenders, and never unlimited;
+- approvals are exact, to the action's own spenders (and the token's `approve_to`), and never
+  unlimited; a debt token's is a credit delegation, read as such in the review;
+- ETH goes only to payable functions, and the review shows it;
 - a plan has at most 6 steps.
 
-It then simulates the whole plan in one block with `eth_simulateV1`, and writes the review
-from the ABI and the simulated asset changes, never from the skill. An RPC without
-`eth_simulateV1` refuses skill actions. After `y`, the steps are sent in order like a swap's.
+It then simulates the whole plan in one block with `eth_simulateV1`, with the manifest's review
+reads before and after it, and writes the review from the ABI, the simulated asset changes and
+those reads, never from the skill. An RPC without `eth_simulateV1` refuses skill actions. After
+`y`, the steps are sent in order like a swap's.
 
 ```text
-Skill    aave-v3-lend 0.1.0 (sha256 cdeb94c7f8e2)
-From     default (0/0) 0x08ba…F543 on mainnet (chain 1)
-Step 1   approve 100 USDC for Aave Pool
-Step 2   Aave Pool.supply(asset=USDC, amount=100 USDC (100000000), onBehalfOf=you, referralCode=0)
-Changes  +99.999999 aUSDC, −100 USDC (simulated)
-Max fee  0.00007854597108402 ETH
+Skill    aave-v3-lend 0.2.0 (sha256 a5e11d2805e6)
+From     default (0/0) 0xC853…C2Dd on mainnet (chain 1)
+Step 1   allow Aave WETH Gateway to take on up to 0.5 WETH debt in your name (credit delegation)
+Step 2   Aave WETH Gateway.borrowETH(pool=Aave Pool, amount=0.5 WETH (500000000000000000), referralCode=0)
+Changes  +0.5 ETH, +0.500000000000000001 WETH debt (simulated)
+Aave account (simulated, before → after)
+           collateral     4618.59 → 4618.59 USD
+           debt           0.00 → 1154.64 USD
+           can borrow     3717.96 → 2563.31 USD
+           health factor  ∞ → 3.31
+Max fee  0.000145232455715162 ETH
 ```
 
 To try Aave on a mainnet fork:
@@ -220,8 +245,11 @@ cargo test --test agent_loop -- --ignored --nocapture   # real Ollama (EDW_TUI_M
 cargo test --test skills_sandbox    # what a skill container can and cannot do (needs Docker)
 cargo test --test skills_agent      # load_skill gating in the Rig loop (edw, anvil; Docker part optional)
 cargo test --test skills_defi_data  # defi-data on recorded API responses (Docker); -- --ignored adds a live run
-cargo test --test skills_aave -- --ignored --nocapture   # pinned Aave addresses vs Aave's registry, then
-                                    # supply + withdraw on a mainnet fork (network; ETH_RPC_URL, Docker, edw)
+cargo test --test skills_aave -- --ignored --nocapture   # pinned Aave addresses (pool, tokens, aTokens,
+                                    # debt tokens, WETH gateway) vs Aave's registry on mainnet and Sepolia
+                                    # forks; USDC supply + withdraw and ETH supply, borrow, repay, withdraw
+                                    # through the gateway on forks (network; ETH_RPC_URL, EDW_TUI_SEPOLIA_RPC,
+                                    # Docker, edw)
 EDW_TUI_E2E_RECORD=1 cargo test --test e2e_aave -- --ignored --nocapture   # the same through the real
                                     # terminal: approve the skills, look up rates, supply, withdraw;
                                     # asserts the mined receipts and balances, records

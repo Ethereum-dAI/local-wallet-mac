@@ -21,7 +21,7 @@ use edw_tui::{
     interim::Interim,
     skills::{
         catalog::{self, Catalog, SkillState},
-        manifest::{self, Skill},
+        manifest::{self, Approval, Skill},
         sandbox::{self, Runner},
         tools::SkillSet,
     },
@@ -91,8 +91,12 @@ fn the_manifest_pins_the_pool_and_only_supply_and_withdraw() {
         );
     }
     for id in ["usdc", "usdt", "dai"] {
-        assert!(m.token(id).unwrap().movable, "{id}");
-        assert!(!m.token(&format!("a{id}")).unwrap().movable, "a{id}");
+        assert_ne!(m.token(id).unwrap().approval, Approval::Never, "{id}");
+        assert_eq!(
+            m.token(&format!("a{id}")).unwrap().approval,
+            Approval::Never,
+            "a{id}"
+        );
     }
     for t in &m.tokens {
         assert!(

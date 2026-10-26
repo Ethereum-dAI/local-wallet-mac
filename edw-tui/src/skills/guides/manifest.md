@@ -22,6 +22,10 @@ symbol = "USDC"
 decimals = 6
 address = { 1 = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 11155111 = "0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8" }
 movable = true                     # false = named in the review, never approved
+# approve_to = ["pool"]            # only these contracts may be approved for it
+# kind = "debt"                    # an Aave debt token: approving it is credit delegation
+#                                  # (approveDelegation, the spender may borrow in the user's
+#                                  # name); needs approve_to
 
 [[read_tool]]                      # a script that only reads and returns data
 name = "pool_info"
@@ -48,8 +52,9 @@ characters. Tool names are unique across all skills and never a built-in's name.
 Plans (what an action returns) are at most 6 steps. Each step is one of:
 
 - `{"approve": {"token", "spender", "amount"}}`: `token` is a token id and `spender` a contract id
-  from this manifest, not addresses. The spender must be listed in the action's `approves`.
-  `amount` is exact (never unlimited).
+  from this manifest, not addresses. The spender must be listed in the action's `approves`, and
+  in the token's `approve_to` when it has one. `amount` is exact (never unlimited). For a
+  `kind = "debt"` token the step is a credit delegation (`approveDelegation`) instead of `approve`.
 - `{"call": {"contract", "function", "args"}}`: `contract` is a contract id, `function` is one of
   that contract's listed function names, and `args` is a list. In `args`, an address may be a
   token id, a contract id, or `"$self"` (the sender). A raw `0x` address is refused.

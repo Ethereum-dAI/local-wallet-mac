@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use super::{
     abi, explain,
-    manifest::{ActionDef, ContractDef, Skill},
+    manifest::{ActionDef, Approval, ContractDef, Skill},
 };
 use crate::interim::guards::{format_units, is_burn};
 
@@ -25,6 +25,7 @@ pub const SELF: &str = "$self";
 
 sol! {
     function approve(address spender, uint256 amount) returns (bool);
+    function approveDelegation(address delegatee, uint256 amount);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,7 +35,8 @@ pub struct CheckedStep {
     pub to: Address,
     pub value: U256,
     pub data: Bytes,
-    /// `(token, amount)` for an approval, so the caller can check the balance covers it.
+    /// `(token, amount)` for an ERC-20 approval, so the caller can check the balance covers it.
+    /// A credit delegation has none: it lets the delegate borrow, it spends nothing held.
     pub approval: Option<(Address, U256)>,
     /// Lines for the review under the step, written by the harness: where a user-named contract
     /// is, and what a signed call's raw calldata does (see [`super::explain`]).
@@ -206,7 +208,7 @@ impl Ctx<'_> {
         let token = m
             .token(token_id)
             .ok_or_else(|| format!("`{token_id}` is not a token of this skill"))?;
-        if !token.movable {
+        if token.approval == Approval::Never {
             return Err(format!("{} may not be approved by a plan", token.symbol));
         }
         let token_address = self.on_chain(token_id, token.address.get(&self.chain_id))?;
@@ -218,6 +220,12 @@ impl Ctx<'_> {
                 action.approves.join(", ")
             ));
         }
+        if !token.approval.allows(spender_id) {
+            return Err(format!(
+                "{} may not be approved to `{spender_id}`",
+                token.symbol
+            ));
+        }
         let spender = m
             .contract(spender_id)
             .ok_or_else(|| format!("`{spender_id}` is not a contract of this skill"))?;
@@ -226,22 +234,36 @@ impl Ctx<'_> {
         if amount == U256::MAX {
             return Err("an unlimited approval is never allowed; approve the exact amount".into());
         }
-        Ok(CheckedStep {
-            label: format!(
-                "approve {} {} for {}",
-                format_units(amount, token.decimals),
-                token.symbol,
-                spender.label
+        let shown = format_units(amount, token.decimals);
+        let (label, data, approval) = match token.approval {
+            Approval::Delegation { .. } => (
+                format!(
+                    "allow {} to take on up to {shown} {} in your name (credit delegation)",
+                    spender.label, token.symbol
+                ),
+                approveDelegationCall {
+                    delegatee: spender_address,
+                    amount,
+                }
+                .abi_encode(),
+                None,
             ),
+            _ => (
+                format!("approve {shown} {} for {}", token.symbol, spender.label),
+                approveCall {
+                    spender: spender_address,
+                    amount,
+                }
+                .abi_encode(),
+                Some((token_address, amount)),
+            ),
+        };
+        Ok(CheckedStep {
+            label: one_line(&label),
             to: token_address,
             value: U256::ZERO,
-            data: approveCall {
-                spender: spender_address,
-                amount,
-            }
-            .abi_encode()
-            .into(),
-            approval: Some((token_address, amount)),
+            data: data.into(),
+            approval,
             details: Vec::new(),
             binding: None,
         })
@@ -682,12 +704,40 @@ decimals = 6
 movable = false
 address = { 11155111 = "0x16dA4541aD1807f4443d92D26044C1147406EB80" }
 
+[[contract]]
+id = "gateway"
+label = "WETH Gateway"
+functions = ["function borrowETH(address pool,uint256 amount,uint16 referralCode)"]
+address = { 11155111 = "0x387d311e47e80b498169e6fb51d3193167d89F7D" }
+
+[[token]]
+id = "aweth"
+symbol = "aWETH"
+decimals = 18
+approve_to = ["gateway"]
+address = { 11155111 = "0x5b071b590a59395fE4025A0Ccc1FcC931AAc1830" }
+
+[[token]]
+id = "weth_debt"
+symbol = "WETH debt"
+decimals = 18
+kind = "debt"
+approve_to = ["gateway"]
+address = { 11155111 = "0x22a35DB253f4F6D0029025D6312A3BdAb20C2c6A" }
+
 [[action]]
 name = "supply_it"
 run = "s.py"
 description = "d"
 schema = { type = "object" }
 approves = ["pool"]
+
+[[action]]
+name = "via_gateway"
+run = "g.py"
+description = "d"
+schema = { type = "object" }
+approves = ["pool", "gateway"]
 "#,
         )
         .unwrap();
@@ -696,9 +746,103 @@ approves = ["pool"]
     }
 
     fn run(plan: Value) -> Result<CheckedPlan, String> {
+        run_as("supply_it", plan)
+    }
+
+    fn run_as(action: &str, plan: Value) -> Result<CheckedPlan, String> {
         let (_root, skill) = skill();
-        let action = skill.action("supply_it").unwrap().clone();
+        let action = skill.action(action).unwrap().clone();
         check(&plan, &skill, &action, SEPOLIA, ME, &json!({}))
+    }
+
+    const GATEWAY: Address = address!("0x387d311e47e80b498169e6fb51d3193167d89F7D");
+    const AWETH: Address = address!("0x5b071b590a59395fE4025A0Ccc1FcC931AAc1830");
+    const WETH_DEBT: Address = address!("0x22a35DB253f4F6D0029025D6312A3BdAb20C2c6A");
+
+    fn grant(token: &str, spender: &str, amount: &str) -> Value {
+        json!({"steps": [{"approve": {"token": token, "spender": spender, "amount": amount}}]})
+    }
+
+    /// Approving a debt token lets the spender borrow in the sender's name: the step calls
+    /// `approveDelegation`, reads as that in the token's units, and spends nothing the sender holds.
+    #[test]
+    fn a_debt_token_is_granted_by_credit_delegation() {
+        let plan = run_as(
+            "via_gateway",
+            grant("weth_debt", "gateway", "500000000000000000"),
+        )
+        .unwrap();
+        let step = &plan.steps[0];
+        assert_eq!(step.to, WETH_DEBT);
+        assert_eq!(
+            step.data,
+            Bytes::from(
+                approveDelegationCall {
+                    delegatee: GATEWAY,
+                    amount: U256::from(500_000_000_000_000_000u64)
+                }
+                .abi_encode()
+            )
+        );
+        assert_eq!(
+            step.label,
+            "allow WETH Gateway to take on up to 0.5 WETH debt in your name (credit delegation)"
+        );
+        assert_eq!(step.approval, None, "a delegation needs no balance");
+        assert_eq!(plan.total_value, U256::ZERO);
+    }
+
+    #[test]
+    fn approve_to_limits_who_a_token_may_be_granted_to() {
+        let plan = run_as(
+            "via_gateway",
+            grant("aweth", "gateway", "1000000000000000000"),
+        )
+        .unwrap();
+        let one = U256::from(1_000_000_000_000_000_000u64);
+        assert_eq!(plan.steps[0].to, AWETH);
+        assert_eq!(
+            plan.steps[0].data,
+            Bytes::from(
+                approveCall {
+                    spender: GATEWAY,
+                    amount: one
+                }
+                .abi_encode()
+            )
+        );
+        assert_eq!(plan.steps[0].label, "approve 1 aWETH for WETH Gateway");
+        assert_eq!(plan.steps[0].approval, Some((AWETH, one)));
+
+        let refused_as = |action: &str, plan: Value, needle: &str| {
+            let error = run_as(action, plan).unwrap_err();
+            assert!(
+                error.contains(needle),
+                "`{error}` should mention `{needle}`"
+            );
+        };
+        // The action lists the Pool, but these tokens are only for the gateway.
+        refused_as(
+            "via_gateway",
+            grant("aweth", "pool", "1"),
+            "may not be approved to `pool`",
+        );
+        refused_as(
+            "via_gateway",
+            grant("weth_debt", "pool", "1"),
+            "may not be approved to `pool`",
+        );
+        // The token allows the gateway, but this action does not list it.
+        refused_as(
+            "supply_it",
+            grant("weth_debt", "gateway", "1"),
+            "may not approve `gateway`",
+        );
+        refused_as(
+            "via_gateway",
+            grant("weth_debt", "gateway", &U256::MAX.to_string()),
+            "unlimited",
+        );
     }
 
     fn approve(amount: &str) -> Value {

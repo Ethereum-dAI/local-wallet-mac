@@ -58,15 +58,39 @@ pub struct ContractDef {
     pub amounts: BTreeMap<String, BTreeMap<String, String>>,
 }
 
-/// An ERC-20 the skill names. `movable` tokens may be approved by a plan; the others are only
-/// listed so the review can name them in the simulated changes.
+/// A token the skill names, and what a plan may grant on it.
 #[derive(Clone, Debug)]
 pub struct TokenDef {
     pub id: String,
     pub symbol: String,
     pub decimals: u8,
     pub address: BTreeMap<u64, Address>,
-    pub movable: bool,
+    pub approval: Approval,
+}
+
+/// What a plan's approve step may grant on a token, and to which contracts of the manifest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Approval {
+    /// Never: the token is listed so the review can name it in the simulated changes.
+    Never,
+    /// ERC-20 `approve`, to any spender the action lists or, with `only`, just to those.
+    Allowance { only: Option<Vec<String>> },
+    /// Credit delegation of an Aave debt token (`approveDelegation`): the delegate may borrow up
+    /// to the amount in the sender's name. Only to the listed contracts.
+    Delegation { to: Vec<String> },
+}
+
+impl Approval {
+    /// Whether a plan may grant this to the contract `spender`.
+    pub fn allows(&self, spender: &str) -> bool {
+        match self {
+            Self::Never => false,
+            Self::Allowance { only: None } => true,
+            Self::Allowance { only: Some(ids) } | Self::Delegation { to: ids } => {
+                ids.iter().any(|id| id == spender)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -163,6 +187,18 @@ struct RawToken {
     address: BTreeMap<String, String>,
     #[serde(default = "yes")]
     movable: bool,
+    approve_to: Option<Vec<String>>,
+    #[serde(default)]
+    kind: TokenKind,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum TokenKind {
+    #[default]
+    Erc20,
+    /// An Aave debt token: not transferable, approved by credit delegation.
+    Debt,
 }
 
 fn yes() -> bool {
@@ -335,9 +371,48 @@ fn tool(raw: RawTool) -> Result<ToolDef, String> {
     })
 }
 
+/// What a plan may grant on token `t`: `movable = false` is never, `kind = "debt"` is a credit
+/// delegation, which must name its delegates, and `approve_to` narrows an ERC-20's spenders.
+fn approval(t: &RawToken, contracts: &[ContractDef]) -> Result<Approval, String> {
+    let id = &t.id;
+    if let Some(to) = &t.approve_to {
+        if to.is_empty() {
+            return Err(format!(
+                "{id}: approve_to is empty; write `movable = false` for a token that is never approved"
+            ));
+        }
+        for spender in to {
+            match contracts.iter().find(|c| &c.id == spender) {
+                None => {
+                    return Err(format!(
+                        "{id}: approve_to names `{spender}`, which is not a contract in this manifest"
+                    ));
+                }
+                Some(c) if c.address_arg.is_some() => {
+                    return Err(format!(
+                        "{id}: approve_to names `{spender}`, whose address the user names; only a pinned contract may be approved"
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    match (t.movable, t.kind, t.approve_to.clone()) {
+        (false, _, Some(_)) => Err(format!(
+            "{id}: give `movable = false` or `approve_to`, not both"
+        )),
+        (false, _, None) => Ok(Approval::Never),
+        (true, TokenKind::Erc20, only) => Ok(Approval::Allowance { only }),
+        (true, TokenKind::Debt, Some(to)) => Ok(Approval::Delegation { to }),
+        (true, TokenKind::Debt, None) => Err(format!(
+            "{id}: a debt token is delegated only to the contracts in `approve_to`; list them, or write `movable = false`"
+        )),
+    }
+}
+
 /// Token functions that grant or move funds directly. Plans approve only through the checker's
 /// own exact-amount step, so a manifest may not list these.
-const MOVES_TOKENS: [&str; 10] = [
+const MOVES_TOKENS: [&str; 12] = [
     "approve",
     "increaseallowance",
     "decreaseallowance",
@@ -348,6 +423,8 @@ const MOVES_TOKENS: [&str; 10] = [
     "setapprovalforall",
     "approveandcall",
     "transferandcall",
+    "approvedelegation",
+    "delegationwithsig",
 ];
 
 /// A function a plan could use to get around the checker: one that moves or approves tokens
@@ -513,11 +590,11 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
             return Err(format!("duplicate id `{}`", t.id));
         }
         tokens.push(TokenDef {
+            approval: approval(&t, &contracts)?,
             address: addresses(&t.id, t.address)?,
             id: t.id,
             symbol: t.symbol,
             decimals: t.decimals,
-            movable: t.movable,
         });
     }
     let mut names = BTreeSet::new();
@@ -669,8 +746,11 @@ approves = ["pool"]
             pool.address[&1],
             address!("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")
         );
-        assert!(m.token("usdc").unwrap().movable);
-        assert!(!m.token("ausdc").unwrap().movable);
+        assert_eq!(
+            m.token("usdc").unwrap().approval,
+            Approval::Allowance { only: None }
+        );
+        assert_eq!(m.token("ausdc").unwrap().approval, Approval::Never);
         assert_eq!(m.token("usdc").unwrap().decimals, 6);
         assert_eq!(
             m.read_tools[0].cache["https://yields.llama.fi/pools"],
@@ -679,6 +759,52 @@ approves = ["pool"]
         assert_eq!(m.actions[0].approves, ["pool"]);
         assert!(skill.has_scripts());
         assert_eq!(skill.tool_names(), ["demo_read", "demo_supply"]);
+    }
+
+    /// `approve_to` narrows to whom a token may be approved; a `debt` token is approved by credit
+    /// delegation and must name its delegates; `movable = false` is never approved.
+    #[test]
+    fn token_approval_policies() {
+        let with = |token: &str| {
+            let toml = format!(
+                "{SKILL_TOML}\n[[contract]]\nid = \"gateway\"\nfunctions = [\"function depositETH(address pool,address onBehalfOf,uint16 referralCode) payable\"]\naddress = {{ 1 = \"0xd01607c3C5eCABa394D8be377a08590149325722\" }}\n\n[[token]]\nid = \"t\"\nsymbol = \"T\"\ndecimals = 18\naddress = {{ 1 = \"0x4d5F47FA6A74757f35C14fD3a6Ef8E3C9BC514E8\" }}\n{token}\n"
+            );
+            let root = tempfile::tempdir().unwrap();
+            let dir = folder(root.path(), "demo", SKILL_MD, Some(&toml));
+            load(&dir).map(|s| s.manifest.token("t").unwrap().approval.clone())
+        };
+        let gateway = || vec!["gateway".to_owned()];
+        assert_eq!(
+            with("approve_to = [\"gateway\"]").unwrap(),
+            Approval::Allowance {
+                only: Some(gateway())
+            }
+        );
+        assert_eq!(
+            with("kind = \"debt\"\napprove_to = [\"gateway\"]").unwrap(),
+            Approval::Delegation { to: gateway() }
+        );
+        assert_eq!(
+            with("kind = \"debt\"\nmovable = false").unwrap(),
+            Approval::Never
+        );
+        for (token, needle) in [
+            ("kind = \"debt\"", "debt token"),
+            ("movable = false\napprove_to = [\"gateway\"]", "not both"),
+            ("approve_to = []", "empty"),
+            ("approve_to = [\"router\"]", "router"),
+            ("kind = \"nft\"", "kind"),
+        ] {
+            let error = with(token).unwrap_err();
+            assert!(error.contains(needle), "{token}: {error}");
+        }
+        let a = Approval::Allowance {
+            only: Some(gateway()),
+        };
+        assert!(a.allows("gateway") && !a.allows("pool"));
+        assert!(Approval::Allowance { only: None }.allows("pool"));
+        assert!(!Approval::Never.allows("pool"));
+        assert!(!Approval::Delegation { to: gateway() }.allows("pool"));
     }
 
     #[test]
@@ -765,6 +891,13 @@ approves = ["pool"]
             "function multicall(bytes[] data)",
             "function execute(address target,bytes data)",
             "function batch((address,bytes)[] calls)",
+        ] {
+            let error = bad(supply, sig);
+            assert!(error.contains("not allowed"), "{sig}: {error}");
+        }
+        for sig in [
+            "function approveDelegation(address delegatee,uint256 amount)",
+            "function delegationWithSig(address delegator,address delegatee,uint256 value,uint256 deadline,uint8 v,bytes32 r,bytes32 s)",
         ] {
             let error = bad(supply, sig);
             assert!(error.contains("not allowed"), "{sig}: {error}");

@@ -9,6 +9,7 @@ pub mod scenario;
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use alloy_node_bindings::{Anvil, AnvilInstance};
 use edw_tui::{
     addresses::AddressBook,
     agent::{self, AgentEvent, ModelSource, Request},
@@ -107,6 +108,40 @@ impl TempWallet {
             mainnet_fork: false,
         }
     }
+}
+
+/// A Sepolia wallet whose RPC is a fresh anvil answering with Sepolia's chain id, with edw's pool
+/// indexer off, so Tornado commands run without the network. The pools have no code there: a
+/// shield is a plain value transfer to the pool's address, and there are no notes to unshield.
+/// `None` (with a message) when anvil cannot start.
+pub async fn fake_sepolia(binary: PathBuf, name: &str) -> Option<(TempWallet, AnvilInstance)> {
+    let chain = match Anvil::new().chain_id(11_155_111).try_spawn() {
+        Ok(chain) => chain,
+        Err(error) => {
+            eprintln!("skipping: cannot start anvil ({error})");
+            return None;
+        }
+    };
+    let wallet = TempWallet::new(binary, name);
+    let rpc = chain.endpoint();
+    // The RPC is switched before the first profile exists, so nothing reaches the real Sepolia.
+    for step in [
+        &["unlock", "--network", "sepolia"][..],
+        &[
+            "network",
+            "rpc-config",
+            "add",
+            "anvil",
+            "--url",
+            &rpc,
+            "--use",
+        ],
+        &["network", "indexer-config", "--disable"],
+        &["profile", "new", "--new-phrase"],
+    ] {
+        wallet.edw(step).await;
+    }
+    Some((wallet, chain))
 }
 
 impl Drop for TempWallet {

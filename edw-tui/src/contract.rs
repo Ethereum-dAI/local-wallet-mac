@@ -32,7 +32,9 @@ use crate::{
 /// are offered only after that, so a correct answer may now start with `load_skill`.
 /// 4: Tornado. `shield`, `unshield`, `prepare_shield`, `next_fresh_address` and `balance`'s
 /// `private`. "shield 1 ETH" is now a call, where under 3 it was a refusal.
-pub const CONTRACT_VERSION: u32 = 4;
+/// 5: the `private-aave-borrow` skill. "borrow 100 DAI against 1 of my shielded ETH, privately" is
+/// now `load_skill` then `private_aave_borrow`, a call no tool under 4 could make.
+pub const CONTRACT_VERSION: u32 = 5;
 
 /// The skills shipped in this crate's `skills/` folder, as if the user had agreed to all of
 /// them and Docker were running: what the model sees in the full setup.

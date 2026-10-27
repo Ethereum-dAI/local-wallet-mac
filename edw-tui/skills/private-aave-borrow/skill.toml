@@ -1,0 +1,50 @@
+version = "0.1.0"
+requires = ["aave-v3-lend"]
+# Everything this skill reads comes over the wallet's own RPC; it calls no HTTP host.
+hosts = []
+
+# Aave v3 on Sepolia, the addresses aave-v3-lend pins (bgd-labs/aave-address-book, AaveV3Sepolia).
+# Sepolia only: there Aave lends the very DAI token the Tornado DAI pool takes, so what is
+# borrowed can be shielded.
+[[contract]]
+id = "pool"
+label = "Aave Pool"
+functions = [
+  "function borrow(address asset,uint256 amount,uint256 interestRateMode,uint16 referralCode,address onBehalfOf)",
+]
+amounts = { borrow = { amount = "asset" } }
+self_only = { borrow = ["onBehalfOf"] }
+address = { 11155111 = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951" }
+
+[[contract]]
+id = "gateway"
+label = "Aave WETH Gateway"
+functions = ["function depositETH(address pool,address onBehalfOf,uint16 referralCode) payable"]
+self_only = { depositETH = ["onBehalfOf"] }
+address = { 11155111 = "0x387d311e47e80b498169e6fb51d3193167d89F7D" }
+
+# Named for the review and the script; a plan of this skill approves nothing. The shield's DAI
+# approvals come from edw's own preparation.
+[[token]]
+id = "dai"
+symbol = "DAI"
+decimals = 18
+movable = false
+address = { 11155111 = "0xFF34B3d4Aee8ddCd6F9AFFFB6Fe49bD371b8a357" }
+
+[[token]]
+id = "weth"
+symbol = "WETH"
+decimals = 18
+movable = false
+address = { 11155111 = "0xC558DBdd856501FCd9aaF1E62eae57A9F0629a3c" }
+
+# The plan runs from the fresh address an unshield withdraws to, as tail calls of edw's user
+# operation; `$self` is that address. edw-tui gives the script `supply` (wei), `token` and
+# `borrow` (base units), derived from the call below.
+[[action]]
+name = "private_aave_borrow"
+run = "scripts/private_borrow.py"
+account = "fresh"
+description = "Borrow DAI on Aave v3 against shielded ETH, privately: one user operation unshields `eth` ETH to a fresh address of this wallet, supplies it to Aave as collateral (all but a 10% fee reserve), borrows `amount` DAI and shields that DAI again. Sepolia only. The user reviews one card before anything is sent."
+schema = { type = "object", required = ["eth", "amount"], properties = { eth = { type = "string", description = "Shielded ETH to unshield, an exact sum of the mined notes held, e.g. \"1\" or \"1.1\"." }, token = { type = "string", enum = ["DAI"], description = "What to borrow and shield again. Defaults to DAI." }, amount = { type = "string", description = "DAI to borrow and shield, a multiple of 100, e.g. \"100\"." } } }

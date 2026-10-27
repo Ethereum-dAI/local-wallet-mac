@@ -32,14 +32,22 @@ pub enum Backend {
     Interim,
 }
 
+/// What the user sees and answers before a tool call runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Review {
+    /// Reads only: runs without asking.
+    None,
+    /// Changes wallet state: the user confirms the exact edw command first.
+    Command,
+    /// Moves funds: the tool checks the call and writes a preview, and only a "yes" sends it.
+    Preview,
+}
+
 pub struct ToolSpec {
     pub name: &'static str,
     pub description: &'static str,
     pub backend: Backend,
-    /// Changes wallet state, so the user confirms it before it runs.
-    pub mutating: bool,
-    /// Moves funds: a dry run is shown for review, and only a "yes" sends it.
-    pub moves_value: bool,
+    pub review: Review,
     pub parameters: fn() -> Value,
 }
 
@@ -51,8 +59,7 @@ const CLI: ToolSpec = ToolSpec {
     name: "",
     description: "",
     backend: Backend::Cli,
-    mutating: false,
-    moves_value: false,
+    review: Review::None,
     parameters: no_params,
 };
 
@@ -65,7 +72,7 @@ pub const TOOLS: [ToolSpec; 13] = [
     ToolSpec {
         name: "unlock",
         description: "Unlock one network; every other network is locked. The first unlock of a network creates its encrypted store with mnemonic 0 and profile 0.",
-        mutating: true,
+        review: Review::Command,
         parameters: || {
             json!({"type": "object", "properties": {
                 "network": {"type": "string", "enum": NETWORKS, "description": "Defaults to sepolia."}
@@ -86,7 +93,7 @@ pub const TOOLS: [ToolSpec; 13] = [
     ToolSpec {
         name: "new_mnemonic",
         description: "Generate a brand-new mnemonic (a separate seed) with one profile on it. Only use this when the user explicitly asks for a new seed or mnemonic; to add profiles to the current wallet use add_profile.",
-        mutating: true,
+        review: Review::Command,
         parameters: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string", "description": "Optional profile name."},
@@ -98,7 +105,7 @@ pub const TOOLS: [ToolSpec; 13] = [
     ToolSpec {
         name: "add_profile",
         description: "Add a profile to the current wallet (on an existing mnemonic, at the next unused index). This is the default way to add or create profiles.",
-        mutating: true,
+        review: Review::Command,
         parameters: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string", "description": "Optional profile name."},
@@ -110,7 +117,7 @@ pub const TOOLS: [ToolSpec; 13] = [
     ToolSpec {
         name: "rename_profile",
         description: "Set or clear a profile's name.",
-        mutating: true,
+        review: Review::Command,
         parameters: || {
             json!({"type": "object", "properties": {
                 "profile": {"type": "string", "description": "The profile as `mnemonic/profile` (e.g. `0/1`) or its current unique name."},
@@ -158,17 +165,15 @@ pub const TOOLS: [ToolSpec; 13] = [
         name: "transfer",
         description: crate::app_contract::TRANSFER_DESCRIPTION,
         backend: Backend::Interim,
-        moves_value: true,
+        review: Review::Preview,
         parameters: crate::app_contract::transfer_parameters,
-        ..CLI
     },
     ToolSpec {
         name: "swap",
         description: crate::app_contract::SWAP_DESCRIPTION,
         backend: Backend::Interim,
-        moves_value: true,
+        review: Review::Preview,
         parameters: crate::app_contract::swap_parameters,
-        ..CLI
     },
 ];
 

@@ -32,7 +32,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::{
     addresses::AddressBook,
     app_contract::SAFETY_CLAUSE,
-    edw::{self, Backend, EdwConfig, EdwResult, TOOLS},
+    edw::{self, Backend, EdwConfig, EdwResult, Review, TOOLS},
     flow::{FlowEvent, Stage, StepState, Trigger},
     interim::{self, Interim, InterimConfig},
     scripted::ScriptedModel,
@@ -327,7 +327,7 @@ impl<const I: usize> Tool for EdwTool<I> {
     /// Arguments arrive with address aliases and are resolved first; the result goes back to
     /// the model with addresses aliased again. The UI always sees real addresses.
     async fn call(&self, _context: &mut ToolContext, args: Value) -> Result<String, Infallible> {
-        if TOOLS[I].moves_value
+        if TOOLS[I].review == Review::Preview
             && let Some(to) = args.get("to").and_then(Value::as_str)
             && let Some(invented) = self.0.addresses.invented(to)
         {
@@ -731,7 +731,7 @@ impl AgentHook for ConfirmHook {
             return ToolCallAction::Run;
         };
         // Value-moving tools confirm inside the tool, after the dry run, with its preview.
-        if !spec.mutating || spec.moves_value {
+        if spec.review != Review::Command {
             return ToolCallAction::Run;
         }
         let args: Value = serde_json::from_str(event.args).unwrap_or(Value::Null);

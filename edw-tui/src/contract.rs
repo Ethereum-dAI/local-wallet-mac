@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::{
     agent::{MAX_TURNS, additional_params, preamble_with},
-    edw::{self, TOOLS},
+    edw::{self, Review, TOOLS},
     skills::{
         LOAD_SKILL, author, author_tools,
         catalog::{self, Catalog, Installed, SkillState},
@@ -108,8 +108,8 @@ pub fn dump() -> Value {
         "preamble": preamble_with(&catalog),
         "tools": tools,
         "skills": skills,
-        "confirmation_required": TOOLS.iter().filter(|t| t.mutating || t.moves_value).map(|t| t.name).collect::<Vec<_>>(),
-        "reviewed_dry_run": TOOLS.iter().filter(|t| t.moves_value).map(|t| t.name).collect::<Vec<_>>(),
+        "confirmation_required": TOOLS.iter().filter(|t| t.review != Review::None).map(|t| t.name).collect::<Vec<_>>(),
+        "reviewed_dry_run": TOOLS.iter().filter(|t| t.review == Review::Preview).map(|t| t.name).collect::<Vec<_>>(),
         "request": {"max_turns": MAX_TURNS, "additional_params": additional_params()},
     })
 }

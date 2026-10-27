@@ -71,6 +71,43 @@ input first gets an approval for exactly the amount, so a swap may be two or thr
 transactions; the review lists them all, and they are sent in order, stopping at the first
 failure. Only known tokens are traded.
 
+## Shield and unshield (Tornado)
+
+These tools run edw's own Tornado Cash commands (`src/tornado/`), as the sending profile (`P`):
+
+| Tool | edw command | Asks first |
+|---|---|---|
+| `shield` | `shield --token T --amount-formatted N --from 0 --profile P` | yes, with a preview |
+| `unshield` | `unshield --token T --amount-formatted N [--to A] --expected-fresh-address F --profile P` | yes, with a preview |
+| `prepare_shield` | `shield --prepare --token T --amount-formatted N --profile P` | yes, unless already prepared |
+| `next_fresh_address` | `next-fresh-address --peek --profile P` | no; it stores nothing |
+
+`balance` with `private: true` runs `edw balance --detailed -- P`, which lists the shielded
+holdings and each unspent note.
+
+- Before anything runs, the harness checks the token and amount against the unlocked network's
+  pools, with edw-core's own catalog at the pinned rev. Sepolia has ETH (0.1, 1, 10) and DAI
+  (100). Mainnet has ETH, DAI, USDC, USDT and WBTC. `local` has none. The amount must be a sum of
+  pool sizes: 1.1 ETH is 1 + 0.1, and 1.15 is refused. A refused call never reaches a review.
+- With `--non-interactive`, edw broadcasts without asking, so the review is the only gate. It
+  shows the exact command, the network and chain id, and the notes a shield makes. When edw
+  batches a shield into one user operation, which installs its EIP-7702 delegation on the
+  paying address, the review says so. For an unshield it names the fresh address it withdraws
+  to. That address goes to edw as `--expected-fresh-address`, so edw aborts if its next fresh
+  address is another one. An unshield's `to` passes the same invented-address guard as
+  `transfer`.
+- Preparing reserves notes (it spends Tornado nonces), and preparing again reserves different
+  ones. So edw's `edw/shield-prepared` answer is saved before the model sees it, in
+  `$EDW_DATA_DIR/edw-tui/prepared-shields/<id>.json` (folder 0700, file 0600, never deleted). A
+  later `prepare_shield` with the same network, profile, token and amount returns the stored
+  one without asking. The model gets the id and the notes' public metadata, never the calls.
+- `--tail-calls` is not a tool argument. 8B models mangle long hex, and a tail call runs
+  arbitrary code from the fresh account. Only harness code can attach one, from a stored
+  preparation (`PreparedShield::tail_calls`), for a skill plan the user reviewed. The log and
+  the model see `<n calls>` in its place.
+- Tornado commands get 10 minutes instead of 60 s, because pool sync, proving and the bundler
+  receipt can take minutes.
+
 ## Skills
 
 A skill is a folder under `skills/` that teaches the agent something new, like Claude's
@@ -241,6 +278,10 @@ what the model sees shows up in review. Regenerate with `cargo run -- tools-dump
 ```bash
 cargo test                          # unit + integration; edw-backed tests skip without edw
 cargo test --test edw_contract      # every tool against the pinned edw
+cargo test --test tornado           # shield, unshield and prepare_shield through the review, on an
+                                    # anvil that answers as Sepolia (needs edw, anvil)
+cargo test --test tornado live -- --ignored --nocapture   # a real Sepolia shield and unshield;
+                                    # moves real Sepolia ETH (EDW_TUI_LIVE_PHRASE, EDW_TUI_LIVE_RPC)
 cargo test --test interim           # real ETH sends on a throwaway anvil (needs anvil)
 cargo test --test e2e_transfer      # the real binary in a pseudo-terminal: alice sends bob 0.1 ETH;
                                     # screenshots in target/e2e-screenshots/, snapshots in tests/snapshots/

@@ -113,16 +113,18 @@ impl Store {
     }
 
     /// The stored preparation for `amount` and `profile`, or else the one `prepare` gets from
-    /// edw, saved before it is returned. `true` when it was stored already.
-    pub async fn reuse_or<F, Fut>(
+    /// edw, saved before it is returned. `true` when it was stored already. `prepare`'s own error
+    /// comes back as it is; the store's is a `String`.
+    pub async fn reuse_or<F, Fut, E>(
         &self,
         amount: &PoolAmount,
         profile: &str,
         prepare: F,
-    ) -> Result<(PreparedShield, bool), String>
+    ) -> Result<(PreparedShield, bool), E>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Value, String>>,
+        Fut: Future<Output = Result<Value, E>>,
+        E: From<String>,
     {
         let _one_at_a_time = self.busy.lock().await;
         if let Some(stored) = self
@@ -133,7 +135,10 @@ impl Store {
             return Ok((stored, true));
         }
         let document = prepare().await?;
-        Ok((self.save(amount, profile, document)?, false))
+        Ok((
+            self.save(amount, profile, document).map_err(E::from)?,
+            false,
+        ))
     }
 
     pub fn get(&self, id: &str) -> Result<PreparedShield, String> {
@@ -356,7 +361,7 @@ mod tests {
         broadcast["broadcast"] = Value::Bool(true);
         for answer in [json!({"kind": "edw/error"}), broadcast] {
             let failed = store
-                .reuse_or(&dai("200"), "0/0", || async { Ok(answer) })
+                .reuse_or(&dai("200"), "0/0", || async { Ok::<_, String>(answer) })
                 .await;
             assert!(failed.unwrap_err().contains("kept in"));
         }

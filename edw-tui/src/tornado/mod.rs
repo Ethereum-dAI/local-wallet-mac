@@ -381,6 +381,16 @@ impl Command {
     }
 }
 
+/// Whether a `balance` call asks for the shielded side, which edw reads.
+pub fn wants_private(args: &Value) -> bool {
+    match args.get("private") {
+        Some(Value::Bool(private)) => *private,
+        // Models often send booleans as strings.
+        Some(Value::String(text)) => text.trim().eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
 /// edw's `edw/next-fresh-address` answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FreshAddress {

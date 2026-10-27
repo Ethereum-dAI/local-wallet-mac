@@ -114,8 +114,12 @@ async fn confirmed_commands_run_and_declined_ones_do_not() {
         "{turn:?}"
     );
 
-    // Out of scope: no tool call at all.
+    // The local chain has no Tornado pools: the call is refused before any review or edw run.
     let turn = h.turn("shield 1 ETH", true).await;
-    assert!(turn.confirms.is_empty() && turn.outputs.is_empty());
-    assert!(turn.reply.contains("cannot shield"));
+    assert!(turn.confirms.is_empty() && turn.flow.is_empty(), "{turn:?}");
+    assert!(
+        turn.outputs[0].contains("Rejected before running edw")
+            && turn.outputs[0].contains("no Tornado pools"),
+        "{turn:?}"
+    );
 }

@@ -32,7 +32,7 @@ use alloy_sol_types::{SolCall, sol};
 use edw_core::{
     instance::{DataDir, Instance},
     mnemonic::Mnemonic,
-    network::{NetworkId, NetworkPreset, RpcConfigKind},
+    network::{NetworkPreset, RpcConfigKind},
     profile::ProfileRecord,
 };
 use guards::{Amount, TokenRef, format_units, parse_units};
@@ -289,30 +289,16 @@ impl Interim {
         Self { config }
     }
 
-    /// The unlocked network, read from edw's own `config view`, so the lock state and the
-    /// session stay edw's to decide.
+    /// The unlocked network, if the interim may send on it.
     async fn unlocked_network(&self) -> Result<NetworkPreset, String> {
-        let view = edw::run(&self.config.edw, &["config".into(), "view".into()]).await;
-        let Some(document) = view.document().filter(|_| view.ok()) else {
-            return Err(format!("cannot read edw's session: {}", view.output));
-        };
-        if document["locked"] != Value::Bool(false) {
-            return Err("the wallet is locked; unlock a network first".into());
-        }
-        let session = document["session"]["network"].as_str().unwrap_or_default();
-        let network = session
-            .parse::<NetworkId>()
-            .ok()
-            .and_then(NetworkPreset::from_network_id)
-            .ok_or_else(|| format!("edw reports an unknown network `{session}`"))?;
-        match network {
+        match edw::unlocked_network(&self.config.edw).await? {
             NetworkPreset::Mainnet if !self.config.mainnet_fork => Err(
                 "sending on mainnet is disabled while edw-tui's transfers are interim; unlock local or sepolia (an anvil mainnet fork works with EDW_TUI_MAINNET_FORK=1)".into(),
             ),
             NetworkPreset::Sepolia if !self.config.allow_sepolia => Err(
                 "interim sends on sepolia are off; set EDW_TUI_INTERIM_SEPOLIA=1 to allow them".into(),
             ),
-            _ => Ok(network),
+            network => Ok(network),
         }
     }
 

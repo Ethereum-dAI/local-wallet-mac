@@ -531,6 +531,42 @@ fn first_number(prompt: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Tornado requests: `shield <amount> <token>`, `prepare a shield of <amount> <token>`,
+/// `unshield <amount> <token> [to <address>]`, `my fresh address`, `my private balance`.
+fn tornado_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
+    if has("fresh") {
+        return Some(Script::Call("next_fresh_address", json!({})));
+    }
+    if has("private") || has("shielded") {
+        return Some(Script::Call("balance", json!({"private": true})));
+    }
+    let tool = if has("unshield") {
+        "unshield"
+    } else if has("shield") && has("prepare") {
+        "prepare_shield"
+    } else if has("shield") {
+        "shield"
+    } else {
+        return None;
+    };
+    let words: Vec<&str> = prompt.split_whitespace().collect();
+    let Some(at) = words.iter().position(|w| w.parse::<f64>().is_ok()) else {
+        return Some(Script::Say(format!("Say it as: {tool} <amount> <token>.")));
+    };
+    let mut args = json!({"amount": words[at]});
+    if let Some(token) = words.get(at + 1).filter(|w| !w.eq_ignore_ascii_case("to")) {
+        args["token"] = json!(token);
+    }
+    let to = words.iter().position(|w| w.eq_ignore_ascii_case("to"));
+    if let Some(to) = to
+        .and_then(|i| words.get(i + 1))
+        .filter(|_| tool == "unshield")
+    {
+        args["to"] = json!(to);
+    }
+    Some(Script::Call(tool, args))
+}
+
 pub fn script(prompt: &str) -> Script {
     let text = prompt.to_lowercase();
     let has = |word: &str| {
@@ -548,8 +584,8 @@ pub fn script(prompt: &str) -> Script {
 
     if let Some(skill) = skill_script(prompt, &text, &has) {
         skill
-    } else if has("shield") {
-        Script::Say("edw cannot shield yet, so there is nothing I can run for that.".into())
+    } else if let Some(tornado) = tornado_script(prompt, &has) {
+        tornado
     } else if has("transfer") || has("send") {
         // "send <amount> <token> to <recipient>"
         let words: Vec<&str> = prompt.split_whitespace().collect();
@@ -1056,7 +1092,31 @@ mod tests {
             script("what is my balance"),
             Script::Call("balance", json!({}))
         );
-        assert!(matches!(script("shield 1 ETH"), Script::Say(_)));
+        for (prompt, tool, args) in [
+            (
+                "shield 1 ETH",
+                "shield",
+                json!({"amount": "1", "token": "ETH"}),
+            ),
+            (
+                "prepare a shield of 200 DAI",
+                "prepare_shield",
+                json!({"amount": "200", "token": "DAI"}),
+            ),
+            (
+                "unshield 0.1 ETH to 0x000000000000000000000000000000000000bEEF",
+                "unshield",
+                json!({"amount": "0.1", "token": "ETH", "to": "0x000000000000000000000000000000000000bEEF"}),
+            ),
+            ("what is my fresh address", "next_fresh_address", json!({})),
+            (
+                "show my private balance",
+                "balance",
+                json!({"private": true}),
+            ),
+        ] {
+            assert_eq!(script(prompt), Script::Call(tool, args), "{prompt}");
+        }
         assert_eq!(
             script("swap 0.01 ETH for USDC"),
             Script::Call(

@@ -30,7 +30,9 @@ use crate::{
 /// appended. "send 1 ETH to 0x…" is now a call, where under 1 it was a refusal.
 /// 3: skills. The preamble lists them, `load_skill` loads one, and its tools (in `skills`)
 /// are offered only after that, so a correct answer may now start with `load_skill`.
-pub const CONTRACT_VERSION: u32 = 3;
+/// 4: Tornado. `shield`, `unshield`, `prepare_shield`, `next_fresh_address` and `balance`'s
+/// `private`. "shield 1 ETH" is now a call, where under 3 it was a refusal.
+pub const CONTRACT_VERSION: u32 = 4;
 
 /// The skills shipped in this crate's `skills/` folder, as if the user had agreed to all of
 /// them and Docker were running: what the model sees in the full setup.

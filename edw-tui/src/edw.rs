@@ -7,7 +7,8 @@
 //! Only commands `edw` implements today map onto the CLI. `profile import` is left out on
 //! purpose: it reads a recovery phrase from stdin, and a phrase must never pass through a chat.
 //! `balance`, `transfer` and `swap` are in [`TOOLS`] too, but edw has no such commands yet, so
-//! they run on the interim executor in `crate::interim` until it does.
+//! they run on the interim executor in `crate::interim` until it does. The Tornado tools map onto
+//! edw through `crate::tornado`, which needs the unlocked network and the sending profile.
 
 use std::{
     path::{Path, PathBuf},
@@ -16,6 +17,7 @@ use std::{
     time::Duration,
 };
 
+use edw_core::network::{NetworkId, NetworkPreset};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use tokio::process::Command;
@@ -30,6 +32,9 @@ pub enum Backend {
     Cli,
     /// Not in edw yet; run by `crate::interim` until it is.
     Interim,
+    /// edw's Tornado commands, through `crate::tornado`: checked against the unlocked network's
+    /// pools and run as the sending profile.
+    Tornado,
 }
 
 /// What the user sees and answers before a tool call runs.
@@ -63,7 +68,7 @@ const CLI: ToolSpec = ToolSpec {
     parameters: no_params,
 };
 
-pub const TOOLS: [ToolSpec; 13] = [
+pub const TOOLS: [ToolSpec; 17] = [
     ToolSpec {
         name: "wallet_status",
         description: "Show the wallet configuration: data directory, which network is unlocked (or locked), and the RPC source.",
@@ -135,11 +140,12 @@ pub const TOOLS: [ToolSpec; 13] = [
     // harness has selected (the default profile unless changed), so the model never names one.
     ToolSpec {
         name: "balance",
-        description: "Show how much ETH and which known tokens the wallet holds on the unlocked network. Use it when the user asks for a balance, or to check funds before sending.",
+        description: "Show how much ETH and which known tokens the wallet holds on the unlocked network. Use it when the user asks for a balance, or to check funds before sending. Set private to true for shielded (Tornado) holdings and notes.",
         backend: Backend::Interim,
         parameters: || {
             json!({"type": "object", "properties": {
-                "token": {"type": "string", "description": "Only this token: a symbol such as ETH or USDC, or a 0x-prefixed contract address. Omit to list all known tokens."}
+                "token": {"type": "string", "description": "Only this token: a symbol such as ETH or USDC, or a 0x-prefixed contract address. Omit to list all known tokens."},
+                "private": {"type": "boolean", "description": "true for the shielded side: Tornado holdings and each unspent note."}
             }})
         },
         ..CLI
@@ -174,6 +180,33 @@ pub const TOOLS: [ToolSpec; 13] = [
         backend: Backend::Interim,
         review: Review::Preview,
         parameters: crate::app_contract::swap_parameters,
+    },
+    ToolSpec {
+        name: "shield",
+        description: "Shield ETH or a token: deposit it into Tornado Cash pools that only this wallet can withdraw from. The amount must be a sum of the network's pool sizes. The user reviews it before it is sent.",
+        backend: Backend::Tornado,
+        review: Review::Preview,
+        parameters: crate::tornado::shield_parameters,
+    },
+    ToolSpec {
+        name: "unshield",
+        description: "Unshield: withdraw shielded ETH or a token from Tornado Cash to a fresh address of this wallet, or on to `to`. The user reviews it before it is sent.",
+        backend: Backend::Tornado,
+        review: Review::Preview,
+        parameters: crate::tornado::unshield_parameters,
+    },
+    ToolSpec {
+        name: "prepare_shield",
+        description: "Reserve Tornado notes for a later deposit and return their id; sends nothing. Only when the user asks to prepare a shield; to shield now, use shield.",
+        backend: Backend::Tornado,
+        review: Review::Preview,
+        parameters: crate::tornado::shield_parameters,
+    },
+    ToolSpec {
+        name: "next_fresh_address",
+        description: "Show the fresh address the next unshield withdraws to. Stores nothing.",
+        backend: Backend::Tornado,
+        ..CLI
     },
 ];
 
@@ -443,6 +476,10 @@ pub fn display_command(argv: &[String]) -> String {
 }
 
 pub async fn run(config: &EdwConfig, argv: &[String]) -> EdwResult {
+    run_with_timeout(config, argv, Duration::from_secs(60)).await
+}
+
+pub async fn run_with_timeout(config: &EdwConfig, argv: &[String], timeout: Duration) -> EdwResult {
     let command = display_command(argv);
     let fail = |output: String| EdwResult {
         command: command.clone(),
@@ -480,8 +517,8 @@ pub async fn run(config: &EdwConfig, argv: &[String]) -> EdwResult {
         Ok(child) => child,
         Err(error) => return fail(format!("cannot run {}: {error}", config.binary.display())),
     };
-    match tokio::time::timeout(Duration::from_secs(60), child.wait_with_output()).await {
-        Err(_) => fail("timed out after 60s".into()),
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Err(_) => fail(format!("timed out after {}s", timeout.as_secs())),
         Ok(Err(error)) => fail(error.to_string()),
         Ok(Ok(out)) => {
             let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -537,6 +574,24 @@ pub async fn run_tool(config: &EdwConfig, name: &str, args: &Value, argv: &[Stri
         exit_code: seeded.exit_code,
         output: format!("{}\n{}", result.output, seeded.output),
     }
+}
+
+/// The unlocked network, read from edw's own `config view`, so the lock state and the session
+/// stay edw's to decide.
+pub async fn unlocked_network(config: &EdwConfig) -> Result<NetworkPreset, String> {
+    let view = run(config, &["config".into(), "view".into()]).await;
+    let Some(document) = view.document().filter(|_| view.ok()) else {
+        return Err(format!("cannot read edw's session: {}", view.output));
+    };
+    if document["locked"] != Value::Bool(false) {
+        return Err("the wallet is locked; unlock a network first".into());
+    }
+    let session = document["session"]["network"].as_str().unwrap_or_default();
+    session
+        .parse::<NetworkId>()
+        .ok()
+        .and_then(NetworkPreset::from_network_id)
+        .ok_or_else(|| format!("edw reports an unknown network `{session}`"))
 }
 
 /// The mnemonic indices the unlocked wallet's profiles use; empty when edw cannot list them.

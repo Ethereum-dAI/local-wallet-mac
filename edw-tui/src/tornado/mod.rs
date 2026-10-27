@@ -6,11 +6,12 @@
 //! is refused before anything runs, with the pool sizes that would work. `--tail-calls` and
 //! `--expected-fresh-address` are the harness's alone: no tool argument reaches them.
 
+pub mod borrow;
 pub mod prepared;
 
 use std::{fmt, time::Duration};
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, U256};
 use alloy_provider::ProviderBuilder;
 use edw_core::{
     network::NetworkPreset,
@@ -143,6 +144,8 @@ pub struct PoolAmount {
     pub amount: String,
     /// How a shield splits it into notes, largest first, as edw does: `1.1` ETH is `1` and `0.1`.
     pub notes: Vec<String>,
+    pub base: U256,
+    decimals: u8,
 }
 
 impl PoolAmount {
@@ -182,7 +185,14 @@ impl PoolAmount {
             token,
             amount: format_amount(base, asset.decimals()),
             notes: notes.iter().map(Pool::amount).collect(),
+            base,
+            decimals: asset.decimals(),
         })
+    }
+
+    /// `base` units of this amount's token, as edw writes an amount: `0.9`.
+    pub fn units(&self, base: U256) -> String {
+        format_amount(base, self.decimals)
     }
 
     fn header(&self) -> String {
@@ -266,12 +276,7 @@ impl Command {
         };
         let amount = || {
             let token = Token::parse(&text(args, "token", false)?.unwrap_or_else(|| "ETH".into()))?;
-            let amount = match args.get("amount") {
-                // Some models send a number even though the schema says string.
-                Some(Value::Number(n)) => n.to_string(),
-                _ => text(args, "amount", true)?.unwrap_or_default(),
-            };
-            PoolAmount::new(network, token, &amount)
+            PoolAmount::new(network, token, &number(args, "amount")?)
         };
         Ok(match tool {
             "shield" => Command::Shield(amount()?),
@@ -406,6 +411,14 @@ impl Command {
             }
             Command::PeekFreshAddress | Command::PrivateBalance => String::new(),
         }
+    }
+}
+
+/// A required decimal argument. Some models send a number even though the schema says string.
+fn number(args: &Map<String, Value>, key: &str) -> Result<String, String> {
+    match args.get(key) {
+        Some(Value::Number(n)) => Ok(n.to_string()),
+        _ => Ok(text(args, key, true)?.unwrap_or_default()),
     }
 }
 

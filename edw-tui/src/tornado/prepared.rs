@@ -14,6 +14,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use alloy_primitives::{Address, Bytes, U256};
+use alloy_sol_types::{SolCall, sol};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -23,6 +25,10 @@ use super::{PoolAmount, TailCalls, Token};
 
 const KIND: &str = "edw/shield-prepared";
 const PREFIX: &str = "shield-";
+
+sol! {
+    function approve(address spender, uint256 amount) returns (bool);
+}
 
 /// edw's `edw/shield-prepared` document, version 1.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +82,36 @@ impl PreparedShield {
     /// The deposit calls, ready to append to an unshield's tail calls.
     pub fn tail_calls(&self) -> TailCalls {
         TailCalls(self.edw.tail_calls.clone())
+    }
+
+    /// The token these calls approve, and how much of it in all: a token's shield approves it
+    /// before each deposit. An error for none, or for more than one token.
+    pub fn approved(&self) -> Result<(Address, U256), String> {
+        let mut approved: Option<(Address, U256)> = None;
+        for call in &self.edw.calls {
+            let data: Bytes = call
+                .data
+                .parse()
+                .map_err(|_| format!("{}: a call's data is not hex", self.id))?;
+            let Ok(approve) = approveCall::abi_decode(&data) else {
+                continue;
+            };
+            let token: Address = call
+                .target
+                .parse()
+                .map_err(|_| format!("{}: `{}` is not an address", self.id, call.target))?;
+            approved = match approved {
+                None => Some((token, approve.amount)),
+                Some((seen, total)) if seen == token => Some((token, total + approve.amount)),
+                Some((seen, _)) => {
+                    return Err(format!(
+                        "{} approves two tokens, {seen} and {token}",
+                        self.id
+                    ));
+                }
+            };
+        }
+        approved.ok_or_else(|| format!("{} approves no token", self.id))
     }
 
     /// What the model is told: the id and what was reserved, never the calls.

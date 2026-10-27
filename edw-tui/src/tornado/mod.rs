@@ -12,7 +12,7 @@ pub mod prepared;
 use std::{fmt, time::Duration};
 
 use alloy_primitives::{Address, U256};
-use alloy_provider::ProviderBuilder;
+use alloy_provider::{Provider, ProviderBuilder};
 use edw_core::{
     network::NetworkPreset,
     vault::tornadocash::{
@@ -56,6 +56,23 @@ pub async fn network(config: &EdwConfig, mainnet_fork: bool) -> Result<NetworkPr
         "edw network rpc-config",
     )?;
     Ok(network)
+}
+
+/// The RPC edw sends through on `network`, once it answers as that chain: where a skill reads
+/// the chain to build calls an unshield will run.
+pub async fn rpc(config: &EdwConfig, network: NetworkPreset) -> Result<reqwest::Url, String> {
+    let rpc = interim::edw_rpc(config, network).await?;
+    let chain = ProviderBuilder::new()
+        .connect_http(rpc.clone())
+        .get_chain_id()
+        .await
+        .map_err(|e| format!("cannot reach edw's {network} RPC at {rpc} ({e})"))?;
+    if chain != network.network_id().0 {
+        return Err(format!(
+            "edw's RPC at {rpc} is chain {chain}, but {network} is unlocked"
+        ));
+    }
+    Ok(rpc)
 }
 
 /// The tokens edw can shield. Which of them a network has pools for is up to edw-core's catalog.

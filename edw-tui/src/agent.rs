@@ -34,7 +34,7 @@ use crate::{
     app_contract::SAFETY_CLAUSE,
     edw::{self, Backend, EdwConfig, EdwResult, Review, TOOLS},
     flow::{FlowEvent, Stage, StepState, Trigger},
-    interim::{self, Interim, InterimConfig},
+    interim::{self, Interim, InterimConfig, SkillContext},
     scripted::ScriptedModel,
     skills::{
         self as skills_mod, LOAD_SKILL, Paths, SkillRow, author, author_tools,
@@ -42,11 +42,12 @@ use crate::{
         consent::ConsentRequest,
         facts,
         host::Log,
+        manifest::{ActionDef, RunsFrom, Skill},
         plan,
         sandbox::{self, Output},
         tools::{self as skill_tools, SkillGate, SkillSet},
     },
-    tornado::{self, Command, FreshAddress, PoolAmount, prepared::Store},
+    tornado::{self, Command, FreshAddress, PoolAmount, borrow, prepared::Store},
 };
 
 const RULES: &str = "You are the chat interface of edw, a privacy-first Ethereum desktop wallet.
@@ -538,6 +539,9 @@ impl Shared {
             );
         }
         let args = self.addresses.reveal_json(args);
+        if let Some(action) = skill.action(tool).filter(|a| a.account == RunsFrom::Fresh) {
+            return self.private_borrow(&skill, action, &args).await;
+        }
         let command = format!("{short} {args}");
         // Only an action sends something, so only an action gets a card.
         let is_action = skill.action(tool).is_some();
@@ -567,17 +571,11 @@ impl Shared {
             Err(_) if skill.action(tool).is_none() => None,
             Err(error) => return fail(&command, format!("{error}; skill actions need the wallet")),
         };
-        let events = self.events.clone();
-        let log: Log = Arc::new(move |line| {
-            let _ = events.send(AgentEvent::ToolFinished(EdwResult {
-                command: line,
-                exit_code: 0,
-                output: String::new(),
-            }));
-        });
-        let host = self
-            .skills
-            .host(&skill, at.as_ref().map(|at| at.rpc.clone()), log);
+        let host = self.skills.host(
+            &skill,
+            at.as_ref().map(|at| at.rpc.clone()),
+            self.script_log(),
+        );
         let action = skill.action(tool);
         let run = match (action, skill.read_tool(tool)) {
             (Some(action), _) => action.tool.run.clone(),
@@ -701,6 +699,18 @@ impl Shared {
             step(Stage::Send, StepState::Done);
         }
         result.to_model_json()
+    }
+
+    /// Where a script's host calls are logged: one line each, in the chat log.
+    fn script_log(&self) -> Log {
+        let events = self.events.clone();
+        Arc::new(move |line| {
+            let _ = events.send(AgentEvent::ToolFinished(EdwResult {
+                command: line,
+                exit_code: 0,
+                output: String::new(),
+            }));
+        })
     }
 
     async fn run_tool<const I: usize>(&self, name: &str, args: &Value) -> String {
@@ -867,6 +877,206 @@ impl Shared {
         };
         self.log(AgentEvent::ToolFinished(result.clone()));
         result.to_model_json()
+    }
+
+    /// A skill action that runs from an unshield's fresh account: a private borrow. The skill's
+    /// script plans the Aave calls for the peeked fresh address, the shield they end with is
+    /// prepared (or a stored one reused), the user answers one card, and only then does edw
+    /// unshield with both as tail calls. edw simulates it all first and sends nothing if it fails.
+    async fn private_borrow(&self, skill: &Skill, action: &ActionDef, args: &Value) -> String {
+        let profile = self.interim.profile();
+        let command = format!("skill {}/{} {args}", skill.name, action.tool.name);
+        let fail = |output: String| {
+            let result = EdwResult {
+                command: command.clone(),
+                exit_code: 1,
+                output: format!("{output}; nothing was sent."),
+            };
+            self.log(AgentEvent::ToolFinished(result.clone()));
+            result.to_model_json()
+        };
+        self.flow_begin(
+            Trigger::Skill {
+                skill: skill.name.clone(),
+                action: action.tool.name.clone(),
+            },
+            command.clone(),
+            &Stage::FRESH_ACCOUNT_ACTION,
+        );
+        self.flow_step(Stage::Script, StepState::Running);
+        self.log(AgentEvent::ToolStarted {
+            command: command.clone(),
+        });
+        let network = match tornado::network(&self.config, self.interim.mainnet_fork()).await {
+            Ok(network) => network,
+            Err(error) => return fail(error),
+        };
+        let request = match borrow::Request::from_call(args, network) {
+            Ok(request) => request,
+            Err(error) => return fail(error),
+        };
+        let peek = self.tornado_run(&Command::PeekFreshAddress, &profile).await;
+        let Some(fresh) = peek
+            .document()
+            .as_ref()
+            .and_then(FreshAddress::from_document)
+            .filter(|_| peek.ok())
+        else {
+            return fail(format!(
+                "edw could not name the fresh address ({})",
+                peek.output
+            ));
+        };
+        let at = match tornado::rpc(&self.config, network).await {
+            Ok(rpc) => SkillContext {
+                chain_id: network.network_id().0,
+                me: fresh.address,
+                network: network.to_string(),
+                rpc,
+            },
+            Err(error) => return fail(error),
+        };
+        let script_args = request.script_args();
+        let invoke = sandbox::invoke_message(
+            &action.tool.name,
+            &script_args,
+            self.skills.context(skill, Some(&at)),
+        );
+        let host = self
+            .skills
+            .host(skill, Some(at.rpc.clone()), self.script_log());
+        let plan = match self.skills.prepare_run(skill) {
+            Ok((snapshot, _run_dir)) => {
+                match self
+                    .skills
+                    .runner
+                    .run(&snapshot, &action.tool.run, invoke, &host)
+                    .await
+                {
+                    Ok(Output::Plan(plan)) => plan,
+                    Ok(Output::Result(_)) => return fail("the skill returned no plan".into()),
+                    Err(error) => return fail(format!("{} failed: {error}", skill.name)),
+                }
+            }
+            Err(error) => return fail(error),
+        };
+        self.flow_step(Stage::Script, StepState::Done);
+        self.flow_step(Stage::Plan, StepState::Running);
+        let checked = plan::check(
+            &plan,
+            skill,
+            action,
+            at.chain_id,
+            plan::Account::Fresh(fresh.address),
+            &script_args,
+        )
+        .and_then(|checked| request.aave(checked, fresh.address));
+        let aave = match checked {
+            Ok(aave) => aave,
+            Err(error) => return fail(format!("the plan was refused ({error})")),
+        };
+        self.flow_step(Stage::Plan, StepState::Done);
+        self.flow_step(Stage::Prepare, StepState::Running);
+        // No card of its own: preparing broadcasts nothing, and the one card below shows its notes.
+        let prepare = Command::Prepare(request.shield.clone());
+        let prepared = self
+            .prepared
+            .reuse_or(&request.shield, &profile, || async {
+                self.log(AgentEvent::ToolStarted {
+                    command: prepare.display(&profile),
+                });
+                let result = self.tornado_run(&prepare, &profile).await;
+                match result.document().filter(|_| result.ok()) {
+                    Some(document) => Ok(document),
+                    None => Err(result.output),
+                }
+            })
+            .await;
+        let (record, reused) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => return fail(format!("the shield could not be prepared ({error})")),
+        };
+        self.log(AgentEvent::ToolFinished(EdwResult {
+            command: prepare.display(&profile),
+            exit_code: 0,
+            output: record.summary(reused).to_string(),
+        }));
+        let borrow = match request.with_shield(fresh, aave, record) {
+            Ok(borrow) => borrow,
+            Err(error) => return fail(format!("the plan was refused ({error})")),
+        };
+        self.flow_step(Stage::Prepare, StepState::Done);
+        self.flow_step(Stage::Review, StepState::Running);
+        let hash = self.skills.hash(&skill.name);
+        let card = borrow.preview(
+            &profile,
+            &format!(
+                "{} {} (sha256 {})",
+                skill.name,
+                skill.manifest.version,
+                &hash[..hash.len().min(12)]
+            ),
+            reused,
+        );
+        let unshield = borrow.command();
+        let display = unshield.display(&profile);
+        if !self.confirm(&display, Some(card)).await {
+            self.flow_detail(Stage::Review, StepState::Declined, Some("declined".into()));
+            return format!(
+                "The user declined `{display}`; nothing was sent. The prepared shield {} is kept for a retry.",
+                borrow.shield().id
+            );
+        }
+        self.flow_step(Stage::Review, StepState::Done);
+        self.flow_step(Stage::Send, StepState::Running);
+        self.log(AgentEvent::ToolStarted {
+            command: display.clone(),
+        });
+        let result = self.tornado_run(&unshield, &profile).await;
+        let accepted = match result.document() {
+            Some(report) if result.ok() && report["kind"] == "edw/unshield" => Some(format!(
+                "user operation {}",
+                report["user_operation"].as_str().unwrap_or("?")
+            )),
+            _ => self.fresh_address_used(borrow.fresh(), &profile).await,
+        };
+        if let Some(by) = accepted
+            && let Err(error) = self.prepared.consume(&borrow.shield().id, &by).await
+        {
+            self.log(AgentEvent::Error(format!(
+                "{} could not be marked used ({error}); do not reuse it",
+                borrow.shield().id
+            )));
+        }
+        self.log(AgentEvent::ToolFinished(result.clone()));
+        if result.ok() {
+            self.flow_step(Stage::Send, StepState::Done);
+        }
+        result.to_model_json()
+    }
+
+    /// After an unshield that did not report success: why its tail calls may be on chain anyway,
+    /// if they may. edw stores the fresh address only once a bundler accepted the user operation,
+    /// so a next fresh address other than `fresh` means it was accepted. When that cannot be read,
+    /// the calls count as used too: reusing calls that landed is the worse mistake.
+    async fn fresh_address_used(&self, fresh: FreshAddress, profile: &str) -> Option<String> {
+        let peek = self.tornado_run(&Command::PeekFreshAddress, profile).await;
+        match peek
+            .document()
+            .as_ref()
+            .and_then(FreshAddress::from_document)
+            .filter(|_| peek.ok())
+        {
+            Some(next) if next.address == fresh.address => None,
+            Some(_) => Some(format!(
+                "fresh address {} was stored while the unshield ran (edw stores it once a bundler accepts)",
+                fresh.address
+            )),
+            None => Some(format!(
+                "the fresh address could not be read after the unshield ({})",
+                peek.output
+            )),
+        }
     }
 }
 

@@ -93,6 +93,32 @@ fn aave_script(prompt: &str, text: &str, has: &dyn Fn(&str) -> bool) -> Option<S
     ]))
 }
 
+/// `privately borrow <amount> <token> against <eth> ETH`.
+fn private_borrow_script(prompt: &str) -> Option<Script> {
+    let words: Vec<&str> = prompt
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '.'))
+        .collect();
+    let amounts: Vec<(&str, &str)> = words
+        .windows(2)
+        .filter(|w| w[0].parse::<f64>().is_ok())
+        .map(|w| (w[0], w[1]))
+        .collect();
+    let (eth, _) = amounts
+        .iter()
+        .find(|(_, unit)| unit.eq_ignore_ascii_case("eth"))?;
+    let (amount, token) = amounts
+        .iter()
+        .find(|(_, unit)| !unit.eq_ignore_ascii_case("eth"))?;
+    Some(Script::Calls(vec![
+        ("load_skill", json!({"name": "private-aave-borrow"})),
+        (
+            "private_aave_borrow",
+            json!({"eth": eth, "token": token.to_uppercase(), "amount": amount}),
+        ),
+    ]))
+}
+
 /// The first address in a prompt: a `0x` + 40-hex word, or the `ADDR_n` alias the harness puts
 /// in its place before the model sees the message (it reveals the alias again in tool arguments).
 fn address_in(prompt: &str) -> Option<String> {
@@ -299,6 +325,9 @@ fn skill_script(prompt: &str, text: &str, has: &dyn Fn(&str) -> bool) -> Option<
     }
     if let Some(safe) = safe_script(prompt, has) {
         return Some(safe);
+    }
+    if has("borrow") && (has("privately") || has("private")) {
+        return private_borrow_script(prompt);
     }
     if has("aave") {
         return aave_script(prompt, text, has);
@@ -781,6 +810,34 @@ mod tests {
                 )
             ])
         );
+    }
+
+    #[test]
+    fn scripts_a_private_borrow_and_leaves_plain_borrows_to_aave() {
+        assert_eq!(
+            script("privately borrow 100 DAI against 1 ETH of my shielded notes"),
+            Script::Calls(vec![
+                ("load_skill", json!({"name": "private-aave-borrow"})),
+                (
+                    "private_aave_borrow",
+                    json!({"eth": "1", "token": "DAI", "amount": "100"})
+                )
+            ])
+        );
+        assert_eq!(
+            script("borrow 100 USDC privately against 0.1 ETH"),
+            Script::Calls(vec![
+                ("load_skill", json!({"name": "private-aave-borrow"})),
+                (
+                    "private_aave_borrow",
+                    json!({"eth": "0.1", "token": "USDC", "amount": "100"})
+                )
+            ])
+        );
+        let Script::Calls(plain) = script("borrow 100 DAI on aave") else {
+            panic!("an Aave call");
+        };
+        assert_eq!(plain[0].1, json!({"name": "aave-v3-lend"}));
     }
 
     /// Aave requests name an action, an asset (ETH included) and an amount or "all".

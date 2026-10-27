@@ -6,6 +6,8 @@
 //! is refused before anything runs, with the pool sizes that would work. `--tail-calls` and
 //! `--expected-fresh-address` are the harness's alone: no tool argument reaches them.
 
+pub mod prepared;
+
 use std::{fmt, time::Duration};
 
 use alloy_primitives::Address;

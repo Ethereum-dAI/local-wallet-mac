@@ -734,7 +734,7 @@ impl Shared {
     /// first, and so is a preparation that is not stored already.
     async fn tornado_call(&self, tool: &str, args: &Value) -> String {
         let profile = self.interim.profile();
-        let checked = match edw::unlocked_network(&self.config).await {
+        let checked = match tornado::network(&self.config, self.interim.mainnet_fork()).await {
             Ok(network) => Command::from_call(tool, args, network),
             Err(error) => Err(error),
         };

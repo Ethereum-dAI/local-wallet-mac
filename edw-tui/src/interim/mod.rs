@@ -306,6 +306,10 @@ impl Interim {
         self.config.profile.set(selector);
     }
 
+    pub fn mainnet_fork(&self) -> bool {
+        self.config.mainnet_fork
+    }
+
     pub fn profile(&self) -> String {
         self.config.profile.get()
     }
@@ -1306,29 +1310,60 @@ async fn check_chain(provider: &impl Provider, account: &Account) -> Result<(), 
     }
     if account.network == NetworkPreset::Mainnet {
         // Only reachable with EDW_TUI_MAINNET_FORK=1 (see `unlocked_network`).
-        let info: Value = provider
-            .raw_request("anvil_nodeInfo".into(), ())
-            .await
-            .unwrap_or(Value::Null);
-        let fork_url = info.pointer("/forkConfig/forkUrl").and_then(Value::as_str);
-        fork_gate(account.network, true, &account.rpc, fork_url)?;
+        let fork_url = anvil_fork_url(provider).await;
+        fork_gate(
+            account.network,
+            true,
+            &account.rpc,
+            fork_url.as_deref(),
+            "EDW_TUI_RPC_URL",
+        )?;
     }
     Ok(())
 }
 
+/// The URL an anvil node says it forks; `None` for any other node.
+pub(crate) async fn anvil_fork_url(provider: &impl Provider) -> Option<String> {
+    let info: Value = provider
+        .raw_request("anvil_nodeInfo".into(), ())
+        .await
+        .ok()?;
+    Some(info.pointer("/forkConfig/forkUrl")?.as_str()?.to_owned())
+}
+
+/// The RPC edw itself uses on `network`: its active RPC config, else the network's default.
+/// Tornado commands go through it, not through `EDW_TUI_RPC_URL`.
+pub(crate) async fn edw_rpc(config: &EdwConfig, network: NetworkPreset) -> Result<Url, String> {
+    let instance = Instance::open(
+        &DataDir::new(&config.data_dir),
+        network.network_id(),
+        config.password.as_bytes(),
+    )
+    .await
+    .map_err(|e| format!("cannot open edw's store: {e}"))?;
+    let rpc = endpoint(&instance, network).await;
+    rpc.parse()
+        .map_err(|e| format!("invalid RPC URL `{rpc}`: {e}"))
+}
+
+pub(crate) const MAINNET_OFF: &str =
+    "sending on mainnet is disabled; an anvil mainnet fork works with EDW_TUI_MAINNET_FORK=1";
+
 /// Mainnet only on an anvil fork: the flag set, a loopback RPC, and a node that reports a fork
-/// URL. Anything else that claims to be mainnet is refused before a key is used.
-fn fork_gate(
+/// URL. Anything else that claims to be mainnet is refused before a key is used. `set_with` is
+/// how that RPC is chosen, for the message.
+pub(crate) fn fork_gate(
     network: NetworkPreset,
     mainnet_fork: bool,
     rpc: &Url,
     fork_url: Option<&str>,
+    set_with: &str,
 ) -> Result<(), String> {
     if network != NetworkPreset::Mainnet {
         return Ok(());
     }
     if !mainnet_fork {
-        return Err("sending on mainnet is disabled; an anvil mainnet fork works with EDW_TUI_MAINNET_FORK=1".into());
+        return Err(MAINNET_OFF.into());
     }
     let host = rpc
         .host_str()
@@ -1341,7 +1376,7 @@ fn fork_gate(
             .is_ok_and(|ip| ip.is_loopback());
     if !loopback {
         return Err(format!(
-            "mainnet-fork mode needs a loopback RPC (EDW_TUI_RPC_URL=http://127.0.0.1:…), not {rpc}"
+            "mainnet-fork mode needs a loopback RPC ({set_with}: http://127.0.0.1:…), not {rpc}"
         ));
     }
     if fork_url.is_none_or(str::is_empty) {
@@ -1458,17 +1493,17 @@ mod tests {
         let fork = Some("https://archive.example");
         let mainnet = NetworkPreset::Mainnet;
         assert!(
-            fork_gate(mainnet, false, &local, fork)
+            fork_gate(mainnet, false, &local, fork, "EDW_TUI_RPC_URL")
                 .unwrap_err()
                 .contains("EDW_TUI_MAINNET_FORK")
         );
         assert!(
-            fork_gate(mainnet, true, &remote, fork)
+            fork_gate(mainnet, true, &remote, fork, "EDW_TUI_RPC_URL")
                 .unwrap_err()
                 .contains("loopback")
         );
         assert!(
-            fork_gate(mainnet, true, &local, None)
+            fork_gate(mainnet, true, &local, None, "EDW_TUI_RPC_URL")
                 .unwrap_err()
                 .contains("fork")
         );
@@ -1477,14 +1512,24 @@ mod tests {
                 mainnet,
                 true,
                 &"http://localhost:8546".parse().unwrap(),
-                fork
+                fork,
+                "EDW_TUI_RPC_URL"
             )
             .is_ok()
         );
-        assert!(fork_gate(mainnet, true, &local, fork).is_ok());
+        assert!(fork_gate(mainnet, true, &local, fork, "EDW_TUI_RPC_URL").is_ok());
         // Other networks are not this gate's business.
-        assert!(fork_gate(NetworkPreset::Sepolia, false, &remote, None).is_ok());
-        assert!(fork_gate(NetworkPreset::Local, false, &local, None).is_ok());
+        assert!(
+            fork_gate(
+                NetworkPreset::Sepolia,
+                false,
+                &remote,
+                None,
+                "EDW_TUI_RPC_URL"
+            )
+            .is_ok()
+        );
+        assert!(fork_gate(NetworkPreset::Local, false, &local, None, "EDW_TUI_RPC_URL").is_ok());
     }
 
     #[test]

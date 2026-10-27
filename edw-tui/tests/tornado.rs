@@ -10,7 +10,7 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt;
 
-use alloy_node_bindings::AnvilInstance;
+use alloy_node_bindings::{Anvil, AnvilInstance};
 use alloy_primitives::{Address, U256, address};
 use alloy_provider::{Provider, ProviderBuilder};
 use common::{Harness, TempWallet, Turn, edw_binary, fake_sepolia};
@@ -221,6 +221,95 @@ async fn calls_edw_would_refuse_never_reach_a_review() {
     let private = h.turn("show my private balance", true).await;
     let balance = output_of(&private, "edw balance --detailed");
     assert!(private.confirms.is_empty() && balance["tornado_notes"].is_array());
+}
+
+/// A mainnet wallet whose edw RPC is `rpc`, with the indexer off.
+async fn mainnet_wallet(binary: std::path::PathBuf, name: &str, rpc: &str) -> TempWallet {
+    let wallet = TempWallet::new(binary, name);
+    for step in [
+        &["unlock", "--network", "mainnet"][..],
+        &[
+            "network",
+            "rpc-config",
+            "add",
+            "anvil",
+            "--url",
+            rpc,
+            "--use",
+        ],
+        &["network", "indexer-config", "--disable"],
+        &["profile", "new", "--new-phrase"],
+    ] {
+        wallet.edw(step).await;
+    }
+    wallet
+}
+
+#[tokio::test]
+async fn mainnet_is_refused_unless_edw_sends_through_a_loopback_anvil_fork() {
+    let Some(binary) = edw_binary() else {
+        eprintln!("skipping: edw is not installed");
+        return;
+    };
+    let Ok(upstream) = Anvil::new().chain_id(1).try_spawn() else {
+        eprintln!("skipping: cannot start anvil");
+        return;
+    };
+    let fork = Anvil::new().fork(upstream.endpoint()).spawn();
+    let cases = [
+        (
+            "plain-off",
+            upstream.endpoint(),
+            false,
+            Some("EDW_TUI_MAINNET_FORK"),
+        ),
+        (
+            "plain-on",
+            upstream.endpoint(),
+            true,
+            Some("not an anvil fork"),
+        ),
+        (
+            "fork-off",
+            fork.endpoint(),
+            false,
+            Some("EDW_TUI_MAINNET_FORK"),
+        ),
+        ("fork-on", fork.endpoint(), true, None),
+    ];
+    for (name, rpc, flag, refusal) in cases {
+        let wallet = mainnet_wallet(binary.clone(), &format!("tornado-mainnet-{name}"), &rpc).await;
+        let mut interim = wallet.interim(None, false);
+        interim.mainnet_fork = flag;
+        let mut h = Harness::start_with(
+            wallet,
+            ModelHandle::named("scripted", ScriptedModel::default()),
+            Some(interim),
+        );
+        let shield = h.turn("shield 0.1 ETH", false).await;
+        let peek = h.turn("what is my fresh address", false).await;
+        match refusal {
+            Some(why) => {
+                for turn in [shield, peek] {
+                    assert!(turn.confirms.is_empty(), "{name}: {turn:?}");
+                    assert!(
+                        turn.outputs[0].contains("Rejected before running edw")
+                            && turn.outputs[0].contains(why),
+                        "{name}: {turn:?}"
+                    );
+                }
+            }
+            None => {
+                assert_eq!(shield.confirms.len(), 1, "{name}: {shield:?}");
+                assert!(
+                    shield.previews[0].contains("on mainnet (chain 1)"),
+                    "{shield:?}"
+                );
+                let peeked = output_of(&peek, "edw next-fresh-address --peek");
+                assert_eq!(peeked["kind"], "edw/next-fresh-address", "{peek:?}");
+            }
+        }
+    }
 }
 
 /// The real thing on Sepolia: shield 0.1 ETH, see it among the notes, unshield it to the fresh

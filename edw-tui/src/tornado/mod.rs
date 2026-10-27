@@ -11,6 +11,7 @@ pub mod prepared;
 use std::{fmt, time::Duration};
 
 use alloy_primitives::Address;
+use alloy_provider::ProviderBuilder;
 use edw_core::{
     network::NetworkPreset,
     vault::tornadocash::{
@@ -21,13 +22,40 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    edw::{self, EdwResult, text},
-    interim::guards::{self, Amount},
+    edw::{self, EdwConfig, EdwResult, text},
+    interim::{
+        self,
+        guards::{self, Amount},
+    },
 };
 
 /// Pool sync, proving and waiting for the bundler's receipt can take minutes, and a broadcast
 /// stopped half way is worse than a slow one.
 pub const TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The unlocked network, if Tornado commands may run there. Mainnet passes the interim's own
+/// gate, judged on the RPC edw sends through: `EDW_TUI_MAINNET_FORK=1` and an anvil fork on a
+/// loopback address. Sepolia needs no `EDW_TUI_INTERIM_SEPOLIA`: that opt-in is about the interim
+/// signing, and edw signs these.
+pub async fn network(config: &EdwConfig, mainnet_fork: bool) -> Result<NetworkPreset, String> {
+    let network = edw::unlocked_network(config).await?;
+    if network != NetworkPreset::Mainnet {
+        return Ok(network);
+    }
+    if !mainnet_fork {
+        return Err(interim::MAINNET_OFF.into());
+    }
+    let rpc = interim::edw_rpc(config, network).await?;
+    let fork_url = interim::anvil_fork_url(&ProviderBuilder::new().connect_http(rpc.clone())).await;
+    interim::fork_gate(
+        network,
+        mainnet_fork,
+        &rpc,
+        fork_url.as_deref(),
+        "edw network rpc-config",
+    )?;
+    Ok(network)
+}
 
 /// The tokens edw can shield. Which of them a network has pools for is up to edw-core's catalog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

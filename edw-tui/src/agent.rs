@@ -638,7 +638,14 @@ impl Shared {
         };
         step(Stage::Script, StepState::Done);
         step(Stage::Plan, StepState::Running);
-        let checked = match plan::check(&plan, &skill, action, at.chain_id, at.me, &args) {
+        let checked = match plan::check(
+            &plan,
+            &skill,
+            action,
+            at.chain_id,
+            plan::Account::Sender(at.me),
+            &args,
+        ) {
             Ok(checked) => checked,
             Err(error) => {
                 return fail(

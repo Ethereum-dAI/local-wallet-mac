@@ -1,4 +1,5 @@
-//! A stand-in model that plays back fixed replies and records the tools each request offered.
+//! A stand-in model that plays back fixed replies and records the tools each request offered
+//! and the conversation each request carried.
 
 use std::{
     collections::VecDeque,
@@ -16,6 +17,8 @@ use serde_json::Value;
 pub struct Recorder {
     pub replies: Arc<Mutex<VecDeque<AssistantContent>>>,
     pub offered: Arc<Mutex<Vec<Vec<String>>>>,
+    /// Each request's chat history as JSON: everything the model was sent besides the preamble.
+    pub seen: Arc<Mutex<Vec<String>>>,
 }
 
 impl Recorder {
@@ -23,6 +26,7 @@ impl Recorder {
         Self {
             replies: Arc::new(Mutex::new(replies.into())),
             offered: Arc::default(),
+            seen: Arc::default(),
         }
     }
 }
@@ -43,6 +47,10 @@ impl CompletionModel for Recorder {
             .lock()
             .unwrap()
             .push(request.tools.iter().map(|t| t.name.clone()).collect());
+        self.seen
+            .lock()
+            .unwrap()
+            .push(serde_json::to_string(&request.chat_history).expect("a chat history serializes"));
         let reply = self
             .replies
             .lock()

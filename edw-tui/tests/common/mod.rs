@@ -245,6 +245,11 @@ impl Harness {
         }
     }
 
+    /// Sends a prompt without waiting; read what follows with [`Self::next`].
+    pub fn prompt(&self, prompt: &str) {
+        self.prompts.send(Request::Prompt(prompt.into())).unwrap();
+    }
+
     /// Sends a prompt and collects events until the reply, answering every confirmation
     /// with `approve`.
     pub async fn turn(&mut self, prompt: &str, approve: bool) -> Turn {

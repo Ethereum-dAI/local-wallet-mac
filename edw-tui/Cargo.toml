@@ -27,7 +27,7 @@ alloy-json-abi = "1.7.3"
 # INTERIM (src/interim): edw-core signs balance/transfer/swap until desktop-wallet ships
 # those commands. The rev must equal edw::EDW_PINNED_REV (a test checks it); the alloy
 # versions follow edw-core's own workspace so there is one copy of each.
-edw-core = { git = "https://github.com/ethereum/desktop-wallet", rev = "038c9944c0efff46082a9d85fdc216fe5e6c738e" }
+edw-core = { git = "https://github.com/ethereum/desktop-wallet", rev = "1d04b61ac665c3e71db3d33f6cc6411f99e169dd" }
 alloy-network = "2.3.0"
 alloy-primitives = "1.6.1"
 alloy-provider = "2.3.0"

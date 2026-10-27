@@ -703,7 +703,7 @@ impl Shared {
         self.log(AgentEvent::ToolStarted {
             command: edw::display_command(&argv),
         });
-        let result = edw::run(&self.config, &argv).await;
+        let result = edw::run_tool(&self.config, name, args, &argv).await;
         self.log(AgentEvent::ToolFinished(result.clone()));
         result.to_model_json()
     }

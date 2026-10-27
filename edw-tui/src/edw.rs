@@ -249,22 +249,27 @@ pub fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             vec!["unlock".into(), "--network".into(), network]
         }
         "new_mnemonic" => {
-            let mut argv = owned(&["profile", "generate"]);
+            let mut argv = owned(&["profile", "new", "--new-phrase"]);
             if let Some(profile_name) = text(args, "name", false)? {
                 argv.extend(["--name".into(), profile_name]);
             }
             if args.get("long_seed") == Some(&Value::Bool(true)) {
-                argv.push("--long-seed".into());
+                argv.push("--long-phrase".into());
             }
             argv
         }
         "add_profile" => {
-            let mut argv = owned(&["profile", "add", "--next"]);
+            // edw names a phrase by a profile on it. Profile 0 of each mnemonic is the one
+            // its first unlock or `new_mnemonic` created.
+            let mnemonic = index(args, "mnemonic")?.unwrap_or(0);
+            let mut argv = vec![
+                "profile".into(),
+                "new".into(),
+                "--phrase-of".into(),
+                format!("{mnemonic}/0"),
+            ];
             if let Some(profile_name) = text(args, "name", false)? {
                 argv.extend(["--name".into(), profile_name]);
-            }
-            if let Some(mnemonic) = index(args, "mnemonic")? {
-                argv.extend(["--mnemonic".into(), mnemonic.to_string()]);
             }
             argv
         }
@@ -321,7 +326,7 @@ impl EdwConfig {
 pub const EDW_REPO: &str = "https://github.com/ethereum/desktop-wallet";
 /// The edw revision the tool mapping is written and tested against. Bumping it means
 /// re-running `cargo test --test edw_contract` and fixing [`build_argv`] until it passes.
-pub const EDW_PINNED_REV: &str = "038c9944c0efff46082a9d85fdc216fe5e6c738e";
+pub const EDW_PINNED_REV: &str = "1d04b61ac665c3e71db3d33f6cc6411f99e169dd";
 
 pub fn install_command() -> String {
     format!("cargo install --git {EDW_REPO} --rev {EDW_PINNED_REV} --locked edw")
@@ -414,6 +419,11 @@ impl EdwResult {
         self.exit_code == 0
     }
 
+    /// The JSON document edw printed on stdout, which [`run`] puts first in the output.
+    pub fn document(&self) -> Option<Value> {
+        serde_json::from_str(self.output.lines().next()?).ok()
+    }
+
     pub fn to_model_json(&self) -> String {
         json!({"command": self.command, "exit_code": self.exit_code, "output": self.output})
             .to_string()
@@ -441,13 +451,21 @@ pub async fn run(config: &EdwConfig, argv: &[String]) -> EdwResult {
             config.runtime_dir.display()
         ));
     }
-    let child = Command::new(&config.binary)
+    let mut process = Command::new(&config.binary);
+    process
+        .arg("--non-interactive")
         .args(argv)
-        .env("DATA_DIR", &config.data_dir)
+        .env("EDW_DATA_DIR", &config.data_dir)
         // edw keeps its unlock session under $XDG_RUNTIME_DIR, which macOS does not set.
-        .env("XDG_RUNTIME_DIR", &config.runtime_dir)
-        .env("EDW_DECRYPTION_PASSWORD", &config.password)
-        .env_remove("RPC_URL")
+        .env("XDG_RUNTIME_DIR", &config.runtime_dir);
+    // Any command edw runs with the password unlocks the wallet for itself, so only `unlock`
+    // gets it; the others use the session, and fail while the wallet is locked.
+    if argv.first().is_some_and(|c| c == "unlock") {
+        process.env("EDW_DECRYPTION_PASSWORD", &config.password);
+    } else {
+        process.env_remove("EDW_DECRYPTION_PASSWORD");
+    }
+    let child = process
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -472,6 +490,65 @@ pub async fn run(config: &EdwConfig, argv: &[String]) -> EdwResult {
     }
 }
 
+/// Runs a tool call [`build_argv`] mapped, plus what the tool descriptions promise and edw no
+/// longer does itself: `add_profile` needs `mnemonic` once the wallet has several, and the
+/// first unlock of a network creates mnemonic 0 and profile 0.
+pub async fn run_tool(config: &EdwConfig, name: &str, args: &Value, argv: &[String]) -> EdwResult {
+    let mnemonic_given = args
+        .as_object()
+        .is_some_and(|args| matches!(index(args, "mnemonic"), Ok(Some(_))));
+    if name == "add_profile" && !mnemonic_given {
+        let mnemonics = mnemonics(config).await;
+        if mnemonics.len() > 1 {
+            return EdwResult {
+                command: display_command(argv),
+                exit_code: 2,
+                output: format!(
+                    "this wallet has several mnemonics ({}); pass `mnemonic` to choose one",
+                    mnemonics
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+        }
+    }
+    let result = run(config, argv).await;
+    let created = name == "unlock"
+        && result
+            .document()
+            .is_some_and(|document| document["created"].is_string());
+    if !created {
+        return result;
+    }
+    let seeded = run(
+        config,
+        &["profile".into(), "new".into(), "--new-phrase".into()],
+    )
+    .await;
+    EdwResult {
+        command: result.command,
+        exit_code: seeded.exit_code,
+        output: format!("{}\n{}", result.output, seeded.output),
+    }
+}
+
+/// The mnemonic indices the unlocked wallet's profiles use; empty when edw cannot list them.
+async fn mnemonics(config: &EdwConfig) -> std::collections::BTreeSet<u64> {
+    let list = run(config, &["profile".into(), "list".into()]).await;
+    list.document()
+        .and_then(|document| {
+            document["profiles"].as_array().map(|profiles| {
+                profiles
+                    .iter()
+                    .filter_map(|profile| profile["mnemonic_index"].as_u64())
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,26 +570,26 @@ mod tests {
                 json!({"network": "Mainnet"}),
                 "unlock --network mainnet",
             ),
-            ("new_mnemonic", json!({}), "profile generate"),
+            ("new_mnemonic", json!({}), "profile new --new-phrase"),
             (
                 "new_mnemonic",
                 json!({"name": "alice", "long_seed": true}),
-                "profile generate --name alice --long-seed",
+                "profile new --new-phrase --name alice --long-phrase",
             ),
             (
                 "new_mnemonic",
                 json!({"long_seed": "yes"}),
-                "profile generate",
+                "profile new --new-phrase",
             ),
             (
                 "add_profile",
                 json!({"name": "bob"}),
-                "profile add --next --name bob",
+                "profile new --phrase-of 0/0 --name bob",
             ),
             (
                 "add_profile",
                 json!({"mnemonic": "1"}),
-                "profile add --next --mnemonic 1",
+                "profile new --phrase-of 1/0",
             ),
             (
                 "rename_profile",
@@ -570,7 +647,7 @@ mod tests {
             Pin::Differs("a".repeat(40))
                 .warning()
                 .unwrap()
-                .contains("--rev 038c994")
+                .contains(&format!("--rev {EDW_PINNED_REV}"))
         );
     }
 

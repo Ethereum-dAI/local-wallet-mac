@@ -55,7 +55,7 @@ async fn start_with(
     })?;
     let wallet = TempWallet::new(binary, name);
     if unlock {
-        wallet.edw(&["unlock", "--network", "local"]).await;
+        wallet.unlock("local").await;
     }
     let interim = wallet.interim(Some(node.endpoint()), false);
     let h = Harness::start_with_skills(

@@ -13,7 +13,7 @@ crates with it and drives edw only.
 ```bash
 # edw, at the revision the tool mapping is tested against (edw::EDW_PINNED_REV):
 cargo install --git https://github.com/ethereum/desktop-wallet \
-  --rev 038c9944c0efff46082a9d85fdc216fe5e6c738e --locked edw
+  --rev 1d04b61ac665c3e71db3d33f6cc6411f99e169dd --locked edw
 
 ollama pull qwen3:8b
 cargo run

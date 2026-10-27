@@ -87,6 +87,15 @@ impl TempWallet {
         result
     }
 
+    /// Unlocks `network` as the `unlock` tool does, so a first unlock creates profile 0/0.
+    pub async fn unlock(&self, network: &str) -> EdwResult {
+        let args = serde_json::json!({ "network": network });
+        let argv = edw::build_argv("unlock", &args).unwrap();
+        let result = edw::run_tool(&self.config, "unlock", &args, &argv).await;
+        assert!(result.ok(), "{result:?}");
+        result
+    }
+
     pub fn interim(&self, rpc_url: Option<String>, allow_sepolia: bool) -> InterimConfig {
         InterimConfig {
             edw: self.config.clone(),

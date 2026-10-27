@@ -1005,6 +1005,15 @@ impl Shared {
             Ok(borrow) => borrow,
             Err(error) => return fail(format!("the plan was refused ({error})")),
         };
+        self.log(AgentEvent::ToolFinished(EdwResult {
+            command: command.clone(),
+            exit_code: 0,
+            output: format!(
+                "planned for fresh address {}, then {}",
+                fresh.address,
+                borrow.shield().id
+            ),
+        }));
         self.flow_step(Stage::Prepare, StepState::Done);
         self.flow_step(Stage::Review, StepState::Running);
         let hash = self.skills.hash(&skill.name);
@@ -1040,17 +1049,21 @@ impl Shared {
             )),
             _ => self.fresh_address_used(borrow.fresh(), &profile).await,
         };
-        if let Some(by) = accepted
-            && let Err(error) = self.prepared.consume(&borrow.shield().id, &by).await
-        {
-            self.log(AgentEvent::Error(format!(
-                "{} could not be marked used ({error}); do not reuse it",
-                borrow.shield().id
-            )));
-        }
+        let id = &borrow.shield().id;
+        let unmarked = match accepted {
+            Some(by) => self.prepared.consume(id, &by).await.err(),
+            None => None,
+        };
         self.log(AgentEvent::ToolFinished(result.clone()));
         if result.ok() {
             self.flow_step(Stage::Send, StepState::Done);
+        }
+        if let Some(error) = unmarked {
+            self.log(AgentEvent::ToolFinished(EdwResult {
+                command: format!("mark {id} used"),
+                exit_code: 1,
+                output: format!("{error}; its calls may be on chain, do not reuse it"),
+            }));
         }
         result.to_model_json()
     }

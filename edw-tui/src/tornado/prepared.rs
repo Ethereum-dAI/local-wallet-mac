@@ -3,6 +3,8 @@
 //! Preparing reserves notes in edw's wallet (it spends Tornado nonces), and preparing again
 //! reserves different ones. So each answer is written to disk before anyone hears of it, is never
 //! deleted, and is found again by what it was for: the same network, profile, token and amount.
+//! Once a bundler accepted an unshield that ends with its calls, it is marked consumed and never
+//! offered again: those deposits may be on chain.
 
 use std::{
     fs,
@@ -60,6 +62,10 @@ pub struct PreparedShield {
     pub token: Token,
     pub amount: String,
     edw: Document,
+    /// What shows a bundler accepted an unshield ending with these calls: its user operation, or
+    /// the fresh address edw stored for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumed: Option<String>,
 }
 
 impl PreparedShield {
@@ -86,7 +92,8 @@ impl PreparedShield {
     }
 
     fn is_for(&self, amount: &PoolAmount, profile: &str) -> bool {
-        self.network == amount.network.to_string()
+        self.consumed.is_none()
+            && self.network == amount.network.to_string()
             && self.profile == profile
             && self.token == amount.token
             && self.amount == amount.amount
@@ -112,9 +119,9 @@ impl Store {
         Self::new(data_dir.join("edw-tui").join("prepared-shields"))
     }
 
-    /// The stored preparation for `amount` and `profile`, or else the one `prepare` gets from
-    /// edw, saved before it is returned. `true` when it was stored already. `prepare`'s own error
-    /// comes back as it is; the store's is a `String`.
+    /// The stored preparation for `amount` and `profile` that is not consumed, or else the one
+    /// `prepare` gets from edw, saved before it is returned. `true` when it was stored already.
+    /// `prepare`'s own error comes back as it is; the store's is a `String`.
     pub async fn reuse_or<F, Fut, E>(
         &self,
         amount: &PoolAmount,
@@ -139,6 +146,18 @@ impl Store {
             self.save(amount, profile, document).map_err(E::from)?,
             false,
         ))
+    }
+
+    /// Marks `id` consumed, `by` what shows it. A record consumed already keeps its first reason.
+    pub async fn consume(&self, id: &str, by: &str) -> Result<PreparedShield, String> {
+        let _one_at_a_time = self.busy.lock().await;
+        let mut record = self.get(id)?;
+        if record.consumed.is_none() {
+            record.consumed = Some(by.to_owned());
+            let text = serde_json::to_string_pretty(&record).expect("serializable");
+            self.write(&record.id, &text)?;
+        }
+        Ok(record)
     }
 
     pub fn get(&self, id: &str) -> Result<PreparedShield, String> {
@@ -205,6 +224,7 @@ impl Store {
             token: amount.token,
             amount: amount.amount.clone(),
             edw,
+            consumed: None,
         };
         let text = serde_json::to_string_pretty(&record).expect("serializable");
         self.write(&record.id, &text)?;
@@ -379,6 +399,44 @@ mod tests {
         let asked = AtomicUsize::new(0);
         prepare(&store, &dai("200"), "0/0", &asked).await.unwrap();
         assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_consumed_preparation_is_never_reused_and_keeps_its_first_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::in_data_dir(root.path());
+        let asked = AtomicUsize::new(0);
+        let (first, _) = prepare(&store, &dai("200"), "0/0", &asked).await.unwrap();
+        store
+            .consume(&first.id, "user operation 0xaa")
+            .await
+            .unwrap();
+        let again = store
+            .consume(&first.id, "user operation 0xbb")
+            .await
+            .unwrap();
+        assert_eq!(again.consumed.as_deref(), Some("user operation 0xaa"));
+
+        // edw reserves new notes for a new preparation, so its answer differs.
+        let mut fresh = document();
+        fresh["notes"][0]["commitment"] = json!(format!("0x{}", "11".repeat(32)));
+        let (second, reused) = Store::in_data_dir(root.path())
+            .reuse_or(&dai("200"), "0/0", || async {
+                asked.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, String>(fresh)
+            })
+            .await
+            .unwrap();
+        assert!(!reused && second.id != first.id && second.consumed.is_none());
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+        let stored = Store::in_data_dir(root.path()).get(&first.id).unwrap();
+        assert_eq!(stored.consumed.as_deref(), Some("user operation 0xaa"));
+
+        let (third, reused) = prepare(&store, &dai("200"), "0/0", &asked).await.unwrap();
+        assert!(
+            reused && third.id == second.id,
+            "the unconsumed one is reused"
+        );
     }
 
     #[test]

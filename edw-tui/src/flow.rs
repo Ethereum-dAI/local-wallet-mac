@@ -42,6 +42,15 @@ impl Stage {
         Stage::Review,
         Stage::Send,
     ];
+    /// A skill action run from an unshield's fresh account: the plan, then the shield it ends
+    /// with is prepared; edw simulates the whole operation when it sends.
+    pub const FRESH_ACCOUNT_ACTION: [Stage; 5] = [
+        Stage::Script,
+        Stage::Plan,
+        Stage::Prepare,
+        Stage::Review,
+        Stage::Send,
+    ];
 
     fn label(self) -> &'static str {
         match self {

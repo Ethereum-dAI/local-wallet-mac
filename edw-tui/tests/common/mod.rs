@@ -6,9 +6,19 @@ pub mod pty;
 pub mod recorder;
 pub mod safe_fork;
 pub mod scenario;
+pub mod sepolia_fork;
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
+use alloy_node_bindings::{Anvil, AnvilInstance};
+use alloy_primitives::{B256, U256};
+use alloy_provider::{Provider, ProviderBuilder};
+use alloy_rpc_types_eth::{Filter, TransactionRequest};
+use edw_core::vault::tornadocash::Pool;
 use edw_tui::{
     addresses::AddressBook,
     agent::{self, AgentEvent, ModelSource, Request},
@@ -16,9 +26,14 @@ use edw_tui::{
     flow::FlowEvent,
     interim::{InterimConfig, SendingProfile},
     scripted::ScriptedModel,
-    skills::tools::SkillSet,
+    skills::{
+        catalog::{self, Catalog, SkillState},
+        sandbox::Runner,
+        tools::SkillSet,
+    },
 };
 use rig_agent::ModelHandle;
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 /// `EDW_BIN`, or `edw` on PATH; `None` when it does not run.
@@ -87,6 +102,15 @@ impl TempWallet {
         result
     }
 
+    /// Unlocks `network` as the `unlock` tool does, so a first unlock creates profile 0/0.
+    pub async fn unlock(&self, network: &str) -> EdwResult {
+        let args = serde_json::json!({ "network": network });
+        let argv = edw::build_argv("unlock", &args).unwrap();
+        let result = edw::run_tool(&self.config, "unlock", &args, &argv).await;
+        assert!(result.ok(), "{result:?}");
+        result
+    }
+
     pub fn interim(&self, rpc_url: Option<String>, allow_sepolia: bool) -> InterimConfig {
         InterimConfig {
             edw: self.config.clone(),
@@ -100,10 +124,138 @@ impl TempWallet {
     }
 }
 
+/// The fake Sepolia's first block. edw syncs a pool's logs from its deploy block up, and the last
+/// Sepolia pool (DAI 100) was deployed at 5_594_406, so a chain below that has none to read.
+const FAKE_SEPOLIA_GENESIS: u64 = 5_594_410;
+
+/// A Sepolia wallet whose RPC is a fresh anvil answering with Sepolia's chain id, with edw's pool
+/// indexer off, so Tornado commands run without the network. The pools have no code there: a
+/// shield is a plain value transfer to the pool's address, and there are no notes to unshield
+/// until [`mine_eth_notes`] makes some. `None` (with a message) when anvil cannot start.
+pub async fn fake_sepolia(binary: PathBuf, name: &str) -> Option<(TempWallet, AnvilInstance)> {
+    let chain = Anvil::new()
+        .chain_id(11_155_111)
+        .args(["--number".to_owned(), FAKE_SEPOLIA_GENESIS.to_string()]);
+    let chain = match chain.try_spawn() {
+        Ok(chain) => chain,
+        Err(error) => {
+            eprintln!("skipping: cannot start anvil ({error})");
+            return None;
+        }
+    };
+    let wallet = TempWallet::new(binary, name);
+    let rpc = chain.endpoint();
+    // The RPC is switched before the first profile exists, so nothing reaches the real Sepolia.
+    for step in [
+        &["unlock", "--network", "sepolia"][..],
+        &[
+            "network",
+            "rpc-config",
+            "add",
+            "anvil",
+            "--url",
+            &rpc,
+            "--use",
+        ],
+        &["network", "indexer-config", "--disable"],
+        &["profile", "new", "--new-phrase"],
+    ] {
+        wallet.edw(step).await;
+    }
+    Some((wallet, chain))
+}
+
+/// Code that emits Tornado's `Deposit(bytes32 indexed commitment, uint32 leafIndex, uint256
+/// timestamp)` for calldata `commitment ‖ leafIndex ‖ timestamp`, and nothing else.
+const DEPOSIT_LOGGER: &str = "0x604060206000376000357fa945e51eec50ab98c161376f0db4cf2aeba3ec92755fe2fcd388bdbbb80ff19660406000a200";
+
+/// Gives profile 0/0 of a [`fake_sepolia`] wallet `amount` of mined Tornado ETH notes. edw
+/// prepares them, and each note's pool gets [`DEPOSIT_LOGGER`] and one `Deposit` log with the
+/// note's commitment, which is all edw's pool sync reads to call a note mined. Leaf indexes
+/// follow the pool's earlier deposits, as the merkle tree needs.
+pub async fn mine_eth_notes(wallet: &TempWallet, chain: &AnvilInstance, amount: &str) {
+    let prepared = wallet
+        .edw(&[
+            "shield",
+            "--prepare",
+            "--token",
+            "ETH",
+            "--amount-formatted",
+            amount,
+            "--profile",
+            "0/0",
+        ])
+        .await
+        .document()
+        .unwrap();
+    let provider = ProviderBuilder::new().connect_http(chain.endpoint_url());
+    for note in prepared["notes"].as_array().unwrap() {
+        let pool = Pool::POOLS
+            .iter()
+            .find(|pool| note["pool"] == pool.id())
+            .unwrap_or_else(|| panic!("no pool for {note}"));
+        let _: () = provider
+            .raw_request("anvil_setCode".into(), (pool.address, DEPOSIT_LOGGER))
+            .await
+            .unwrap();
+        let earlier = Filter::new()
+            .address(pool.address)
+            .from_block(FAKE_SEPOLIA_GENESIS);
+        let leaf = provider.get_logs(&earlier).await.unwrap().len();
+        let commitment: B256 = note["commitment"].as_str().unwrap().parse().unwrap();
+        let mut data = commitment.to_vec();
+        data.extend(U256::from(leaf).to_be_bytes::<32>());
+        data.extend(U256::from(1_700_000_000u64).to_be_bytes::<32>());
+        let tx = TransactionRequest::default()
+            .from(chain.addresses()[0])
+            .to(pool.address)
+            .input(data.into());
+        // anvil mines a sent transaction after answering, so its receipt is waited for.
+        let receipt = provider
+            .send_transaction(tx)
+            .await
+            .unwrap()
+            .get_receipt()
+            .await
+            .unwrap();
+        assert!(receipt.status(), "the Deposit log landed: {receipt:?}");
+    }
+}
+
 impl Drop for TempWallet {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+pub fn shipped() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("skills")
+}
+
+pub fn skill_set(dir: &Path) -> Arc<SkillSet> {
+    let mut installed = catalog::discover(&[dir.to_owned()]);
+    for i in &mut installed {
+        i.state = SkillState::Ready;
+    }
+    catalog::resolve(&mut installed, &edw::tool_names(), true);
+    Arc::new(SkillSet::new(
+        Catalog::from_installed(&installed),
+        &installed,
+        Runner::from_env(),
+    ))
+}
+
+pub fn records(wallet: &TempWallet) -> Vec<Value> {
+    let dir = wallet.config.data_dir.join("edw-tui/prepared-shields");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut records: Vec<Value> = entries
+        .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+        .map(|text| serde_json::from_str(&text).unwrap())
+        .collect();
+    records.sort_by_key(|r| r["id"].as_str().unwrap().to_owned());
+    records
 }
 
 /// One user turn: what was asked for confirmation (with any dry-run preview), what ran, and
@@ -172,7 +324,11 @@ impl Harness {
     }
 
     pub async fn next(&mut self) -> AgentEvent {
-        tokio::time::timeout(Duration::from_secs(120), self.events.recv())
+        self.next_within(Duration::from_secs(120)).await
+    }
+
+    pub async fn next_within(&mut self, limit: Duration) -> AgentEvent {
+        tokio::time::timeout(limit, self.events.recv())
             .await
             .expect("timed out")
             .expect("agent gone")
@@ -199,6 +355,11 @@ impl Harness {
             AgentEvent::Error(error) => Err(error),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// Sends a prompt without waiting; read what follows with [`Self::next`].
+    pub fn prompt(&self, prompt: &str) {
+        self.prompts.send(Request::Prompt(prompt.into())).unwrap();
     }
 
     /// Sends a prompt and collects events until the reply, answering every confirmation

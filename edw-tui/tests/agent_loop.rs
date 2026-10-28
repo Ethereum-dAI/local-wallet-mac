@@ -56,12 +56,15 @@ async fn switching_models_keeps_the_conversation() {
     h.turn("unlock sepolia", true).await;
     h.switch("scripted").await.unwrap();
     let turn = h.turn("show profiles", true).await;
-    assert!(turn.outputs[0].contains("default"), "{turn:?}");
+    assert!(turn.outputs[0].contains(DEFAULT_PROFILE), "{turn:?}");
     // An unknown Ollama model is refused (or Ollama is unreachable); either way the model stays.
     assert!(h.switch("definitely-not-a-model:1b").await.is_err());
     let turn = h.turn("show profiles", true).await;
-    assert!(turn.outputs[0].contains("default"), "{turn:?}");
+    assert!(turn.outputs[0].contains(DEFAULT_PROFILE), "{turn:?}");
 }
+
+/// Profile 0/0, unnamed, as edw's JSON lists it.
+const DEFAULT_PROFILE: &str = r#"{"mnemonic_index":0,"profile_index":0,"name":null}"#;
 
 #[tokio::test]
 async fn confirmed_commands_run_and_declined_ones_do_not() {
@@ -76,38 +79,45 @@ async fn confirmed_commands_run_and_declined_ones_do_not() {
     assert!(turn.confirms.is_empty());
     assert!(turn.outputs[0].contains("wallet is locked"), "{turn:?}");
 
-    // Declining a state change: nothing runs.
-    let turn = h.turn("unlock sepolia", false).await;
-    assert_eq!(turn.confirms, ["edw unlock --network sepolia"]);
+    // Declining a state change: nothing runs. `local`, because on a network with an RPC edw
+    // scans the chain when a profile is added.
+    let turn = h.turn("unlock local", false).await;
+    assert_eq!(turn.confirms, ["edw unlock --network local"]);
     assert!(turn.outputs.is_empty(), "{turn:?}");
 
-    // Approving it: the store is created, and the recovery phrase never leaves the harness.
-    let turn = h.turn("unlock sepolia", true).await;
+    let turn = h.turn("unlock local", true).await;
     assert!(
-        turn.outputs[0].contains("=> 0:") && turn.outputs[0].contains("Unlocked sepolia"),
+        turn.outputs[0].contains("=> 0:")
+            && turn.outputs[0].contains(r#""network":"local""#)
+            && turn.outputs[0].contains(DEFAULT_PROFILE),
         "{turn:?}"
     );
     assert!(
-        turn.outputs[0].contains(edw_tui::edw::PHRASE_PLACEHOLDER),
+        !turn.outputs[0].contains(edw_tui::edw::PHRASE_PLACEHOLDER),
         "{turn:?}"
     );
     assert!(turn.reply.starts_with("Done"));
 
+    let bob = r#"{"mnemonic_index":0,"profile_index":1,"name":"bob"}"#;
     let turn = h.turn("add a profile named bob", true).await;
-    assert_eq!(turn.confirms, ["edw profile add --next --name bob"]);
-    assert!(
-        turn.outputs[0].contains("Created profile 0/1 (bob)"),
-        "{turn:?}"
+    assert_eq!(
+        turn.confirms,
+        ["edw profile new --phrase-of 0/0 --name bob"]
     );
+    assert!(turn.outputs[0].contains(bob), "{turn:?}");
 
     let turn = h.turn("show profiles", true).await;
     assert!(
-        turn.outputs[0].contains("default") && turn.outputs[0].contains("bob"),
+        turn.outputs[0].contains(DEFAULT_PROFILE) && turn.outputs[0].contains(bob),
         "{turn:?}"
     );
 
-    // Out of scope: no tool call at all.
+    // The local chain has no Tornado pools: the call is refused before any review or edw run.
     let turn = h.turn("shield 1 ETH", true).await;
-    assert!(turn.confirms.is_empty() && turn.outputs.is_empty());
-    assert!(turn.reply.contains("cannot shield"));
+    assert!(turn.confirms.is_empty() && turn.flow.is_empty(), "{turn:?}");
+    assert!(
+        turn.outputs[0].contains("Rejected before running edw")
+            && turn.outputs[0].contains("no Tornado pools"),
+        "{turn:?}"
+    );
 }

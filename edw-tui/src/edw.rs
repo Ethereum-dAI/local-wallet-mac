@@ -6,8 +6,10 @@
 //!
 //! Only commands `edw` implements today map onto the CLI. `profile import` is left out on
 //! purpose: it reads a recovery phrase from stdin, and a phrase must never pass through a chat.
-//! `balance`, `transfer` and `swap` are in [`TOOLS`] too, but edw has no such commands yet, so
-//! they run on the interim executor in `crate::interim` until it does.
+//! `balance`, `transfer` and `swap` are in [`TOOLS`] too, but run on the interim executor in
+//! `crate::interim`: edw's `transfer` is ETH only and broadcasts without a dry run, and it has no
+//! `swap`. Only `balance` with `private` reads edw's own document. The Tornado tools map onto
+//! edw through `crate::tornado`, which needs the unlocked network and the sending profile.
 
 use std::{
     path::{Path, PathBuf},
@@ -16,6 +18,7 @@ use std::{
     time::Duration,
 };
 
+use edw_core::network::{NetworkId, NetworkPreset};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use tokio::process::Command;
@@ -30,16 +33,26 @@ pub enum Backend {
     Cli,
     /// Not in edw yet; run by `crate::interim` until it is.
     Interim,
+    /// edw's Tornado commands, through `crate::tornado`: checked against the unlocked network's
+    /// pools and run as the sending profile.
+    Tornado,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Review {
+    /// Reads only: runs without asking.
+    None,
+    /// Changes wallet state: the user confirms the exact edw command first.
+    Command,
+    /// Moves funds: the tool checks the call and writes a preview, and only a "yes" sends it.
+    Preview,
 }
 
 pub struct ToolSpec {
     pub name: &'static str,
     pub description: &'static str,
     pub backend: Backend,
-    /// Changes wallet state, so the user confirms it before it runs.
-    pub mutating: bool,
-    /// Moves funds: a dry run is shown for review, and only a "yes" sends it.
-    pub moves_value: bool,
+    pub review: Review,
     pub parameters: fn() -> Value,
 }
 
@@ -51,12 +64,11 @@ const CLI: ToolSpec = ToolSpec {
     name: "",
     description: "",
     backend: Backend::Cli,
-    mutating: false,
-    moves_value: false,
+    review: Review::None,
     parameters: no_params,
 };
 
-pub const TOOLS: [ToolSpec; 13] = [
+pub const TOOLS: [ToolSpec; 17] = [
     ToolSpec {
         name: "wallet_status",
         description: "Show the wallet configuration: data directory, which network is unlocked (or locked), and the RPC source.",
@@ -65,7 +77,7 @@ pub const TOOLS: [ToolSpec; 13] = [
     ToolSpec {
         name: "unlock",
         description: "Unlock one network; every other network is locked. The first unlock of a network creates its encrypted store with mnemonic 0 and profile 0.",
-        mutating: true,
+        review: Review::Command,
         parameters: || {
             json!({"type": "object", "properties": {
                 "network": {"type": "string", "enum": NETWORKS, "description": "Defaults to sepolia."}
@@ -86,7 +98,7 @@ pub const TOOLS: [ToolSpec; 13] = [
     ToolSpec {
         name: "new_mnemonic",
         description: "Generate a brand-new mnemonic (a separate seed) with one profile on it. Only use this when the user explicitly asks for a new seed or mnemonic; to add profiles to the current wallet use add_profile.",
-        mutating: true,
+        review: Review::Command,
         parameters: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string", "description": "Optional profile name."},
@@ -98,7 +110,7 @@ pub const TOOLS: [ToolSpec; 13] = [
     ToolSpec {
         name: "add_profile",
         description: "Add a profile to the current wallet (on an existing mnemonic, at the next unused index). This is the default way to add or create profiles.",
-        mutating: true,
+        review: Review::Command,
         parameters: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string", "description": "Optional profile name."},
@@ -110,7 +122,7 @@ pub const TOOLS: [ToolSpec; 13] = [
     ToolSpec {
         name: "rename_profile",
         description: "Set or clear a profile's name.",
-        mutating: true,
+        review: Review::Command,
         parameters: || {
             json!({"type": "object", "properties": {
                 "profile": {"type": "string", "description": "The profile as `mnemonic/profile` (e.g. `0/1`) or its current unique name."},
@@ -124,15 +136,16 @@ pub const TOOLS: [ToolSpec; 13] = [
         description: "Show the unlocked network's networkConfigs (RPC providers); the active one is marked with *.",
         ..CLI
     },
-    // Interim: edw has no balance, transfer or swap command yet. Sent from the profile the
-    // harness has selected (the default profile unless changed), so the model never names one.
+    // Interim: sent from the profile the harness has selected (the default profile unless
+    // changed), so the model never names one.
     ToolSpec {
         name: "balance",
-        description: "Show how much ETH and which known tokens the wallet holds on the unlocked network. Use it when the user asks for a balance, or to check funds before sending.",
+        description: "Show how much ETH and which known tokens the wallet holds on the unlocked network. Use it when the user asks for a balance, or to check funds before sending. Set private to true for shielded (Tornado) holdings and notes.",
         backend: Backend::Interim,
         parameters: || {
             json!({"type": "object", "properties": {
-                "token": {"type": "string", "description": "Only this token: a symbol such as ETH or USDC, or a 0x-prefixed contract address. Omit to list all known tokens."}
+                "token": {"type": "string", "description": "Only this token: a symbol such as ETH or USDC, or a 0x-prefixed contract address. Omit to list all known tokens."},
+                "private": {"type": "boolean", "description": "true for the shielded side: Tornado holdings and each unspent note."}
             }})
         },
         ..CLI
@@ -158,16 +171,41 @@ pub const TOOLS: [ToolSpec; 13] = [
         name: "transfer",
         description: crate::app_contract::TRANSFER_DESCRIPTION,
         backend: Backend::Interim,
-        moves_value: true,
+        review: Review::Preview,
         parameters: crate::app_contract::transfer_parameters,
-        ..CLI
     },
     ToolSpec {
         name: "swap",
         description: crate::app_contract::SWAP_DESCRIPTION,
         backend: Backend::Interim,
-        moves_value: true,
+        review: Review::Preview,
         parameters: crate::app_contract::swap_parameters,
+    },
+    ToolSpec {
+        name: "shield",
+        description: "Shield ETH or a token: deposit it into Tornado Cash pools that only this wallet can withdraw from. The amount must be a sum of the network's pool sizes. The user reviews it before it is sent.",
+        backend: Backend::Tornado,
+        review: Review::Preview,
+        parameters: crate::tornado::shield_parameters,
+    },
+    ToolSpec {
+        name: "unshield",
+        description: "Unshield: withdraw shielded ETH or a token from Tornado Cash to a fresh address of this wallet, or on to `to`. The user reviews it before it is sent.",
+        backend: Backend::Tornado,
+        review: Review::Preview,
+        parameters: crate::tornado::unshield_parameters,
+    },
+    ToolSpec {
+        name: "prepare_shield",
+        description: "Reserve Tornado notes for a later deposit and return their id; sends nothing. Only when the user asks to prepare a shield; to shield now, use shield.",
+        backend: Backend::Tornado,
+        review: Review::Preview,
+        parameters: crate::tornado::shield_parameters,
+    },
+    ToolSpec {
+        name: "next_fresh_address",
+        description: "Show the fresh address the next unshield withdraws to. Stores nothing.",
+        backend: Backend::Tornado,
         ..CLI
     },
 ];
@@ -249,22 +287,27 @@ pub fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             vec!["unlock".into(), "--network".into(), network]
         }
         "new_mnemonic" => {
-            let mut argv = owned(&["profile", "generate"]);
+            let mut argv = owned(&["profile", "new", "--new-phrase"]);
             if let Some(profile_name) = text(args, "name", false)? {
                 argv.extend(["--name".into(), profile_name]);
             }
             if args.get("long_seed") == Some(&Value::Bool(true)) {
-                argv.push("--long-seed".into());
+                argv.push("--long-phrase".into());
             }
             argv
         }
         "add_profile" => {
-            let mut argv = owned(&["profile", "add", "--next"]);
+            // edw names a phrase by a profile on it. Profile 0 of each mnemonic is the one
+            // its first unlock or `new_mnemonic` created.
+            let mnemonic = index(args, "mnemonic")?.unwrap_or(0);
+            let mut argv = vec![
+                "profile".into(),
+                "new".into(),
+                "--phrase-of".into(),
+                format!("{mnemonic}/0"),
+            ];
             if let Some(profile_name) = text(args, "name", false)? {
                 argv.extend(["--name".into(), profile_name]);
-            }
-            if let Some(mnemonic) = index(args, "mnemonic")? {
-                argv.extend(["--mnemonic".into(), mnemonic.to_string()]);
             }
             argv
         }
@@ -321,7 +364,7 @@ impl EdwConfig {
 pub const EDW_REPO: &str = "https://github.com/ethereum/desktop-wallet";
 /// The edw revision the tool mapping is written and tested against. Bumping it means
 /// re-running `cargo test --test edw_contract` and fixing [`build_argv`] until it passes.
-pub const EDW_PINNED_REV: &str = "038c9944c0efff46082a9d85fdc216fe5e6c738e";
+pub const EDW_PINNED_REV: &str = "1d04b61ac665c3e71db3d33f6cc6411f99e169dd";
 
 pub fn install_command() -> String {
     format!("cargo install --git {EDW_REPO} --rev {EDW_PINNED_REV} --locked edw")
@@ -414,6 +457,11 @@ impl EdwResult {
         self.exit_code == 0
     }
 
+    /// The JSON document edw printed on stdout, which [`run`] puts first in the output.
+    pub fn document(&self) -> Option<Value> {
+        serde_json::from_str(self.output.lines().next()?).ok()
+    }
+
     pub fn to_model_json(&self) -> String {
         json!({"command": self.command, "exit_code": self.exit_code, "output": self.output})
             .to_string()
@@ -428,6 +476,10 @@ pub fn display_command(argv: &[String]) -> String {
 }
 
 pub async fn run(config: &EdwConfig, argv: &[String]) -> EdwResult {
+    run_with_timeout(config, argv, Duration::from_secs(60)).await
+}
+
+pub async fn run_with_timeout(config: &EdwConfig, argv: &[String], timeout: Duration) -> EdwResult {
     let command = display_command(argv);
     let fail = |output: String| EdwResult {
         command: command.clone(),
@@ -441,13 +493,21 @@ pub async fn run(config: &EdwConfig, argv: &[String]) -> EdwResult {
             config.runtime_dir.display()
         ));
     }
-    let child = Command::new(&config.binary)
+    let mut process = Command::new(&config.binary);
+    process
+        .arg("--non-interactive")
         .args(argv)
-        .env("DATA_DIR", &config.data_dir)
+        .env("EDW_DATA_DIR", &config.data_dir)
         // edw keeps its unlock session under $XDG_RUNTIME_DIR, which macOS does not set.
-        .env("XDG_RUNTIME_DIR", &config.runtime_dir)
-        .env("EDW_DECRYPTION_PASSWORD", &config.password)
-        .env_remove("RPC_URL")
+        .env("XDG_RUNTIME_DIR", &config.runtime_dir);
+    // Any command edw runs with the password unlocks the wallet for itself, so only `unlock`
+    // gets it; the others use the session, and fail while the wallet is locked.
+    if argv.first().is_some_and(|c| c == "unlock") {
+        process.env("EDW_DECRYPTION_PASSWORD", &config.password);
+    } else {
+        process.env_remove("EDW_DECRYPTION_PASSWORD");
+    }
+    let child = process
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -457,8 +517,8 @@ pub async fn run(config: &EdwConfig, argv: &[String]) -> EdwResult {
         Ok(child) => child,
         Err(error) => return fail(format!("cannot run {}: {error}", config.binary.display())),
     };
-    match tokio::time::timeout(Duration::from_secs(60), child.wait_with_output()).await {
-        Err(_) => fail("timed out after 60s".into()),
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Err(_) => fail(format!("timed out after {}s", timeout.as_secs())),
         Ok(Err(error)) => fail(error.to_string()),
         Ok(Ok(out)) => {
             let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -470,6 +530,83 @@ pub async fn run(config: &EdwConfig, argv: &[String]) -> EdwResult {
             }
         }
     }
+}
+
+/// Runs a tool call [`build_argv`] mapped, plus what the tool descriptions promise and edw no
+/// longer does itself: `add_profile` needs `mnemonic` once the wallet has several, and the
+/// first unlock of a network creates mnemonic 0 and profile 0.
+pub async fn run_tool(config: &EdwConfig, name: &str, args: &Value, argv: &[String]) -> EdwResult {
+    let mnemonic_given = args
+        .as_object()
+        .is_some_and(|args| matches!(index(args, "mnemonic"), Ok(Some(_))));
+    if name == "add_profile" && !mnemonic_given {
+        let mnemonics = mnemonics(config).await;
+        if mnemonics.len() > 1 {
+            return EdwResult {
+                command: display_command(argv),
+                exit_code: 2,
+                output: format!(
+                    "this wallet has several mnemonics ({}); pass `mnemonic` to choose one",
+                    mnemonics
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+        }
+    }
+    let result = run(config, argv).await;
+    let created = name == "unlock"
+        && result
+            .document()
+            .is_some_and(|document| document["created"].is_string());
+    if !created {
+        return result;
+    }
+    let seeded = run(
+        config,
+        &["profile".into(), "new".into(), "--new-phrase".into()],
+    )
+    .await;
+    EdwResult {
+        command: result.command,
+        exit_code: seeded.exit_code,
+        output: format!("{}\n{}", result.output, seeded.output),
+    }
+}
+
+/// The unlocked network, read from edw's own `config view`, so the lock state and the session
+/// stay edw's to decide.
+pub async fn unlocked_network(config: &EdwConfig) -> Result<NetworkPreset, String> {
+    let view = run(config, &["config".into(), "view".into()]).await;
+    let Some(document) = view.document().filter(|_| view.ok()) else {
+        return Err(format!("cannot read edw's session: {}", view.output));
+    };
+    if document["locked"] != Value::Bool(false) {
+        return Err("the wallet is locked; unlock a network first".into());
+    }
+    let session = document["session"]["network"].as_str().unwrap_or_default();
+    session
+        .parse::<NetworkId>()
+        .ok()
+        .and_then(NetworkPreset::from_network_id)
+        .ok_or_else(|| format!("edw reports an unknown network `{session}`"))
+}
+
+/// The mnemonic indices the unlocked wallet's profiles use; empty when edw cannot list them.
+async fn mnemonics(config: &EdwConfig) -> std::collections::BTreeSet<u64> {
+    let list = run(config, &["profile".into(), "list".into()]).await;
+    list.document()
+        .and_then(|document| {
+            document["profiles"].as_array().map(|profiles| {
+                profiles
+                    .iter()
+                    .filter_map(|profile| profile["mnemonic_index"].as_u64())
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -493,26 +630,26 @@ mod tests {
                 json!({"network": "Mainnet"}),
                 "unlock --network mainnet",
             ),
-            ("new_mnemonic", json!({}), "profile generate"),
+            ("new_mnemonic", json!({}), "profile new --new-phrase"),
             (
                 "new_mnemonic",
                 json!({"name": "alice", "long_seed": true}),
-                "profile generate --name alice --long-seed",
+                "profile new --new-phrase --name alice --long-phrase",
             ),
             (
                 "new_mnemonic",
                 json!({"long_seed": "yes"}),
-                "profile generate",
+                "profile new --new-phrase",
             ),
             (
                 "add_profile",
                 json!({"name": "bob"}),
-                "profile add --next --name bob",
+                "profile new --phrase-of 0/0 --name bob",
             ),
             (
                 "add_profile",
                 json!({"mnemonic": "1"}),
-                "profile add --next --mnemonic 1",
+                "profile new --phrase-of 1/0",
             ),
             (
                 "rename_profile",
@@ -570,7 +707,7 @@ mod tests {
             Pin::Differs("a".repeat(40))
                 .warning()
                 .unwrap()
-                .contains("--rev 038c994")
+                .contains(&format!("--rev {EDW_PINNED_REV}"))
         );
     }
 

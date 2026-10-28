@@ -831,6 +831,18 @@ impl Shared {
         result.to_model_json()
     }
 
+    /// What `shield --prepare` answered, for the store; a failed command is the model's error.
+    /// Once edw succeeds its notes are reserved, so an answer that does not parse goes to the
+    /// store as text, which keeps it aside rather than drop it.
+    async fn prepared_answer(&self, prepare: &Command, profile: &str) -> Result<Value, String> {
+        let argv = prepare.argv(profile);
+        let result = edw::run_with_timeout(&self.config, &argv, tornado::TIMEOUT).await;
+        if !result.ok() {
+            return Err(tornado::for_model(result, &prepare.display(profile)).output);
+        }
+        Ok(result.document().unwrap_or(Value::String(result.output)))
+    }
+
     /// The stored preparation for the same deposit, or a new one the user agreed to. The model
     /// gets its summary, never the calls.
     async fn prepare_shield(
@@ -854,11 +866,9 @@ impl Shared {
                 self.log(AgentEvent::ToolStarted {
                     command: display.clone(),
                 });
-                let result = self.tornado_run(command, profile).await;
-                match result.document().filter(|_| result.ok()) {
-                    Some(document) => Ok(document),
-                    None => Err(NoRecord::Failed(result.output)),
-                }
+                self.prepared_answer(command, profile)
+                    .await
+                    .map_err(NoRecord::Failed)
             })
             .await;
         let result = match prepared {
@@ -1005,11 +1015,7 @@ impl Shared {
                 self.log(AgentEvent::ToolStarted {
                     command: prepare.display(&profile),
                 });
-                let result = self.tornado_run(&prepare, &profile).await;
-                match result.document().filter(|_| result.ok()) {
-                    Some(document) => Ok(document),
-                    None => Err(result.output),
-                }
+                self.prepared_answer(&prepare, &profile).await
             })
             .await;
         let (record, reused) = match prepared {

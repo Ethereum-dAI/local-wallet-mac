@@ -133,6 +133,56 @@ async fn a_prepared_shield_is_saved_and_a_retry_reuses_it() {
     assert_eq!(pending_private_eth(&h.wallet).await, "1.1");
 }
 
+/// edw has reserved the notes by the time it answers, so a `shield --prepare` that succeeds with
+/// an answer the harness cannot read is kept all the same. The pinned edw prints one JSON line;
+/// the wrapper here pretty-prints it.
+#[tokio::test]
+async fn a_prepared_answer_that_does_not_parse_is_still_kept() {
+    let Some(binary) = edw_binary() else {
+        eprintln!("skipping: edw is not installed");
+        return;
+    };
+    let Some((mut wallet, _chain)) = fake_sepolia(binary.clone(), "tornado-unparsed").await else {
+        return;
+    };
+    let wrapper_dir = tempfile::tempdir().unwrap();
+    let wrapper = wrapper_dir.path().join("edw");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/bash\nif [ \"$2 $3\" = 'shield --prepare' ]; then\n  '{edw}' \"$@\" | python3 -I -m json.tool\n  exit \"${{PIPESTATUS[0]}}\"\nfi\nexec '{edw}' \"$@\"\n",
+            edw = binary.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    wallet.config.binary = wrapper;
+    let mut h = scripted(wallet);
+    const PREPARE: &str = "edw shield --prepare --token ETH --amount-formatted 1.1 --profile 0/0";
+
+    let turn = h.turn("prepare a shield of 1.1 ETH", true).await;
+    let failed = turn
+        .outputs
+        .iter()
+        .find(|o| o.starts_with(PREPARE))
+        .unwrap_or_else(|| panic!("{turn:?}"));
+    assert!(
+        failed.contains("=> 1:") && failed.contains("kept in") && !failed.contains(DEPOSIT),
+        "{failed}"
+    );
+    assert_eq!(pending_private_eth(&h.wallet).await, "1.1");
+    let store = h.wallet.config.data_dir.join("edw-tui/prepared-shields");
+    let kept: Vec<String> = std::fs::read_dir(&store)
+        .unwrap_or_else(|e| panic!("nothing kept in {}: {e}", store.display()))
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    let [kept] = kept.try_into().unwrap();
+    let answer: String = serde_json::from_str(&kept).unwrap();
+    let document: Value = serde_json::from_str(&answer).unwrap();
+    assert_eq!(document["kind"], "edw/shield-prepared");
+    assert_eq!(document["notes"].as_array().unwrap().len(), 2);
+}
+
 #[tokio::test]
 async fn a_shield_is_sent_only_after_the_user_says_yes() {
     let Some((mut h, chain)) = start("tornado-shield").await else {

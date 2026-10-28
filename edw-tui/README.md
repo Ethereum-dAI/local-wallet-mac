@@ -146,7 +146,7 @@ edw unshield --token ETH --amount-formatted 1 --expected-fresh-address F --tail-
 4. The DAI shield is prepared (`shield --prepare`), or a stored, unconsumed one reused. It has no
    card of its own: preparing sends nothing.
 5. The two halves are checked against each other: the borrowed token is the one the shield's
-   approvals are for, the borrow covers what the shield deposits, and the ETH supplied fits in
+   approvals are for, the borrow is exactly what the shield deposits, and the ETH supplied fits in
    the unshield after the fee reserve. Any mismatch refuses the borrow with nothing sent.
 6. One card shows the decoded Aave calls, the new DAI notes, the amount unshielded and `F`.
    After a yes, edw unshields with the Aave calls and then the shield's, simulates the whole

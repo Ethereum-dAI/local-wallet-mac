@@ -129,7 +129,7 @@ impl Request {
     }
 
     /// The Aave half against the shield: it supplies at most what the fee reserve leaves, and
-    /// borrows the very token the shield approves, at least as much as it deposits.
+    /// borrows the very token the shield approves, exactly as much as it deposits.
     fn check(&self, aave: &AaveCalls, token: Address, amount: U256) -> Result<(), String> {
         let max = self.max_supply();
         if aave.supply.is_zero() || aave.supply > max {
@@ -147,9 +147,9 @@ impl Request {
                 aave.token, token
             ));
         }
-        if aave.borrow < amount {
+        if aave.borrow != amount {
             return Err(format!(
-                "the Aave plan borrows {} {token_name}, less than the {} {token_name} the shield deposits",
+                "the Aave plan borrows {} {token_name}, but the shield deposits {} {token_name}; the borrow must be exactly that",
                 self.shield.units(aave.borrow),
                 self.shield.units(amount),
                 token_name = self.shield.token
@@ -484,9 +484,10 @@ mod tests {
         assert!(
             refused(script_plan(ETHER / 2, "weth", 100 * ETHER)).contains("they must be the same")
         );
-        assert!(
-            refused(script_plan(ETHER / 2, "dai", 99 * ETHER)).contains("less than the 100 DAI")
-        );
+        for borrow in [101 * ETHER, 99 * ETHER] {
+            let why = refused(script_plan(ETHER / 2, "dai", borrow));
+            assert!(why.contains("but the shield deposits 100 DAI"), "{why}");
+        }
         let reversed = json!({"steps": [
             {"call": {"contract": "pool", "function": "borrow", "args": ["dai", "100000000000000000000", "2", "0", "$self"]}},
             {"call": {"contract": "gateway", "function": "depositETH", "args": ["pool", "$self", "0"], "value": "1"}},

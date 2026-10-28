@@ -6,8 +6,9 @@
 //!
 //! Only commands `edw` implements today map onto the CLI. `profile import` is left out on
 //! purpose: it reads a recovery phrase from stdin, and a phrase must never pass through a chat.
-//! `balance`, `transfer` and `swap` are in [`TOOLS`] too, but edw has no such commands yet, so
-//! they run on the interim executor in `crate::interim` until it does. The Tornado tools map onto
+//! `balance`, `transfer` and `swap` are in [`TOOLS`] too, but run on the interim executor in
+//! `crate::interim`: edw's `transfer` is ETH only and broadcasts without a dry run, and it has no
+//! `swap`. Only `balance` with `private` reads edw's own document. The Tornado tools map onto
 //! edw through `crate::tornado`, which needs the unlocked network and the sending profile.
 
 use std::{
@@ -135,8 +136,8 @@ pub const TOOLS: [ToolSpec; 17] = [
         description: "Show the unlocked network's networkConfigs (RPC providers); the active one is marked with *.",
         ..CLI
     },
-    // Interim: edw has no balance, transfer or swap command yet. Sent from the profile the
-    // harness has selected (the default profile unless changed), so the model never names one.
+    // Interim: sent from the profile the harness has selected (the default profile unless
+    // changed), so the model never names one.
     ToolSpec {
         name: "balance",
         description: "Show how much ETH and which known tokens the wallet holds on the unlocked network. Use it when the user asks for a balance, or to check funds before sending. Set private to true for shielded (Tornado) holdings and notes.",

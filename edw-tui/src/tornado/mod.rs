@@ -7,6 +7,7 @@
 //! `--expected-fresh-address` are the harness's alone: no tool argument reaches them.
 
 pub mod borrow;
+pub mod held;
 pub mod prepared;
 
 use std::{fmt, time::Duration};

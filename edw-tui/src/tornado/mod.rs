@@ -466,6 +466,12 @@ impl FreshAddress {
     }
 }
 
+/// edw refused an unshield as a usage error. At the pinned rev each of those, the
+/// `--expected-fresh-address` abort among them, comes before edw proves or signs anything.
+pub fn refused_before_signing(document: &Value) -> bool {
+    document["kind"] == "edw/error" && document["class"] == "usage"
+}
+
 /// `result` as the model and the log get it: edw's JSON document alone when it printed one, so
 /// progress lines on stderr (which echo tail calls) never reach the model.
 pub fn for_model(result: EdwResult, command: &str) -> EdwResult {

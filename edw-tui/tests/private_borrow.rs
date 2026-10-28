@@ -254,13 +254,12 @@ async fn a_failed_unshield_leaves_the_preparation_for_the_retry() {
     no_calldata(&seen);
 }
 
-/// edw stores a fresh address once a bundler accepted the user operation using it, so a fresh
-/// address that moves during a failed attempt retires its preparation, whatever moved it. Here it
-/// is stored by hand while the card is open; edw refuses the unshield, held to the reviewed
-/// address, and the next attempt prepares new notes for the next fresh address.
+/// The fresh address moves while the card is open (stored by hand here, as another unshield
+/// would). edw, held to the reviewed address, refuses before it signs, so the shield's calls went
+/// nowhere: the next attempt reuses them, for the next fresh address.
 #[tokio::test]
-async fn a_fresh_address_used_during_the_attempt_retires_its_preparation() {
-    let Some(mut b) = start("private-borrow-consumed", 2).await else {
+async fn a_borrow_edw_refuses_for_a_moved_fresh_address_keeps_its_preparation() {
+    let Some(mut b) = start("private-borrow-moved", 2).await else {
         return;
     };
     let fresh = fresh_address(&b.h.wallet).await;
@@ -288,25 +287,20 @@ async fn a_fresh_address_used_during_the_attempt_retires_its_preparation() {
         .find(|o| o.starts_with(&unshield(fresh)))
         .unwrap_or_else(|| panic!("{outputs:?}"));
     assert!(
-        refused.contains(&format!("expected fresh address {}", fresh.address)),
+        refused.contains(r#""class":"usage""#)
+            && refused.contains(&format!("expected fresh address {}", fresh.address)),
         "{refused}"
     );
     let [record] = records(&b.h.wallet).try_into().unwrap();
-    assert!(
-        record["consumed"]
-            .as_str()
-            .is_some_and(|why| why.contains(&fresh.address.to_string())),
-        "{record}"
-    );
+    assert!(record["consumed"].is_null(), "{record}");
 
     let next = fresh_address(&b.h.wallet).await;
     assert_ne!(next, fresh);
     let again = b.h.turn(PROMPT, false).await;
     assert_eq!(again.confirms, [unshield(next)], "{again:?}");
-    assert!(again.previews[0].contains("prepared now"), "{again:?}");
-    let records = records(&b.h.wallet);
-    assert_eq!(records.len(), 2, "{records:?}");
-    assert_eq!(pending_private(&b.h.wallet, "DAI").await, "200");
+    assert!(again.previews[0].contains("prepared before"), "{again:?}");
+    assert_eq!(records(&b.h.wallet).len(), 1);
+    assert_eq!(pending_private(&b.h.wallet, "DAI").await, "100");
 }
 
 #[tokio::test]

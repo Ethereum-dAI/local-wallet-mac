@@ -1067,6 +1067,7 @@ impl Shared {
                 "user operation {}",
                 report["user_operation"].as_str().unwrap_or("?")
             )),
+            Some(error) if tornado::refused_before_signing(&error) => None,
             _ => self.fresh_address_used(borrow.fresh(), &profile).await,
         };
         let id = &borrow.shield().id;
@@ -1088,10 +1089,10 @@ impl Shared {
         result.to_model_json()
     }
 
-    /// After an unshield that did not report success: why its tail calls may be on chain anyway,
-    /// if they may. edw stores the fresh address only once a bundler accepted the user operation,
-    /// so a next fresh address other than `fresh` means it was accepted. When that cannot be read,
-    /// the calls count as used too: reusing calls that landed is the worse mistake.
+    /// After an unshield that failed past edw's usage checks: why its tail calls may be on chain
+    /// anyway, if they may. edw stores the fresh address only once a bundler accepted the user
+    /// operation, so a next fresh address other than `fresh` means it was accepted. When that
+    /// cannot be read, the calls count as used too: reusing calls that landed is the worse mistake.
     async fn fresh_address_used(&self, fresh: FreshAddress, profile: &str) -> Option<String> {
         let peek = self.tornado_run(&Command::PeekFreshAddress, profile).await;
         match peek

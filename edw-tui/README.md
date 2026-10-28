@@ -106,8 +106,10 @@ holdings and each unspent note.
 - A record is marked `consumed` once an unshield that ends with its calls may have put them on
   chain: edw reported the user operation, or the fresh address was stored while the unshield ran
   (edw stores it only once a bundler accepted the operation), or it could not be read afterwards.
-  A consumed record is never reused; the next request prepares new notes. A declined or failed
-  attempt marks nothing, so the retry reuses the same notes.
+  An unshield edw refused as a usage error (`"class":"usage"`, among them the
+  `--expected-fresh-address` abort) marks nothing: edw raises those before it signs. A consumed
+  record is never reused; the next request prepares new notes. A declined or failed attempt marks
+  nothing, so the retry reuses the same notes.
 - These files are wallet state, like edw's own database. A seed-only restore cannot recover
   reservations that never reached the chain, and the wallet database must not be rolled back to
   an older backup while exported calls may still be submitted (edw's own warning). Back them up

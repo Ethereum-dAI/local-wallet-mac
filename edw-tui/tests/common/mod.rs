@@ -6,6 +6,7 @@ pub mod pty;
 pub mod recorder;
 pub mod safe_fork;
 pub mod scenario;
+pub mod sepolia_fork;
 
 use std::{
     path::{Path, PathBuf},

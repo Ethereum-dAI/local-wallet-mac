@@ -152,6 +152,13 @@ The fee reserve is `FEE_RESERVE_BPS`, 10% of the amount: edw-core seeds its own 
 tenth of the sponsoring note, which is never larger than the amount. A larger proven fee makes edw
 refuse before signing.
 
+The first live run on Sepolia (public Pimlico, 0.1 ETH unshielded, 0.09 ETH supplied) proved a fee
+of 0.009462 ETH, 94.6% of the 0.01 ETH reserve; the fork rehearsal had proven 0.0048 ETH. The gas
+actually paid was about 0.00327 ETH, and the paymaster refunded the rest, so 0.00673 ETH (6.7% of
+the unshield) stayed on the fresh address. The reserve is kept at 10%: edw has no way to quote its
+fee without sending, so a computed reserve needs an upstream quote flag. A fee above the reserve
+is refused before anything is sent.
+
 Before the script runs, the harness reads the profile's notes (`edw balance --detailed`) and picks
 them as edw will, with edw-core's own `withdrawal_notes` at the pinned rev (`src/tornado/held.rs`).
 It refuses, with no preparation and no card, when the mined ETH notes cannot make the amount

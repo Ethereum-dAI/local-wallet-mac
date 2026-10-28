@@ -12,17 +12,14 @@
 
 mod common;
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{fs, path::Path, sync::Arc};
 
 use alloy_node_bindings::AnvilInstance;
 use alloy_primitives::{hex, keccak256};
 use common::{
     Harness, TempWallet, Turn, edw_binary, fake_sepolia, mine_eth_notes,
     recorder::{Recorder, call},
+    records, shipped, skill_set,
 };
 use edw_core::{
     instance::{DataDir, Instance},
@@ -34,10 +31,9 @@ use edw_tui::{
     flow::{FlowEvent, Stage, StepState},
     scripted::ScriptedModel,
     skills::{
-        catalog::{self, Catalog, SkillState},
         manifest,
         plan::{self, Account},
-        sandbox::{self, Runner},
+        sandbox,
         tools::SkillSet,
     },
     tornado::{FreshAddress, PoolAmount, Token, borrow::Request, prepared::Store},
@@ -62,10 +58,6 @@ edw_skill.plan(
 /// Calldata the model must never see: ERC-20 approve, Tornado deposit, depositETH and borrow.
 const SELECTORS: [&str; 4] = ["095ea7b3", "b214faa5", "474cf53d", "a415bcad"];
 
-fn shipped() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("skills")
-}
-
 fn copy(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();
     for entry in fs::read_dir(from).unwrap() {
@@ -77,20 +69,6 @@ fn copy(from: &Path, to: &Path) {
             fs::copy(entry.path(), target).unwrap();
         }
     }
-}
-
-/// Every skill in `dir`, agreed to.
-fn skill_set(dir: &Path) -> Arc<SkillSet> {
-    let mut installed = catalog::discover(&[dir.to_owned()]);
-    for i in &mut installed {
-        i.state = SkillState::Ready;
-    }
-    catalog::resolve(&mut installed, &edw::tool_names(), true);
-    Arc::new(SkillSet::new(
-        Catalog::from_installed(&installed),
-        &installed,
-        Runner::from_env(),
-    ))
 }
 
 /// The shipped skills, with private-aave-borrow's script swapped for [`STUB`].
@@ -161,19 +139,6 @@ fn unshield(fresh: FreshAddress) -> String {
         "edw unshield --token ETH --amount-formatted 1 --tail-calls <4 calls> --expected-fresh-address {} --profile 0/0",
         fresh.address
     )
-}
-
-fn records(wallet: &TempWallet) -> Vec<Value> {
-    let dir = wallet.config.data_dir.join("edw-tui/prepared-shields");
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut records: Vec<Value> = entries
-        .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
-        .map(|text| serde_json::from_str(&text).unwrap())
-        .collect();
-    records.sort_by_key(|r| r["id"].as_str().unwrap().to_owned());
-    records
 }
 
 /// edw's own count of the profile's pending private `symbol`: notes reserved or not yet mined.

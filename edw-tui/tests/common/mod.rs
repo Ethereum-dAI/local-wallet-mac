@@ -7,7 +7,11 @@ pub mod recorder;
 pub mod safe_fork;
 pub mod scenario;
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use alloy_node_bindings::{Anvil, AnvilInstance};
 use alloy_primitives::{B256, U256};
@@ -21,9 +25,14 @@ use edw_tui::{
     flow::FlowEvent,
     interim::{InterimConfig, SendingProfile},
     scripted::ScriptedModel,
-    skills::tools::SkillSet,
+    skills::{
+        catalog::{self, Catalog, SkillState},
+        sandbox::Runner,
+        tools::SkillSet,
+    },
 };
 use rig_agent::ModelHandle;
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 /// `EDW_BIN`, or `edw` on PATH; `None` when it does not run.
@@ -218,6 +227,39 @@ impl Drop for TempWallet {
     }
 }
 
+/// The skills this crate ships.
+pub fn shipped() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("skills")
+}
+
+/// Every skill in `dir`, agreed to.
+pub fn skill_set(dir: &Path) -> Arc<SkillSet> {
+    let mut installed = catalog::discover(&[dir.to_owned()]);
+    for i in &mut installed {
+        i.state = SkillState::Ready;
+    }
+    catalog::resolve(&mut installed, &edw::tool_names(), true);
+    Arc::new(SkillSet::new(
+        Catalog::from_installed(&installed),
+        &installed,
+        Runner::from_env(),
+    ))
+}
+
+/// The wallet's stored shield preparations, by id.
+pub fn records(wallet: &TempWallet) -> Vec<Value> {
+    let dir = wallet.config.data_dir.join("edw-tui/prepared-shields");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut records: Vec<Value> = entries
+        .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+        .map(|text| serde_json::from_str(&text).unwrap())
+        .collect();
+    records.sort_by_key(|r| r["id"].as_str().unwrap().to_owned());
+    records
+}
+
 /// One user turn: what was asked for confirmation (with any dry-run preview), what ran, and
 /// the final reply.
 #[derive(Debug, Default)]
@@ -284,7 +326,11 @@ impl Harness {
     }
 
     pub async fn next(&mut self) -> AgentEvent {
-        tokio::time::timeout(Duration::from_secs(120), self.events.recv())
+        self.next_within(Duration::from_secs(120)).await
+    }
+
+    pub async fn next_within(&mut self, limit: Duration) -> AgentEvent {
+        tokio::time::timeout(limit, self.events.recv())
             .await
             .expect("timed out")
             .expect("agent gone")

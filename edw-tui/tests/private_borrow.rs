@@ -1,10 +1,12 @@
 //! A private borrow through the agent, the review and the real `edw`, on the anvil that answers as
 //! Sepolia (`common::fake_sepolia`). That chain has neither Aave nor Tornado pools, so where the
 //! skill's script runs it is swapped for one that writes the same plan without reading Aave, and
-//! the unshield finds no notes: edw takes every flag and stops at "held notes cannot make". What
-//! is checked is what the harness promises: one card with the whole operation, nothing sent
-//! without a yes, no calldata for the model, and a preparation reused until an attempt may have
-//! put it on chain. Skips without edw or anvil, and the card tests without Docker.
+//! the 1 ETH note a borrow unshields is mined there by `common::mine_eth_notes`. edw picks it,
+//! proves, and fails before sending, as the chain has no EntryPoint. What is checked is what the
+//! harness promises: a profile whose notes cannot pay for the unshield is refused before any
+//! preparation or card, one card shows the whole operation, nothing is sent without a yes, the
+//! model sees no calldata, and a preparation is reused until an attempt may have put it on chain.
+//! Skips without edw or anvil, and the card tests without Docker.
 //!
 //! `live_sepolia_private_borrow` is the real thing, ignored by default.
 
@@ -19,7 +21,7 @@ use std::{
 use alloy_node_bindings::AnvilInstance;
 use alloy_primitives::{hex, keccak256};
 use common::{
-    Harness, TempWallet, Turn, edw_binary, fake_sepolia,
+    Harness, TempWallet, Turn, edw_binary, fake_sepolia, mine_eth_notes,
     recorder::{Recorder, call},
 };
 use edw_core::{
@@ -130,6 +132,7 @@ async fn start(name: &str, attempts: usize) -> Option<Borrowing> {
         return None;
     }
     let (wallet, chain) = fake_sepolia(binary, name).await?;
+    mine_eth_notes(&wallet, &chain, "1").await;
     let skills = tempfile::tempdir().unwrap();
     let model = recorder(&vec![json!({"eth": "1", "amount": "100"}); attempts]);
     let h = Harness::start_with_skills(
@@ -263,7 +266,7 @@ async fn a_failed_unshield_leaves_the_preparation_for_the_retry() {
             "prepared before"
         };
         assert!(turn.previews[0].contains(prepared), "{turn:?}");
-        // No notes on this chain: edw takes the whole command and stops before proving.
+        // edw picks the mined note and proves, then fails before sending, as there is no EntryPoint.
         let failed = turn
             .outputs
             .iter()
@@ -271,7 +274,8 @@ async fn a_failed_unshield_leaves_the_preparation_for_the_retry() {
             .unwrap_or_else(|| panic!("no unshield in {turn:?}"));
         assert!(
             failed.contains("=> 1:")
-                && failed.contains("held notes cannot make 1000000000000000000 wei exactly"),
+                && failed.contains("edw/error")
+                && !failed.contains("held notes cannot make"),
             "{failed}"
         );
         assert!(!sent(&turn));
@@ -281,14 +285,14 @@ async fn a_failed_unshield_leaves_the_preparation_for_the_retry() {
     assert!(record["consumed"].is_null(), "{record}");
     assert_eq!(pending_private(&b.h.wallet, "DAI").await, "100");
     let seen = b.model.seen.lock().unwrap().clone();
-    assert!(seen.iter().any(|s| s.contains("held notes cannot make")));
+    assert!(seen.iter().any(|s| s.contains("edw/error")), "{seen:?}");
     no_calldata(&seen);
 }
 
 /// edw stores a fresh address once a bundler accepted the user operation using it, so a fresh
 /// address that moves during a failed attempt retires its preparation, whatever moved it. Here it
-/// is stored by hand while the card is open; the unshield fails (no notes), and the next attempt
-/// prepares new notes for the next fresh address.
+/// is stored by hand while the card is open; edw refuses the unshield, held to the reviewed
+/// address, and the next attempt prepares new notes for the next fresh address.
 #[tokio::test]
 async fn a_fresh_address_used_during_the_attempt_retires_its_preparation() {
     let Some(mut b) = start("private-borrow-consumed", 2).await else {
@@ -318,7 +322,10 @@ async fn a_fresh_address_used_during_the_attempt_retires_its_preparation() {
         .iter()
         .find(|o| o.starts_with(&unshield(fresh)))
         .unwrap_or_else(|| panic!("{outputs:?}"));
-    assert!(refused.contains("=> 1:"), "{refused}");
+    assert!(
+        refused.contains(&format!("expected fresh address {}", fresh.address)),
+        "{refused}"
+    );
     let [record] = records(&b.h.wallet).try_into().unwrap();
     assert!(
         record["consumed"]
@@ -376,6 +383,144 @@ async fn what_the_harness_refuses_never_reaches_a_card() {
         );
     }
     assert!(records(&h.wallet).is_empty());
+}
+
+/// A wallet on the fake Sepolia whose model asks for 100 DAI against each of `eth`, in turn, with
+/// the shipped skill. Each case served here is refused before the script runs, so no Docker.
+async fn asking(name: &str, eth: &[&str]) -> Option<(Harness, Recorder, AnvilInstance)> {
+    let Some(binary) = edw_binary() else {
+        eprintln!("skipping: edw is not installed");
+        return None;
+    };
+    let (wallet, chain) = fake_sepolia(binary, name).await?;
+    let calls: Vec<Value> = eth
+        .iter()
+        .map(|eth| json!({"eth": eth, "amount": "100"}))
+        .collect();
+    let model = recorder(&calls);
+    let h = Harness::start_with_skills(
+        wallet,
+        ModelHandle::named("recorder", model.clone()),
+        None,
+        skill_set(&shipped()),
+    );
+    Some((h, model, chain))
+}
+
+/// The refusal the model got for the borrow in `turn`, once nothing was reserved, reviewed or
+/// sent (no card, no stored preparation, no DAI notes reserved in edw).
+async fn refused_before_anything(turn: &Turn, model: &Recorder, wallet: &TempWallet) -> String {
+    assert!(turn.confirms.is_empty(), "{turn:?}");
+    assert!(!sent(turn));
+    assert!(
+        !turn.outputs.iter().any(|o| o.starts_with("edw shield")),
+        "{turn:?}"
+    );
+    assert!(records(wallet).is_empty());
+    assert_eq!(pending_private(wallet, "DAI").await, "0");
+    let refused = turn
+        .outputs
+        .iter()
+        .find(|o| o.starts_with("skill private-aave-borrow/private_aave_borrow"))
+        .unwrap_or_else(|| panic!("{turn:?}"));
+    assert!(
+        refused.contains("=> 1:") && refused.contains("; nothing was sent."),
+        "{refused}"
+    );
+    let output = refused.split_once(" => 1: ").unwrap().1;
+    let answered = model.seen.lock().unwrap().last().cloned().unwrap();
+    assert!(
+        answered.contains(r#"\"exit_code\":1"#) && answered.contains(output),
+        "the model got the refusal as a failed tool result: {answered}"
+    );
+    output.to_owned()
+}
+
+#[tokio::test]
+async fn a_wallet_without_notes_is_refused_before_any_preparation_or_card() {
+    let Some((mut h, model, _chain)) = asking("private-borrow-no-notes", &["1"]).await else {
+        return;
+    };
+    let turn = h.turn(PROMPT, true).await;
+    let refused = refused_before_anything(&turn, &model, &h.wallet).await;
+    assert!(
+        refused.contains("profile 0/0 holds no mined Tornado ETH notes")
+            && refused.contains("exactly 1 ETH")
+            && refused.contains("only unshielded whole"),
+        "{refused}"
+    );
+}
+
+#[tokio::test]
+async fn notes_that_cannot_make_the_amount_are_refused_with_what_is_held_and_needed() {
+    let Some((mut h, model, chain)) = asking("private-borrow-short", &["1"]).await else {
+        return;
+    };
+    mine_eth_notes(&h.wallet, &chain, "0.1").await;
+    let turn = h.turn(PROMPT, true).await;
+    let refused = refused_before_anything(&turn, &model, &h.wallet).await;
+    assert!(
+        refused.contains(
+            "holds mined Tornado ETH notes of 0.1 ETH, which cannot make the 1 ETH needed exactly"
+        ) && refused.contains("only unshielded whole"),
+        "{refused}"
+    );
+}
+
+#[tokio::test]
+async fn pending_notes_and_notes_without_a_paymaster_are_refused_as_edw_would() {
+    let Some((mut h, model, chain)) = asking("private-borrow-unspendable", &["1", "10"]).await
+    else {
+        return;
+    };
+    h.wallet
+        .edw(&[
+            "shield",
+            "--prepare",
+            "--token",
+            "ETH",
+            "--amount-formatted",
+            "1",
+            "--profile",
+            "0/0",
+        ])
+        .await;
+    let turn = h.turn(PROMPT, true).await;
+    let refused = refused_before_anything(&turn, &model, &h.wallet).await;
+    assert!(refused.contains("not mined yet (1 ETH)"), "{refused}");
+
+    mine_eth_notes(&h.wallet, &chain, "10").await;
+    let turn = h.turn(PROMPT, true).await;
+    let refused = refused_before_anything(&turn, &model, &h.wallet).await;
+    assert!(
+        refused.contains("edw picks to make 10 ETH (10 ETH) are all in pools without a paymaster"),
+        "{refused}"
+    );
+}
+
+#[tokio::test]
+async fn notes_edw_cannot_read_refuse_the_borrow_rather_than_skip_the_check() {
+    let Some((mut h, _model, chain)) = asking("private-borrow-unread", &["1"]).await else {
+        return;
+    };
+    drop(chain);
+    let turn = h.turn(PROMPT, true).await;
+    assert!(turn.confirms.is_empty(), "{turn:?}");
+    assert!(
+        !turn.outputs.iter().any(|o| o.starts_with("edw ")),
+        "{turn:?}"
+    );
+    assert!(records(&h.wallet).is_empty());
+    let refused = turn
+        .outputs
+        .iter()
+        .find(|o| o.starts_with("skill private-aave-borrow/private_aave_borrow"))
+        .unwrap_or_else(|| panic!("{turn:?}"));
+    assert!(
+        refused.contains("=> 1: the profile's Tornado notes could not be read (RPC config")
+            && refused.contains("; nothing was sent."),
+        "{refused}"
+    );
 }
 
 /// The argv the harness builds, run as edw itself: every flag, the tail-call list and the

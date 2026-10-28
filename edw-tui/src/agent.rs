@@ -47,7 +47,7 @@ use crate::{
         sandbox::{self, Output},
         tools::{self as skill_tools, SkillGate, SkillSet},
     },
-    tornado::{self, Command, FreshAddress, PoolAmount, borrow, prepared::Store},
+    tornado::{self, Command, FreshAddress, PoolAmount, borrow, held::HeldEth, prepared::Store},
 };
 
 const RULES: &str = "You are the chat interface of edw, a privacy-first Ethereum desktop wallet.
@@ -879,10 +879,11 @@ impl Shared {
         result.to_model_json()
     }
 
-    /// A skill action that runs from an unshield's fresh account: a private borrow. The skill's
-    /// script plans the Aave calls for the peeked fresh address, the shield they end with is
-    /// prepared (or a stored one reused), the user answers one card, and only then does edw
-    /// unshield with both as tail calls. edw simulates it all first and sends nothing if it fails.
+    /// A skill action that runs from an unshield's fresh account: a private borrow. The profile's
+    /// notes are checked to pay for the unshield as edw picks them, the skill's script plans the
+    /// Aave calls for the peeked fresh address, the shield they end with is prepared (or a stored
+    /// one reused), the user answers one card, and only then does edw unshield with both as tail
+    /// calls. edw simulates it all first and sends nothing if it fails.
     async fn private_borrow(&self, skill: &Skill, action: &ActionDef, args: &Value) -> String {
         let profile = self.interim.profile();
         let command = format!("skill {}/{} {args}", skill.name, action.tool.name);
@@ -915,6 +916,26 @@ impl Shared {
             Ok(request) => request,
             Err(error) => return fail(error),
         };
+        // edw would refuse these notes only after the card, with the DAI notes already reserved.
+        // Not through tornado_run, which keeps only the JSON, while edw says on stderr why notes
+        // were unreadable.
+        let balance = edw::run_with_timeout(
+            &self.config,
+            &Command::PrivateBalance.argv(&profile),
+            tornado::TIMEOUT,
+        )
+        .await;
+        let held = match HeldEth::read(&balance, network) {
+            Ok(held) => held,
+            Err(error) => {
+                return fail(format!(
+                    "the profile's Tornado notes could not be read ({error})"
+                ));
+            }
+        };
+        if let Err(refused) = held.unshield(request.unshield.base, &profile) {
+            return fail(refused.to_string());
+        }
         let peek = self.tornado_run(&Command::PeekFreshAddress, &profile).await;
         let Some(fresh) = peek
             .document()

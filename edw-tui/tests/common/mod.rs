@@ -200,15 +200,15 @@ pub async fn mine_eth_notes(wallet: &TempWallet, chain: &AnvilInstance, amount: 
             .from(chain.addresses()[0])
             .to(pool.address)
             .input(data.into());
-        let hash: B256 = provider
-            .raw_request("eth_sendTransaction".into(), (tx,))
+        // anvil mines a sent transaction after answering, so its receipt is waited for.
+        let receipt = provider
+            .send_transaction(tx)
+            .await
+            .unwrap()
+            .get_receipt()
             .await
             .unwrap();
-        let receipt = provider.get_transaction_receipt(hash).await.unwrap();
-        assert!(
-            receipt.is_some_and(|r| r.status()),
-            "the Deposit log landed"
-        );
+        assert!(receipt.status(), "the Deposit log landed: {receipt:?}");
     }
 }
 

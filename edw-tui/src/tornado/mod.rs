@@ -10,7 +10,7 @@ pub mod borrow;
 pub mod held;
 pub mod prepared;
 
-use std::{fmt, time::Duration};
+use std::{fmt, sync::LazyLock, time::Duration};
 
 use alloy_primitives::{Address, U256};
 use alloy_provider::{Provider, ProviderBuilder};
@@ -20,6 +20,7 @@ use edw_core::{
         Pool, deposit_pools_for_asset, format_amount, parse_amount, resolve_asset,
     },
 };
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -473,15 +474,31 @@ pub fn refused_before_signing(document: &Value) -> bool {
 }
 
 /// `result` as the model and the log get it: edw's JSON document alone when it printed one, so
-/// progress lines on stderr (which echo tail calls) never reach the model.
+/// progress lines on stderr (which echo tail calls) never reach the model. Without one, edw's text
+/// with the calldata cut out ([`without_calldata`]).
 pub fn for_model(result: EdwResult, command: &str) -> EdwResult {
-    let output = result
-        .document()
-        .map_or(result.output, |document| document.to_string());
+    let output = match result.document() {
+        Some(document) => document.to_string(),
+        None => without_calldata(&result.output),
+    };
     EdwResult {
         command: command.to_owned(),
         exit_code: result.exit_code,
         output,
+    }
+}
+
+/// edw's text when it printed no document (an argument error, a crash): its tail-call lines and
+/// argument echo spell out calldata, so every hex run longer than a 32-byte hash is cut, and a
+/// long text keeps only its end, where edw says why it stopped.
+fn without_calldata(text: &str) -> String {
+    const KEEP: usize = 1_000;
+    static CALLDATA: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"0x[0-9a-fA-F]{65,}").expect("valid regex"));
+    let text = CALLDATA.replace_all(text, "0x…");
+    match text.char_indices().rev().nth(KEEP - 1) {
+        Some((at, _)) if at > 0 => format!("…{}", &text[at..]),
+        _ => text.into_owned(),
     }
 }
 
@@ -681,6 +698,52 @@ mod tests {
         let shown = for_model(result, "edw unshield --token ETH");
         assert!(!shown.output.contains("deadbeef"), "{shown:?}");
         assert!(shown.output.contains("no notes") && shown.exit_code == 1);
+    }
+
+    #[test]
+    fn without_a_document_edw_says_why_but_no_calldata_reaches_the_model() {
+        let approve = format!("0x095ea7b3{}{}", "00".repeat(32), "11".repeat(32));
+        let deposit = format!("0xb214faa5{}", "22".repeat(32));
+        let tails = format!("{TO}:{approve}:0,{TO}:{deposit}:0");
+        let stopped = |exit_code: i32, output: String| {
+            for_model(
+                EdwResult {
+                    command: "edw unshield".into(),
+                    exit_code,
+                    output,
+                },
+                "edw unshield --tail-calls <2 calls>",
+            )
+        };
+        let rejected = stopped(
+            2,
+            format!(
+                "error: invalid value '{tails}' for '--tail-calls <TAIL_CALLS>': invalid tail call 1; expected TARGET:0xCALLDATA[:VALUE], with decimal or 0x wei value\n\nFor more information, try '--help'."
+            ),
+        );
+        let progress = "Syncing Tornado pools...\n".repeat(200);
+        let crashed = stopped(
+            101,
+            format!(
+                "{progress}tail {TO}:{approve}:0\ntail {TO}:{deposit}:0\nthread 'main' panicked at proving failed"
+            ),
+        );
+        for (shown, why) in [
+            (&rejected, "invalid tail call 1"),
+            (&crashed, "panicked at proving failed"),
+        ] {
+            assert!(
+                !shown.output.contains("095ea7b3") && !shown.output.contains("b214faa5"),
+                "{shown:?}"
+            );
+            assert!(shown.output.contains(why), "{shown:?}");
+            assert!(
+                shown.output.chars().count() <= 1_001,
+                "{}",
+                shown.output.len()
+            );
+        }
+        assert_eq!((rejected.exit_code, crashed.exit_code), (2, 101));
     }
 
     #[test]

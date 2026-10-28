@@ -167,6 +167,40 @@ A skill action runs from a fresh account like this only with `account = "fresh"`
 `[[action]]`; `$self` and `self_only` then mean that account. edw-tui uses it for this flow only,
 and a plan checked for one kind of account is refused for the other.
 
+#### Rehearsing it on a Sepolia fork
+
+`tests/fork_private_borrow.rs` runs the whole flow for real on an anvil fork of Sepolia, with no
+Sepolia funds and nothing sent to Sepolia:
+
+```bash
+npm install -g @pimlico/alto@0.0.21   # the bundler kohaku-rs's fork kit pins; or set ALTO_BIN
+EDW_BIN=… cargo test --test fork_private_borrow -- --ignored --nocapture   # edw, anvil, Docker
+```
+
+A new wallet whose only RPC is the fork and whose only bundler is a local alto shields two 0.1 ETH
+notes into Sepolia's Tornado pool with `edw shield`. The agent then borrows 100 DAI against one of
+them, as above: the real script in Docker, the real preparation, one card (approved), and edw
+proving and sending the combined unshield. The test checks from chain state that one transaction
+carried the user operation, and that the fresh address is an EIP-7702 account with Aave collateral
+and at least 100 DAI of variable debt. It also checks that the Tornado DAI pool took exactly 100
+DAI and that nothing left the profile's public address. edw must list a mined 100 DAI note, and
+the preparation must be consumed. Then the fork's gas price goes to 1.5 and 3 times what the fee
+reserve covers, and the same request must be refused before signing, with the note and the
+preparation kept.
+
+It prints each stage's time, edw's own log of the unshield, and the proven fee against the reserve.
+edw prices the fee at the bundler's slow `maxFeePerGas + maxPriorityFeePerGas`, so the reserve
+holds while that stays below `reserve / (gas limit x 1.01)`. On 2026-10-28 that was about 4.2 gwei
+for a 0.1 ETH borrow (gas limit 2.38M), against 2 gwei quoted on the fork and 2.2 gwei from public
+Pimlico's slow tier the same day. Gas above that is refused before signing, with nothing sent. Up
+to about twice that, edw says the fee leaves too little for the Aave deposit; beyond it, the error
+is the bundler's simulation revert, `ExecuteError` (`0x5a154675`) of the first tail call.
+
+What it does not cover: the public Pimlico bundler (its gas limits, prices and acceptance), the
+paymaster's deposit on Sepolia now rather than at the fork block, and the public RPC's limits
+during edw's live sync. Pool history still comes from the Saga indexer, as it does live: the public
+RPC no longer serves Sepolia logs that old, so the indexer cannot be turned off here.
+
 ## Skills
 
 A skill is a folder under `skills/` that teaches the agent something new, like Claude's
@@ -349,6 +383,9 @@ cargo test --test private_borrow    # the private borrow through the card and th
 cargo test --test private_borrow live -- --ignored --nocapture   # a real one on Sepolia
                                     # (EDW_TUI_LIVE_PHRASE with mined ETH notes, EDW_TUI_LIVE_ETH,
                                     # EDW_TUI_LIVE_RPC, Docker)
+cargo test --test fork_private_borrow -- --ignored --nocapture   # the whole private borrow on a
+                                    # Sepolia fork with a local bundler, then refused at high gas
+                                    # (network; edw, anvil, alto, Docker; see Private borrow)
 cargo test --test held_notes        # the held-notes check refuses what the pinned edw's unshield
                                     # refuses, on notes mined on that anvil (edw, anvil)
 cargo test --test skills_private_borrow -- --ignored --nocapture   # the real script on a Sepolia

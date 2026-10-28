@@ -59,7 +59,6 @@ struct Call {
     value: String,
 }
 
-/// One stored preparation: what it was for, and edw's answer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedShield {
     pub id: String,

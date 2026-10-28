@@ -1,7 +1,8 @@
-//! INTERIM: `balance`, `transfer` (and later `swap`) until desktop-wallet ships its own.
+//! INTERIM: public `balance`, `transfer` and `swap`, run here because edw's own `transfer` is
+//! ETH only and broadcasts without a dry run, and edw has no `swap`.
 //!
-//! When `edw balance` and `edw transfer` land, the adapter points those tools at the CLI and
-//! this module goes. Swap may never come to desktop-wallet; its code will then be promoted
+//! If edw gains a reviewed, token-aware `transfer`, the adapter can point that tool at the CLI
+//! and this part goes. Swap may never come to desktop-wallet; its code will then be promoted
 //! instead of deleted. Nothing outside this module depends on how it works: the tools the
 //! model sees are the permanent contract in `app_contract.rs`, and this executor behaves the
 //! way edw's spec says the real commands will (a dry run first, a send only after "yes").

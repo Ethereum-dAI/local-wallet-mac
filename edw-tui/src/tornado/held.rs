@@ -26,7 +26,6 @@ pub struct HeldNote {
     pub mined: bool,
 }
 
-/// A profile's unspent Tornado ETH notes on `network`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldEth {
     pub network: NetworkPreset,
@@ -56,7 +55,6 @@ impl fmt::Display for Refused {
     }
 }
 
-/// A row of the balance document's `tornado_notes`.
 #[derive(Deserialize)]
 struct Row {
     pool: String,

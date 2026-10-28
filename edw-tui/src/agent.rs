@@ -732,7 +732,6 @@ impl Shared {
     }
 }
 
-/// Why a preparation left no record.
 enum NoRecord {
     /// The user said no; this is the reply.
     Declined(String),

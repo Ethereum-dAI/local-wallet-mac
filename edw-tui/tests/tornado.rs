@@ -211,7 +211,6 @@ async fn calls_edw_would_refuse_never_reach_a_review() {
         );
     }
 
-    // The read-only ones run without a question.
     let fresh = h.turn("what is my fresh address", true).await;
     let peek = output_of(&fresh, "edw next-fresh-address --peek");
     assert!(

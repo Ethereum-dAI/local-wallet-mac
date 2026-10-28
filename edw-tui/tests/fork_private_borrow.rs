@@ -7,7 +7,7 @@
 //! signing, with nothing sent. Ignored by default; it reads Sepolia over the network and takes
 //! about two minutes.
 //!
-//! What edw needs, found by trying it (`common::sepolia_fork`):
+//! What edw needs (`common::sepolia_fork`):
 //! - RPC: anvil forked from Sepolia answers with chain id 11155111 and takes state overrides;
 //!   `network rpc-config add --use` points edw at it.
 //! - Bundler: alto 0.0.21 (the version kohaku-rs's fork kit pins), against the EntryPoint v0.8

@@ -51,8 +51,10 @@ line breaks in a paste never send the message.
 
 ## Transfers (interim)
 
-edw has no `balance`, `transfer` or `swap` command yet, so `src/interim/` does the work until it
-does, signing with the pinned `edw-core` from edw's own encrypted store. The tools the model
+edw now has `balance` and `transfer`, but `transfer` is ETH only and broadcasts without a dry run,
+and edw has no `swap`. So `src/interim/` still runs the chat's `transfer`, `swap` and public
+`balance` (the private side of `balance` reads edw's own document), signing with the pinned
+`edw-core` from edw's own encrypted store. The tools the model
 sees are the SwiftUI app's `transfer` and `swap`, byte for byte (a test compares them with
 `wallet-macos/.../ToolDefinitions.swift`), plus the app's safety clause, so switching to edw's
 commands later changes no evals.

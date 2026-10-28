@@ -90,7 +90,6 @@ async fn every_tool_maps_onto_the_pinned_edw() {
     s.fails("list_profiles", json!({}), "locked").await;
     assert_eq!(s.ok("wallet_status", json!({})).await[0]["locked"], true);
 
-    // The first unlock of a network creates its wallet: mnemonic 0 and profile 0.
     let unlocked = s.ok("unlock", json!({"network": "local"})).await;
     assert_eq!(unlocked[0]["network"], "local");
     assert_eq!(profile(&unlocked[1]["profile"]), (0, 0, None));
@@ -101,7 +100,6 @@ async fn every_tool_maps_onto_the_pinned_edw() {
     let network = s.ok("list_networks", json!({})).await;
     assert_eq!(network[0]["network_id"], 31337);
 
-    // add_profile uses the next unused index on the existing mnemonic.
     let bob = s.ok("add_profile", json!({"name": "bob"})).await;
     assert_eq!(profile(&bob[0]["profile"]), (0, 1, Some("bob")));
     let renamed = s
@@ -111,7 +109,6 @@ async fn every_tool_maps_onto_the_pinned_edw() {
         )
         .await;
     assert_eq!(profile(&renamed[0]["profile"]), (0, 1, Some("robert")));
-    // An empty new name clears it.
     let cleared = s
         .ok(
             "rename_profile",
@@ -120,7 +117,6 @@ async fn every_tool_maps_onto_the_pinned_edw() {
         .await;
     assert_eq!(profile(&cleared[0]["profile"]), (0, 1, None));
 
-    // new_mnemonic is a separate seed.
     let carol = s.ok("new_mnemonic", json!({"name": "carol"})).await;
     assert_eq!(profile(&carol[0]["profile"]), (1, 0, Some("carol")));
     // With two mnemonics, add_profile needs `mnemonic`, as its schema tells the model.
@@ -200,7 +196,6 @@ fn other() -> (i32, String) {
     (1, "other".into())
 }
 
-/// Every file under `dir`, with its bytes.
 fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut files = BTreeMap::new();
     let mut pending = vec![dir.to_owned()];
@@ -333,7 +328,6 @@ async fn tornado_tools_map_onto_the_pinned_edw() {
     assert_eq!(refusal(&unsupported), usage(), "{unsupported:?}");
     assert!(command("prepare_shield", json!({"token": "DOGE", "amount": "1"})).is_err());
 
-    // An amount that is not a sum of pool sizes: refused by both.
     let odd = run(config, &prepare("ETH", "1.15")).await;
     assert_eq!(refusal(&odd), other(), "{odd:?}");
     assert!(command("prepare_shield", json!({"amount": "1.15"})).is_err());

@@ -228,12 +228,10 @@ impl Drop for TempWallet {
     }
 }
 
-/// The skills this crate ships.
 pub fn shipped() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("skills")
 }
 
-/// Every skill in `dir`, agreed to.
 pub fn skill_set(dir: &Path) -> Arc<SkillSet> {
     let mut installed = catalog::discover(&[dir.to_owned()]);
     for i in &mut installed {
@@ -247,7 +245,6 @@ pub fn skill_set(dir: &Path) -> Arc<SkillSet> {
     ))
 }
 
-/// The wallet's stored shield preparations, by id.
 pub fn records(wallet: &TempWallet) -> Vec<Value> {
     let dir = wallet.config.data_dir.join("edw-tui/prepared-shields");
     let Ok(entries) = std::fs::read_dir(dir) else {

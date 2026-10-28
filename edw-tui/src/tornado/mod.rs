@@ -245,7 +245,6 @@ impl TailCalls {
     }
 }
 
-/// What an unshield does with what it withdraws.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Destination {
     /// It stays on the fresh address.
@@ -440,7 +439,6 @@ fn number(args: &Map<String, Value>, key: &str) -> Result<String, String> {
     }
 }
 
-/// Whether a `balance` call asks for the shielded side, which edw reads.
 pub fn wants_private(args: &Value) -> bool {
     match args.get("private") {
         Some(Value::Bool(private)) => *private,
@@ -450,7 +448,6 @@ pub fn wants_private(args: &Value) -> bool {
     }
 }
 
-/// edw's `edw/next-fresh-address` answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FreshAddress {
     pub index: u32,

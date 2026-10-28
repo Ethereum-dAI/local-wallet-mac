@@ -85,8 +85,6 @@ async fn confirmed_commands_run_and_declined_ones_do_not() {
     assert_eq!(turn.confirms, ["edw unlock --network local"]);
     assert!(turn.outputs.is_empty(), "{turn:?}");
 
-    // Approving it: the store is created with profile 0/0, and its recovery phrase never
-    // leaves edw.
     let turn = h.turn("unlock local", true).await;
     assert!(
         turn.outputs[0].contains("=> 0:")

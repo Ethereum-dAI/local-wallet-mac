@@ -37,7 +37,6 @@ pub enum Backend {
     Tornado,
 }
 
-/// What the user sees and answers before a tool call runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Review {
     /// Reads only: runs without asking.

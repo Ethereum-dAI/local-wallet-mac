@@ -131,8 +131,8 @@ edw unshield --token ETH --amount-formatted 1 --expected-fresh-address F --tail-
 ```
 
 1. The model calls `private_aave_borrow(eth, amount)`. The harness refuses anything but DAI on
-   Sepolia (there Aave lends the very token the Tornado DAI pool takes) and amounts that are not
-   pool sums.
+   Sepolia (there Aave lends the very token the Tornado DAI pool takes), amounts that are not
+   pool sums, and an unshield the profile's notes cannot pay for (below).
 2. It peeks the fresh address `F` (`next-fresh-address --peek`) and runs the skill's script with
    `F` as `me`: `supply` is the unshielded ETH less a 10% fee reserve, `borrow` the DAI amount.
    The script reads Aave (ETH taken as collateral, DAI lent now, the loan within the ETH's LTV)
@@ -150,8 +150,15 @@ edw unshield --token ETH --amount-formatted 1 --expected-fresh-address F --tail-
 
 The fee reserve is `FEE_RESERVE_BPS`, 10% of the amount: edw-core seeds its own fee quote with a
 tenth of the sponsoring note, which is never larger than the amount. A larger proven fee makes edw
-refuse before signing. Whether the user holds mined notes making the amount exactly is edw's own
-check ("held notes cannot make … exactly"), surfaced as it is.
+refuse before signing.
+
+Before the script runs, the harness reads the profile's notes (`edw balance --detailed`) and picks
+them as edw will, with edw-core's own `withdrawal_notes` at the pinned rev (`src/tornado/held.rs`).
+It refuses, with no preparation and no card, when the mined ETH notes cannot make the amount
+exactly (notes are only unshielded whole), when they could only once pending notes are mined, or
+when the notes edw picks are all in pools without a paymaster (on Sepolia, the 10 ETH pool). A
+balance edw could not read refuses the borrow too. `tests/held_notes.rs` holds the check to the
+binary's own answers.
 
 The collateral and the debt belong to `F`, an address of the same wallet, not to the profile.
 Repaying or withdrawing has to come from `F` later; this skill does not do it.
@@ -342,6 +349,8 @@ cargo test --test private_borrow    # the private borrow through the card and th
 cargo test --test private_borrow live -- --ignored --nocapture   # a real one on Sepolia
                                     # (EDW_TUI_LIVE_PHRASE with mined ETH notes, EDW_TUI_LIVE_ETH,
                                     # EDW_TUI_LIVE_RPC, Docker)
+cargo test --test held_notes        # the held-notes check refuses what the pinned edw's unshield
+                                    # refuses, on notes mined on that anvil (edw, anvil)
 cargo test --test skills_private_borrow -- --ignored --nocapture   # the real script on a Sepolia
                                     # fork, then its calls and a 200 DAI shield's from one account
                                     # (network; EDW_TUI_SEPOLIA_RPC, Docker, anvil)

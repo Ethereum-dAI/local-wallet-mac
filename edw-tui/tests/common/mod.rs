@@ -10,6 +10,10 @@ pub mod scenario;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use alloy_node_bindings::{Anvil, AnvilInstance};
+use alloy_primitives::{B256, U256};
+use alloy_provider::{Provider, ProviderBuilder};
+use alloy_rpc_types_eth::{Filter, TransactionRequest};
+use edw_core::vault::tornadocash::Pool;
 use edw_tui::{
     addresses::AddressBook,
     agent::{self, AgentEvent, ModelSource, Request},
@@ -110,12 +114,19 @@ impl TempWallet {
     }
 }
 
+/// The fake Sepolia's first block. edw syncs a pool's logs from its deploy block up, and the last
+/// Sepolia pool (DAI 100) was deployed at 5_594_406, so a chain below that has none to read.
+const FAKE_SEPOLIA_GENESIS: u64 = 5_594_410;
+
 /// A Sepolia wallet whose RPC is a fresh anvil answering with Sepolia's chain id, with edw's pool
 /// indexer off, so Tornado commands run without the network. The pools have no code there: a
-/// shield is a plain value transfer to the pool's address, and there are no notes to unshield.
-/// `None` (with a message) when anvil cannot start.
+/// shield is a plain value transfer to the pool's address, and there are no notes to unshield
+/// until [`mine_eth_notes`] makes some. `None` (with a message) when anvil cannot start.
 pub async fn fake_sepolia(binary: PathBuf, name: &str) -> Option<(TempWallet, AnvilInstance)> {
-    let chain = match Anvil::new().chain_id(11_155_111).try_spawn() {
+    let chain = Anvil::new()
+        .chain_id(11_155_111)
+        .args(["--number".to_owned(), FAKE_SEPOLIA_GENESIS.to_string()]);
+    let chain = match chain.try_spawn() {
         Ok(chain) => chain,
         Err(error) => {
             eprintln!("skipping: cannot start anvil ({error})");
@@ -142,6 +153,63 @@ pub async fn fake_sepolia(binary: PathBuf, name: &str) -> Option<(TempWallet, An
         wallet.edw(step).await;
     }
     Some((wallet, chain))
+}
+
+/// Code that emits Tornado's `Deposit(bytes32 indexed commitment, uint32 leafIndex, uint256
+/// timestamp)` for calldata `commitment ‖ leafIndex ‖ timestamp`, and nothing else.
+const DEPOSIT_LOGGER: &str = "0x604060206000376000357fa945e51eec50ab98c161376f0db4cf2aeba3ec92755fe2fcd388bdbbb80ff19660406000a200";
+
+/// Gives profile 0/0 of a [`fake_sepolia`] wallet `amount` of mined Tornado ETH notes. edw
+/// prepares them, and each note's pool gets [`DEPOSIT_LOGGER`] and one `Deposit` log with the
+/// note's commitment, which is all edw's pool sync reads to call a note mined. Leaf indexes
+/// follow the pool's earlier deposits, as the merkle tree needs.
+pub async fn mine_eth_notes(wallet: &TempWallet, chain: &AnvilInstance, amount: &str) {
+    let prepared = wallet
+        .edw(&[
+            "shield",
+            "--prepare",
+            "--token",
+            "ETH",
+            "--amount-formatted",
+            amount,
+            "--profile",
+            "0/0",
+        ])
+        .await
+        .document()
+        .unwrap();
+    let provider = ProviderBuilder::new().connect_http(chain.endpoint_url());
+    for note in prepared["notes"].as_array().unwrap() {
+        let pool = Pool::POOLS
+            .iter()
+            .find(|pool| note["pool"] == pool.id())
+            .unwrap_or_else(|| panic!("no pool for {note}"));
+        let _: () = provider
+            .raw_request("anvil_setCode".into(), (pool.address, DEPOSIT_LOGGER))
+            .await
+            .unwrap();
+        let earlier = Filter::new()
+            .address(pool.address)
+            .from_block(FAKE_SEPOLIA_GENESIS);
+        let leaf = provider.get_logs(&earlier).await.unwrap().len();
+        let commitment: B256 = note["commitment"].as_str().unwrap().parse().unwrap();
+        let mut data = commitment.to_vec();
+        data.extend(U256::from(leaf).to_be_bytes::<32>());
+        data.extend(U256::from(1_700_000_000u64).to_be_bytes::<32>());
+        let tx = TransactionRequest::default()
+            .from(chain.addresses()[0])
+            .to(pool.address)
+            .input(data.into());
+        let hash: B256 = provider
+            .raw_request("eth_sendTransaction".into(), (tx,))
+            .await
+            .unwrap();
+        let receipt = provider.get_transaction_receipt(hash).await.unwrap();
+        assert!(
+            receipt.is_some_and(|r| r.status()),
+            "the Deposit log landed"
+        );
+    }
 }
 
 impl Drop for TempWallet {

@@ -513,14 +513,17 @@ mod tests {
                 .unwrap()
         };
         let mut other_token = fixture();
+        let other = "0x00000000000000000000000000000000000000d1";
         for call in other_token["calls"]
             .as_array_mut()
             .unwrap()
             .iter_mut()
             .step_by(2)
         {
-            call["target"] = json!("0x00000000000000000000000000000000000000d1");
+            call["target"] = json!(other);
         }
+        let tail = other_token["tail_calls"].as_str().unwrap();
+        other_token["tail_calls"] = json!(tail.replace(&DAI.to_string(), other));
         let why = wanted
             .clone()
             .with_shield(fresh(), aave(), prepared(other_token).await)

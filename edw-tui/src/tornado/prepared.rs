@@ -59,6 +59,35 @@ struct Call {
     value: String,
 }
 
+impl Document {
+    /// `tail_calls`, which an unshield broadcasts, holds exactly `calls`, which
+    /// [`PreparedShield::approved`] checks: the same targets, data and values, in order.
+    fn tail_calls_are_the_calls(&self) -> bool {
+        let read = |target: &str, data: &str, value: &str| -> Option<(Address, Bytes, U256)> {
+            Some((
+                target.parse().ok()?,
+                data.parse().ok()?,
+                value.parse().ok()?,
+            ))
+        };
+        let calls: Option<Vec<_>> = self
+            .calls
+            .iter()
+            .map(|call| read(&call.target, &call.data, &call.value))
+            .collect();
+        let tail: Option<Vec<_>> = self
+            .tail_calls
+            .split(',')
+            .map(|call| match call.split(':').collect::<Vec<_>>()[..] {
+                [target, data] => read(target, data, "0"),
+                [target, data, value] => read(target, data, value),
+                _ => None,
+            })
+            .collect();
+        calls.is_some() && calls == tail
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedShield {
     pub id: String,
@@ -242,7 +271,7 @@ impl Store {
                     && d.chain_id == amount.network.network_id().0
                     && d.token.eq_ignore_ascii_case(amount.token.symbol())
                     && d.notes.len() == amount.notes.len()
-                    && !d.tail_calls.is_empty()
+                    && d.tail_calls_are_the_calls()
             });
         let Some(edw) = expected else {
             // The notes are reserved all the same, so edw's answer is kept, not dropped.
@@ -434,6 +463,47 @@ mod tests {
         let asked = AtomicUsize::new(0);
         prepare(&store, &dai("200"), "0/0", &asked).await.unwrap();
         assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tail_calls_other_than_the_checked_calls_are_kept_aside() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::in_data_dir(root.path());
+        let tail = document()["tail_calls"].as_str().unwrap().to_owned();
+        let token = document()["calls"][0]["target"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let elsewhere = "0x00000000000000000000000000000000000000d1";
+        let approve_100 = "56bc75e2d63100000";
+        for differs in [
+            tail.replacen(&token, elsewhere, 1),
+            tail.replacen(approve_100, "fffffffffffffffff", 1),
+            tail.replacen(":0,", ":1,", 1),
+            format!("{tail},{elsewhere}:0x"),
+            tail.rsplit_once(',').unwrap().0.to_owned(),
+        ] {
+            assert_ne!(differs, tail);
+            let mut answer = document();
+            answer["tail_calls"] = json!(differs);
+            let refused = store
+                .reuse_or(&dai("200"), "0/0", || async { Ok::<_, String>(answer) })
+                .await;
+            assert!(refused.unwrap_err().contains("kept in"), "{differs}");
+        }
+
+        // The same calls in other spelling: lowercase hex, and no value where it is zero.
+        let respelled: Vec<String> = tail
+            .to_lowercase()
+            .split(',')
+            .map(|call| call.strip_suffix(":0").unwrap_or(call).to_owned())
+            .collect();
+        let mut same = document();
+        same["tail_calls"] = json!(respelled.join(","));
+        let saved = store
+            .reuse_or(&dai("200"), "0/0", || async { Ok::<_, String>(same) })
+            .await;
+        assert!(saved.is_ok(), "{saved:?}");
     }
 
     #[tokio::test]

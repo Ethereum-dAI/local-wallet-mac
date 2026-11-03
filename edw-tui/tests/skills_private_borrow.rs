@@ -135,7 +135,7 @@ async fn its_plan_for_a_fresh_account_borrows_dai_that_the_shield_deposits_on_a_
     let run = |request: Request| {
         let invoke = sandbox::invoke_message(
             &action.tool.name,
-            &request.script_args(),
+            &request.script_args(request.trial_supply()),
             set.context(&skill, Some(&at)),
         );
         let host = set.host(&skill, Some(at.rpc.clone()), Arc::new(|_| {}));
@@ -158,7 +158,7 @@ async fn its_plan_for_a_fresh_account_borrows_dai_that_the_shield_deposits_on_a_
         refused.contains("Unshield more ETH or borrow less"),
         "{refused}"
     );
-    let args = request.script_args();
+    let args = request.script_args(request.trial_supply());
     let Output::Plan(proposed) = run(request.clone()).await.unwrap() else {
         panic!("a plan");
     };
@@ -172,7 +172,9 @@ async fn its_plan_for_a_fresh_account_borrows_dai_that_the_shield_deposits_on_a_
         &args,
     )
     .unwrap();
-    let aave = request.aave(checked.clone(), fresh).unwrap();
+    let aave = request
+        .aave(checked.clone(), fresh, request.trial_supply())
+        .unwrap();
     assert_eq!(aave.supply, U256::from(900_000_000_000_000_000u64));
     assert_eq!(aave.borrow, U256::from(200u128 * 10u128.pow(18)));
 

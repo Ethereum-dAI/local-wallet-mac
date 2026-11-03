@@ -925,6 +925,7 @@ impl Shared {
             Ok(request) => request,
             Err(error) => return fail(error),
         };
+        let trial = request.trial_supply();
         // edw would refuse these notes only after the card, with the DAI notes already reserved.
         // Not through tornado_run, which keeps only the JSON, while edw says on stderr why notes
         // were unreadable.
@@ -966,7 +967,7 @@ impl Shared {
             },
             Err(error) => return fail(error),
         };
-        let script_args = request.script_args();
+        let script_args = request.script_args(trial);
         let invoke = sandbox::invoke_message(
             &action.tool.name,
             &script_args,
@@ -1000,7 +1001,7 @@ impl Shared {
             plan::Account::Fresh(fresh.address),
             &script_args,
         )
-        .and_then(|checked| request.aave(checked, fresh.address));
+        .and_then(|checked| request.aave(checked, fresh.address, trial));
         let aave = match checked {
             Ok(aave) => aave,
             Err(error) => return fail(format!("the plan was refused ({error})")),
@@ -1027,7 +1028,7 @@ impl Shared {
             exit_code: 0,
             output: record.summary(reused).to_string(),
         }));
-        let borrow = match request.with_shield(fresh, aave, record) {
+        let borrow = match request.with_shield(fresh, aave, record, trial) {
             Ok(borrow) => borrow,
             Err(error) => return fail(format!("the plan was refused ({error})")),
         };
@@ -1053,7 +1054,7 @@ impl Shared {
             ),
             reused,
         );
-        let unshield = borrow.command();
+        let unshield = borrow.command(tornado::Mode::Send);
         let display = unshield.display(&profile);
         if !self.confirm(&display, Some(card)).await {
             self.flow_detail(Stage::Review, StepState::Declined, Some("declined".into()));

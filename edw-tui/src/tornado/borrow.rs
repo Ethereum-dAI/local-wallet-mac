@@ -15,8 +15,8 @@ use edw_core::{
 use serde_json::{Map, Value, json};
 
 use super::{
-    Command, Destination, FreshAddress, Mode, PoolAmount, TailCalls, Token, Unshield, number,
-    prepared::PreparedShield,
+    Command, Destination, FeeQuote, FreshAddress, Mode, PoolAmount, TailCalls, Token, Unshield,
+    number, prepared::PreparedShield,
 };
 use crate::{edw::text, skills::plan::CheckedPlan};
 
@@ -25,11 +25,14 @@ sol! {
     function borrow(address asset, uint256 amount, uint256 interestRateMode, uint16 referralCode, address onBehalfOf);
 }
 
-/// The share of the unshielded ETH kept back for the sponsor fee, in basis points: 10%. edw-core
-/// quotes the fee with a balance seed of a tenth of the sponsoring note (`seed_overrides`, "the
-/// SDK's temporary 10% sponsor fee"), and that note is never larger than the whole amount. A
-/// larger proven fee makes edw refuse before signing.
-pub const FEE_RESERVE_BPS: u64 = 1_000;
+/// The share of the unshielded ETH the trial plan leaves out, in basis points: 10%. The trial
+/// calls only give `unshield --quote` something to price, so the ceiling just has to sit under what
+/// any plausible fee leaves; the plan that is sent supplies what the quote leaves.
+pub const TRIAL_RESERVE_BPS: u64 = 1_000;
+
+/// One part in this many of the quoted fee stays unspent on top of it, so a fee that drifts up
+/// between the quote and edw's proof does not leave the tail calls short.
+const FEE_HEADROOM_DIVISOR: u64 = 4;
 
 /// What the model asked for: unshield `unshield` of ETH, then borrow `shield` of DAI and shield it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,16 +67,52 @@ impl Request {
         })
     }
 
-    /// The most of the unshielded ETH that may go to Aave: all but the fee reserve.
-    pub fn max_supply(&self) -> U256 {
+    /// What the trial plan supplies: all but [`TRIAL_RESERVE_BPS`] of the unshielded ETH.
+    pub fn trial_supply(&self) -> U256 {
         let all = self.unshield.base;
-        all - all * U256::from(FEE_RESERVE_BPS) / U256::from(10_000)
+        all - all * U256::from(TRIAL_RESERVE_BPS) / U256::from(10_000)
+    }
+
+    /// What the plan that is sent supplies, given the quote of the trial calls: the ETH the
+    /// quote leaves, less a quarter of its fee. Refused when the quote leaves less than the trial
+    /// calls supplied, since edw priced calls the notes could not have paid for.
+    pub fn final_supply(&self, trial: &FeeQuote) -> Result<U256, String> {
+        let wanted = self.trial_supply();
+        if trial.available < wanted {
+            return Err(format!(
+                "edw quoted a fee of {} ETH, which leaves {} ETH of the {} ETH unshielded for the calls, under the {} ETH a first plan needs",
+                self.unshield.units(trial.fee),
+                self.unshield.units(trial.available),
+                self.unshield.amount,
+                self.unshield.units(wanted)
+            ));
+        }
+        let supply = trial
+            .available
+            .saturating_sub(trial.fee / U256::from(FEE_HEADROOM_DIVISOR));
+        if supply.is_zero() {
+            return Err("the fee leaves no ETH to supply to Aave".into());
+        }
+        Ok(supply)
+    }
+
+    /// The quote of the calls that will be sent: it must still leave what they supply.
+    pub fn check_quote(&self, supply: U256, quote: &FeeQuote) -> Result<(), String> {
+        if quote.available < supply {
+            return Err(format!(
+                "edw's fee rose to {} ETH between quotes, which leaves {} ETH, under the {} ETH the plan supplies",
+                self.unshield.units(quote.fee),
+                self.unshield.units(quote.available),
+                self.unshield.units(supply)
+            ));
+        }
+        Ok(())
     }
 
     /// What the skill's script runs with: numbers the harness derived, never the model's text.
-    pub fn script_args(&self) -> Value {
+    pub fn script_args(&self, supply: U256) -> Value {
         json!({
-            "supply": self.max_supply().to_string(),
+            "supply": supply.to_string(),
             "token": self.shield.token.symbol(),
             "borrow": self.shield.base.to_string(),
         })
@@ -81,14 +120,19 @@ impl Request {
 
     /// The Aave half, checked against the token and amount this shield will take, before any
     /// note is reserved for it.
-    pub fn aave(&self, plan: CheckedPlan, fresh: Address) -> Result<AaveCalls, String> {
+    pub fn aave(
+        &self,
+        plan: CheckedPlan,
+        fresh: Address,
+        ceiling: U256,
+    ) -> Result<AaveCalls, String> {
         let aave = AaveCalls::read(plan, fresh)?;
         let chain = self.shield.network.network_id().0;
         let token = resolve_asset(self.shield.token.symbol(), chain)
             .ok()
             .and_then(|asset| token_address(&asset))
             .ok_or_else(|| format!("{} has no token on chain {chain}", self.shield.token))?;
-        self.check(&aave, token, self.shield.base)?;
+        self.check(&aave, token, self.shield.base, ceiling)?;
         Ok(aave)
     }
 
@@ -99,6 +143,7 @@ impl Request {
         fresh: FreshAddress,
         aave: AaveCalls,
         shield: PreparedShield,
+        ceiling: U256,
     ) -> Result<PrivateBorrow, String> {
         if shield.consumed.is_some() {
             return Err(format!("{} was used already", shield.id));
@@ -119,7 +164,7 @@ impl Request {
             ));
         }
         let (token, amount) = shield.approved()?;
-        self.check(&aave, token, amount)?;
+        self.check(&aave, token, amount, ceiling)?;
         Ok(PrivateBorrow {
             request: self,
             fresh,
@@ -128,17 +173,21 @@ impl Request {
         })
     }
 
-    /// The Aave half against the shield: it supplies at most what the fee reserve leaves, and
-    /// borrows the very token the shield approves, exactly as much as it deposits.
-    fn check(&self, aave: &AaveCalls, token: Address, amount: U256) -> Result<(), String> {
-        let max = self.max_supply();
-        if aave.supply.is_zero() || aave.supply > max {
+    /// The Aave half against the shield: it supplies at most `ceiling`, and borrows the very
+    /// token the shield approves, exactly as much as it deposits.
+    fn check(
+        &self,
+        aave: &AaveCalls,
+        token: Address,
+        amount: U256,
+        ceiling: U256,
+    ) -> Result<(), String> {
+        if aave.supply.is_zero() || aave.supply > ceiling {
             return Err(format!(
-                "the Aave plan supplies {} ETH; of the {} ETH unshielded, at most {} ETH may go to Aave, since {}% is kept back for the fee",
+                "the Aave plan supplies {} ETH; of the {} ETH unshielded, at most {} ETH may go to Aave after the fee",
                 self.unshield.units(aave.supply),
                 self.unshield.amount,
-                self.unshield.units(max),
-                FEE_RESERVE_BPS / 100
+                self.unshield.units(ceiling)
             ));
         }
         if aave.token != token {
@@ -235,12 +284,13 @@ impl PrivateBorrow {
         TailCalls(format!("{},{}", aave.join(","), self.shield.tail_calls().0))
     }
 
-    /// The unshield that runs it, held to the fresh address the Aave calls were built for.
-    pub fn command(&self) -> Command {
+    /// The unshield that prices (`Mode::Quote`) or runs it, held to the fresh address the Aave
+    /// calls were built for.
+    pub fn command(&self, mode: Mode) -> Command {
         Command::Unshield(Unshield {
             amount: self.request.unshield.clone(),
             destination: Destination::Calls(self.tail_calls()),
-            mode: Mode::Send,
+            mode,
             expected_fresh_address: Some(self.fresh.address),
         })
     }
@@ -250,7 +300,7 @@ impl PrivateBorrow {
     pub fn preview(&self, profile: &str, skill: &str, reused: bool) -> String {
         let unshield = &self.request.unshield;
         let shield = &self.request.shield;
-        let reserve = unshield.base - self.request.max_supply();
+        let reserve = unshield.base - self.request.trial_supply();
         let mut lines = vec![
             format!("Skill    {skill}"),
             format!(
@@ -264,7 +314,7 @@ impl PrivateBorrow {
             format!(
                 "Fee      paid from the unshielded ETH; {} ETH ({}%) is kept back for it, and what it leaves stays on the fresh address",
                 unshield.units(reserve),
-                FEE_RESERVE_BPS / 100
+                TRIAL_RESERVE_BPS / 100
             ),
         ];
         for (n, step) in self.aave.plan.steps.iter().enumerate() {
@@ -331,6 +381,7 @@ mod tests {
     const DAI: Address = address!("0xFF34B3d4Aee8ddCd6F9AFFFB6Fe49bD371b8a357");
     const DAI_200: &str = include_str!("../../tests/fixtures/shield_prepared_dai_200.json");
     const ETHER: u128 = 1_000_000_000_000_000_000;
+    const TRIAL: U256 = U256::from_limbs([900_000_000_000_000_000, 0, 0, 0]);
 
     fn skill() -> Skill {
         manifest::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/private-aave-borrow"))
@@ -390,10 +441,11 @@ mod tests {
             .aave(
                 checked(script_plan(9 * ETHER / 10, "dai", 200 * ETHER)),
                 FRESH,
+                TRIAL,
             )
             .unwrap();
         wanted
-            .with_shield(fresh(), aave, prepared(fixture()).await)
+            .with_shield(fresh(), aave, prepared(fixture()).await, TRIAL)
             .unwrap()
     }
 
@@ -420,7 +472,7 @@ mod tests {
         );
         assert_eq!(borrow.tail_calls(), TailCalls(expected.clone()));
 
-        let argv = borrow.command().argv("0/0");
+        let argv = borrow.command(Mode::Send).argv("0/0");
         assert_eq!(
             argv,
             [
@@ -439,17 +491,107 @@ mod tests {
             ]
         );
         assert!(
-            !borrow.command().display("0/0").contains("0x095ea7b3"),
+            !borrow
+                .command(Mode::Send)
+                .display("0/0")
+                .contains("0x095ea7b3"),
             "the display counts the calls"
         );
     }
 
     #[test]
-    fn the_script_is_told_the_supply_after_the_fee_reserve_and_the_borrow_in_base_units() {
+    fn the_script_is_told_the_supply_it_is_given_and_the_borrow_in_base_units() {
+        let wanted = request("1.1", "300");
         assert_eq!(
-            request("1.1", "300").script_args(),
+            wanted.trial_supply(),
+            U256::from(990_000_000_000_000_000u64)
+        );
+        assert_eq!(
+            wanted.script_args(wanted.trial_supply()),
             json!({"supply": "990000000000000000", "token": "DAI", "borrow": "300000000000000000000"})
         );
+    }
+
+    fn quote(fee: u128, available: u128) -> FeeQuote {
+        FeeQuote {
+            fee: U256::from(fee),
+            available: U256::from(available),
+        }
+    }
+
+    #[test]
+    fn the_final_supply_keeps_a_quarter_of_the_fee_as_headroom() {
+        let wanted = request("1", "100");
+        let supply = |fee, available| wanted.final_supply(&quote(fee, available));
+        assert_eq!(
+            supply(ETHER / 100, ETHER - ETHER / 100),
+            Ok(U256::from(ETHER - ETHER / 100 - ETHER / 400))
+        );
+        assert_eq!(supply(0, ETHER), Ok(U256::from(ETHER)));
+        assert_eq!(
+            supply(7, ETHER - 7),
+            Ok(U256::from(ETHER - 7 - 1)),
+            "the quarter rounds down"
+        );
+        assert_eq!(
+            supply(3, ETHER - 3),
+            Ok(U256::from(ETHER - 3)),
+            "a fee under 4 wei keeps nothing back"
+        );
+    }
+
+    #[test]
+    fn the_final_supply_is_never_more_than_the_quote_leaves() {
+        let wanted = request("1", "100");
+        for fee in [0, 1, 3, 4, 5, ETHER / 100, ETHER / 10] {
+            let left = ETHER - fee;
+            let supply = wanted.final_supply(&quote(fee, left)).unwrap();
+            assert!(
+                supply <= U256::from(left) && supply <= wanted.unshield.base,
+                "{fee}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fee_that_leaves_less_than_the_trial_supply_is_refused() {
+        let wanted = request("1", "100");
+        let why = wanted
+            .final_supply(&quote(ETHER / 5, ETHER - ETHER / 5))
+            .unwrap_err();
+        assert!(
+            why.contains("0.2 ETH") && why.contains("0.8 ETH") && why.contains("0.9 ETH"),
+            "{why}"
+        );
+        assert!(wanted.final_supply(&quote(ETHER, 0)).is_err());
+        assert!(wanted.final_supply(&quote(2 * ETHER, 0)).is_err());
+        assert!(
+            wanted
+                .final_supply(&quote(ETHER / 10, 9 * ETHER / 10))
+                .is_ok(),
+            "exactly the trial supply is enough"
+        );
+    }
+
+    #[test]
+    fn the_quote_of_the_final_calls_must_still_cover_what_they_supply() {
+        let wanted = request("1", "100");
+        let supply = U256::from(ETHER - ETHER / 100 - ETHER / 400);
+        assert!(
+            wanted
+                .check_quote(supply, &quote(ETHER / 100, ETHER - ETHER / 100))
+                .is_ok()
+        );
+        assert!(
+            wanted
+                .check_quote(supply, &quote(ETHER / 80, ETHER - ETHER / 80))
+                .is_ok(),
+            "the headroom absorbs a fee up a quarter"
+        );
+        let why = wanted
+            .check_quote(supply, &quote(ETHER / 50, ETHER - ETHER / 50))
+            .unwrap_err();
+        assert!(why.contains("rose to 0.02 ETH"), "{why}");
     }
 
     #[test]
@@ -476,10 +618,10 @@ mod tests {
     #[test]
     fn the_aave_half_is_refused_before_any_note_is_reserved() {
         let wanted = request("1", "100");
-        let refused = |plan: Value| wanted.aave(checked(plan), FRESH).unwrap_err();
+        let refused = |plan: Value| wanted.aave(checked(plan), FRESH, TRIAL).unwrap_err();
         let over = refused(script_plan(ETHER, "dai", 100 * ETHER));
         assert!(
-            over.contains("at most 0.9 ETH") && over.contains("10%"),
+            over.contains("at most 0.9 ETH") && over.contains("after the fee"),
             "{over}"
         );
         assert!(refused(script_plan(0, "dai", 100 * ETHER)).contains("supplies 0 ETH"));
@@ -501,7 +643,7 @@ mod tests {
         let other = address!("0x00000000000000000000000000000000000000E1");
         assert!(
             wanted
-                .aave(elsewhere, other)
+                .aave(elsewhere, other, TRIAL)
                 .unwrap_err()
                 .contains("for the fresh account")
         );
@@ -512,7 +654,11 @@ mod tests {
         let wanted = request("1", "200");
         let aave = || {
             wanted
-                .aave(checked(script_plan(ETHER / 2, "dai", 200 * ETHER)), FRESH)
+                .aave(
+                    checked(script_plan(ETHER / 2, "dai", 200 * ETHER)),
+                    FRESH,
+                    TRIAL,
+                )
                 .unwrap()
         };
         let mut other_token = fixture();
@@ -529,7 +675,7 @@ mod tests {
         other_token["tail_calls"] = json!(tail.replace(&DAI.to_string(), other));
         let why = wanted
             .clone()
-            .with_shield(fresh(), aave(), prepared(other_token).await)
+            .with_shield(fresh(), aave(), prepared(other_token).await, TRIAL)
             .unwrap_err();
         assert!(why.contains("they must be the same"), "{why}");
 
@@ -537,16 +683,20 @@ mod tests {
         used.consumed = Some("user operation 0xaa".into());
         let why = wanted
             .clone()
-            .with_shield(fresh(), aave(), used)
+            .with_shield(fresh(), aave(), used, TRIAL)
             .unwrap_err();
         assert!(why.contains("used already"), "{why}");
 
         let smaller = request("1", "100");
         let aave = smaller
-            .aave(checked(script_plan(ETHER / 2, "dai", 100 * ETHER)), FRESH)
+            .aave(
+                checked(script_plan(ETHER / 2, "dai", 100 * ETHER)),
+                FRESH,
+                TRIAL,
+            )
             .unwrap();
         let why = smaller
-            .with_shield(fresh(), aave, prepared(fixture()).await)
+            .with_shield(fresh(), aave, prepared(fixture()).await, TRIAL)
             .unwrap_err();
         assert!(why.contains("not of 100 DAI"), "{why}");
     }

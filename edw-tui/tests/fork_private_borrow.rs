@@ -47,7 +47,7 @@ use edw_tui::{
     flow::FlowEvent,
     scripted::ScriptedModel,
     skills::{manifest, sandbox},
-    tornado::{self, borrow::FEE_RESERVE_BPS},
+    tornado::{self, borrow::TRIAL_RESERVE_BPS},
 };
 use rig_agent::ModelHandle;
 use serde_json::{Value, json};
@@ -458,7 +458,7 @@ async fn the_private_borrow_runs_end_to_end_on_a_sepolia_fork() {
     lap(&mut stages, "checks", started);
 
     let fee = parse_ether(report["fee"].as_str().unwrap()).unwrap();
-    let reserve = parse_ether("0.1").unwrap() * U256::from(FEE_RESERVE_BPS) / U256::from(10_000);
+    let reserve = parse_ether("0.1").unwrap() * U256::from(TRIAL_RESERVE_BPS) / U256::from(10_000);
     let quoted = bundler
         .call("eth_getUserOperationByHash", json!([user_op]))
         .await
@@ -483,7 +483,7 @@ async fn the_private_borrow_runs_end_to_end_on_a_sepolia_fork() {
         format_ether(fee),
         fee.to::<u128>() as f64 / reserve.to::<u128>() as f64 * 100.0,
         format_ether(reserve),
-        FEE_RESERVE_BPS / 100
+        TRIAL_RESERVE_BPS / 100
     );
     eprintln!(
         "     at gas limit {gas} and maxFee + maxPriorityFee {} gwei; the reserve covers up to {} gwei",

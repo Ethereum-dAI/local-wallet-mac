@@ -36,7 +36,7 @@ use edw_tui::{
         sandbox,
         tools::SkillSet,
     },
-    tornado::{FreshAddress, PoolAmount, Token, borrow::Request, prepared::Store},
+    tornado::{FreshAddress, Mode, PoolAmount, Token, borrow::Request, prepared::Store},
 };
 use rig_agent::ModelHandle;
 use rig_core::message::AssistantContent;
@@ -493,7 +493,8 @@ async fn edw_takes_the_combined_unshield_flag_for_flag() {
     .unwrap();
     let skill = manifest::load(&shipped().join("private-aave-borrow")).unwrap();
     let action = skill.action("private_aave_borrow").unwrap();
-    let args = request.script_args();
+    let trial = request.trial_supply();
+    let args = request.script_args(trial);
     let plan = json!({"steps": [
         {"call": {"contract": "gateway", "function": "depositETH", "args": ["pool", "$self", "0"], "value": args["supply"]}},
         {"call": {"contract": "pool", "function": "borrow", "args": ["dai", args["borrow"], "2", "0", "$self"]}},
@@ -507,7 +508,7 @@ async fn edw_takes_the_combined_unshield_flag_for_flag() {
         &args,
     )
     .unwrap();
-    let aave = request.aave(checked, fresh.address).unwrap();
+    let aave = request.aave(checked, fresh.address, trial).unwrap();
     let prepared = wallet
         .edw(&[
             "shield",
@@ -527,9 +528,9 @@ async fn edw_takes_the_combined_unshield_flag_for_flag() {
         .reuse_or(&dai, "0/0", || async { Ok::<_, String>(prepared.clone()) })
         .await
         .unwrap();
-    let borrow = request.with_shield(fresh, aave, shield).unwrap();
+    let borrow = request.with_shield(fresh, aave, shield, trial).unwrap();
 
-    let argv = borrow.command().argv("0/0");
+    let argv = borrow.command(Mode::Send).argv("0/0");
     let tail = &argv[argv.iter().position(|a| a == "--tail-calls").unwrap() + 1];
     assert_eq!(tail.split(',').count(), 4);
     let shield_calls = prepared["tail_calls"].as_str().unwrap();

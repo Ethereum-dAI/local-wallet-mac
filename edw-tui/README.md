@@ -176,7 +176,7 @@ them as edw will, with edw-core's own `withdrawal_notes` at the pinned rev (`src
 It refuses, with no preparation and no card, when the mined ETH notes cannot make the amount
 exactly (notes are only unshielded whole), when they could only once pending notes are mined, or
 when the notes edw picks are all in pools without a paymaster (on Sepolia, the 10 ETH pool). A
-balance edw could not read refuses the borrow too. `tests/tornado/held_notes.rs` holds the check to the
+balance edw could not read refuses the borrow too. `held_notes` in `tests/tornado/main.rs` holds the check to the
 binary's own answers.
 
 The collateral and the debt belong to `F`, an address of the same wallet, not to the profile.

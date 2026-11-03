@@ -15,7 +15,7 @@ use edw_core::{
 use serde_json::{Map, Value, json};
 
 use super::{
-    Command, Destination, FreshAddress, PoolAmount, TailCalls, Token, Unshield, number,
+    Command, Destination, FreshAddress, Mode, PoolAmount, TailCalls, Token, Unshield, number,
     prepared::PreparedShield,
 };
 use crate::{edw::text, skills::plan::CheckedPlan};
@@ -240,6 +240,7 @@ impl PrivateBorrow {
         Command::Unshield(Unshield {
             amount: self.request.unshield.clone(),
             destination: Destination::Calls(self.tail_calls()),
+            mode: Mode::Send,
             expected_fresh_address: Some(self.fresh.address),
         })
     }

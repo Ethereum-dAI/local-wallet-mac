@@ -256,10 +256,21 @@ pub enum Destination {
     Calls(TailCalls),
 }
 
+/// Whether an unshield goes out or only asks edw what it would cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Proves, signs and sends; `--yes` is passed because the review card was the consent.
+    Send,
+    /// `--quote`: edw estimates the fee and prints it. It signs, sends and stores nothing, and
+    /// needs no `--yes`.
+    Quote,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unshield {
     pub amount: PoolAmount,
     pub destination: Destination,
+    pub mode: Mode,
     /// The fresh address the user reviewed, or that a plan's calls were built for. edw aborts
     /// before proving or signing when its next fresh address is another one.
     pub expected_fresh_address: Option<Address>,
@@ -305,6 +316,7 @@ impl Command {
                     None => Destination::Fresh,
                     Some(to) => Destination::To(guards::recipient(&to)?),
                 },
+                mode: Mode::Send,
                 expected_fresh_address: None,
             }),
             "next_fresh_address" => Command::PeekFreshAddress,
@@ -342,7 +354,13 @@ impl Command {
                 if let Some(fresh) = unshield.expected_fresh_address {
                     argv.extend(["--expected-fresh-address".into(), fresh.to_string()]);
                 }
-                argv.push("--yes".into());
+                argv.push(
+                    match unshield.mode {
+                        Mode::Send => "--yes",
+                        Mode::Quote => "--quote",
+                    }
+                    .into(),
+                );
                 argv
             }
             Command::PeekFreshAddress => owned(&["next-fresh-address", "--peek"]),
@@ -467,6 +485,31 @@ impl FreshAddress {
         Some(Self {
             index: u32::try_from(document["index"].as_u64()?).ok()?,
             address: document["address"].as_str()?.parse().ok()?,
+        })
+    }
+}
+
+/// What `unshield --quote` priced: the fee, and the ETH left for the tail calls once it is paid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeeQuote {
+    pub fee: U256,
+    pub available: U256,
+}
+
+impl FeeQuote {
+    pub fn from_document(document: &Value) -> Option<Self> {
+        if document["kind"] != "edw/unshield-quote" {
+            return None;
+        }
+        let wei = |key: &str| {
+            let digits = document[key].as_str()?;
+            (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| U256::from_str_radix(digits, 10).ok())
+                .flatten()
+        };
+        Some(Self {
+            fee: wei("fee_raw")?,
+            available: wei("tail_value_raw")?,
         })
     }
 }
@@ -759,6 +802,65 @@ mod tests {
         let fresh = FreshAddress::from_document(&document).unwrap();
         assert_eq!((fresh.index, fresh.address.to_string()), (3, TO.to_owned()));
         assert!(FreshAddress::from_document(&json!({"kind": "edw/error"})).is_none());
+    }
+
+    #[test]
+    fn a_quote_is_asked_without_yes_and_a_send_with_it() {
+        let Command::Unshield(mut unshield) =
+            command("unshield", json!({"amount": "1"}), Sepolia).unwrap()
+        else {
+            panic!("an unshield");
+        };
+        unshield.destination = Destination::Calls(TailCalls(format!("{TO}:0xdeadbeef:0")));
+        let argv = |mode| {
+            Command::Unshield(Unshield {
+                mode,
+                ..unshield.clone()
+            })
+        };
+        let send = argv(Mode::Send);
+        assert_eq!(
+            send.argv(PROFILE).iter().filter(|a| *a == "--yes").count(),
+            1
+        );
+        assert!(!send.argv(PROFILE).contains(&"--quote".to_owned()));
+        let quote = argv(Mode::Quote);
+        assert!(quote.argv(PROFILE).contains(&"--quote".to_owned()));
+        assert!(!quote.argv(PROFILE).contains(&"--yes".to_owned()));
+        let shown = quote.display(PROFILE);
+        assert!(
+            shown.contains("--quote") && shown.contains("<1 calls>") && !shown.contains("deadbeef"),
+            "{shown}"
+        );
+        assert!(!send.display(PROFILE).contains("--quote"));
+    }
+
+    #[test]
+    fn reads_an_unshield_quote() {
+        let quote = |fee: &str, available: &str| json!({"kind": "edw/unshield-quote", "version": 1, "fee_raw": fee, "available_raw": "7", "tail_value_raw": available, "sweep_value_raw": null, "tail_calls": 4});
+        let read =
+            FeeQuote::from_document(&quote("10000000000000000", "990000000000000000")).unwrap();
+        assert_eq!(read.fee, U256::from(10_000_000_000_000_000u64));
+        assert_eq!(read.available, U256::from(990_000_000_000_000_000u64));
+        assert_eq!(
+            FeeQuote::from_document(&quote("0", "5")).unwrap().fee,
+            U256::ZERO
+        );
+        assert!(
+            FeeQuote::from_document(
+                &json!({"kind": "edw/unshield", "fee_raw": "1", "tail_value_raw": "1"})
+            )
+            .is_none()
+        );
+        for bad in [
+            quote("1.5", "5"),
+            quote("-1", "5"),
+            quote("0x10", "5"),
+            quote("1", ""),
+            json!({"kind": "edw/unshield-quote", "fee_raw": 1, "tail_value_raw": "1"}),
+        ] {
+            assert!(FeeQuote::from_document(&bad).is_none(), "{bad}");
+        }
     }
 
     #[test]

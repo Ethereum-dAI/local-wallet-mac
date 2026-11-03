@@ -378,7 +378,7 @@ async fn the_private_borrow_runs_end_to_end_on_a_sepolia_fork() {
     assert!(
         card.contains(&format!(
             "Fee      edw quotes {} ETH",
-            format_ether(fee_quote.fee)
+            format_ether(fee_quote.fee).trim_end_matches('0')
         )),
         "{card}"
     );
@@ -484,6 +484,19 @@ async fn the_private_borrow_runs_end_to_end_on_a_sepolia_fork() {
         record["consumed"].as_str(),
         Some(format!("user operation {user_op}").as_str()),
         "{record}"
+    );
+    eprintln!(
+        "on chain: {} transaction to the EntryPoint {sent_in}",
+        bundles.len()
+    );
+    eprintln!(
+        "          {} user operation {user_op} from {fresh}, success {}",
+        user_ops.len(),
+        op.success
+    );
+    eprintln!(
+        "          the Tornado DAI pool took {} DAI; the profile's public address sent nothing",
+        format_ether(pool_dai_after - pool_dai_before)
     );
     lap(&mut stages, "checks", started);
 

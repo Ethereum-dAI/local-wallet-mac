@@ -320,7 +320,7 @@
       "requires": [
         "aave-v3-lend"
       ],
-      "sha256": "b18a9c7ee54105fa4e1a3b839af82148c7e1dbfaed096ed3358a4cad304a0688",
+      "sha256": "95520a1b3736357d3f974606b14095b649642edc5c70283b0ecbdf623a0eff9e",
       "tools": [
         {
           "function": {

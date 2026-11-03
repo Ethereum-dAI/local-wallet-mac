@@ -543,6 +543,16 @@ impl Shared {
         }
         let args = self.addresses.reveal_json(args);
         if let Some(action) = skill.action(tool).filter(|a| a.account == RunsFrom::Fresh) {
+            if skill.name != borrow::SKILL || action.tool.name != borrow::ACTION {
+                return fail(
+                    &short,
+                    format!(
+                        "Refused: `{tool}` runs from a fresh account, and the harness can do that only for {}'s {}; nothing was run.",
+                        borrow::SKILL,
+                        borrow::ACTION
+                    ),
+                );
+            }
             return self.private_borrow(&skill, action, &args).await;
         }
         let command = format!("{short} {args}");
@@ -734,20 +744,6 @@ impl Shared {
         result.to_model_json()
     }
 }
-
-enum NoRecord {
-    /// The user said no; this is the reply.
-    Declined(String),
-    /// edw or the store failed; this is what happened.
-    Failed(String),
-}
-
-impl From<String> for NoRecord {
-    fn from(why: String) -> Self {
-        NoRecord::Failed(why)
-    }
-}
-
 impl Shared {
     /// A Tornado tool, through edw's CLI as the sending profile. A shield or unshield is reviewed
     /// first, and so is a preparation that is not stored already.
@@ -827,6 +823,18 @@ impl Shared {
             command: display.clone(),
         });
         let result = self.tornado_run(&command, profile).await;
+        let result = if tornado::timed_out(&result) {
+            // edw was killed; for an unshield, the stored fresh address shows whether it landed.
+            let accepted = match (&command, fresh) {
+                (Command::Unshield(_), Some(fresh)) => {
+                    self.fresh_address_used(fresh, profile).await
+                }
+                _ => None,
+            };
+            tornado::unconfirmed(result, accepted.as_deref())
+        } else {
+            result
+        };
         self.log(AgentEvent::ToolFinished(result.clone()));
         if result.ok() {
             self.flow_step(Stage::Send, StepState::Done);
@@ -847,7 +855,8 @@ impl Shared {
     }
 
     /// The stored preparation for the same deposit, or a new one the user agreed to. The model
-    /// gets its summary, never the calls.
+    /// gets its summary, never the calls. The user is asked before the store is locked, so an open
+    /// card holds up no other preparation.
     async fn prepare_shield(
         &self,
         command: &Command,
@@ -855,23 +864,20 @@ impl Shared {
         profile: &str,
     ) -> String {
         let display = command.display(profile);
+        if matches!(self.prepared.find(amount, profile), Ok(None))
+            && !self
+                .confirm(&display, Some(command.preview(profile, None)))
+                .await
+        {
+            return format!("The user declined `{display}`; nothing was reserved.");
+        }
         let prepared = self
             .prepared
             .reuse_or(amount, profile, || async {
-                if !self
-                    .confirm(&display, Some(command.preview(profile, None)))
-                    .await
-                {
-                    return Err(NoRecord::Declined(format!(
-                        "The user declined `{display}`; nothing was reserved."
-                    )));
-                }
                 self.log(AgentEvent::ToolStarted {
                     command: display.clone(),
                 });
-                self.prepared_answer(command, profile)
-                    .await
-                    .map_err(NoRecord::Failed)
+                self.prepared_answer(command, profile).await
             })
             .await;
         let result = match prepared {
@@ -880,8 +886,7 @@ impl Shared {
                 exit_code: 0,
                 output: record.summary(reused).to_string(),
             },
-            Err(NoRecord::Declined(reply)) => return reply,
-            Err(NoRecord::Failed(output)) => EdwResult {
+            Err(output) => EdwResult {
                 command: display,
                 exit_code: 1,
                 output,
@@ -1084,10 +1089,11 @@ impl Shared {
             _ => self.fresh_address_used(borrow.fresh(), &profile).await,
         };
         let id = &borrow.shield().id;
-        let unmarked = match accepted {
-            Some(by) => self.prepared.consume(id, &by).await.err(),
+        let unmarked = match &accepted {
+            Some(by) => self.prepared.consume(id, by).await.err(),
             None => None,
         };
+        let result = tornado::unconfirmed(result, accepted.as_deref());
         self.log(AgentEvent::ToolFinished(result.clone()));
         if result.ok() {
             self.flow_step(Stage::Send, StepState::Done);

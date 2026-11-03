@@ -32,9 +32,34 @@ use crate::{
     },
 };
 
-/// Pool sync, proving and waiting for the bundler's receipt can take minutes, and a broadcast
-/// stopped half way is worse than a slow one.
+/// Pool sync, proving and waiting for the bundler's receipt can take minutes. Past this the edw
+/// process is killed, which can be after a bundler accepted the operation: see [`unconfirmed`].
 pub const TIMEOUT: Duration = Duration::from_secs(600);
+
+/// `result` is edw cut off at [`TIMEOUT`], not edw's own answer.
+pub fn timed_out(result: &EdwResult) -> bool {
+    result.exit_code == -1 && result.output.starts_with("timed out after")
+}
+
+/// `result` for a send, with what a cut-off send leaves open said outright: edw was killed, and a
+/// bundler may already have accepted the operation, so the model must not retry it blind.
+/// `accepted` is what shows it did, when something does.
+pub fn unconfirmed(result: EdwResult, accepted: Option<&str>) -> EdwResult {
+    if !timed_out(&result) {
+        return result;
+    }
+    let seen = match accepted {
+        Some(by) => format!("It was accepted: {by}."),
+        None => "Nothing shows it was accepted, nor that it was not.".to_owned(),
+    };
+    EdwResult {
+        output: format!(
+            "{}; edw was stopped at that limit, so the operation may already be on chain. {seen} Check the balance before trying again; do not retry blindly.",
+            result.output
+        ),
+        ..result
+    }
+}
 
 /// The unlocked network, if Tornado commands may run there. Mainnet passes the interim's own
 /// gate, judged on the RPC edw sends through: `EDW_TUI_MAINNET_FORK=1` and an anvil fork on a
@@ -577,6 +602,40 @@ mod tests {
     use NetworkPreset::{Local, Mainnet, Sepolia};
 
     const PROFILE: &str = "0/0";
+
+    fn cut_off() -> EdwResult {
+        EdwResult {
+            command: "edw unshield".into(),
+            exit_code: -1,
+            output: "timed out after 600s".into(),
+        }
+    }
+
+    #[test]
+    fn a_send_cut_off_at_the_limit_is_not_called_a_plain_failure() {
+        let said = unconfirmed(cut_off(), None);
+        assert_eq!(said.exit_code, -1);
+        assert!(
+            said.output.contains("may already be on chain"),
+            "{}",
+            said.output
+        );
+        assert!(said.output.contains("do not retry blindly"));
+        let seen = unconfirmed(cut_off(), Some("fresh address 0xab was stored"));
+        assert!(
+            seen.output
+                .contains("It was accepted: fresh address 0xab was stored")
+        );
+
+        let refused = EdwResult {
+            exit_code: 2,
+            output: "usage error".into(),
+            ..cut_off()
+        };
+        assert_eq!(unconfirmed(refused.clone(), None), refused);
+        assert!(!timed_out(&refused));
+    }
+
     const TO: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
     fn command(tool: &str, args: Value, network: NetworkPreset) -> Result<Command, String> {

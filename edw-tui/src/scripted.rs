@@ -93,6 +93,15 @@ fn aave_script(prompt: &str, text: &str, has: &dyn Fn(&str) -> bool) -> Option<S
     ]))
 }
 
+/// A plain decimal such as `100` or `0.5`: digits and at most one point. Not `inf`, `nan` or `1e3`,
+/// which `f64` parses.
+fn is_decimal(word: &str) -> bool {
+    let (whole, fraction) = word.split_once('.').unwrap_or((word, ""));
+    word.bytes().any(|b| b.is_ascii_digit())
+        && whole.bytes().all(|b| b.is_ascii_digit())
+        && fraction.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// `privately borrow <amount> <token> against <eth> ETH`.
 fn private_borrow_script(prompt: &str) -> Option<Script> {
     let words: Vec<&str> = prompt
@@ -101,7 +110,7 @@ fn private_borrow_script(prompt: &str) -> Option<Script> {
         .collect();
     let amounts: Vec<(&str, &str)> = words
         .windows(2)
-        .filter(|w| w[0].parse::<f64>().is_ok())
+        .filter(|w| is_decimal(w[0]))
         .map(|w| (w[0], w[1]))
         .collect();
     let (eth, _) = amounts
@@ -556,7 +565,7 @@ fn first_number(prompt: &str) -> Option<String> {
     prompt
         .split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_ascii_digit() && c != '.'))
-        .find(|w| !w.is_empty() && w.parse::<f64>().is_ok())
+        .find(|w| is_decimal(w))
         .map(str::to_owned)
 }
 
@@ -566,7 +575,7 @@ fn tornado_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
     if has("fresh") {
         return Some(Script::Call("next_fresh_address", json!({})));
     }
-    if has("private") || has("shielded") {
+    if (has("private") || has("shielded")) && !has("shield") && !has("unshield") {
         return Some(Script::Call("balance", json!({"private": true})));
     }
     let tool = if has("unshield") {
@@ -579,7 +588,7 @@ fn tornado_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
         return None;
     };
     let words: Vec<&str> = prompt.split_whitespace().collect();
-    let Some(at) = words.iter().position(|w| w.parse::<f64>().is_ok()) else {
+    let Some(at) = words.iter().position(|w| is_decimal(w)) else {
         return Some(Script::Say(format!("Say it as: {tool} <amount> <token>.")));
     };
     let mut args = json!({"amount": words[at]});
@@ -838,6 +847,33 @@ mod tests {
             panic!("an Aave call");
         };
         assert_eq!(plain[0].1, json!({"name": "aave-v3-lend"}));
+    }
+
+    #[test]
+    fn only_plain_decimals_are_amounts() {
+        for word in ["100", "0.5", ".5", "7."] {
+            assert!(is_decimal(word), "{word}");
+        }
+        for word in ["inf", "nan", "1e3", "-1", "1.2.3", ".", "", "0x10"] {
+            assert!(!is_decimal(word), "{word}");
+        }
+        assert_eq!(
+            script("unshield inf ETH"),
+            Script::Say("Say it as: unshield <amount> <token>.".into())
+        );
+        assert_eq!(first_number("borrow 1e3 then 5"), Some("5".into()));
+    }
+
+    #[test]
+    fn a_private_word_in_a_shield_request_is_not_a_balance_request() {
+        assert_eq!(
+            script("what is my private balance"),
+            Script::Call("balance", json!({"private": true}))
+        );
+        assert_eq!(
+            script("unshield 1 ETH and keep it private"),
+            Script::Call("unshield", json!({"amount": "1", "token": "ETH"}))
+        );
     }
 
     /// Aave requests name an action, an asset (ETH included) and an amount or "all".

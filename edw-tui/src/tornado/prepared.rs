@@ -25,6 +25,10 @@ use super::{PoolAmount, TailCalls, Token};
 
 const KIND: &str = "edw/shield-prepared";
 const PREFIX: &str = "shield-";
+/// Hex digits of the sha256 of edw's answer kept in an id: 16, which no two answers share in
+/// practice. Ids of 10, which earlier versions wrote, still read.
+const ID_DIGITS: usize = 16;
+const ID_DIGITS_READ: std::ops::RangeInclusive<usize> = 10..=ID_DIGITS;
 
 sol! {
     function approve(address spender, uint256 amount) returns (bool);
@@ -183,9 +187,23 @@ impl Store {
         Self::new(data_dir.join("edw-tui").join("prepared-shields"))
     }
 
+    /// The stored preparation for `amount` and `profile` that is not consumed, if there is one.
+    /// Takes no lock, so a caller can ask the user before preparing without holding up others.
+    pub fn find(
+        &self,
+        amount: &PoolAmount,
+        profile: &str,
+    ) -> Result<Option<PreparedShield>, String> {
+        Ok(self
+            .records()?
+            .into_iter()
+            .find(|r| r.is_for(amount, profile)))
+    }
+
     /// The stored preparation for `amount` and `profile` that is not consumed, or else the one
     /// `prepare` gets from edw, saved before it is returned. `true` when it was stored already.
-    /// `prepare`'s own error comes back as it is; the store's is a `String`.
+    /// `prepare`'s own error comes back as it is; the store's is a `String`. The store is locked
+    /// while `prepare` runs, so it must not wait for the user: ask first, with [`Self::find`].
     pub async fn reuse_or<F, Fut, E>(
         &self,
         amount: &PoolAmount,
@@ -198,11 +216,7 @@ impl Store {
         E: From<String>,
     {
         let _one_at_a_time = self.busy.lock().await;
-        if let Some(stored) = self
-            .records()
-            .into_iter()
-            .find(|r| r.is_for(amount, profile))
-        {
+        if let Some(stored) = self.find(amount, profile)? {
             return Ok((stored, true));
         }
         let document = prepare().await?;
@@ -226,7 +240,8 @@ impl Store {
 
     pub fn get(&self, id: &str) -> Result<PreparedShield, String> {
         let digits = id.strip_prefix(PREFIX).unwrap_or_default();
-        if digits.len() != 10 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if !ID_DIGITS_READ.contains(&digits.len()) || !digits.bytes().all(|b| b.is_ascii_hexdigit())
+        {
             return Err(format!("`{id}` is not a prepared shield id"));
         }
         let path = self.dir.join(format!("{id}.json"));
@@ -235,9 +250,14 @@ impl Store {
         serde_json::from_str(&text).map_err(|e| format!("{} is unreadable: {e}", path.display()))
     }
 
-    fn records(&self) -> Vec<PreparedShield> {
-        let Ok(entries) = fs::read_dir(&self.dir) else {
-            return Vec::new();
+    /// Every stored preparation. One that cannot be read is an error, not a gap: it may hold the
+    /// reservation a retry should reuse, and skipping it would reserve other notes for the same
+    /// deposit.
+    fn records(&self) -> Result<Vec<PreparedShield>, String> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(format!("cannot read {}: {e}", self.dir.display())),
         };
         let mut names: Vec<String> = entries
             .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
@@ -246,8 +266,17 @@ impl Store {
         names.sort();
         names
             .iter()
-            .filter_map(|name| fs::read_to_string(self.dir.join(name)).ok())
-            .filter_map(|text| serde_json::from_str(&text).ok())
+            .map(|name| {
+                let path = self.dir.join(name);
+                let text = fs::read_to_string(&path)
+                    .map_err(|e| format!("cannot read the stored preparation {}: {e}", path.display()))?;
+                serde_json::from_str(&text).map_err(|e| {
+                    format!(
+                        "the stored preparation {} is unreadable ({e}); it may hold reserved notes, so fix or move it before preparing again",
+                        path.display()
+                    )
+                })
+            })
             .collect()
     }
 
@@ -258,7 +287,7 @@ impl Store {
         document: Value,
     ) -> Result<PreparedShield, String> {
         let text = document.to_string();
-        let digest: String = Sha256::digest(text.as_bytes())[..5]
+        let digest: String = Sha256::digest(text.as_bytes())[..ID_DIGITS / 2]
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
@@ -434,7 +463,7 @@ mod tests {
         fs::write(&blocked, "").unwrap();
         let store = Store::new(blocked.join("prepared"));
         let saved = prepare(&store, &dai("200"), "0/0", &AtomicUsize::new(0)).await;
-        assert!(saved.unwrap_err().contains("cannot save"));
+        assert!(saved.unwrap_err().contains("cannot "));
     }
 
     #[tokio::test]
@@ -542,6 +571,36 @@ mod tests {
             reused && third.id == second.id,
             "the unconsumed one is reused"
         );
+    }
+
+    #[tokio::test]
+    async fn a_record_that_cannot_be_read_stops_a_new_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::in_data_dir(root.path());
+        let asked = AtomicUsize::new(0);
+        prepare(&store, &dai("200"), "0/0", &asked).await.unwrap();
+        fs::write(store.dir.join("shield-0123456789.json"), "{ not json").unwrap();
+        let refused = prepare(&store, &dai("200"), "0/0", &asked).await;
+        assert!(refused.unwrap_err().contains("is unreadable"));
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "edw must not reserve again"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_sees_a_stored_preparation_without_waiting_for_a_running_one() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::in_data_dir(root.path());
+        assert!(store.find(&dai("200"), "0/0").unwrap().is_none());
+        let held = store.busy.lock().await;
+        assert!(store.find(&dai("200"), "0/0").unwrap().is_none());
+        drop(held);
+        prepare(&store, &dai("200"), "0/0", &AtomicUsize::new(0))
+            .await
+            .unwrap();
+        assert!(store.find(&dai("200"), "0/0").unwrap().is_some());
     }
 
     #[test]

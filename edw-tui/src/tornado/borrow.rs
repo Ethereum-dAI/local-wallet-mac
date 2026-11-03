@@ -28,6 +28,11 @@ sol! {
 /// The share of the unshielded ETH the trial plan leaves out, in basis points: 10%. The trial
 /// calls only give `unshield --quote` something to price, so the ceiling just has to sit under what
 /// any plausible fee leaves; the plan that is sent supplies what the quote leaves.
+/// The one skill action the private-borrow flow is written for: its arguments, its Aave plan and
+/// its shield are this module's. Another skill that runs from a fresh account is refused.
+pub const SKILL: &str = "private-aave-borrow";
+pub const ACTION: &str = "private_aave_borrow";
+
 pub const TRIAL_RESERVE_BPS: u64 = 1_000;
 
 /// One part in this many of the quoted fee stays unspent on top of it, so a fee that drifts up

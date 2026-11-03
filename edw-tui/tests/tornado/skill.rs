@@ -149,7 +149,7 @@ async fn its_plan_for_a_fresh_account_borrows_dai_that_the_shield_deposits_on_a_
         }
     };
     let too_much = Request::from_call(
-        &json!({"eth": "0.1", "amount": "1000"}),
+        &json!({"eth": "0.1", "amount": "500"}),
         NetworkPreset::Sepolia,
     )
     .unwrap();

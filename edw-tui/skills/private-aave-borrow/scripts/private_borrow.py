@@ -4,7 +4,8 @@ edw-tui runs it with what it derived from the user's request: `supply` (wei of t
 ETH that goes to Aave as collateral), `token` and `borrow` (base units). The fresh account (`me`)
 holds nothing yet, since the unshield brings the ETH in the same user operation, so no balance is
 checked here. Aave's own state is: whether it takes ETH as collateral and lends the token now, and
-whether the ETH can back the loan at Aave's prices.
+whether the ETH can back the loan at Aave's prices, and whether the supply cap, the borrow cap and
+the pool's liquidity leave room for it.
 """
 
 from decimal import ROUND_DOWN, Decimal
@@ -18,6 +19,8 @@ RESERVE_DATA = (
 ADDRESSES_PROVIDER = "function ADDRESSES_PROVIDER() view returns (address)"
 PRICE_ORACLE = "function getPriceOracle() view returns (address)"
 ASSET_PRICE = "function getAssetPrice(address asset) view returns (uint256)"
+BALANCE_OF = "function balanceOf(address account) view returns (uint256)"
+TOTAL_SUPPLY = "function totalSupply() view returns (uint256)"
 VARIABLE = "2"
 # Aave's base currency: USD with 8 decimals.
 BASE = Decimal(10) ** 8
@@ -46,8 +49,12 @@ def whole(units, decimals=18):
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
-def configuration(asset):
-    return int(edw_skill.call(pool, RESERVE_DATA, [asset])[0][0])
+def reserve(asset):
+    return edw_skill.call(pool, RESERVE_DATA, [asset])[0]
+
+
+def configuration(data):
+    return int(data[0])
 
 
 def bit(value, n):
@@ -59,14 +66,42 @@ def open_reserve(value):
     return bit(value, 56) and not bit(value, 57) and not bit(value, 60)
 
 
-collateral_config = configuration(weth["address"])
+collateral_data = reserve(weth["address"])
+collateral_config = configuration(collateral_data)
 ltv = collateral_config & 0xFFFF
 threshold = (collateral_config >> 16) & 0xFFFF
 if not open_reserve(collateral_config) or ltv == 0:
     edw_skill.fail("Aave does not take ETH as collateral on this chain now")
-loan_config = configuration(token["address"])
+loan_data = reserve(token["address"])
+loan_config = configuration(loan_data)
 if not open_reserve(loan_config) or not bit(loan_config, 58):
     edw_skill.fail(f"Aave does not lend {symbol} on this chain now (borrowing it is turned off)")
+
+# Caps count whole tokens, and 0 means none. Indexes 8 and 10 are the aToken and the variable debt
+# token, whose totalSupply already includes accrued interest.
+CAP_MASK = (1 << 36) - 1
+supply_cap = (collateral_config >> 116) & CAP_MASK
+borrow_cap = (loan_config >> 80) & CAP_MASK
+if supply_cap:
+    supplied = int(edw_skill.call(collateral_data[8], TOTAL_SUPPLY)[0])
+    if supplied + supply > supply_cap * 10**18:
+        edw_skill.fail(
+            f"Aave's ETH supply cap ({supply_cap} ETH) leaves no room for {whole(supply)} ETH "
+            f"({whole(supplied)} ETH is supplied already)"
+        )
+if borrow_cap:
+    borrowed = int(edw_skill.call(loan_data[10], TOTAL_SUPPLY)[0])
+    if borrowed + borrow > borrow_cap * 10 ** token["decimals"]:
+        edw_skill.fail(
+            f"Aave's {symbol} borrow cap ({borrow_cap} {symbol}) leaves no room for "
+            f"{whole(borrow, token['decimals'])} {symbol} ({whole(borrowed, token['decimals'])} is borrowed already)"
+        )
+liquidity = int(edw_skill.call(token["address"], BALANCE_OF, [loan_data[8]])[0])
+if borrow > liquidity:
+    edw_skill.fail(
+        f"Aave holds {whole(liquidity, token['decimals'])} {symbol} to lend now; "
+        f"{whole(borrow, token['decimals'])} {symbol} is more than that"
+    )
 
 oracle = edw_skill.call(edw_skill.call(pool, ADDRESSES_PROVIDER)[0], PRICE_ORACLE)[0]
 
@@ -77,6 +112,10 @@ def usd(units, asset, decimals):
 
 collateral = usd(supply, weth["address"], 18)
 debt = usd(borrow, token["address"], token["decimals"])
+if collateral <= 0 or debt <= 0:
+    edw_skill.fail(
+        "Aave's oracle prices this loan at 0 USD, so its health cannot be judged; try again later"
+    )
 can_borrow = collateral * ltv // 10_000
 if debt > can_borrow:
     edw_skill.fail(

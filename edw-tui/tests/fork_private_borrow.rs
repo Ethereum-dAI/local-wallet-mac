@@ -55,7 +55,7 @@ use serde_json::{Value, json};
 
 const SEPOLIA: u64 = 11_155_111;
 const PROMPT: &str = "privately borrow 100 DAI against 0.1 ETH";
-const SHIELD_ETH: [&str; 9] = [
+const SHIELD_ETH: [&str; 10] = [
     "shield",
     "--token",
     "ETH",
@@ -63,6 +63,7 @@ const SHIELD_ETH: [&str; 9] = [
     "0.1",
     "--from",
     "0",
+    "--yes",
     "--profile",
     "0/0",
 ];

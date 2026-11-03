@@ -378,7 +378,9 @@ async fn the_private_borrow_runs_end_to_end_on_a_sepolia_fork() {
     assert!(
         card.contains(&format!(
             "Fee      edw quotes {} ETH",
-            format_ether(fee_quote.fee).trim_end_matches('0')
+            format_ether(fee_quote.fee)
+                .trim_end_matches('0')
+                .trim_end_matches('.')
         )),
         "{card}"
     );

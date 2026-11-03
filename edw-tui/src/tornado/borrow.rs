@@ -272,6 +272,11 @@ impl PrivateBorrow {
         self.fresh
     }
 
+    /// edw's quote of these calls must still leave what they supply to Aave.
+    pub fn check_quote(&self, quote: &FeeQuote) -> Result<(), String> {
+        self.request.check_quote(self.aave.supply, quote)
+    }
+
     /// The Aave calls, then the shield's, in edw's `--tail-calls` form.
     pub fn tail_calls(&self) -> TailCalls {
         let aave: Vec<String> = self
@@ -296,11 +301,11 @@ impl PrivateBorrow {
     }
 
     /// The one review card. `skill` names the skill that wrote the Aave plan; `reused` says the
-    /// preparation was stored before this borrow.
-    pub fn preview(&self, profile: &str, skill: &str, reused: bool) -> String {
+    /// preparation was stored before this borrow; `quote` is edw's price of exactly these calls.
+    pub fn preview(&self, profile: &str, skill: &str, reused: bool, quote: &FeeQuote) -> String {
         let unshield = &self.request.unshield;
         let shield = &self.request.shield;
-        let reserve = unshield.base - self.request.trial_supply();
+        let kept = quote.available.saturating_sub(self.aave.supply);
         let mut lines = vec![
             format!("Skill    {skill}"),
             format!(
@@ -312,9 +317,13 @@ impl PrivateBorrow {
                 self.fresh.address, self.fresh.index
             ),
             format!(
-                "Fee      paid from the unshielded ETH; {} ETH ({}%) is kept back for it, and what it leaves stays on the fresh address",
-                unshield.units(reserve),
-                TRIAL_RESERVE_BPS / 100
+                "Fee      edw quotes {} ETH, paid from the unshielded ETH; it proves the fee again before signing and refuses if it rose",
+                unshield.units(quote.fee)
+            ),
+            format!(
+                "Supply   {} ETH goes to Aave; {} ETH is kept back as fee headroom and stays on the fresh address",
+                unshield.units(self.aave.supply),
+                unshield.units(kept)
             ),
         ];
         for (n, step) in self.aave.plan.steps.iter().enumerate() {
@@ -496,6 +505,35 @@ mod tests {
                 .display("0/0")
                 .contains("0x095ea7b3"),
             "the display counts the calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_quote_and_the_send_are_one_unshield_and_only_the_quote_lacks_yes() {
+        let borrow = borrow_200().await;
+        let sent = borrow.command(Mode::Send).argv("0/0");
+        let quoted = borrow.command(Mode::Quote).argv("0/0");
+        for argv in [&sent, &quoted] {
+            let count = |flag: &str| argv.iter().filter(|a| *a == flag).count();
+            assert_eq!(argv.iter().filter(|a| *a == "unshield").count(), 1);
+            assert_eq!(
+                (count("--tail-calls"), count("--expected-fresh-address")),
+                (1, 1)
+            );
+            assert_eq!((count("--sweep-to"), count("--to")), (0, 0), "{argv:?}");
+        }
+        assert!(sent.contains(&"--yes".to_owned()) && !sent.contains(&"--quote".to_owned()));
+        assert!(quoted.contains(&"--quote".to_owned()) && !quoted.contains(&"--yes".to_owned()));
+        let strip = |argv: &[String]| {
+            argv.iter()
+                .filter(|a| *a != "--yes" && *a != "--quote")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            strip(&sent),
+            strip(&quoted),
+            "the quote prices the very calls that are sent"
         );
     }
 
@@ -703,13 +741,17 @@ mod tests {
 
     #[tokio::test]
     async fn the_card_shows_the_decoded_calls_the_notes_and_where_the_debt_ends_up() {
-        let card = borrow_200()
-            .await
-            .preview("0/0", "private-aave-borrow 0.1.0", true);
+        let card = borrow_200().await.preview(
+            "0/0",
+            "private-aave-borrow 0.1.0",
+            true,
+            &quote(ETHER / 100, ETHER - ETHER / 100),
+        );
         for line in [
             "Unshield 1 ETH on sepolia (chain 11155111) from profile 0/0's shielded notes",
             &format!("Fresh    {FRESH} (address index 3)"),
-            "0.1 ETH (10%) is kept back",
+            "Fee      edw quotes 0.01 ETH, paid from the unshielded ETH; it proves the fee again before signing and refuses if it rose",
+            "Supply   0.9 ETH goes to Aave; 0.09 ETH is kept back as fee headroom and stays on the fresh address",
             "Aave 1   Aave WETH Gateway.depositETH(pool=Aave Pool, onBehalfOf=the fresh account, referralCode=0) with 0.9 ETH",
             "Aave 2   Aave Pool.borrow(asset=DAI, amount=200 DAI (200000000000000000000), interestRateMode=2, referralCode=0, onBehalfOf=the fresh account)",
             "Shield   200 DAI into 2 new notes",
@@ -720,6 +762,7 @@ mod tests {
         ] {
             assert!(card.contains(line), "{line}\n{card}");
         }
+        assert!(!card.contains("10%"), "{card}");
         for calldata in [
             "0x095ea7b3",
             "b214faa5",

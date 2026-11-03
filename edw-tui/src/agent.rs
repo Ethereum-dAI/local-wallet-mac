@@ -12,6 +12,7 @@ use std::{
     sync::Arc,
 };
 
+use alloy_primitives::{Address, U256};
 use rig_agent::{
     Agent, AgentBuilder, ModelHandle,
     agent::{AgentHook, HookContext, ToolCall, ToolCallAction},
@@ -47,7 +48,9 @@ use crate::{
         sandbox::{self, Output},
         tools::{self as skill_tools, SkillGate, SkillSet},
     },
-    tornado::{self, Command, FreshAddress, PoolAmount, borrow, held::HeldEth, prepared::Store},
+    tornado::{
+        self, Command, FeeQuote, FreshAddress, PoolAmount, borrow, held::HeldEth, prepared::Store,
+    },
 };
 
 const RULES: &str = "You are the chat interface of edw, a privacy-first Ethereum desktop wallet.
@@ -967,45 +970,14 @@ impl Shared {
             },
             Err(error) => return fail(error),
         };
-        let script_args = request.script_args(trial);
-        let invoke = sandbox::invoke_message(
-            &action.tool.name,
-            &script_args,
-            self.skills.context(skill, Some(&at)),
-        );
-        let host = self
-            .skills
-            .host(skill, Some(at.rpc.clone()), self.script_log());
-        let plan = match self.skills.prepare_run(skill) {
-            Ok((snapshot, _run_dir)) => {
-                match self
-                    .skills
-                    .runner
-                    .run(&snapshot, &action.tool.run, invoke, &host)
-                    .await
-                {
-                    Ok(Output::Plan(plan)) => plan,
-                    Ok(Output::Result(_)) => return fail("the skill returned no plan".into()),
-                    Err(error) => return fail(format!("{} failed: {error}", skill.name)),
-                }
-            }
+        let aave = match self
+            .aave_plan(skill, action, &request, &at, fresh.address, trial)
+            .await
+        {
+            Ok(aave) => aave,
             Err(error) => return fail(error),
         };
         self.flow_step(Stage::Script, StepState::Done);
-        self.flow_step(Stage::Plan, StepState::Running);
-        let checked = plan::check(
-            &plan,
-            skill,
-            action,
-            at.chain_id,
-            plan::Account::Fresh(fresh.address),
-            &script_args,
-        )
-        .and_then(|checked| request.aave(checked, fresh.address, trial));
-        let aave = match checked {
-            Ok(aave) => aave,
-            Err(error) => return fail(format!("the plan was refused ({error})")),
-        };
         self.flow_step(Stage::Plan, StepState::Done);
         self.flow_step(Stage::Prepare, StepState::Running);
         // No card of its own: preparing broadcasts nothing, and the one card below shows its notes.
@@ -1028,9 +1000,42 @@ impl Shared {
             exit_code: 0,
             output: record.summary(reused).to_string(),
         }));
-        let borrow = match request.with_shield(fresh, aave, record, trial) {
+        let trial_borrow = match request
+            .clone()
+            .with_shield(fresh, aave, record.clone(), trial)
+        {
             Ok(borrow) => borrow,
             Err(error) => return fail(format!("the plan was refused ({error})")),
+        };
+        self.flow_step(Stage::Prepare, StepState::Done);
+        self.flow_step(Stage::Quote, StepState::Running);
+        let kept = format!("the prepared shield {} is kept for a retry", record.id);
+        let supply = match self.quote(&trial_borrow, &profile).await {
+            Ok(quote) => request.final_supply(&quote),
+            Err(error) => Err(error),
+        };
+        let supply = match supply {
+            Ok(supply) => supply,
+            Err(error) => return fail(format!("{error}; {kept}")),
+        };
+        let aave = match self
+            .aave_plan(skill, action, &request, &at, fresh.address, supply)
+            .await
+        {
+            Ok(aave) => aave,
+            Err(error) => return fail(format!("{error}; {kept}")),
+        };
+        let borrow = match request.with_shield(fresh, aave, record, supply) {
+            Ok(borrow) => borrow,
+            Err(error) => return fail(format!("the plan was refused ({error}); {kept}")),
+        };
+        let quote = match self.quote(&borrow, &profile).await {
+            Ok(quote) => borrow.check_quote(&quote).map(|()| quote),
+            Err(error) => Err(error),
+        };
+        let quote = match quote {
+            Ok(quote) => quote,
+            Err(error) => return fail(format!("{error}; {kept}")),
         };
         self.log(AgentEvent::ToolFinished(EdwResult {
             command: command.clone(),
@@ -1041,7 +1046,7 @@ impl Shared {
                 borrow.shield().id
             ),
         }));
-        self.flow_step(Stage::Prepare, StepState::Done);
+        self.flow_step(Stage::Quote, StepState::Done);
         self.flow_step(Stage::Review, StepState::Running);
         let hash = self.skills.hash(&skill.name);
         let card = borrow.preview(
@@ -1053,6 +1058,7 @@ impl Shared {
                 &hash[..hash.len().min(12)]
             ),
             reused,
+            &quote,
         );
         let unshield = borrow.command(tornado::Mode::Send);
         let display = unshield.display(&profile);
@@ -1094,6 +1100,70 @@ impl Shared {
             }));
         }
         result.to_model_json()
+    }
+
+    /// The skill's script run for `supply` wei and the Aave plan it writes, checked against the
+    /// request and the fresh address. Errors are worded for the model.
+    async fn aave_plan(
+        &self,
+        skill: &Skill,
+        action: &ActionDef,
+        request: &borrow::Request,
+        at: &SkillContext,
+        fresh: Address,
+        supply: U256,
+    ) -> Result<borrow::AaveCalls, String> {
+        let script_args = request.script_args(supply);
+        let invoke = sandbox::invoke_message(
+            &action.tool.name,
+            &script_args,
+            self.skills.context(skill, Some(at)),
+        );
+        let host = self
+            .skills
+            .host(skill, Some(at.rpc.clone()), self.script_log());
+        let (snapshot, _run_dir) = self.skills.prepare_run(skill)?;
+        let plan = match self
+            .skills
+            .runner
+            .run(&snapshot, &action.tool.run, invoke, &host)
+            .await
+        {
+            Ok(Output::Plan(plan)) => plan,
+            Ok(Output::Result(_)) => return Err("the skill returned no plan".into()),
+            Err(error) => return Err(format!("{} failed: {error}", skill.name)),
+        };
+        plan::check(
+            &plan,
+            skill,
+            action,
+            at.chain_id,
+            plan::Account::Fresh(fresh),
+            &script_args,
+        )
+        .and_then(|checked| request.aave(checked, fresh, supply))
+        .map_err(|error| format!("the plan was refused ({error})"))
+    }
+
+    /// What `unshield --quote` prices for this borrow's calls. edw signs, sends and stores
+    /// nothing for it, so it needs no review.
+    async fn quote(
+        &self,
+        borrow: &borrow::PrivateBorrow,
+        profile: &str,
+    ) -> Result<FeeQuote, String> {
+        let command = borrow.command(tornado::Mode::Quote);
+        self.log(AgentEvent::ToolStarted {
+            command: command.display(profile),
+        });
+        let result = self.tornado_run(&command, profile).await;
+        self.log(AgentEvent::ToolFinished(result.clone()));
+        result
+            .document()
+            .as_ref()
+            .and_then(FeeQuote::from_document)
+            .filter(|_| result.ok())
+            .ok_or_else(|| format!("edw could not quote the fee ({})", result.output))
     }
 
     /// After an unshield that failed past edw's usage checks: why its tail calls may be on chain

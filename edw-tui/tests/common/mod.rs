@@ -124,6 +124,45 @@ impl TempWallet {
     }
 }
 
+/// Puts a wrapper in front of `wallet`'s edw for the rest of the test. The fake Sepolia has no
+/// bundler to price a fee, so `unshield --quote` answers a recorded `edw/unshield-quote` for a
+/// 1 ETH unshield with this `fee` and `tail_value` (wei) and everything else runs the real edw.
+/// Returns the file that gets one line per edw call, its arguments after the binary.
+pub fn quote_fees(wallet: &mut TempWallet, fee: u128, tail_value: u128) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let quote = serde_json::json!({
+        "kind": "edw/unshield-quote",
+        "version": 1,
+        "fresh_index": 0,
+        "fresh_address": "0x00000000000000000000000000000000000000f5",
+        "token": "ETH",
+        "fee_token": "ETH",
+        "fee_raw": fee.to_string(),
+        "available_raw": tail_value.to_string(),
+        "tail_value_raw": tail_value.to_string(),
+        "sweep_value_raw": null,
+        "bundler": "http://127.0.0.1:1",
+        "tail_calls": 4,
+        "notes": [],
+    });
+    let log = wallet.dir.join("edw-calls.log");
+    let script = wallet.dir.join("edw-quoting");
+    std::fs::create_dir_all(&wallet.dir).unwrap();
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\ncase \" $* \" in\n  *\" unshield \"*\" --quote \"*) printf '%s\\n' '{quote}'; exit 0;;\nesac\nexec '{}' \"$@\"\n",
+            log.display(),
+            wallet.config.binary.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    wallet.config.binary = script;
+    log
+}
+
 /// The fake Sepolia's first block. edw syncs a pool's logs from its deploy block up, and the last
 /// Sepolia pool (DAI 100) was deployed at 5_594_406, so a chain below that has none to read.
 const FAKE_SEPOLIA_GENESIS: u64 = 5_594_410;

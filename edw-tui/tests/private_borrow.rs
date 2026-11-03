@@ -12,12 +12,16 @@
 
 mod common;
 
-use std::{fs, path::Path, sync::Arc};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use alloy_node_bindings::AnvilInstance;
 use alloy_primitives::{hex, keccak256};
 use common::{
-    Harness, TempWallet, Turn, edw_binary, fake_sepolia, mine_eth_notes,
+    Harness, TempWallet, Turn, edw_binary, fake_sepolia, mine_eth_notes, quote_fees,
     recorder::{Recorder, call},
     records, shipped, skill_set,
 };
@@ -42,6 +46,9 @@ use rig_agent::ModelHandle;
 use rig_core::message::AssistantContent;
 use serde_json::{Value, json};
 
+const ETHER: u128 = 1_000_000_000_000_000_000;
+/// The recorded fee of a 1 ETH unshield, and the ETH it leaves for the tail calls.
+const FEE: u128 = ETHER / 100;
 const PROMPT: &str = "privately borrow 100 DAI against 1 ETH";
 /// What a stub plan carries besides its steps, to show the script ran for the fresh address.
 const STUB: &str = r#"import edw_skill
@@ -95,12 +102,18 @@ fn recorder(calls: &[Value]) -> Recorder {
 
 struct Borrowing {
     h: Harness,
+    /// One line per edw call, as `common::quote_fees` logs them.
+    calls: PathBuf,
     model: Recorder,
     _chain: AnvilInstance,
     _skills: tempfile::TempDir,
 }
 
 async fn start(name: &str, attempts: usize) -> Option<Borrowing> {
+    start_quoting(name, attempts, FEE).await
+}
+
+async fn start_quoting(name: &str, attempts: usize, fee: u128) -> Option<Borrowing> {
     let Some(binary) = edw_binary() else {
         eprintln!("skipping: edw is not installed");
         return None;
@@ -109,8 +122,9 @@ async fn start(name: &str, attempts: usize) -> Option<Borrowing> {
         eprintln!("skipping: Docker is not running");
         return None;
     }
-    let (wallet, chain) = fake_sepolia(binary, name).await?;
+    let (mut wallet, chain) = fake_sepolia(binary, name).await?;
     mine_eth_notes(&wallet, &chain, "1").await;
+    let calls = quote_fees(&mut wallet, fee, ETHER - fee);
     let skills = tempfile::tempdir().unwrap();
     let model = recorder(&vec![json!({"eth": "1", "amount": "100"}); attempts]);
     let h = Harness::start_with_skills(
@@ -121,6 +135,7 @@ async fn start(name: &str, attempts: usize) -> Option<Borrowing> {
     );
     Some(Borrowing {
         h,
+        calls,
         model,
         _chain: chain,
         _skills: skills,
@@ -191,7 +206,7 @@ async fn one_card_shows_the_whole_operation_and_nothing_is_sent_before_yes() {
         "Skill    private-aave-borrow 0.1.0 (sha256 ",
         "Unshield 1 ETH on sepolia (chain 11155111) from profile 0/0's shielded notes",
         &format!("Fresh    {} (address index {})", fresh.address, fresh.index),
-        "Aave 1   Aave WETH Gateway.depositETH(pool=Aave Pool, onBehalfOf=the fresh account, referralCode=0) with 0.9 ETH",
+        "Aave 1   Aave WETH Gateway.depositETH(pool=Aave Pool, onBehalfOf=the fresh account, referralCode=0) with 0.9875 ETH",
         "Aave 2   Aave Pool.borrow(asset=DAI, amount=100 DAI (100000000000000000000), interestRateMode=2, referralCode=0, onBehalfOf=the fresh account)",
         "Shield   100 DAI into 1 new note (shield-",
         "prepared now): 2 calls, approve then deposit",
@@ -200,7 +215,9 @@ async fn one_card_shows_the_whole_operation_and_nothing_is_sent_before_yes() {
             "Skill says (not checked): planned for {} without reading Aave",
             fresh.address
         ),
-        "has 0.9 ETH supplied to Aave and owes 100 DAI",
+        "Fee      edw quotes 0.01 ETH, paid from the unshielded ETH; it proves the fee again before signing and refuses if it rose",
+        "Supply   0.9875 ETH goes to Aave; 0.0025 ETH is kept back as fee headroom and stays on the fresh address",
+        "has 0.9875 ETH supplied to Aave and owes 100 DAI",
     ] {
         assert!(card.contains(line), "{line}\n{card}");
     }
@@ -214,6 +231,77 @@ async fn one_card_shows_the_whole_operation_and_nothing_is_sent_before_yes() {
     let seen = b.model.seen.lock().unwrap().clone();
     assert!(seen.iter().any(|s| s.contains("declined")), "{seen:?}");
     no_calldata(&seen);
+}
+
+/// The unshield calls edw was given, each as its argument list.
+fn unshields(calls: &Path) -> Vec<Vec<String>> {
+    fs::read_to_string(calls)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| line.split(' ').map(str::to_owned).collect::<Vec<_>>())
+        .filter(|argv| argv.iter().any(|arg| arg == "unshield"))
+        .collect()
+}
+
+fn has(argv: &[String], flag: &str) -> bool {
+    argv.iter().any(|arg| arg == flag)
+}
+
+fn value<'a>(argv: &'a [String], flag: &str) -> &'a str {
+    &argv[argv.iter().position(|arg| arg == flag).unwrap() + 1]
+}
+
+#[tokio::test]
+async fn two_quotes_price_the_borrow_and_one_unshield_without_a_sweep_sends_it() {
+    let Some(mut b) = start("private-borrow-one-op", 1).await else {
+        return;
+    };
+    let turn = b.h.turn(PROMPT, true).await;
+    let argvs = unshields(&b.calls);
+    let [trial, priced, send] = argvs.as_slice() else {
+        panic!("a trial quote, the quote of the calls and one unshield: {argvs:?}\n{turn:?}");
+    };
+    for quote in [trial, priced] {
+        assert!(has(quote, "--quote") && !has(quote, "--yes"), "{quote:?}");
+    }
+    assert!(has(send, "--yes") && !has(send, "--quote"), "{send:?}");
+    for argv in [trial, priced, send] {
+        assert!(has(argv, "--tail-calls") && has(argv, "--expected-fresh-address"));
+        assert!(!has(argv, "--sweep-to") && !has(argv, "--to"), "{argv:?}");
+    }
+    assert_ne!(value(trial, "--tail-calls"), value(priced, "--tail-calls"));
+    assert_eq!(value(priced, "--tail-calls"), value(send, "--tail-calls"));
+}
+
+#[tokio::test]
+async fn a_fee_the_trial_supply_cannot_pay_is_refused_before_the_card_and_keeps_the_preparation() {
+    let Some(mut b) = start_quoting("private-borrow-dear-fee", 1, ETHER / 5).await else {
+        return;
+    };
+    let turn = b.h.turn(PROMPT, true).await;
+    assert!(
+        turn.confirms.is_empty() && turn.previews.is_empty(),
+        "{turn:?}"
+    );
+    let refused = turn
+        .outputs
+        .iter()
+        .find(|o| o.starts_with("skill private-aave-borrow/private_aave_borrow"))
+        .unwrap_or_else(|| panic!("{turn:?}"));
+    for part in [
+        "edw quoted a fee of 0.2 ETH",
+        "under the 0.9 ETH a first plan needs",
+        "nothing was sent",
+        "is kept for a retry",
+    ] {
+        assert!(refused.contains(part), "{part}\n{refused}");
+    }
+    let argvs = unshields(&b.calls);
+    assert!(argvs.len() == 1 && has(&argvs[0], "--quote"), "{argvs:?}");
+    assert!(!sent(&turn));
+    let [record] = records(&b.h.wallet).try_into().unwrap();
+    assert!(record["consumed"].is_null(), "{record}");
+    no_calldata(&turn.outputs);
 }
 
 #[tokio::test]

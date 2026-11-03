@@ -4,8 +4,8 @@ description: Borrow DAI on Aave against shielded (Tornado) ETH without linking i
 ---
 private_aave_borrow(eth, amount) does it all in one user operation that edw signs and sends:
 1. edw unshields `eth` ETH from the user's Tornado notes to a fresh address of this wallet.
-2. From that address, the ETH goes to Aave as collateral (all but 10%, kept back for the fee)
-   and `amount` DAI is borrowed.
+2. From that address, the ETH goes to Aave as collateral (what edw's fee quote leaves, less a
+   margin kept back for the fee) and `amount` DAI is borrowed.
 3. The DAI is shielded again, into new 100 DAI notes.
 
 Before calling:
@@ -27,7 +27,8 @@ address later; this skill does not do it.
 Errors:
 - "held notes cannot make ..." means the user holds no exact set of mined notes for that
   amount: suggest an amount they do hold.
-- "after a ... sponsor fee the notes leave ..." means the fee was larger than the reserve:
-  suggest unshielding more ETH.
+- "edw quoted a fee of ..." or "edw's fee rose ..." means the fee left too little ETH for the
+  Aave deposit: suggest unshielding more ETH, or trying again when gas is cheaper.
+- "edw could not quote the fee" means edw could not price the operation; nothing was sent.
 - Only say it was done when the result says the user operation was sent. A declined or failed
   call sent nothing.

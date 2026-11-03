@@ -134,34 +134,42 @@ again, in one user operation that edw signs and sends:
 edw unshield --token ETH --amount-formatted 1 --expected-fresh-address F --tail-calls "$AAVE,$SHIELD"
 ```
 
+The same command with `--quote` and no `--yes` only prices it. The whole borrow stays that one
+`unshield`: no `--sweep-to`, no `--to`, so one user operation.
+
 1. The model calls `private_aave_borrow(eth, amount)`. The harness refuses anything but DAI on
    Sepolia (there Aave lends the very token the Tornado DAI pool takes), amounts that are not
    pool sums, and an unshield the profile's notes cannot pay for (below).
 2. It peeks the fresh address `F` (`next-fresh-address --peek`) and runs the skill's script with
-   `F` as `me`: `supply` is the unshielded ETH less a 10% fee reserve, `borrow` the DAI amount.
-   The script reads Aave (ETH taken as collateral, DAI lent now, the loan within the ETH's LTV)
+   `F` as `me`: `supply` is the ETH to supply, `borrow` the DAI amount. The script reads Aave (ETH taken as collateral, DAI lent now, the loan within the ETH's LTV)
    and plans `depositETH(pool, $self)` with the ETH, then `borrow(DAI, amount, $self)`.
 3. The plan is checked for the fresh account, read back from its calldata, and must be exactly
    those two calls. It is built for this borrow only and never stored.
 4. The DAI shield is prepared (`shield --prepare`), or a stored, unconsumed one reused. It has no
    card of its own: preparing sends nothing.
 5. The two halves are checked against each other: the borrowed token is the one the shield's
-   approvals are for, the borrow is exactly what the shield deposits, and the ETH supplied fits in
-   the unshield after the fee reserve. Any mismatch refuses the borrow with nothing sent.
-6. One card shows the decoded Aave calls, the new DAI notes, the amount unshielded and `F`.
-   After a yes, edw unshields with the Aave calls and then the shield's, simulates the whole
-   operation and sends nothing if that fails.
+   approvals are for, the borrow is exactly what the shield deposits, and the ETH supplied fits
+   what the plan may supply. Any mismatch refuses the borrow with nothing sent.
+6. `unshield --quote` prices the calls, then the script runs again for what the quote leaves, and
+   the final calls are quoted once more (below).
+7. One card shows the quoted fee, the decoded Aave calls, the new DAI notes, the amount
+   unshielded and `F`. After a yes, edw unshields with the Aave calls and then the shield's,
+   simulates the whole operation and sends nothing if that fails.
 
-The fee reserve is `FEE_RESERVE_BPS`, 10% of the amount: edw-core seeds its own fee quote with a
-tenth of the sponsoring note, which is never larger than the amount. A larger proven fee makes edw
-refuse before signing.
+The fee is quoted, not reserved at a fixed share. The first plan (a trial) supplies all but
+`TRIAL_RESERVE_BPS`, 10%, of the unshielded ETH, which only gives edw calls to price. The quote's
+`tail_value_raw` is the ETH the fee leaves; the plan that is sent supplies that less a quarter of
+the quoted fee, kept as headroom for fee drift between the quote and edw's proof. The final calls
+are quoted again, and the borrow is refused, with nothing sent, when that quote leaves less than
+the plan supplies, when a fee leaves less than the trial supplied, or when edw cannot quote. The
+card shows the fee, the supply and what is kept back. edw proves the fee again before it signs
+and refuses if it rose. A quote never signs, sends or stores the fresh address, and the card is
+the only consent: the quotes run before it, and the send is the one `unshield` with `--yes`.
 
-The first live run on Sepolia (public Pimlico, 0.1 ETH unshielded, 0.09 ETH supplied) proved a fee
-of 0.009462 ETH, 94.6% of the 0.01 ETH reserve; the fork rehearsal had proven 0.0048 ETH. The gas
-actually paid was about 0.00327 ETH, and the paymaster refunded the rest, so 0.00673 ETH (6.7% of
-the unshield) stayed on the fresh address. The reserve is kept at 10%: edw has no way to quote its
-fee without sending, so a computed reserve needs an upstream quote flag. A fee above the reserve
-is refused before anything is sent.
+The first live run on Sepolia (public Pimlico, 0.1 ETH unshielded, 0.09 ETH supplied under the
+earlier fixed 10% reserve) proved a fee of 0.009462 ETH; the fork rehearsal had proven 0.0048
+ETH. The gas actually paid was about 0.00327 ETH, and the paymaster refunded the rest, so
+0.00673 ETH (6.7% of the unshield) stayed on the fresh address.
 
 Before the script runs, the harness reads the profile's notes (`edw balance --detailed`) and picks
 them as edw will, with edw-core's own `withdrawal_notes` at the pinned rev (`src/tornado/held.rs`).
@@ -195,17 +203,16 @@ proving and sending the combined unshield. The test checks from chain state that
 carried the user operation, and that the fresh address is an EIP-7702 account with Aave collateral
 and at least 100 DAI of variable debt. It also checks that the Tornado DAI pool took exactly 100
 DAI and that nothing left the profile's public address. edw must list a mined 100 DAI note, and
-the preparation must be consumed. Then the fork's gas price goes to 1.5 and 3 times what the fee
-reserve covers, and the same request must be refused before signing, with the note and the
-preparation kept.
+the preparation must be consumed. The proven fee must not exceed the fee the card quoted. Then
+the fork's gas price goes to 1.5 and 3 times what the trial supply leaves for the fee, and the same
+request must be refused before the card, with nothing sent and the note and the preparation kept.
 
-It prints each stage's time, edw's own log of the unshield, and the proven fee against the reserve.
-edw prices the fee at the bundler's slow `maxFeePerGas + maxPriorityFeePerGas`, so the reserve
-holds while that stays below `reserve / (gas limit x 1.01)`. On 2026-10-28 that was about 4.2 gwei
-for a 0.1 ETH borrow (gas limit 2.38M), against 2 gwei quoted on the fork and 2.2 gwei from public
-Pimlico's slow tier the same day. Gas above that is refused before signing, with nothing sent. Up
-to about twice that, edw says the fee leaves too little for the Aave deposit; beyond it, the error
-is the bundler's simulation revert, `ExecuteError` (`0x5a154675`) of the first tail call.
+It prints each stage's time, edw's own log of the unshield, and the proven fee against the quote.
+edw prices the fee at the bundler's slow `maxFeePerGas + maxPriorityFeePerGas`, so the quote
+leaves the trial supply while that stays below `ceiling / (gas limit x 1.01)`, where the ceiling
+is the 10% the trial leaves out. On 2026-10-28 that was about 4.2 gwei for a 0.1 ETH borrow (gas
+limit 2.38M), against 2 gwei quoted on the fork and 2.2 gwei from public Pimlico's slow tier the
+same day. Above that the borrow is refused, with nothing sent.
 
 What it does not cover: the public Pimlico bundler (its gas limits, prices and acceptance), the
 paymaster's deposit on Sepolia now rather than at the fork block, and the public RPC's limits

@@ -46,5 +46,5 @@ address = { 11155111 = "0xC558DBdd856501FCd9aaF1E62eae57A9F0629a3c" }
 name = "private_aave_borrow"
 run = "scripts/private_borrow.py"
 account = "fresh"
-description = "Borrow DAI on Aave v3 against shielded ETH, privately: one user operation unshields `eth` ETH to a fresh address of this wallet, supplies it to Aave as collateral (all but a 10% fee reserve), borrows `amount` DAI and shields that DAI again. Sepolia only. The user reviews one card before anything is sent."
+description = "Borrow DAI on Aave v3 against shielded ETH, privately: one user operation unshields `eth` ETH to a fresh address of this wallet, supplies it to Aave as collateral (what edw's fee quote leaves), borrows `amount` DAI and shields that DAI again. Sepolia only. The user reviews one card before anything is sent."
 schema = { type = "object", required = ["eth", "amount"], properties = { eth = { type = "string", description = "Shielded ETH to unshield, an exact sum of the mined notes held, e.g. \"1\" or \"1.1\"." }, token = { type = "string", enum = ["DAI"], description = "What to borrow and shield again. Defaults to DAI." }, amount = { type = "string", description = "DAI to borrow and shield, a multiple of 100, e.g. \"100\"." } } }

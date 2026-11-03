@@ -1,10 +1,11 @@
 //! A rehearsal of the private borrow on a Sepolia fork, end to end and for real. The pinned edw
 //! shields two 0.1 ETH notes into Sepolia's Tornado pool. Then the agent (scripted model, the
 //! shipped skill's script in Docker) borrows 100 DAI against one of them: it peeks the fresh
-//! address, plans Aave for it, prepares a 100 DAI shield, and edw proves and sends the one
-//! combined unshield through a local bundler. Everything is checked from chain state afterwards.
+//! address, plans Aave for it, prepares a 100 DAI shield, has edw quote the fee (`unshield
+//! --quote`, twice) and sizes the supply from it, and edw proves and sends the one combined
+//! unshield through a local bundler. Everything is checked from chain state afterwards.
 //! Then gas gets expensive, and the same request against the other note must be refused before
-//! signing, with nothing sent. Ignored by default; it reads Sepolia over the network and takes
+//! the card, with nothing sent. Ignored by default; it reads Sepolia over the network and takes
 //! about two minutes.
 //!
 //! What edw needs (`common::sepolia_fork`):
@@ -47,7 +48,7 @@ use edw_tui::{
     flow::FlowEvent,
     scripted::ScriptedModel,
     skills::{manifest, sandbox},
-    tornado::{self, borrow::TRIAL_RESERVE_BPS},
+    tornado::{self, FeeQuote, borrow::TRIAL_RESERVE_BPS},
 };
 use rig_agent::ModelHandle;
 use serde_json::{Value, json};
@@ -172,11 +173,27 @@ struct Attempt {
 }
 
 impl Attempt {
+    /// The unshield that was sent, not a quote of it.
     fn unshield(&self) -> &EdwResult {
-        self.outputs
-            .iter()
-            .find(|o| o.command.starts_with("edw unshield"))
+        self.unshields(false)
+            .next()
             .unwrap_or_else(|| panic!("no unshield ran: {:#?}\n{}", self.outputs, self.reply))
+    }
+
+    fn unshields(&self, quotes: bool) -> impl Iterator<Item = &EdwResult> {
+        self.outputs.iter().filter(move |o| {
+            o.command.starts_with("edw unshield") && o.command.contains(" --quote ") == quotes
+        })
+    }
+
+    /// edw's quote of the calls that were sent: the last one asked.
+    fn final_quote(&self) -> FeeQuote {
+        let quote = self
+            .unshields(true)
+            .last()
+            .unwrap_or_else(|| panic!("no quote was asked: {:#?}\n{}", self.outputs, self.reply));
+        FeeQuote::from_document(&quote.document().unwrap())
+            .unwrap_or_else(|| panic!("not a quote: {quote:?}"))
     }
 }
 
@@ -352,6 +369,20 @@ async fn the_private_borrow_runs_end_to_end_on_a_sepolia_fork() {
         panic!("one card: {:?}\n{}", borrowed.cards, borrowed.reply);
     };
     eprintln!("\nthe card:\n{card}\n");
+    assert_eq!(
+        borrowed.unshields(true).count(),
+        2,
+        "{:#?}",
+        borrowed.outputs
+    );
+    let fee_quote = borrowed.final_quote();
+    assert!(
+        card.contains(&format!(
+            "Fee      edw quotes {} ETH",
+            format_ether(fee_quote.fee)
+        )),
+        "{card}"
+    );
     assert!(
         command.starts_with(
             "edw unshield --token ETH --amount-formatted 0.1 --tail-calls <4 calls> --expected-fresh-address 0x"
@@ -458,7 +489,7 @@ async fn the_private_borrow_runs_end_to_end_on_a_sepolia_fork() {
     lap(&mut stages, "checks", started);
 
     let fee = parse_ether(report["fee"].as_str().unwrap()).unwrap();
-    let reserve = parse_ether("0.1").unwrap() * U256::from(TRIAL_RESERVE_BPS) / U256::from(10_000);
+    let ceiling = parse_ether("0.1").unwrap() * U256::from(TRIAL_RESERVE_BPS) / U256::from(10_000);
     let quoted = bundler
         .call("eth_getUserOperationByHash", json!([user_op]))
         .await
@@ -476,17 +507,18 @@ async fn the_private_borrow_runs_end_to_end_on_a_sepolia_fork() {
     .sum();
     let price = hex_u256(&fields["maxFeePerGas"]) + hex_u256(&fields["maxPriorityFeePerGas"]);
     // kohaku proves the fee as gas limit x (maxFee + maxPriorityFee), plus 1%.
-    let break_even = reserve * U256::from(10_000) / (gas * U256::from(10_100));
+    let break_even = ceiling * U256::from(10_000) / (gas * U256::from(10_100));
     let gwei = |wei: U256| format_units(wei, "gwei").unwrap();
     eprintln!(
-        "\nfee: proven {} ETH = {:.1}% of the {} ETH reserve ({}% of 0.1 ETH)",
+        "\nfee: proven {} ETH, quoted {} ETH; {:.1}% of the {} ETH trial ceiling ({}% of 0.1 ETH)",
         format_ether(fee),
-        fee.to::<u128>() as f64 / reserve.to::<u128>() as f64 * 100.0,
-        format_ether(reserve),
+        format_ether(fee_quote.fee),
+        fee.to::<u128>() as f64 / ceiling.to::<u128>() as f64 * 100.0,
+        format_ether(ceiling),
         TRIAL_RESERVE_BPS / 100
     );
     eprintln!(
-        "     at gas limit {gas} and maxFee + maxPriorityFee {} gwei; the reserve covers up to {} gwei",
+        "     at gas limit {gas} and maxFee + maxPriorityFee {} gwei; the trial ceiling covers up to {} gwei",
         gwei(price),
         gwei(break_even)
     );
@@ -503,37 +535,40 @@ async fn the_private_borrow_runs_end_to_end_on_a_sepolia_fork() {
         format_ether(debt),
         format_ether(account.healthFactor)
     );
-    assert!(fee <= reserve, "the proven fee fits in the reserve");
+    assert!(
+        fee <= fee_quote.fee,
+        "edw proved a fee above the one it quoted"
+    );
 
-    // The fee outgrows the reserve once gas costs more than `break_even`. At 1.5 times that, the
-    // bundler's estimate still passes on edw's simulation funding (a tenth of the note) and edw's
-    // own check refuses; at 3 times, the estimate itself reverts. Either way nothing is sent.
-    for (stage, half_steps, edw_explains) in [
-        ("borrow at 1.5x gas", 3u64, true),
-        ("borrow at 3x gas", 6, false),
-    ] {
+    // The fee outgrows the trial ceiling once gas costs more than `break_even`. Then the quote of
+    // the trial calls leaves less than they supply (or edw cannot price them), so the borrow is
+    // refused before the card, whatever edw says, and nothing is sent.
+    for (stage, half_steps) in [("borrow at 1.5x gas", 3u64), ("borrow at 3x gas", 6)] {
         let target = break_even * U256::from(half_steps) / U256::from(2);
         let price = price_gas(&provider, &bundler, target).await;
         let head_before = provider.get_block_number().await.unwrap();
         let started = Instant::now();
         let expensive = attempt(&mut h).await;
         lap(&mut stages, stage, started);
-        assert_eq!(expensive.cards.len(), 1, "{:?}", expensive.cards);
-        let refused = expensive.unshield();
-        let error = refused.document().unwrap();
-        let message = error["message"].as_str().unwrap_or_default();
-        eprintln!("\nquoted {} gwei, edw refused: {message}", gwei(price));
+        assert!(expensive.cards.is_empty(), "{:?}", expensive.cards);
         assert_eq!(
-            (refused.exit_code, error["kind"].as_str()),
-            (1, Some("edw/error")),
+            expensive.unshields(false).count(),
+            0,
+            "nothing but quotes ran: {:#?}",
+            expensive.outputs
+        );
+        let refused = expensive
+            .outputs
+            .iter()
+            .find(|o| o.command.starts_with("skill private-aave-borrow"))
+            .unwrap_or_else(|| panic!("{:#?}", expensive.outputs));
+        eprintln!("\nquoted {} gwei, refused: {}", gwei(price), refused.output);
+        assert_eq!(refused.exit_code, 1, "{refused:?}");
+        assert!(
+            refused.output.contains("nothing was sent")
+                && refused.output.contains("kept for a retry"),
             "{refused:?}"
         );
-        if edw_explains {
-            assert!(
-                message.contains("sponsor fee") && message.contains("does not cover 0.09"),
-                "{error}"
-            );
-        }
         let head_after = provider.get_block_number().await.unwrap();
         assert!(
             to_entry_point(&provider, head_before + 1, head_after)

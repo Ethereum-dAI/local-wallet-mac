@@ -250,7 +250,7 @@ async fn calls_edw_would_refuse_never_reach_a_review() {
     };
     for prompt in [
         "shield 100 USDC",
-        "shield 1.15 ETH",
+        "shield 1.005 ETH",
         "unshield 0.1 ETH to 0x0000000000000000000000000000000000000000",
     ] {
         let turn = h.turn(prompt, true).await;

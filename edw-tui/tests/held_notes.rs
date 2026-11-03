@@ -38,6 +38,7 @@ async fn edw_refusal(config: &EdwConfig, eth: &str) -> Option<Refusal> {
         "ETH",
         "--amount-formatted",
         eth,
+        "--yes",
         "--profile",
         "0/0",
     ];
@@ -46,7 +47,7 @@ async fn edw_refusal(config: &EdwConfig, eth: &str) -> Option<Refusal> {
         !result.ok(),
         "this chain has no EntryPoint, so nothing can be sent: {result:?}"
     );
-    if result.output.contains("Proving sponsoring") {
+    if result.output.contains("proving the sponsoring") {
         return None;
     }
     let message = result.document().unwrap()["message"].clone();

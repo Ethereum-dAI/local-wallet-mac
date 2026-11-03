@@ -325,7 +325,7 @@ async fn what_the_harness_refuses_never_reaches_a_card() {
             "not a sum of the sepolia DAI pool sizes",
         ),
         (
-            "privately borrow 100 DAI against 1.15 ETH",
+            "privately borrow 100 DAI against 1.005 ETH",
             "not a sum of the sepolia ETH pool sizes",
         ),
     ] {
@@ -427,9 +427,8 @@ async fn notes_that_cannot_make_the_amount_are_refused_with_what_is_held_and_nee
 }
 
 #[tokio::test]
-async fn pending_notes_and_notes_without_a_paymaster_are_refused_as_edw_would() {
-    let Some((mut h, model, chain)) = asking("private-borrow-unspendable", &["1", "10"]).await
-    else {
+async fn pending_notes_are_refused_as_edw_would() {
+    let Some((mut h, model, _chain)) = asking("private-borrow-unspendable", &["1"]).await else {
         return;
     };
     h.wallet
@@ -447,14 +446,6 @@ async fn pending_notes_and_notes_without_a_paymaster_are_refused_as_edw_would() 
     let turn = h.turn(PROMPT, true).await;
     let refused = refused_before_anything(&turn, &model, &h.wallet).await;
     assert!(refused.contains("not mined yet (1 ETH)"), "{refused}");
-
-    mine_eth_notes(&h.wallet, &chain, "10").await;
-    let turn = h.turn(PROMPT, true).await;
-    let refused = refused_before_anything(&turn, &model, &h.wallet).await;
-    assert!(
-        refused.contains("edw picks to make 10 ETH (10 ETH) are all in pools without a paymaster"),
-        "{refused}"
-    );
 }
 
 #[tokio::test]

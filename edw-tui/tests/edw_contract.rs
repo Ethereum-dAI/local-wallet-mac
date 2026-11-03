@@ -328,9 +328,9 @@ async fn tornado_tools_map_onto_the_pinned_edw() {
     assert_eq!(refusal(&unsupported), usage(), "{unsupported:?}");
     assert!(command("prepare_shield", json!({"token": "DOGE", "amount": "1"})).is_err());
 
-    let odd = run(config, &prepare("ETH", "1.15")).await;
+    let odd = run(config, &prepare("ETH", "1.005")).await;
     assert_eq!(refusal(&odd), other(), "{odd:?}");
-    assert!(command("prepare_shield", json!({"amount": "1.15"})).is_err());
+    assert!(command("prepare_shield", json!({"amount": "1.005"})).is_err());
 
     // A preparation reserves the notes the harness predicted, and broadcasts nothing.
     let prepared = command("prepare_shield", json!({"amount": "1.1"})).unwrap();

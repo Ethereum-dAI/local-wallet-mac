@@ -303,16 +303,16 @@ mod tests {
     }
 
     /// What the pinned edw answered `unshield --token ETH --amount-formatted N` holding these very
-    /// notes (`tests/held_notes.rs` asks it again). It went past note selection for 1 and 11,
-    /// said "the selected ETH notes have no paymaster" for 10, and "held notes cannot make" for
-    /// the rest.
+    /// notes (`tests/held_notes.rs` asks it again). It went past note selection for 1, 10 and 11
+    /// (every Sepolia pool has a paymaster since the extended pools) and said "held notes cannot
+    /// make" for the rest.
     #[test]
     fn picks_notes_as_edw_does() {
         let held = HeldEth::read(&ran(&balance(), ""), NetworkPreset::Sepolia).unwrap();
         for (eth, expected) in [
             ("1", None),
             ("11", None),
-            ("10", Some(Refusal::NoSponsor)),
+            ("10", None),
             ("0.1", Some(Refusal::NotMined)),
             ("1.1", Some(Refusal::NotMined)),
             ("11.1", Some(Refusal::NotMined)),
@@ -323,14 +323,13 @@ mod tests {
         }
     }
 
-    /// edw takes the largest notes first and only then looks for a sponsor, so a 10 ETH note is
-    /// picked over ten 1 ETH notes that would have had one.
+    /// edw takes the largest notes first, so a 10 ETH note is picked over ten 1 ETH notes.
     #[test]
-    fn the_largest_notes_are_picked_first_even_when_smaller_ones_could_sponsor() {
+    fn the_largest_notes_are_picked_first() {
         let mut pools = vec!["eth-10-11155111"];
         pools.extend(["eth-1-11155111"; 10]);
         let held = holding(mined(&pools));
-        assert_eq!(refusal(&held, "10"), Some(Refusal::NoSponsor));
+        assert_eq!(refusal(&held, "10"), None);
         assert_eq!(refusal(&held, "11"), None);
         assert_eq!(refusal(&held, "9"), None);
     }
@@ -367,16 +366,6 @@ mod tests {
         assert_eq!(refused.reason, Refusal::NotMined);
         assert!(
             refused.message.contains("not mined yet (1 ETH)"),
-            "{refused}"
-        );
-
-        let big = holding(mined(&["eth-10-11155111"]));
-        let refused = big.unshield(wei("10"), "0/0").unwrap_err();
-        assert!(
-            refused.message.contains("(10 ETH)")
-                && refused
-                    .message
-                    .contains("on sepolia only the 1 ETH and 0.1 ETH pools have one"),
             "{refused}"
         );
     }

@@ -364,7 +364,7 @@ impl EdwConfig {
 pub const EDW_REPO: &str = "https://github.com/ethereum/desktop-wallet";
 /// The edw revision the tool mapping is written and tested against. Bumping it means
 /// re-running `cargo test --test edw_contract` and fixing [`build_argv`] until it passes.
-pub const EDW_PINNED_REV: &str = "1d04b61ac665c3e71db3d33f6cc6411f99e169dd";
+pub const EDW_PINNED_REV: &str = "2cc9c3e661fe37b2c6ed1ae8ca31f8b77643b1c8";
 
 pub fn install_command() -> String {
     format!("cargo install --git {EDW_REPO} --rev {EDW_PINNED_REV} --locked edw")

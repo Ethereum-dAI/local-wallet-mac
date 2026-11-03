@@ -321,6 +321,7 @@ impl Command {
                 let mut argv = owned(&["shield"]);
                 argv.extend(amount.args());
                 argv.extend(owned(&["--from", PAYER_INDEX]));
+                argv.push("--yes".into());
                 argv
             }
             Command::Prepare(amount) => {
@@ -341,6 +342,7 @@ impl Command {
                 if let Some(fresh) = unshield.expected_fresh_address {
                     argv.extend(["--expected-fresh-address".into(), fresh.to_string()]);
                 }
+                argv.push("--yes".into());
                 argv
             }
             Command::PeekFreshAddress => owned(&["next-fresh-address", "--peek"]),
@@ -352,9 +354,11 @@ impl Command {
     }
 
     /// The command line the log, the review and the model see: tail calls are counted, never
-    /// spelled out, so no calldata reaches the model.
+    /// spelled out, so no calldata reaches the model, and `--yes` is left off because the review
+    /// card is the consent edw's `--non-interactive` mode asks for.
     pub fn display(&self, profile: &str) -> String {
         let mut argv = self.argv(profile);
+        argv.retain(|arg| arg != "--yes");
         if let Command::Unshield(Unshield {
             destination: Destination::Calls(calls),
             ..
@@ -551,12 +555,12 @@ mod tests {
             (
                 "shield",
                 json!({"token": "dai", "amount": "200"}),
-                "shield --token DAI --amount-formatted 200 --from 0 --profile 0/0",
+                "shield --token DAI --amount-formatted 200 --from 0 --yes --profile 0/0",
             ),
             (
                 "shield",
                 json!({"amount": 1.1}),
-                "shield --token ETH --amount-formatted 1.1 --from 0 --profile 0/0",
+                "shield --token ETH --amount-formatted 1.1 --from 0 --yes --profile 0/0",
             ),
             (
                 "prepare_shield",
@@ -566,12 +570,12 @@ mod tests {
             (
                 "unshield",
                 json!({"token": "ETH", "amount": "0.1"}),
-                "unshield --token ETH --amount-formatted 0.1 --profile 0/0",
+                "unshield --token ETH --amount-formatted 0.1 --yes --profile 0/0",
             ),
             (
                 "unshield",
                 json!({"amount": "0.1", "to": TO}),
-                "unshield --token ETH --amount-formatted 0.1 --to 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 --profile 0/0",
+                "unshield --token ETH --amount-formatted 0.1 --to 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 --yes --profile 0/0",
             ),
             (
                 "next_fresh_address",
@@ -613,14 +617,17 @@ mod tests {
         for amount in ["0.1", "1.1", "12.3", "0.3"] {
             assert!(ok("ETH", amount, Sepolia), "{amount} ETH");
         }
-        for amount in ["1.15", "0.05", "0.000000000000000001"] {
+        for amount in ["1.005", "0.005", "0.000000000000000001"] {
             assert!(!ok("ETH", amount, Sepolia), "{amount} ETH");
         }
         assert!(ok("DAI", "300", Sepolia) && !ok("DAI", "150", Sepolia));
         assert!(ok("ETH", "100", Mainnet) && ok("WBTC", "1.1", Mainnet));
         assert!(ok("USDC", "1100", Mainnet) && !ok("USDC", "50", Mainnet));
-        let why = command("shield", json!({"amount": "1.15"}), Sepolia).unwrap_err();
-        assert!(why.contains("10, 1, 0.1 ETH"), "{why}");
+        let why = command("shield", json!({"amount": "1.005"}), Sepolia).unwrap_err();
+        assert!(
+            why.contains("30, 10, 3, 1, 0.3, 0.1, 0.03, 0.01 ETH"),
+            "{why}"
+        );
         for bad in ["all", "-1", "0", "1e18", "abc", ""] {
             assert!(!ok("ETH", bad, Sepolia), "{bad}");
         }
@@ -632,7 +639,7 @@ mod tests {
         else {
             panic!("a valid shield");
         };
-        assert_eq!(amount.notes, ["10", "1", "1", "0.1", "0.1", "0.1"]);
+        assert_eq!(amount.notes, ["10", "1", "1", "0.3"]);
         let preview = Command::Shield(amount).preview(PROFILE, None);
         assert!(preview.contains("10 ETH + 1 ETH + 1 ETH"), "{preview}");
         assert!(preview.contains("sepolia (chain 11155111)") && preview.contains("Batch"));

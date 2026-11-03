@@ -432,6 +432,7 @@ mod tests {
                 expected.as_str(),
                 "--expected-fresh-address",
                 &FRESH.to_string(),
+                "--yes",
                 "--profile",
                 "0/0",
             ]
@@ -464,7 +465,7 @@ mod tests {
             )
             .contains("shields DAI")
         );
-        assert!(refused(json!({"eth": "1.15", "amount": "100"}), Sepolia).contains("not a sum"));
+        assert!(refused(json!({"eth": "1.005", "amount": "100"}), Sepolia).contains("not a sum"));
         assert!(refused(json!({"eth": "1", "amount": "150"}), Sepolia).contains("not a sum"));
         assert!(refused(json!({"amount": "100"}), Sepolia).contains("`eth` is required"));
         let numbers = Request::from_call(&json!({"eth": 1, "amount": 100}), Sepolia).unwrap();

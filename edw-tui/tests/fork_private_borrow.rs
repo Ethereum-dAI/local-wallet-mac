@@ -403,10 +403,7 @@ async fn the_private_borrow_runs_end_to_end_on_a_sepolia_fork() {
         (op.userOpHash, op.sender, op.success),
         (user_op, fresh, true)
     );
-    assert_eq!(
-        op.paymaster,
-        Pool::SEPOLIA_ETHER_01.paymaster.unwrap().address
-    );
+    assert_eq!(op.paymaster, Pool::SEPOLIA_ETHER_01.paymaster.unwrap());
     let code = provider.get_code_at(fresh).await.unwrap();
     assert!(
         code.starts_with(&[0xef, 0x01, 0x00]),

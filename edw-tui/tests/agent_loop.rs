@@ -64,7 +64,8 @@ async fn switching_models_keeps_the_conversation() {
 }
 
 /// Profile 0/0, unnamed, as edw's JSON lists it.
-const DEFAULT_PROFILE: &str = r#"{"mnemonic_index":0,"profile_index":0,"name":null}"#;
+const DEFAULT_PROFILE: &str =
+    r#"{"mnemonic_index":0,"profile_index":0,"name":null,"use_extended_pools":true}"#;
 
 #[tokio::test]
 async fn confirmed_commands_run_and_declined_ones_do_not() {
@@ -98,7 +99,7 @@ async fn confirmed_commands_run_and_declined_ones_do_not() {
     );
     assert!(turn.reply.starts_with("Done"));
 
-    let bob = r#"{"mnemonic_index":0,"profile_index":1,"name":"bob"}"#;
+    let bob = r#"{"mnemonic_index":0,"profile_index":1,"name":"bob","use_extended_pools":true}"#;
     let turn = h.turn("add a profile named bob", true).await;
     assert_eq!(
         turn.confirms,

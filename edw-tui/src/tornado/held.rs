@@ -212,7 +212,7 @@ mod tests {
 
     use super::*;
 
-    /// `edw balance --detailed` from the pinned edw on the fake Sepolia (`tests/held_notes.rs`
+    /// `edw balance --detailed` from the pinned edw on the fake Sepolia (`tests/tornado/held_notes.rs`
     /// checks it still is), with mined 10 and 1 ETH notes and a 0.1 ETH note not mined yet.
     const BALANCE: &str = include_str!("../../tests/fixtures/balance_detailed_tornado_notes.json");
 
@@ -303,7 +303,7 @@ mod tests {
     }
 
     /// What the pinned edw answered `unshield --token ETH --amount-formatted N` holding these very
-    /// notes (`tests/held_notes.rs` asks it again). It went past note selection for 1, 10 and 11
+    /// notes (`tests/tornado/held_notes.rs` asks it again). It went past note selection for 1, 10 and 11
     /// (every Sepolia pool has a paymaster since the extended pools) and said "held notes cannot
     /// make" for the rest.
     #[test]

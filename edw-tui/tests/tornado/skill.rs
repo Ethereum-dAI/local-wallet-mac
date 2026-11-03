@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 const SEPOLIA: u64 = 11_155_111;
 /// edw's preparation of a 200 DAI shield on Sepolia, recorded from edw: two approvals of 100
 /// DAI to the Tornado DAI pool, each followed by a deposit.
-const SHIELD_DAI_200: &str = include_str!("fixtures/shield_prepared_dai_200.json");
+const SHIELD_DAI_200: &str = include_str!("../fixtures/shield_prepared_dai_200.json");
 
 fn load(name: &str) -> Skill {
     manifest::load(

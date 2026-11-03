@@ -8,13 +8,11 @@
 //! `EDW_TUI_LIVE_RUNTIME_DIR` to `<data dir>/../runtime`. `EDW_TUI_E2E_RECORD=1` also records
 //! `target/e2e-screenshots/private_borrow_live.mp4`.
 //!
-//! `EDW_TUI_LIVE_DATA_DIR=… EDW_TUI_E2E_RECORD=1 cargo test --test e2e_private_borrow_live -- --ignored --nocapture`
-
-mod common;
+//! `EDW_TUI_LIVE_DATA_DIR=… EDW_TUI_E2E_RECORD=1 cargo test --test tornado live:: -- --ignored --nocapture`
 
 use std::path::PathBuf;
 
-use common::{
+use crate::common::{
     edw_binary,
     pty::Tui,
     scenario::{recording, screenshots_dir},

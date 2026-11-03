@@ -10,21 +10,19 @@
 //!
 //! `live_sepolia_private_borrow` is the real thing, ignored by default.
 
-mod common;
-
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use alloy_node_bindings::AnvilInstance;
-use alloy_primitives::{hex, keccak256};
-use common::{
+use crate::common::{
     Harness, TempWallet, Turn, edw_binary, fake_sepolia, mine_eth_notes, quote_fees,
     recorder::{Recorder, call},
     records, shipped, skill_set,
 };
+use alloy_node_bindings::AnvilInstance;
+use alloy_primitives::{hex, keccak256};
 use edw_core::{
     instance::{DataDir, Instance},
     network::NetworkPreset,
@@ -662,7 +660,7 @@ fn the_selectors_kept_from_the_model_are_those_calls() {
 ///   public default);
 /// - Docker (the skill's script reads Aave's Sepolia market), edw and the network.
 ///
-/// `cargo test --test private_borrow live -- --ignored --nocapture`
+/// `cargo test --test tornado borrow::live -- --ignored --nocapture`
 #[tokio::test]
 #[ignore = "moves real Sepolia funds; needs EDW_TUI_LIVE_PHRASE, edw, Docker and the network"]
 async fn live_sepolia_private_borrow() {

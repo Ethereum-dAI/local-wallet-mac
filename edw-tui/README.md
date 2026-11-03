@@ -176,7 +176,7 @@ them as edw will, with edw-core's own `withdrawal_notes` at the pinned rev (`src
 It refuses, with no preparation and no card, when the mined ETH notes cannot make the amount
 exactly (notes are only unshielded whole), when they could only once pending notes are mined, or
 when the notes edw picks are all in pools without a paymaster (on Sepolia, the 10 ETH pool). A
-balance edw could not read refuses the borrow too. `tests/held_notes.rs` holds the check to the
+balance edw could not read refuses the borrow too. `tests/tornado/held_notes.rs` holds the check to the
 binary's own answers.
 
 The collateral and the debt belong to `F`, an address of the same wallet, not to the profile.
@@ -188,12 +188,12 @@ and a plan checked for one kind of account is refused for the other.
 
 #### Rehearsing it on a Sepolia fork
 
-`tests/fork_private_borrow.rs` runs the whole flow for real on an anvil fork of Sepolia, with no
+`tests/tornado/fork.rs` runs the whole flow for real on an anvil fork of Sepolia, with no
 Sepolia funds and nothing sent to Sepolia:
 
 ```bash
 npm install -g @pimlico/alto@0.0.21   # the bundler kohaku-rs's fork kit pins; or set ALTO_BIN
-EDW_BIN=… cargo test --test fork_private_borrow -- --ignored --nocapture   # edw, anvil, Docker
+EDW_BIN=… cargo test --test tornado fork:: -- --ignored --nocapture   # edw, anvil, Docker
 ```
 
 A new wallet whose only RPC is the fork and whose only bundler is a local alto shields two 0.1 ETH
@@ -392,21 +392,21 @@ what the model sees shows up in review. Regenerate with `cargo run -- tools-dump
 ```bash
 cargo test                          # unit + integration; edw-backed tests skip without edw
 cargo test --test edw_contract      # every tool against the pinned edw
-cargo test --test tornado           # shield, unshield and prepare_shield through the review, on an
+cargo test --test tornado shield::         # shield, unshield and prepare_shield through the review, on an
                                     # anvil that answers as Sepolia (needs edw, anvil)
-cargo test --test tornado live -- --ignored --nocapture   # a real Sepolia shield and unshield;
+cargo test --test tornado shield::live -- --ignored --nocapture   # a real Sepolia shield and unshield;
                                     # moves real Sepolia ETH (EDW_TUI_LIVE_PHRASE, EDW_TUI_LIVE_RPC)
-cargo test --test private_borrow    # the private borrow through the card and the pinned edw, on the
+cargo test --test tornado borrow::   # the private borrow through the card and the pinned edw, on the
                                     # anvil that answers as Sepolia (edw, anvil; card tests need Docker)
-cargo test --test private_borrow live -- --ignored --nocapture   # a real one on Sepolia
+cargo test --test tornado borrow::live -- --ignored --nocapture   # a real one on Sepolia
                                     # (EDW_TUI_LIVE_PHRASE with mined ETH notes, EDW_TUI_LIVE_ETH,
                                     # EDW_TUI_LIVE_RPC, Docker)
-cargo test --test fork_private_borrow -- --ignored --nocapture   # the whole private borrow on a
+cargo test --test tornado fork:: -- --ignored --nocapture   # the whole private borrow on a
                                     # Sepolia fork with a local bundler, then refused at high gas
                                     # (network; edw, anvil, alto, Docker; see Private borrow)
-cargo test --test held_notes        # the held-notes check refuses what the pinned edw's unshield
+cargo test --test tornado held_notes::        # the held-notes check refuses what the pinned edw's unshield
                                     # refuses, on notes mined on that anvil (edw, anvil)
-cargo test --test skills_private_borrow -- --ignored --nocapture   # the real script on a Sepolia
+cargo test --test tornado skill:: -- --ignored --nocapture   # the real script on a Sepolia
                                     # fork, then its calls and a 200 DAI shield's from one account
                                     # (network; EDW_TUI_SEPOLIA_RPC, Docker, anvil)
 cargo test --test interim           # real ETH sends on a throwaway anvil (needs anvil)

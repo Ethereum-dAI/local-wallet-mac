@@ -3,11 +3,9 @@
 //! the check passes exactly when edw's own `unshield` gets past picking notes and goes on to
 //! prove; when it refuses, edw refused for the same rule. Skips without edw or anvil.
 
-mod common;
-
 use std::time::Duration;
 
-use common::{edw_binary, fake_sepolia, mine_eth_notes};
+use crate::common::{edw_binary, fake_sepolia, mine_eth_notes};
 use edw_core::{network::NetworkPreset, vault::tornadocash::parse_amount};
 use edw_tui::{
     edw::{self, EdwConfig, EdwResult},
@@ -18,7 +16,7 @@ use edw_tui::{
 };
 use serde_json::Value;
 
-const BALANCE: &str = include_str!("fixtures/balance_detailed_tornado_notes.json");
+const BALANCE: &str = include_str!("../fixtures/balance_detailed_tornado_notes.json");
 
 async fn run(config: &EdwConfig, argv: Vec<String>) -> EdwResult {
     edw::run_with_timeout(config, &argv, Duration::from_secs(120)).await

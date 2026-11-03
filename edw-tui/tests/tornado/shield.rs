@@ -6,14 +6,12 @@
 //!
 //! `live_sepolia_shield_then_unshield` is the real thing, ignored by default.
 
-mod common;
-
 use std::os::unix::fs::PermissionsExt;
 
+use crate::common::{Harness, TempWallet, Turn, edw_binary, fake_sepolia};
 use alloy_node_bindings::{Anvil, AnvilInstance};
 use alloy_primitives::{Address, U256, address};
 use alloy_provider::{Provider, ProviderBuilder};
-use common::{Harness, TempWallet, Turn, edw_binary, fake_sepolia};
 use edw_core::instance::{DataDir, Instance};
 use edw_tui::{
     flow::{FlowEvent, Stage, StepState},
@@ -368,7 +366,7 @@ async fn mainnet_is_refused_unless_edw_sends_through_a_loopback_anvil_fork() {
 /// - optionally `EDW_TUI_LIVE_RPC`, a Sepolia RPC that supports state overrides (else edw's
 ///   public default), and the network, for edw's indexer and the public Pimlico bundler.
 ///
-/// `cargo test --test tornado live -- --ignored --nocapture`
+/// `cargo test --test tornado shield::live -- --ignored --nocapture`
 #[tokio::test]
 #[ignore = "moves real Sepolia ETH; needs EDW_TUI_LIVE_PHRASE, edw and the network"]
 async fn live_sepolia_shield_then_unshield() {

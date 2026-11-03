@@ -23,12 +23,15 @@
 //! Needs `EDW_BIN` (the pinned edw), anvil, Docker, alto (`ALTO_BIN`, or `alto` on PATH) and the
 //! network (`EDW_TUI_SEPOLIA_RPC`, default a public endpoint); skips with a message without them.
 //!
-//! `EDW_BIN=… ALTO_BIN=… cargo test --test fork_private_borrow -- --ignored --nocapture`
-
-mod common;
+//! `EDW_BIN=… ALTO_BIN=… cargo test --test tornado fork:: -- --ignored --nocapture`
 
 use std::time::{Duration, Instant};
 
+use crate::common::{
+    Harness, edw_binary, records,
+    sepolia_fork::{Alto, ENTRY_POINT, alto_binary, fork_sepolia, last_run, timeline, wallet_on},
+    shipped, skill_set,
+};
 use alloy_primitives::{
     Address, B256, U256,
     utils::{format_ether, format_units, parse_ether},
@@ -36,11 +39,6 @@ use alloy_primitives::{
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
 use alloy_sol_types::{SolCall, SolEvent, sol};
-use common::{
-    Harness, edw_binary, records,
-    sepolia_fork::{Alto, ENTRY_POINT, alto_binary, fork_sepolia, last_run, timeline, wallet_on},
-    shipped, skill_set,
-};
 use edw_core::vault::tornadocash::Pool;
 use edw_tui::{
     agent::AgentEvent,

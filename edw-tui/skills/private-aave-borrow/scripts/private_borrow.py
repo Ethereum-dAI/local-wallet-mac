@@ -21,6 +21,8 @@ PRICE_ORACLE = "function getPriceOracle() view returns (address)"
 ASSET_PRICE = "function getAssetPrice(address asset) view returns (uint256)"
 BALANCE_OF = "function balanceOf(address account) view returns (uint256)"
 TOTAL_SUPPLY = "function totalSupply() view returns (uint256)"
+SCALED_TOTAL_SUPPLY = "function scaledTotalSupply() view returns (uint256)"
+RAY = 10**27
 VARIABLE = "2"
 # Aave's base currency: USD with 8 decimals.
 BASE = Decimal(10) ** 8
@@ -77,13 +79,16 @@ loan_config = configuration(loan_data)
 if not open_reserve(loan_config) or not bit(loan_config, 58):
     edw_skill.fail(f"Aave does not lend {symbol} on this chain now (borrowing it is turned off)")
 
-# Caps count whole tokens, and 0 means none. Indexes 8 and 10 are the aToken and the variable debt
-# token, whose totalSupply already includes accrued interest.
+# Caps count whole tokens, and 0 means none. Reserve fields: 1 liquidity index, 8 aToken, 10 variable
+# debt token (whose totalSupply already includes accrued interest), 12 accrued to the treasury.
+# Isolation-mode debt ceilings and eMode are not checked; edw's simulation still refuses those.
 CAP_MASK = (1 << 36) - 1
 supply_cap = (collateral_config >> 116) & CAP_MASK
 borrow_cap = (loan_config >> 80) & CAP_MASK
 if supply_cap:
-    supplied = int(edw_skill.call(collateral_data[8], TOTAL_SUPPLY)[0])
+    # Aave's own test: (scaled aToken supply + what accrued to the treasury) at the liquidity index.
+    scaled = int(edw_skill.call(collateral_data[8], SCALED_TOTAL_SUPPLY)[0]) + int(collateral_data[12])
+    supplied = (scaled * int(collateral_data[1]) + RAY // 2) // RAY
     if supplied + supply > supply_cap * 10**18:
         edw_skill.fail(
             f"Aave's ETH supply cap ({supply_cap} ETH) leaves no room for {whole(supply)} ETH "
@@ -112,9 +117,12 @@ def usd(units, asset, decimals):
 
 collateral = usd(supply, weth["address"], 18)
 debt = usd(borrow, token["address"], token["decimals"])
-if collateral <= 0 or debt <= 0:
+if collateral <= 0:
+    edw_skill.fail("Aave's oracle prices the ETH at 0 USD, so the loan's health cannot be judged; try again later")
+if debt <= 0:
     edw_skill.fail(
-        "Aave's oracle prices this loan at 0 USD, so its health cannot be judged; try again later"
+        f"{whole(borrow, token['decimals'])} {symbol} is worth 0 USD at Aave's oracle (the amount is "
+        "too small to price, or the oracle has no price), so the loan's health cannot be judged"
     )
 can_borrow = collateral * ltv // 10_000
 if debt > can_borrow:

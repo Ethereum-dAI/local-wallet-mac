@@ -26,9 +26,9 @@ use super::{PoolAmount, TailCalls, Token};
 const KIND: &str = "edw/shield-prepared";
 const PREFIX: &str = "shield-";
 /// Hex digits of the sha256 of edw's answer kept in an id: 16, which no two answers share in
-/// practice. Ids of 10, which earlier versions wrote, still read.
+/// practice. Ids of 10 digits, which earlier versions wrote, still read.
 const ID_DIGITS: usize = 16;
-const ID_DIGITS_READ: std::ops::RangeInclusive<usize> = 10..=ID_DIGITS;
+const OLD_ID_DIGITS: usize = 10;
 
 sol! {
     function approve(address spender, uint256 amount) returns (bool);
@@ -189,15 +189,53 @@ impl Store {
 
     /// The stored preparation for `amount` and `profile` that is not consumed, if there is one.
     /// Takes no lock, so a caller can ask the user before preparing without holding up others.
+    /// A stored file that cannot be read is an error when it could be this deposit's, since its
+    /// notes are reserved and preparing again would reserve others; see [`could_be_for`].
     pub fn find(
         &self,
         amount: &PoolAmount,
         profile: &str,
     ) -> Result<Option<PreparedShield>, String> {
-        Ok(self
-            .records()?
-            .into_iter()
-            .find(|r| r.is_for(amount, profile)))
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(e) => return Err(format!("cannot read {}: {e}", self.dir.display())),
+        };
+        let mut names: Vec<String> = entries
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.starts_with(PREFIX) && name.ends_with(".json"))
+            .collect();
+        names.sort();
+        let mut found = None;
+        for name in names {
+            let path = self.dir.join(&name);
+            let text = fs::read_to_string(&path).map_err(|e| {
+                format!("cannot read the stored preparation {}: {e}", path.display())
+            })?;
+            match serde_json::from_str::<PreparedShield>(&text) {
+                Ok(record) if found.is_none() && record.is_for(amount, profile) => {
+                    found = Some(record);
+                }
+                Ok(_) => {}
+                // Whatever order the files are in: a record that might be this deposit's and
+                // cannot be read is not one to pass over.
+                Err(e) if could_be_for(&text, amount, profile) => {
+                    return Err(format!(
+                        "the stored preparation {} is unreadable ({e}) and could be this deposit's, so its notes may be reserved; fix or move it before preparing again",
+                        path.display()
+                    ));
+                }
+                Err(_) => {}
+            }
+        }
+        Ok(found)
     }
 
     /// The stored preparation for `amount` and `profile` that is not consumed, or else the one
@@ -240,7 +278,8 @@ impl Store {
 
     pub fn get(&self, id: &str) -> Result<PreparedShield, String> {
         let digits = id.strip_prefix(PREFIX).unwrap_or_default();
-        if !ID_DIGITS_READ.contains(&digits.len()) || !digits.bytes().all(|b| b.is_ascii_hexdigit())
+        if ![OLD_ID_DIGITS, ID_DIGITS].contains(&digits.len())
+            || !digits.bytes().all(|b| b.is_ascii_hexdigit())
         {
             return Err(format!("`{id}` is not a prepared shield id"));
         }
@@ -248,36 +287,6 @@ impl Store {
         let text =
             fs::read_to_string(&path).map_err(|e| format!("no prepared shield {id} ({e})"))?;
         serde_json::from_str(&text).map_err(|e| format!("{} is unreadable: {e}", path.display()))
-    }
-
-    /// Every stored preparation. One that cannot be read is an error, not a gap: it may hold the
-    /// reservation a retry should reuse, and skipping it would reserve other notes for the same
-    /// deposit.
-    fn records(&self) -> Result<Vec<PreparedShield>, String> {
-        let entries = match fs::read_dir(&self.dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(format!("cannot read {}: {e}", self.dir.display())),
-        };
-        let mut names: Vec<String> = entries
-            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-            .filter(|name| name.starts_with(PREFIX) && name.ends_with(".json"))
-            .collect();
-        names.sort();
-        names
-            .iter()
-            .map(|name| {
-                let path = self.dir.join(name);
-                let text = fs::read_to_string(&path)
-                    .map_err(|e| format!("cannot read the stored preparation {}: {e}", path.display()))?;
-                serde_json::from_str(&text).map_err(|e| {
-                    format!(
-                        "the stored preparation {} is unreadable ({e}); it may hold reserved notes, so fix or move it before preparing again",
-                        path.display()
-                    )
-                })
-            })
-            .collect()
     }
 
     fn save(
@@ -352,6 +361,19 @@ impl Store {
             .map_err(fail)?;
         Ok(path)
     }
+}
+
+/// Whether an unreadable stored file might hold this deposit's reservation: unless it is valid
+/// JSON that names another network, profile, token or amount, it might.
+fn could_be_for(text: &str, amount: &PoolAmount, profile: &str) -> bool {
+    let Ok(loose) = serde_json::from_str::<Value>(text) else {
+        return true;
+    };
+    let names = |key: &str, want: &str| loose[key].as_str().is_none_or(|have| have == want);
+    names("network", &amount.network.to_string())
+        && names("profile", profile)
+        && names("token", amount.token.symbol())
+        && names("amount", &amount.amount)
 }
 
 #[cfg(test)]
@@ -463,7 +485,7 @@ mod tests {
         fs::write(&blocked, "").unwrap();
         let store = Store::new(blocked.join("prepared"));
         let saved = prepare(&store, &dai("200"), "0/0", &AtomicUsize::new(0)).await;
-        assert!(saved.unwrap_err().contains("cannot "));
+        assert!(saved.unwrap_err().contains("cannot save"));
     }
 
     #[tokio::test]
@@ -586,6 +608,28 @@ mod tests {
             asked.load(Ordering::SeqCst),
             1,
             "edw must not reserve again"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_record_of_another_deposit_does_not_block_this_one() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::in_data_dir(root.path());
+        let asked = AtomicUsize::new(0);
+        fs::create_dir_all(&store.dir).unwrap();
+        // Valid JSON of a newer schema, for 100 DAI on Sepolia: not 200 DAI.
+        let other = json!({"network": "sepolia", "profile": "0/0", "token": "DAI", "amount": "100", "edw": {"v": 2}});
+        fs::write(store.dir.join("shield-aaaaaaaaaa.json"), other.to_string()).unwrap();
+        let (_, reused) = prepare(&store, &dai("200"), "0/0", &asked).await.unwrap();
+        assert!(!reused);
+        // The same deposit's record, unreadable, does block it.
+        let mine = json!({"network": "sepolia", "profile": "0/0", "token": "DAI", "amount": "200", "edw": {"v": 2}});
+        fs::write(store.dir.join("shield-bbbbbbbbbb.json"), mine.to_string()).unwrap();
+        assert!(
+            prepare(&store, &dai("200"), "0/0", &asked)
+                .await
+                .unwrap_err()
+                .contains("could be this deposit's")
         );
     }
 

@@ -93,20 +93,21 @@ fn aave_script(prompt: &str, text: &str, has: &dyn Fn(&str) -> bool) -> Option<S
     ]))
 }
 
-/// A plain decimal such as `100` or `0.5`: digits and at most one point. Not `inf`, `nan` or `1e3`,
+/// A plain decimal such as `100` or `0.5`: digits, and digits on both sides of a point. Not `inf`, `nan` or `1e3`,
 /// which `f64` parses.
 fn is_decimal(word: &str) -> bool {
-    let (whole, fraction) = word.split_once('.').unwrap_or((word, ""));
-    word.bytes().any(|b| b.is_ascii_digit())
-        && whole.bytes().all(|b| b.is_ascii_digit())
-        && fraction.bytes().all(|b| b.is_ascii_digit())
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    match word.split_once('.') {
+        Some((whole, fraction)) => digits(whole) && digits(fraction),
+        None => digits(word),
+    }
 }
 
 /// `privately borrow <amount> <token> against <eth> ETH`.
 fn private_borrow_script(prompt: &str) -> Option<Script> {
     let words: Vec<&str> = prompt
         .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '.'))
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '-'))
         .collect();
     let amounts: Vec<(&str, &str)> = words
         .windows(2)
@@ -564,7 +565,7 @@ pub fn summary(tool: &str, result: &str) -> Option<String> {
 fn first_number(prompt: &str) -> Option<String> {
     prompt
         .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_ascii_digit() && c != '.'))
+        .map(|w| w.trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-'))
         .find(|w| is_decimal(w))
         .map(str::to_owned)
 }
@@ -851,10 +852,12 @@ mod tests {
 
     #[test]
     fn only_plain_decimals_are_amounts() {
-        for word in ["100", "0.5", ".5", "7."] {
+        for word in ["100", "0.5"] {
             assert!(is_decimal(word), "{word}");
         }
-        for word in ["inf", "nan", "1e3", "-1", "1.2.3", ".", "", "0x10"] {
+        for word in [
+            "inf", "nan", "1e3", "-1", "1.2.3", ".", "", "0x10", ".5", "7.",
+        ] {
             assert!(!is_decimal(word), "{word}");
         }
         assert_eq!(
@@ -862,6 +865,12 @@ mod tests {
             Script::Say("Say it as: unshield <amount> <token>.".into())
         );
         assert_eq!(first_number("borrow 1e3 then 5"), Some("5".into()));
+        assert_eq!(first_number("borrow -100 DAI"), None);
+        let negative = script("privately borrow -100 DAI against 1 ETH");
+        assert!(
+            !matches!(&negative, Script::Calls(calls) if calls.iter().any(|(tool, _)| *tool == "private_aave_borrow")),
+            "{negative:?}"
+        );
     }
 
     #[test]

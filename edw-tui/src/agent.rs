@@ -10,6 +10,7 @@ use std::{
     convert::Infallible,
     path::{Component, Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use alloy_primitives::{Address, U256};
@@ -49,9 +50,12 @@ use crate::{
         tools::{self as skill_tools, SkillGate, SkillSet},
     },
     tornado::{
-        self, Command, FeeQuote, FreshAddress, PoolAmount, borrow, held::HeldEth, prepared::Store,
+        self, Command, FeeQuote, FreshAddress, Landing, PoolAmount, borrow, held::HeldEth,
+        prepared::Store,
     },
 };
+
+const PEEK_TIMEOUT: Duration = Duration::from_secs(60);
 
 const RULES: &str = "You are the chat interface of edw, a privacy-first Ethereum desktop wallet.
 You act only through the provided tools; each one runs one real wallet command.
@@ -781,7 +785,13 @@ impl Shared {
 
     async fn tornado_run(&self, command: &Command, profile: &str) -> EdwResult {
         let argv = command.argv(profile);
-        let result = edw::run_with_timeout(&self.config, &argv, tornado::TIMEOUT).await;
+        // Naming the next fresh address reads the wallet only. It also runs to see whether a send
+        // that was cut off landed, which must not wait out another send's limit.
+        let limit = match command {
+            Command::PeekFreshAddress => PEEK_TIMEOUT,
+            _ => tornado::TIMEOUT,
+        };
+        let result = edw::run_with_timeout(&self.config, &argv, limit).await;
         tornado::for_model(result, &command.display(profile))
     }
 
@@ -831,7 +841,7 @@ impl Shared {
                 }
                 _ => None,
             };
-            tornado::unconfirmed(result, accepted.as_deref())
+            tornado::unconfirmed(result, accepted.as_ref())
         } else {
             result
         };
@@ -1081,19 +1091,23 @@ impl Shared {
         });
         let result = self.tornado_run(&unshield, &profile).await;
         let accepted = match result.document() {
-            Some(report) if result.ok() && report["kind"] == "edw/unshield" => Some(format!(
-                "user operation {}",
-                report["user_operation"].as_str().unwrap_or("?")
-            )),
+            Some(report) if result.ok() && report["kind"] == "edw/unshield" => {
+                Some(Landing::Accepted(format!(
+                    "user operation {}",
+                    report["user_operation"].as_str().unwrap_or("?")
+                )))
+            }
             Some(error) if tornado::refused_before_signing(&error) => None,
             _ => self.fresh_address_used(borrow.fresh(), &profile).await,
         };
         let id = &borrow.shield().id;
+        // Consumed when it may have landed, which includes not knowing: a used shield costs a
+        // reservation, and a reused one that was sent costs a second deposit.
         let unmarked = match &accepted {
-            Some(by) => self.prepared.consume(id, by).await.err(),
+            Some(landing) => self.prepared.consume(id, landing.by()).await.err(),
             None => None,
         };
-        let result = tornado::unconfirmed(result, accepted.as_deref());
+        let result = tornado::unconfirmed(result, accepted.as_ref());
         self.log(AgentEvent::ToolFinished(result.clone()));
         if result.ok() {
             self.flow_step(Stage::Send, StepState::Done);
@@ -1172,7 +1186,7 @@ impl Shared {
     /// anyway, if they may. edw stores the fresh address only once a bundler accepted the user
     /// operation, so a next fresh address other than `fresh` means it was accepted. When that
     /// cannot be read, the calls count as used too: reusing calls that landed is the worse mistake.
-    async fn fresh_address_used(&self, fresh: FreshAddress, profile: &str) -> Option<String> {
+    async fn fresh_address_used(&self, fresh: FreshAddress, profile: &str) -> Option<Landing> {
         let peek = self.tornado_run(&Command::PeekFreshAddress, profile).await;
         match peek
             .document()
@@ -1181,14 +1195,14 @@ impl Shared {
             .filter(|_| peek.ok())
         {
             Some(next) if next.address == fresh.address => None,
-            Some(_) => Some(format!(
+            Some(_) => Some(Landing::Accepted(format!(
                 "fresh address {} was stored while the unshield ran (edw stores it once a bundler accepts)",
                 fresh.address
-            )),
-            None => Some(format!(
-                "the fresh address could not be read after the unshield ({})",
+            ))),
+            None => Some(Landing::Unknown(format!(
+                "the fresh address could not be read after the unshield: {}",
                 peek.output
-            )),
+            ))),
         }
     }
 }

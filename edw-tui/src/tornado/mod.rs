@@ -41,15 +41,37 @@ pub fn timed_out(result: &EdwResult) -> bool {
     result.exit_code == -1 && result.output.starts_with("timed out after")
 }
 
+/// What shows, after an unshield that did not report success, whether a bundler took it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Landing {
+    /// edw stored the fresh address, which it does once a bundler accepts the operation.
+    Accepted(String),
+    /// The fresh address could not be read, so nothing is known.
+    Unknown(String),
+}
+
+impl Landing {
+    /// What a prepared shield that ended with these calls must be treated as: it may be on
+    /// chain either way, so it is never offered again.
+    pub fn by(&self) -> &str {
+        match self {
+            Landing::Accepted(by) | Landing::Unknown(by) => by,
+        }
+    }
+}
+
 /// `result` for a send, with what a cut-off send leaves open said outright: edw was killed, and a
 /// bundler may already have accepted the operation, so the model must not retry it blind.
-/// `accepted` is what shows it did, when something does.
-pub fn unconfirmed(result: EdwResult, accepted: Option<&str>) -> EdwResult {
+/// `landing` is what shows it did, when something does.
+pub fn unconfirmed(result: EdwResult, landing: Option<&Landing>) -> EdwResult {
     if !timed_out(&result) {
         return result;
     }
-    let seen = match accepted {
-        Some(by) => format!("It was accepted: {by}."),
+    let seen = match landing {
+        Some(Landing::Accepted(by)) => format!("It was accepted: {by}."),
+        Some(Landing::Unknown(why)) => {
+            format!("Whether it was accepted is unknown ({why}); treat it as sent.")
+        }
         None => "Nothing shows it was accepted, nor that it was not.".to_owned(),
     };
     EdwResult {
@@ -621,7 +643,10 @@ mod tests {
             said.output
         );
         assert!(said.output.contains("do not retry blindly"));
-        let seen = unconfirmed(cut_off(), Some("fresh address 0xab was stored"));
+        let seen = unconfirmed(
+            cut_off(),
+            Some(&Landing::Accepted("fresh address 0xab was stored".into())),
+        );
         assert!(
             seen.output
                 .contains("It was accepted: fresh address 0xab was stored")

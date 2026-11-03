@@ -67,15 +67,11 @@ impl Request {
         })
     }
 
-    /// What the trial plan supplies: all but [`TRIAL_RESERVE_BPS`] of the unshielded ETH.
     pub fn trial_supply(&self) -> U256 {
         let all = self.unshield.base;
         all - all * U256::from(TRIAL_RESERVE_BPS) / U256::from(10_000)
     }
 
-    /// What the plan that is sent supplies, given the quote of the trial calls: the ETH the
-    /// quote leaves, less a quarter of its fee. Refused when the quote leaves less than the trial
-    /// calls supplied, since edw priced calls the notes could not have paid for.
     pub fn final_supply(&self, trial: &FeeQuote) -> Result<U256, String> {
         let wanted = self.trial_supply();
         if trial.available < wanted {
@@ -96,7 +92,6 @@ impl Request {
         Ok(supply)
     }
 
-    /// The quote of the calls that will be sent: it must still leave what they supply.
     pub fn check_quote(&self, supply: U256, quote: &FeeQuote) -> Result<(), String> {
         if quote.available < supply {
             return Err(format!(
@@ -173,8 +168,6 @@ impl Request {
         })
     }
 
-    /// The Aave half against the shield: it supplies at most `ceiling`, and borrows the very
-    /// token the shield approves, exactly as much as it deposits.
     fn check(
         &self,
         aave: &AaveCalls,
@@ -272,7 +265,6 @@ impl PrivateBorrow {
         self.fresh
     }
 
-    /// edw's quote of these calls must still leave what they supply to Aave.
     pub fn check_quote(&self, quote: &FeeQuote) -> Result<(), String> {
         self.request.check_quote(self.aave.supply, quote)
     }
@@ -289,8 +281,6 @@ impl PrivateBorrow {
         TailCalls(format!("{},{}", aave.join(","), self.shield.tail_calls().0))
     }
 
-    /// The unshield that prices (`Mode::Quote`) or runs it, held to the fresh address the Aave
-    /// calls were built for.
     pub fn command(&self, mode: Mode) -> Command {
         Command::Unshield(Unshield {
             amount: self.request.unshield.clone(),
@@ -301,7 +291,7 @@ impl PrivateBorrow {
     }
 
     /// The one review card. `skill` names the skill that wrote the Aave plan; `reused` says the
-    /// preparation was stored before this borrow; `quote` is edw's price of exactly these calls.
+    /// preparation was stored before this borrow.
     pub fn preview(&self, profile: &str, skill: &str, reused: bool, quote: &FeeQuote) -> String {
         let unshield = &self.request.unshield;
         let shield = &self.request.shield;

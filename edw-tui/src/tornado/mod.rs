@@ -256,7 +256,6 @@ pub enum Destination {
     Calls(TailCalls),
 }
 
-/// Whether an unshield goes out or only asks edw what it would cost.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// Proves, signs and sends; `--yes` is passed because the review card was the consent.
@@ -489,7 +488,6 @@ impl FreshAddress {
     }
 }
 
-/// What `unshield --quote` priced: the fee, and the ETH left for the tail calls once it is paid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FeeQuote {
     pub fee: U256,

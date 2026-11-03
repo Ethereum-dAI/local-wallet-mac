@@ -1102,8 +1102,6 @@ impl Shared {
         result.to_model_json()
     }
 
-    /// The skill's script run for `supply` wei and the Aave plan it writes, checked against the
-    /// request and the fresh address. Errors are worded for the model.
     async fn aave_plan(
         &self,
         skill: &Skill,
@@ -1145,8 +1143,6 @@ impl Shared {
         .map_err(|error| format!("the plan was refused ({error})"))
     }
 
-    /// What `unshield --quote` prices for this borrow's calls. edw signs, sends and stores
-    /// nothing for it, so it needs no review.
     async fn quote(
         &self,
         borrow: &borrow::PrivateBorrow,

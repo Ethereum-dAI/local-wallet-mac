@@ -27,7 +27,6 @@ pub enum Stage {
     Plan,
     /// The plan is simulated and its preview written.
     Simulate,
-    /// edw prices the operation's fee, which sizes what goes to Aave.
     Quote,
     /// The user answers yes or no.
     Review,

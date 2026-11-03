@@ -47,7 +47,6 @@ use rig_core::message::AssistantContent;
 use serde_json::{Value, json};
 
 const ETHER: u128 = 1_000_000_000_000_000_000;
-/// The recorded fee of a 1 ETH unshield, and the ETH it leaves for the tail calls.
 const FEE: u128 = ETHER / 100;
 const PROMPT: &str = "privately borrow 100 DAI against 1 ETH";
 /// What a stub plan carries besides its steps, to show the script ran for the fresh address.
@@ -102,7 +101,6 @@ fn recorder(calls: &[Value]) -> Recorder {
 
 struct Borrowing {
     h: Harness,
-    /// One line per edw call, as `common::quote_fees` logs them.
     calls: PathBuf,
     model: Recorder,
     _chain: AnvilInstance,
@@ -233,7 +231,6 @@ async fn one_card_shows_the_whole_operation_and_nothing_is_sent_before_yes() {
     no_calldata(&seen);
 }
 
-/// The unshield calls edw was given, each as its argument list.
 fn unshields(calls: &Path) -> Vec<Vec<String>> {
     fs::read_to_string(calls)
         .unwrap_or_default()

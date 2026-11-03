@@ -126,8 +126,7 @@ impl TempWallet {
 
 /// Puts a wrapper in front of `wallet`'s edw for the rest of the test. The fake Sepolia has no
 /// bundler to price a fee, so `unshield --quote` answers a recorded `edw/unshield-quote` for a
-/// 1 ETH unshield with this `fee` and `tail_value` (wei) and everything else runs the real edw.
-/// Returns the file that gets one line per edw call, its arguments after the binary.
+/// 1 ETH unshield and everything else runs the real edw.
 pub fn quote_fees(wallet: &mut TempWallet, fee: u128, tail_value: u128) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 

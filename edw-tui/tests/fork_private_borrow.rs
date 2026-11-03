@@ -173,7 +173,6 @@ struct Attempt {
 }
 
 impl Attempt {
-    /// The unshield that was sent, not a quote of it.
     fn unshield(&self) -> &EdwResult {
         self.unshields(false)
             .next()
@@ -186,7 +185,6 @@ impl Attempt {
         })
     }
 
-    /// edw's quote of the calls that were sent: the last one asked.
     fn final_quote(&self) -> FeeQuote {
         let quote = self
             .unshields(true)
@@ -540,9 +538,6 @@ async fn the_private_borrow_runs_end_to_end_on_a_sepolia_fork() {
         "edw proved a fee above the one it quoted"
     );
 
-    // The fee outgrows the trial ceiling once gas costs more than `break_even`. Then the quote of
-    // the trial calls leaves less than they supply (or edw cannot price them), so the borrow is
-    // refused before the card, whatever edw says, and nothing is sent.
     for (stage, half_steps) in [("borrow at 1.5x gas", 3u64), ("borrow at 3x gas", 6)] {
         let target = break_even * U256::from(half_steps) / U256::from(2);
         let price = price_gas(&provider, &bundler, target).await;

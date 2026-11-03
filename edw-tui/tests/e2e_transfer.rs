@@ -5,7 +5,7 @@
 //! Steps: 0. start anvil; a. create profiles alice and bob; b. fund alice
 //! (`anvil_setBalance`); c. send 0.1 ETH from alice to bob through the review modal.
 //!
-//! The wallet is seeded with Foundry's well-known test mnemonic (the way edw's own first
+//! The wallet is seeded with Foundry's well-known test mnemonic (the way edw-tui's first
 //! unlock seeds a random one), so every address and even the transaction hash are the same on
 //! every run. Screenshots of the review modal and the final screen are written to
 //! `target/e2e-screenshots/` (SVG for people, TXT for diffs) for a person to look at; they are
@@ -62,31 +62,6 @@ fn confirm(tui: &mut Tui, done: &str) {
     idle(tui);
 }
 
-/// Foundry's public test mnemonic. Never holds real funds.
-const TEST_MNEMONIC: &str = "test test test test test test test test test test test junk";
-
-/// Creates the local network's store as edw's first unlock does (encrypted with the password,
-/// mnemonic 0, profile 0), but with a known mnemonic instead of a random one.
-async fn seed_wallet(config: &edw::EdwConfig) {
-    use std::sync::Arc;
-
-    use edw_core::database::{Database, encrypted::EncryptedDatabase, file::FileDatabase};
-    let dir = config.data_dir.join("local");
-    std::fs::create_dir_all(&dir).unwrap();
-    let backend: Arc<dyn Database> = Arc::new(FileDatabase::open(&dir).unwrap());
-    let store: Arc<dyn Database> = Arc::new(
-        EncryptedDatabase::create(backend, config.password.as_bytes())
-            .await
-            .unwrap(),
-    );
-    let record = edw_core::mnemonic::add_mnemonic(store.clone(), TEST_MNEMONIC.to_owned().into())
-        .await
-        .unwrap();
-    edw_core::profile::simple::bootstrap_profile(store, record.index, 0, None)
-        .await
-        .unwrap();
-}
-
 async fn eth(rpc: &str, who: Address) -> U256 {
     ProviderBuilder::new()
         .connect_http(rpc.parse().unwrap())
@@ -115,7 +90,7 @@ async fn alice_sends_bob_one_tenth_of_an_eth() {
 
     let wallet = TempWallet::new(binary.clone(), "e2e");
     let config = &wallet.config;
-    seed_wallet(config).await;
+    common::scenario::seed_wallet(config, "local").await;
     let mut tui = Tui::spawn(
         &PathBuf::from(env!("CARGO_BIN_EXE_edw-tui")),
         &[
@@ -139,11 +114,11 @@ async fn alice_sends_bob_one_tenth_of_an_eth() {
 
     // a. A wallet on the local chain, and two profiles in it.
     tui.submit("unlock local");
-    confirm(&mut tui, "Unlocked local");
+    confirm(&mut tui, r#""network":"local""#);
     tui.submit("add a profile named alice");
-    confirm(&mut tui, "Created profile 0/1 (alice)");
+    confirm(&mut tui, r#""profile_index":1,"name":"alice""#);
     tui.submit("add a profile named bob");
-    confirm(&mut tui, "Created profile 0/2 (bob)");
+    confirm(&mut tui, r#""profile_index":2,"name":"bob""#);
 
     // Alice sends from here on.
     tui.submit("/profile alice");

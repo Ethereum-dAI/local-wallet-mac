@@ -59,7 +59,7 @@ async fn start(
         None
     })?;
     let wallet = TempWallet::new(binary, name);
-    wallet.edw(&["unlock", "--network", network]).await;
+    wallet.unlock(network).await;
     let interim = wallet.interim(rpc, allow_sepolia);
     Some(Harness::start_with(
         wallet,
@@ -215,7 +215,7 @@ async fn sends_from_the_profile_the_harness_selected() {
         return;
     };
     h.wallet
-        .edw(&["profile", "add", "--next", "--name", "bob"])
+        .edw(&["profile", "new", "--phrase-of", "0/0", "--name", "bob"])
         .await;
     let default = sender(&h, &rpc, false).await;
     fund(&rpc, default, U256::from(ETHER)).await;

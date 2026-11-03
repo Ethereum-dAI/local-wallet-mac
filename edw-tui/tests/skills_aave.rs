@@ -324,7 +324,7 @@ impl Fork {
         let node = Anvil::new().fork(rpc).try_spawn().expect("anvil fork");
         let rpc = node.endpoint();
         let wallet = TempWallet::new(binary, name);
-        wallet.edw(&["unlock", "--network", network]).await;
+        wallet.unlock(network).await;
         let mut interim = wallet.interim(Some(rpc.clone()), network == "sepolia");
         interim.mainnet_fork = network == "mainnet";
         let me = Interim::new(interim.clone()).address(None).await.unwrap();

@@ -136,6 +136,28 @@ pub struct ActionDef {
     pub tool: ToolDef,
     /// Contract ids this action may approve as spender.
     pub approves: Vec<String>,
+    pub account: RunsFrom,
+}
+
+/// The account an action's plan runs from, which is who its `$self` is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunsFrom {
+    /// The sending profile, which signs and sends each step.
+    #[default]
+    Sender,
+    /// An unshield's fresh account: the steps run as tail calls of edw's user operation, right
+    /// after the withdrawal, so that account holds only what the unshield brings it.
+    Fresh,
+}
+
+impl std::fmt::Display for RunsFrom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RunsFrom::Sender => "the sending profile",
+            RunsFrom::Fresh => "an unshield's fresh account",
+        })
+    }
 }
 
 impl Skill {
@@ -260,6 +282,8 @@ struct RawTool {
     /// Actions only.
     #[serde(default)]
     approves: Vec<String>,
+    /// Actions only; the sending profile when left out.
+    account: Option<RunsFrom>,
 }
 
 /// Reads and validates one skill folder. Errors name the file and the field at fault.
@@ -691,6 +715,12 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
         if !t.approves.is_empty() {
             return Err(format!("{}: only actions may approve", t.name));
         }
+        if t.account.is_some() {
+            return Err(format!(
+                "{}: only actions run from an account; a read tool sends nothing",
+                t.name
+            ));
+        }
         read_tools.push(tool(t)?);
     }
     let mut actions = Vec::new();
@@ -720,6 +750,7 @@ fn validate(raw: RawManifest) -> Result<Manifest, String> {
         }
         actions.push(ActionDef {
             approves: a.approves.clone(),
+            account: a.account.unwrap_or_default(),
             tool: tool(a)?,
         });
     }
@@ -969,8 +1000,27 @@ approves = ["pool"]
             Duration::from_secs(900)
         );
         assert_eq!(m.actions[0].approves, ["pool"]);
+        assert_eq!(m.actions[0].account, RunsFrom::Sender);
         assert!(skill.has_scripts());
         assert_eq!(skill.tool_names(), ["demo_read", "demo_supply"]);
+    }
+
+    #[test]
+    fn only_an_action_may_run_from_an_unshields_fresh_account() {
+        let with = |section: &str| {
+            let toml = SKILL_TOML.replacen(
+                &format!("{section}\nname"),
+                &format!("{section}\naccount = \"fresh\"\nname"),
+                1,
+            );
+            let root = tempfile::tempdir().unwrap();
+            load(&folder(root.path(), "demo", SKILL_MD, Some(&toml)))
+        };
+        let action = with("[[action]]").unwrap();
+        assert_eq!(action.manifest.actions[0].account, RunsFrom::Fresh);
+        assert!(with("[[read_tool]]").unwrap_err().contains("only actions"));
+        let unknown = SKILL_TOML.replacen("[[action]]\n", "[[action]]\naccount = \"anyone\"\n", 1);
+        assert!(load_err(SKILL_MD, Some(&unknown)).contains("account"));
     }
 
     /// `approve_to` narrows to whom a token may be approved; a `debt` token is approved by credit

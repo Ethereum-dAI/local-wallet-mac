@@ -5,12 +5,12 @@
 //! The wallet uses Foundry's public test mnemonic, so addresses are the same on every run.
 //! Never use it for anything but throwaway chains.
 
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 use alloy_node_bindings::{Anvil, AnvilInstance};
 use alloy_primitives::{Address, U256};
 use alloy_provider::{Provider, ProviderBuilder};
-use edw_core::database::{Database, encrypted::EncryptedDatabase, file::FileDatabase};
+use edw_core::instance::{DataDir, Instance};
 use edw_tui::{
     edw::{self, Pin},
     interim::Interim,
@@ -296,21 +296,18 @@ pub fn screenshots_dir() -> PathBuf {
     dir
 }
 
-/// Creates `network`'s store as edw's first unlock does (encrypted with the password,
+/// Creates `network`'s store as edw-tui's first unlock does (encrypted with the password,
 /// mnemonic 0, profile 0), but with the known test mnemonic instead of a random one.
 pub async fn seed_wallet(config: &edw::EdwConfig, network: &str) {
-    let dir = config.data_dir.join(network);
-    std::fs::create_dir_all(&dir).unwrap();
-    let backend: Arc<dyn Database> = Arc::new(FileDatabase::open(&dir).unwrap());
-    let store: Arc<dyn Database> = Arc::new(
-        EncryptedDatabase::create(backend, config.password.as_bytes())
-            .await
-            .unwrap(),
-    );
-    let record = edw_core::mnemonic::add_mnemonic(store.clone(), TEST_MNEMONIC.to_owned().into())
-        .await
-        .unwrap();
-    edw_core::profile::simple::bootstrap_profile(store, record.index, 0, None)
+    let instance = Instance::open_or_create(
+        &DataDir::new(&config.data_dir),
+        network.parse().unwrap(),
+        config.password.as_bytes(),
+    )
+    .await
+    .unwrap();
+    instance
+        .import_profile(TEST_MNEMONIC.to_owned().into(), 0, None)
         .await
         .unwrap();
 }

@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::{
     agent::{MAX_TURNS, additional_params, preamble_with},
-    edw::{self, TOOLS},
+    edw::{self, Review, TOOLS},
     skills::{
         LOAD_SKILL, author, author_tools,
         catalog::{self, Catalog, Installed, SkillState},
@@ -30,7 +30,11 @@ use crate::{
 /// appended. "send 1 ETH to 0x…" is now a call, where under 1 it was a refusal.
 /// 3: skills. The preamble lists them, `load_skill` loads one, and its tools (in `skills`)
 /// are offered only after that, so a correct answer may now start with `load_skill`.
-pub const CONTRACT_VERSION: u32 = 3;
+/// 4: Tornado. `shield`, `unshield`, `prepare_shield`, `next_fresh_address` and `balance`'s
+/// `private`. "shield 1 ETH" is now a call, where under 3 it was a refusal.
+/// 5: the `private-aave-borrow` skill. "borrow 100 DAI against 1 of my shielded ETH, privately" is
+/// now `load_skill` then `private_aave_borrow`, a call no tool under 4 could make.
+pub const CONTRACT_VERSION: u32 = 5;
 
 /// The skills shipped in this crate's `skills/` folder, as if the user had agreed to all of
 /// them and Docker were running: what the model sees in the full setup.
@@ -108,8 +112,8 @@ pub fn dump() -> Value {
         "preamble": preamble_with(&catalog),
         "tools": tools,
         "skills": skills,
-        "confirmation_required": TOOLS.iter().filter(|t| t.mutating || t.moves_value).map(|t| t.name).collect::<Vec<_>>(),
-        "reviewed_dry_run": TOOLS.iter().filter(|t| t.moves_value).map(|t| t.name).collect::<Vec<_>>(),
+        "confirmation_required": TOOLS.iter().filter(|t| t.review != Review::None).map(|t| t.name).collect::<Vec<_>>(),
+        "reviewed_dry_run": TOOLS.iter().filter(|t| t.review == Review::Preview).map(|t| t.name).collect::<Vec<_>>(),
         "request": {"max_turns": MAX_TURNS, "additional_params": additional_params()},
     })
 }

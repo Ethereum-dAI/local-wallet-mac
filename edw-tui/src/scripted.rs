@@ -93,6 +93,42 @@ fn aave_script(prompt: &str, text: &str, has: &dyn Fn(&str) -> bool) -> Option<S
     ]))
 }
 
+/// A plain decimal such as `100` or `0.5`: digits, and digits on both sides of a point. Not `inf`, `nan` or `1e3`,
+/// which `f64` parses.
+fn is_decimal(word: &str) -> bool {
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    match word.split_once('.') {
+        Some((whole, fraction)) => digits(whole) && digits(fraction),
+        None => digits(word),
+    }
+}
+
+/// `privately borrow <amount> <token> against <eth> ETH`.
+fn private_borrow_script(prompt: &str) -> Option<Script> {
+    let words: Vec<&str> = prompt
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '-'))
+        .collect();
+    let amounts: Vec<(&str, &str)> = words
+        .windows(2)
+        .filter(|w| is_decimal(w[0]))
+        .map(|w| (w[0], w[1]))
+        .collect();
+    let (eth, _) = amounts
+        .iter()
+        .find(|(_, unit)| unit.eq_ignore_ascii_case("eth"))?;
+    let (amount, token) = amounts
+        .iter()
+        .find(|(_, unit)| !unit.eq_ignore_ascii_case("eth"))?;
+    Some(Script::Calls(vec![
+        ("load_skill", json!({"name": "private-aave-borrow"})),
+        (
+            "private_aave_borrow",
+            json!({"eth": eth, "token": token.to_uppercase(), "amount": amount}),
+        ),
+    ]))
+}
+
 /// The first address in a prompt: a `0x` + 40-hex word, or the `ADDR_n` alias the harness puts
 /// in its place before the model sees the message (it reveals the alias again in tool arguments).
 fn address_in(prompt: &str) -> Option<String> {
@@ -299,6 +335,9 @@ fn skill_script(prompt: &str, text: &str, has: &dyn Fn(&str) -> bool) -> Option<
     }
     if let Some(safe) = safe_script(prompt, has) {
         return Some(safe);
+    }
+    if has("borrow") && (has("privately") || has("private")) {
+        return private_borrow_script(prompt);
     }
     if has("aave") {
         return aave_script(prompt, text, has);
@@ -526,9 +565,45 @@ pub fn summary(tool: &str, result: &str) -> Option<String> {
 fn first_number(prompt: &str) -> Option<String> {
     prompt
         .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_ascii_digit() && c != '.'))
-        .find(|w| !w.is_empty() && w.parse::<f64>().is_ok())
+        .map(|w| w.trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-'))
+        .find(|w| is_decimal(w))
         .map(str::to_owned)
+}
+
+/// Tornado requests: `shield <amount> <token>`, `prepare a shield of <amount> <token>`,
+/// `unshield <amount> <token> [to <address>]`, `my fresh address`, `my private balance`.
+fn tornado_script(prompt: &str, has: &dyn Fn(&str) -> bool) -> Option<Script> {
+    if has("fresh") {
+        return Some(Script::Call("next_fresh_address", json!({})));
+    }
+    if (has("private") || has("shielded")) && !has("shield") && !has("unshield") {
+        return Some(Script::Call("balance", json!({"private": true})));
+    }
+    let tool = if has("unshield") {
+        "unshield"
+    } else if has("shield") && has("prepare") {
+        "prepare_shield"
+    } else if has("shield") {
+        "shield"
+    } else {
+        return None;
+    };
+    let words: Vec<&str> = prompt.split_whitespace().collect();
+    let Some(at) = words.iter().position(|w| is_decimal(w)) else {
+        return Some(Script::Say(format!("Say it as: {tool} <amount> <token>.")));
+    };
+    let mut args = json!({"amount": words[at]});
+    if let Some(token) = words.get(at + 1).filter(|w| !w.eq_ignore_ascii_case("to")) {
+        args["token"] = json!(token);
+    }
+    let to = words.iter().position(|w| w.eq_ignore_ascii_case("to"));
+    if let Some(to) = to
+        .and_then(|i| words.get(i + 1))
+        .filter(|_| tool == "unshield")
+    {
+        args["to"] = json!(to);
+    }
+    Some(Script::Call(tool, args))
 }
 
 pub fn script(prompt: &str) -> Script {
@@ -548,8 +623,8 @@ pub fn script(prompt: &str) -> Script {
 
     if let Some(skill) = skill_script(prompt, &text, &has) {
         skill
-    } else if has("shield") {
-        Script::Say("edw cannot shield yet, so there is nothing I can run for that.".into())
+    } else if let Some(tornado) = tornado_script(prompt, &has) {
+        tornado
     } else if has("transfer") || has("send") {
         // "send <amount> <token> to <recipient>"
         let words: Vec<&str> = prompt.split_whitespace().collect();
@@ -744,6 +819,69 @@ mod tests {
                     json!({"chain": "Ethereum", "kind": "lend", "symbol": "USDC", "limit": 3})
                 )
             ])
+        );
+    }
+
+    #[test]
+    fn scripts_a_private_borrow_and_leaves_plain_borrows_to_aave() {
+        assert_eq!(
+            script("privately borrow 100 DAI against 1 ETH of my shielded notes"),
+            Script::Calls(vec![
+                ("load_skill", json!({"name": "private-aave-borrow"})),
+                (
+                    "private_aave_borrow",
+                    json!({"eth": "1", "token": "DAI", "amount": "100"})
+                )
+            ])
+        );
+        assert_eq!(
+            script("borrow 100 USDC privately against 0.1 ETH"),
+            Script::Calls(vec![
+                ("load_skill", json!({"name": "private-aave-borrow"})),
+                (
+                    "private_aave_borrow",
+                    json!({"eth": "0.1", "token": "USDC", "amount": "100"})
+                )
+            ])
+        );
+        let Script::Calls(plain) = script("borrow 100 DAI on aave") else {
+            panic!("an Aave call");
+        };
+        assert_eq!(plain[0].1, json!({"name": "aave-v3-lend"}));
+    }
+
+    #[test]
+    fn only_plain_decimals_are_amounts() {
+        for word in ["100", "0.5"] {
+            assert!(is_decimal(word), "{word}");
+        }
+        for word in [
+            "inf", "nan", "1e3", "-1", "1.2.3", ".", "", "0x10", ".5", "7.",
+        ] {
+            assert!(!is_decimal(word), "{word}");
+        }
+        assert_eq!(
+            script("unshield inf ETH"),
+            Script::Say("Say it as: unshield <amount> <token>.".into())
+        );
+        assert_eq!(first_number("borrow 1e3 then 5"), Some("5".into()));
+        assert_eq!(first_number("borrow -100 DAI"), None);
+        let negative = script("privately borrow -100 DAI against 1 ETH");
+        assert!(
+            !matches!(&negative, Script::Calls(calls) if calls.iter().any(|(tool, _)| *tool == "private_aave_borrow")),
+            "{negative:?}"
+        );
+    }
+
+    #[test]
+    fn a_private_word_in_a_shield_request_is_not_a_balance_request() {
+        assert_eq!(
+            script("what is my private balance"),
+            Script::Call("balance", json!({"private": true}))
+        );
+        assert_eq!(
+            script("unshield 1 ETH and keep it private"),
+            Script::Call("unshield", json!({"amount": "1", "token": "ETH"}))
         );
     }
 
@@ -1056,7 +1194,31 @@ mod tests {
             script("what is my balance"),
             Script::Call("balance", json!({}))
         );
-        assert!(matches!(script("shield 1 ETH"), Script::Say(_)));
+        for (prompt, tool, args) in [
+            (
+                "shield 1 ETH",
+                "shield",
+                json!({"amount": "1", "token": "ETH"}),
+            ),
+            (
+                "prepare a shield of 200 DAI",
+                "prepare_shield",
+                json!({"amount": "200", "token": "DAI"}),
+            ),
+            (
+                "unshield 0.1 ETH to 0x000000000000000000000000000000000000bEEF",
+                "unshield",
+                json!({"amount": "0.1", "token": "ETH", "to": "0x000000000000000000000000000000000000bEEF"}),
+            ),
+            ("what is my fresh address", "next_fresh_address", json!({})),
+            (
+                "show my private balance",
+                "balance",
+                json!({"private": true}),
+            ),
+        ] {
+            assert_eq!(script(prompt), Script::Call(tool, args), "{prompt}");
+        }
         assert_eq!(
             script("swap 0.01 ETH for USDC"),
             Script::Call(

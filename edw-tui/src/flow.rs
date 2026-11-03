@@ -27,6 +27,7 @@ pub enum Stage {
     Plan,
     /// The plan is simulated and its preview written.
     Simulate,
+    Quote,
     /// The user answers yes or no.
     Review,
     /// The transaction is signed and submitted.
@@ -42,6 +43,16 @@ impl Stage {
         Stage::Review,
         Stage::Send,
     ];
+    /// A skill action run from an unshield's fresh account: the plan, then the shield it ends
+    /// with is prepared and edw quotes the fee; edw simulates the whole operation when it sends.
+    pub const FRESH_ACCOUNT_ACTION: [Stage; 6] = [
+        Stage::Script,
+        Stage::Plan,
+        Stage::Prepare,
+        Stage::Quote,
+        Stage::Review,
+        Stage::Send,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -49,6 +60,7 @@ impl Stage {
             Stage::Script => "skill script",
             Stage::Plan => "plan check",
             Stage::Simulate => "simulate",
+            Stage::Quote => "fee quote",
             Stage::Review => "your review",
             Stage::Send => "send",
         }

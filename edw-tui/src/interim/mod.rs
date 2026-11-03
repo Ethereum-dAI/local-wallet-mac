@@ -1,7 +1,8 @@
-//! INTERIM: `balance`, `transfer` (and later `swap`) until desktop-wallet ships its own.
+//! INTERIM: public `balance`, `transfer` and `swap`, run here because edw's own `transfer` is
+//! ETH only and broadcasts without a dry run, and edw has no `swap`.
 //!
-//! When `edw balance` and `edw transfer` land, the adapter points those tools at the CLI and
-//! this module goes. Swap may never come to desktop-wallet; its code will then be promoted
+//! If edw gains a reviewed, token-aware `transfer`, the adapter can point that tool at the CLI
+//! and this part goes. Swap may never come to desktop-wallet; its code will then be promoted
 //! instead of deleted. Nothing outside this module depends on how it works: the tools the
 //! model sees are the permanent contract in `app_contract.rs`, and this executor behaves the
 //! way edw's spec says the real commands will (a dry run first, a send only after "yes").
@@ -19,7 +20,6 @@ pub mod tokens;
 
 use std::{
     collections::BTreeMap,
-    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -31,12 +31,10 @@ use alloy_rpc_types_eth::TransactionRequest;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall, sol};
 use edw_core::{
-    database::{
-        Database, encrypted::EncryptedDatabase, file::FileDatabase, scoped::ScopedDatabaseExt,
-    },
-    mnemonic::{MnemonicRecord, db::MnemonicDb, resolve_mnemonic},
-    network::{SupportedNetwork, db::NetworkDb},
-    profile::simple::{ProfileRecord, db::SimpleProfileDb, resolve_profile},
+    instance::{DataDir, Instance},
+    mnemonic::Mnemonic,
+    network::{NetworkPreset, RpcConfigKind},
+    profile::ProfileRecord,
 };
 use guards::{Amount, TokenRef, format_units, parse_units};
 use reqwest::Url;
@@ -171,7 +169,7 @@ impl Prepared {
 
 struct Account {
     label: String,
-    network: SupportedNetwork,
+    network: NetworkPreset,
     chain_id: u64,
     signer: PrivateKeySigner,
     rpc: Url,
@@ -292,36 +290,25 @@ impl Interim {
         Self { config }
     }
 
-    /// The unlocked network, read from edw's own `config view`, so the lock state and the
-    /// session stay edw's to decide.
-    async fn unlocked_network(&self) -> Result<SupportedNetwork, String> {
-        let view = edw::run(&self.config.edw, &["config".into(), "view".into()]).await;
-        if !view.ok() {
-            return Err(format!("cannot read edw's session: {}", view.output));
-        }
-        let session = view
-            .output
-            .lines()
-            .find_map(|line| line.strip_prefix("session="))
-            .unwrap_or("(locked)");
-        if session == "(locked)" {
-            return Err("the wallet is locked; unlock a network first".into());
-        }
-        let network = SupportedNetwork::from_str(session)
-            .map_err(|_| format!("edw reports an unknown network `{session}`"))?;
-        match network {
-            SupportedNetwork::Mainnet if !self.config.mainnet_fork => Err(
+    /// The unlocked network, if the interim may send on it.
+    async fn unlocked_network(&self) -> Result<NetworkPreset, String> {
+        match edw::unlocked_network(&self.config.edw).await? {
+            NetworkPreset::Mainnet if !self.config.mainnet_fork => Err(
                 "sending on mainnet is disabled while edw-tui's transfers are interim; unlock local or sepolia (an anvil mainnet fork works with EDW_TUI_MAINNET_FORK=1)".into(),
             ),
-            SupportedNetwork::Sepolia if !self.config.allow_sepolia => Err(
+            NetworkPreset::Sepolia if !self.config.allow_sepolia => Err(
                 "interim sends on sepolia are off; set EDW_TUI_INTERIM_SEPOLIA=1 to allow them".into(),
             ),
-            _ => Ok(network),
+            network => Ok(network),
         }
     }
 
     pub fn set_profile(&self, selector: &str) {
         self.config.profile.set(selector);
+    }
+
+    pub fn mainnet_fork(&self) -> bool {
+        self.config.mainnet_fork
     }
 
     pub fn profile(&self) -> String {
@@ -330,46 +317,28 @@ impl Interim {
 
     /// The sending profile's account; `selector` overrides the harness's choice (for checks).
     /// The unlocked network, and edw's encrypted store for it, opened with the session password.
-    async fn open_store(&self) -> Result<(SupportedNetwork, Arc<dyn Database>), String> {
+    async fn open_store(&self) -> Result<(NetworkPreset, Instance), String> {
         let network = self.unlocked_network().await?;
-        let dir = self.config.edw.data_dir.join(network.slug());
-        let backend: Arc<dyn Database> = Arc::new(
-            FileDatabase::open(&dir)
-                .map_err(|e| format!("cannot open edw's store at {}: {e}", dir.display()))?,
-        );
-        let store: Arc<dyn Database> = Arc::new(
-            EncryptedDatabase::unlock(backend, self.config.edw.password.as_bytes())
-                .await
-                .map_err(|e| format!("cannot unlock edw's store: {e}"))?,
-        );
-        Ok((network, store))
-    }
-
-    async fn profiles(
-        store: &Arc<dyn Database>,
-    ) -> Result<(Vec<ProfileRecord>, Vec<MnemonicRecord>), String> {
-        let profiles = store
-            .clone()
-            .scoped(b"profiles")
-            .list_profiles()
-            .await
-            .map_err(|e| e.to_string())?;
-        let mnemonics = store
-            .clone()
-            .scoped(b"mnemonics")
-            .get_mnemonics()
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok((profiles, mnemonics))
+        let instance = Instance::open(
+            &DataDir::new(&self.config.edw.data_dir),
+            network.network_id(),
+            self.config.edw.password.as_bytes(),
+        )
+        .await
+        .map_err(|e| format!("cannot open edw's store: {e}"))?;
+        Ok((network, instance))
     }
 
     /// A profile's signer: its first address, `m/44'/60'/<profile>'/0/0`.
-    fn signer(
-        mnemonics: &[MnemonicRecord],
+    async fn signer(
+        instance: &Instance,
         record: &ProfileRecord,
     ) -> Result<PrivateKeySigner, String> {
-        resolve_mnemonic(mnemonics, record.mnemonic_index)
-            .and_then(|m| m.mnemonic())
+        let phrase = instance
+            .recovery_phrase(record)
+            .await
+            .map_err(|e| format!("cannot derive the profile's key: {e}"))?;
+        Mnemonic::parse(&phrase)
             .and_then(|m| m.standard_address_key(0, record.profile_index))
             .map(PrivateKeySigner::from_signing_key)
             .map_err(|e| format!("cannot derive the profile's key: {e}"))
@@ -388,9 +357,9 @@ impl Interim {
     pub async fn profile_addresses(&self) -> EdwResult {
         let command = format!("interim profile-addresses --from {}", self.profile());
         let listing = async {
-            let (network, store) = self.open_store().await?;
-            let (profiles, mnemonics) = Self::profiles(&store).await?;
-            let sender = resolve_profile(&profiles, &self.profile()).ok().cloned();
+            let (network, instance) = self.open_store().await?;
+            let profiles = instance.profiles().await.map_err(|e| e.to_string())?;
+            let sender = instance.profile(&self.profile()).await.ok();
             let mut lines = vec![format!("Profiles on {network}:")];
             for record in &profiles {
                 let marker = if sender.as_ref() == Some(record) {
@@ -401,7 +370,7 @@ impl Interim {
                 lines.push(format!(
                     "  {}  {}{marker}",
                     Self::label(record),
-                    Self::signer(&mnemonics, record)?.address()
+                    Self::signer(&instance, record).await?.address()
                 ));
             }
             Ok::<_, String>(lines.join("\n"))
@@ -418,24 +387,21 @@ impl Interim {
 
     async fn account(&self, selector: Option<&str>) -> Result<Account, String> {
         let selector = selector.map_or_else(|| self.profile(), str::to_owned);
-        let (network, store) = self.open_store().await?;
-        let (profiles, mnemonics) = Self::profiles(&store).await?;
-        let record = resolve_profile(&profiles, &selector).map_err(|e| {
+        let (network, instance) = self.open_store().await?;
+        let record = instance.profile(&selector).await.map_err(|e| {
             format!(
                 "the sending profile `{selector}` is not in this wallet ({e}); change it with /profile"
             )
         })?;
-        let signer = Self::signer(&mnemonics, record)?;
+        let signer = Self::signer(&instance, &record).await?;
 
         let rpc = match &self.config.rpc_url {
             Some(url) => url.clone(),
-            None => endpoint(&store)
-                .await
-                .unwrap_or_else(|| network.default_config().http_rpc_url()),
+            None => endpoint(&instance, network).await,
         };
         Ok(Account {
-            label: Self::label(record),
-            chain_id: network.default_config().network_id.0,
+            label: Self::label(&record),
+            chain_id: network.network_id().0,
             network,
             signer,
             rpc: rpc
@@ -1317,15 +1283,16 @@ async fn simulation_failed(
     }
 }
 
-/// The unlocked network's active endpoint, as edw would pick it.
-async fn endpoint(store: &Arc<dyn Database>) -> Option<String> {
-    let preferences = store.clone().scoped(b"preferences");
-    let configs = preferences.get_network_configs().await.ok()?;
-    let active = preferences.get_active().await.ok().flatten();
-    let config = active
-        .and_then(|name| configs.iter().find(|c| c.name == name))
-        .or(configs.first())?;
-    Some(config.http_rpc_url())
+/// The unlocked network's active endpoint, as edw would pick it. edw gives a new `local`
+/// wallet no RPC; to edw-tui, `local` is the dev chain on anvil's default port.
+async fn endpoint(instance: &Instance, network: NetworkPreset) -> String {
+    match instance.active_rpc().await.ok().flatten().map(|c| c.kind) {
+        Some(RpcConfigKind::Http { url }) => url,
+        None => network
+            .default_rpc_url()
+            .unwrap_or("http://127.0.0.1:8545")
+            .to_owned(),
+    }
 }
 
 /// Refuses to read or send through a node that serves another chain than the unlocked network.
@@ -1342,31 +1309,62 @@ async fn check_chain(provider: &impl Provider, account: &Account) -> Result<(), 
             account.rpc, account.network, account.chain_id, account.network
         ));
     }
-    if account.network == SupportedNetwork::Mainnet {
+    if account.network == NetworkPreset::Mainnet {
         // Only reachable with EDW_TUI_MAINNET_FORK=1 (see `unlocked_network`).
-        let info: Value = provider
-            .raw_request("anvil_nodeInfo".into(), ())
-            .await
-            .unwrap_or(Value::Null);
-        let fork_url = info.pointer("/forkConfig/forkUrl").and_then(Value::as_str);
-        fork_gate(account.network, true, &account.rpc, fork_url)?;
+        let fork_url = anvil_fork_url(provider).await;
+        fork_gate(
+            account.network,
+            true,
+            &account.rpc,
+            fork_url.as_deref(),
+            "EDW_TUI_RPC_URL",
+        )?;
     }
     Ok(())
 }
 
+/// The URL an anvil node says it forks; `None` for any other node.
+pub(crate) async fn anvil_fork_url(provider: &impl Provider) -> Option<String> {
+    let info: Value = provider
+        .raw_request("anvil_nodeInfo".into(), ())
+        .await
+        .ok()?;
+    Some(info.pointer("/forkConfig/forkUrl")?.as_str()?.to_owned())
+}
+
+/// The RPC edw itself uses on `network`: its active RPC config, else the network's default.
+/// Tornado commands go through it, not through `EDW_TUI_RPC_URL`.
+pub(crate) async fn edw_rpc(config: &EdwConfig, network: NetworkPreset) -> Result<Url, String> {
+    let instance = Instance::open(
+        &DataDir::new(&config.data_dir),
+        network.network_id(),
+        config.password.as_bytes(),
+    )
+    .await
+    .map_err(|e| format!("cannot open edw's store: {e}"))?;
+    let rpc = endpoint(&instance, network).await;
+    rpc.parse()
+        .map_err(|e| format!("invalid RPC URL `{rpc}`: {e}"))
+}
+
+pub(crate) const MAINNET_OFF: &str =
+    "sending on mainnet is disabled; an anvil mainnet fork works with EDW_TUI_MAINNET_FORK=1";
+
 /// Mainnet only on an anvil fork: the flag set, a loopback RPC, and a node that reports a fork
-/// URL. Anything else that claims to be mainnet is refused before a key is used.
-fn fork_gate(
-    network: SupportedNetwork,
+/// URL. Anything else that claims to be mainnet is refused before a key is used. `set_with` is
+/// how that RPC is chosen, for the message.
+pub(crate) fn fork_gate(
+    network: NetworkPreset,
     mainnet_fork: bool,
     rpc: &Url,
     fork_url: Option<&str>,
+    set_with: &str,
 ) -> Result<(), String> {
-    if network != SupportedNetwork::Mainnet {
+    if network != NetworkPreset::Mainnet {
         return Ok(());
     }
     if !mainnet_fork {
-        return Err("sending on mainnet is disabled; an anvil mainnet fork works with EDW_TUI_MAINNET_FORK=1".into());
+        return Err(MAINNET_OFF.into());
     }
     let host = rpc
         .host_str()
@@ -1379,7 +1377,7 @@ fn fork_gate(
             .is_ok_and(|ip| ip.is_loopback());
     if !loopback {
         return Err(format!(
-            "mainnet-fork mode needs a loopback RPC (EDW_TUI_RPC_URL=http://127.0.0.1:…), not {rpc}"
+            "mainnet-fork mode needs a loopback RPC ({set_with}: http://127.0.0.1:…), not {rpc}"
         ));
     }
     if fork_url.is_none_or(str::is_empty) {
@@ -1494,19 +1492,19 @@ mod tests {
         let local: Url = "http://127.0.0.1:8546".parse().unwrap();
         let remote: Url = "https://eth.llamarpc.com".parse().unwrap();
         let fork = Some("https://archive.example");
-        let mainnet = SupportedNetwork::Mainnet;
+        let mainnet = NetworkPreset::Mainnet;
         assert!(
-            fork_gate(mainnet, false, &local, fork)
+            fork_gate(mainnet, false, &local, fork, "EDW_TUI_RPC_URL")
                 .unwrap_err()
                 .contains("EDW_TUI_MAINNET_FORK")
         );
         assert!(
-            fork_gate(mainnet, true, &remote, fork)
+            fork_gate(mainnet, true, &remote, fork, "EDW_TUI_RPC_URL")
                 .unwrap_err()
                 .contains("loopback")
         );
         assert!(
-            fork_gate(mainnet, true, &local, None)
+            fork_gate(mainnet, true, &local, None, "EDW_TUI_RPC_URL")
                 .unwrap_err()
                 .contains("fork")
         );
@@ -1515,14 +1513,24 @@ mod tests {
                 mainnet,
                 true,
                 &"http://localhost:8546".parse().unwrap(),
-                fork
+                fork,
+                "EDW_TUI_RPC_URL"
             )
             .is_ok()
         );
-        assert!(fork_gate(mainnet, true, &local, fork).is_ok());
+        assert!(fork_gate(mainnet, true, &local, fork, "EDW_TUI_RPC_URL").is_ok());
         // Other networks are not this gate's business.
-        assert!(fork_gate(SupportedNetwork::Sepolia, false, &remote, None).is_ok());
-        assert!(fork_gate(SupportedNetwork::Local, false, &local, None).is_ok());
+        assert!(
+            fork_gate(
+                NetworkPreset::Sepolia,
+                false,
+                &remote,
+                None,
+                "EDW_TUI_RPC_URL"
+            )
+            .is_ok()
+        );
+        assert!(fork_gate(NetworkPreset::Local, false, &local, None, "EDW_TUI_RPC_URL").is_ok());
     }
 
     #[test]

@@ -255,7 +255,15 @@ async fn safe_execute_works_against_a_real_safe_1_5_0() {
     else {
         panic!("expected a plan")
     };
-    let checked = plan::check(&proposed, &skill, action, 1, ME, &input).unwrap();
+    let checked = plan::check(
+        &proposed,
+        &skill,
+        action,
+        1,
+        plan::Account::Sender(ME),
+        &input,
+    )
+    .unwrap();
     let step = &checked.steps[0];
     assert_eq!(step.to, SAFE);
     eprintln!("review lines: {:#?}", step.details);

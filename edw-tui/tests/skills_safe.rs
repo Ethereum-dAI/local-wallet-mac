@@ -571,7 +571,7 @@ async fn approving_a_waiting_transaction_proposes_exactly_approve_hash_on_the_sa
         &skill,
         action,
         1,
-        ME.parse().unwrap(),
+        edw_tui::skills::plan::Account::Sender(ME.parse().unwrap()),
         &json!({"address": SAFE, "nonce": 1445}),
     )
     .unwrap();
@@ -813,7 +813,7 @@ async fn executing_proposes_exec_transaction_with_the_owners_signatures_in_order
         &skill,
         action,
         1,
-        ME.parse().unwrap(),
+        edw_tui::skills::plan::Account::Sender(ME.parse().unwrap()),
         &json!({"address": SAFE}),
     )
     .unwrap();

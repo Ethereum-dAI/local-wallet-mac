@@ -13,15 +13,47 @@ use serde_json::Value;
 
 use super::{
     abi, explain,
-    manifest::{ActionDef, Approval, ContractDef, ReviewRead, Skill},
+    manifest::{ActionDef, Approval, ContractDef, ReviewRead, RunsFrom, Skill},
 };
 use crate::interim::guards::{format_units, is_burn};
 
 pub const MAX_STEPS: usize = 6;
 const MAX_NOTES: usize = 6;
 const MAX_NOTE_CHARS: usize = 300;
-/// What a script writes for the sending profile.
+/// What a script writes for the account its plan runs from.
 pub const SELF: &str = "$self";
+
+/// The account a plan runs from, which `$self` stands for. The harness names it, never the
+/// script, and it must be the kind the action's manifest declares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Account {
+    Sender(Address),
+    /// The fresh address an unshield will withdraw to, as edw peeked it.
+    Fresh(Address),
+}
+
+impl Account {
+    pub fn address(self) -> Address {
+        match self {
+            Account::Sender(address) | Account::Fresh(address) => address,
+        }
+    }
+
+    fn runs_from(self) -> RunsFrom {
+        match self {
+            Account::Sender(_) => RunsFrom::Sender,
+            Account::Fresh(_) => RunsFrom::Fresh,
+        }
+    }
+
+    /// `$self` in a review line.
+    fn shown(self) -> &'static str {
+        match self {
+            Account::Sender(_) => "you",
+            Account::Fresh(_) => "the fresh account",
+        }
+    }
+}
 
 sol! {
     function approve(address spender, uint256 amount) returns (bool);
@@ -158,18 +190,26 @@ fn two_decimals(value: U256, decimals: u8) -> String {
     format!("{whole}.{:0<2}", &fraction[..fraction.len().min(2)])
 }
 
-/// Checks `plan` (`{"steps": [...]}`) for `action` of `skill` on `chain_id`, sent by `me`.
-/// `input` is what the action was called with: it supplies the address of a contract the
-/// manifest leaves to the user (`address_arg`). The error names the rule that failed; nothing
+/// Checks `plan` (`{"steps": [...]}`) for `action` of `skill` on `chain_id`, run from
+/// `account`. `input` is what the action was called with: it supplies the address of a contract
+/// the manifest leaves to the user (`address_arg`). The error names the rule that failed; nothing
 /// is partially accepted.
 pub fn check(
     plan: &Value,
     skill: &Skill,
     action: &ActionDef,
     chain_id: u64,
-    me: Address,
+    account: Account,
     input: &Value,
 ) -> Result<CheckedPlan, String> {
+    if action.account != account.runs_from() {
+        return Err(format!(
+            "{} runs from {}, not from {}",
+            action.tool.name,
+            action.account,
+            account.runs_from()
+        ));
+    }
     let steps = plan
         .get("steps")
         .and_then(Value::as_array)
@@ -186,7 +226,8 @@ pub fn check(
     let ctx = Ctx {
         skill,
         chain_id,
-        me,
+        me: account.address(),
+        account,
         input,
     };
     let mut checked = Vec::new();
@@ -236,6 +277,7 @@ struct Ctx<'a> {
     skill: &'a Skill,
     chain_id: u64,
     me: Address,
+    account: Account,
     input: &'a Value,
 }
 
@@ -501,8 +543,12 @@ impl Ctx<'_> {
                 .get(name)
                 .is_some_and(|params| params.contains(&param.name));
             if to_sender && arg.as_str() != Some(SELF) {
+                let whose = match self.account {
+                    Account::Sender(_) => "the sender",
+                    Account::Fresh(_) => "the fresh account",
+                };
                 return Err(format!(
-                    "{name}({label}) must be the sender (`$self`), not {arg}"
+                    "{name}({label}) must be {whose} (`$self`), not {arg}"
                 ));
             }
             let resolved = if signed {
@@ -776,7 +822,7 @@ impl Ctx<'_> {
     fn show(&self, ty: &DynSolType, value: &Value) -> String {
         let m = &self.skill.manifest;
         match (ty, value.as_str()) {
-            (DynSolType::Address, Some(SELF)) => "you".into(),
+            (DynSolType::Address, Some(SELF)) => self.account.shown().into(),
             (DynSolType::Address, Some(id)) => m
                 .token(id)
                 .map(|t| t.symbol.clone())
@@ -808,6 +854,7 @@ mod tests {
         function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode);
         function withdraw(address asset, uint256 amount, address to) returns (uint256);
         function approve(address spender, uint256 amount) returns (bool);
+        function withdrawETH(address pool, uint256 amount, address to);
     }
 
     const ME: Address = address!("0x00000000000000000000000000000000000000A1");
@@ -904,6 +951,13 @@ description = "d"
 schema = { type = "object" }
 approves = ["pool", "gateway"]
 
+[[action]]
+name = "from_fresh"
+run = "f.py"
+description = "d"
+schema = { type = "object" }
+account = "fresh"
+
 [[review_read]]
 label = "Aave account"
 contract = "pool"
@@ -924,7 +978,14 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
     fn run_as(action: &str, plan: Value) -> Result<CheckedPlan, String> {
         let (_root, skill) = skill();
         let action = skill.action(action).unwrap().clone();
-        check(&plan, &skill, &action, SEPOLIA, ME, &json!({}))
+        check(
+            &plan,
+            &skill,
+            &action,
+            SEPOLIA,
+            Account::Sender(ME),
+            &json!({}),
+        )
     }
 
     const GATEWAY: Address = address!("0x387d311e47e80b498169e6fb51d3193167d89F7D");
@@ -933,6 +994,73 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
 
     fn grant(token: &str, spender: &str, amount: &str) -> Value {
         json!({"steps": [{"approve": {"token": token, "spender": spender, "amount": amount}}]})
+    }
+
+    /// `$self` is the account the harness names, so a fresh account's plan pays out to that account
+    /// only; and an action runs only from the account kind its manifest declares, so neither kind
+    /// of plan can pass as the other.
+    #[test]
+    fn a_fresh_accounts_plan_pays_out_only_to_that_account() {
+        let (_root, skill) = skill();
+        let fresh = address!("0x00000000000000000000000000000000000000F5");
+        let withdraw = |to: &str| json!({"steps": [{"call": {"contract": "gateway", "function": "withdrawETH", "args": ["pool", "1000", to]}}]});
+        let from_fresh = skill.action("from_fresh").unwrap();
+        let checked = check(
+            &withdraw(SELF),
+            &skill,
+            from_fresh,
+            SEPOLIA,
+            Account::Fresh(fresh),
+            &json!({}),
+        )
+        .unwrap();
+        let expected = withdrawETHCall {
+            pool: POOL,
+            amount: U256::from(1000),
+            to: fresh,
+        };
+        assert_eq!(checked.steps[0].data, Bytes::from(expected.abi_encode()));
+        assert_eq!(
+            checked.steps[0].label,
+            "WETH Gateway.withdrawETH(pool=Aave Pool, amount=1000, to=the fresh account)"
+        );
+        let elsewhere = check(
+            &withdraw("pool"),
+            &skill,
+            from_fresh,
+            SEPOLIA,
+            Account::Fresh(fresh),
+            &json!({}),
+        );
+        assert!(elsewhere.unwrap_err().contains("must be the fresh account"));
+
+        let as_sender = check(
+            &withdraw(SELF),
+            &skill,
+            from_fresh,
+            SEPOLIA,
+            Account::Sender(ME),
+            &json!({}),
+        );
+        assert!(
+            as_sender
+                .unwrap_err()
+                .contains("runs from an unshield's fresh account")
+        );
+        let sender_action = skill.action("via_gateway").unwrap();
+        let as_fresh = check(
+            &withdraw(SELF),
+            &skill,
+            sender_action,
+            SEPOLIA,
+            Account::Fresh(fresh),
+            &json!({}),
+        );
+        assert!(
+            as_fresh
+                .unwrap_err()
+                .contains("runs from the sending profile")
+        );
     }
 
     /// Approving a debt token lets the spender borrow in the sender's name: the step calls
@@ -1318,7 +1446,7 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
             &skill,
             &action,
             1,
-            ME,
+            Account::Sender(ME),
             &json!({}),
         )
         .unwrap_err();
@@ -1339,7 +1467,7 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
             let plan = json!({"steps": [{"call": {
                 "contract": "safe", "function": "approveHash", "args": [format!("0x{}", "ab".repeat(32))]
             }}]});
-            check(&plan, &skill, &action, 1, ME, &input)
+            check(&plan, &skill, &action, 1, Account::Sender(ME), &input)
         }
 
         #[test]
@@ -1379,7 +1507,14 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
             let plan = json!({"steps": [{"call": {
                 "contract": "safe", "function": "execTransaction", "args": args
             }}]});
-            check(&plan, &skill, &action, 1, ME, &json!({"address": SAFE}))
+            check(
+                &plan,
+                &skill,
+                &action,
+                1,
+                Account::Sender(ME),
+                &json!({"address": SAFE}),
+            )
         }
 
         fn exec_args() -> Vec<Value> {
@@ -1490,11 +1625,28 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
             let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/safe-multisig");
             let skill = manifest::load(&dir).unwrap();
             let action = skill.action("safe_execute").unwrap().clone();
-            let error =
-                check(&plan, &skill, &action, 1, ME, &json!({"address": SAFE})).unwrap_err();
+            let error = check(
+                &plan,
+                &skill,
+                &action,
+                1,
+                Account::Sender(ME),
+                &json!({"address": SAFE}),
+            )
+            .unwrap_err();
             assert!(error.contains("without ETH"), "{error}");
             plan["steps"][0]["call"]["value"] = json!("0");
-            assert!(check(&plan, &skill, &action, 1, ME, &json!({"address": SAFE})).is_ok());
+            assert!(
+                check(
+                    &plan,
+                    &skill,
+                    &action,
+                    1,
+                    Account::Sender(ME),
+                    &json!({"address": SAFE})
+                )
+                .is_ok()
+            );
         }
 
         #[test]
@@ -1536,7 +1688,7 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
             let input = json!({"address": SAFE});
             let ok = check(
                 &plan(json!({"contract": "safe", "function": "approveHash", "args": [hash], "explain": explain})),
-                &skill, &action, 1, ME, &input,
+                &skill, &action, 1, Account::Sender(ME), &input,
             )
             .unwrap();
             let binding = ok.steps[0].binding.as_ref().unwrap();
@@ -1549,7 +1701,7 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
                 &skill,
                 &action,
                 1,
-                ME,
+                Account::Sender(ME),
                 &input,
             )
             .unwrap();
@@ -1557,10 +1709,10 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
             // Malformed fields, a missing field, or `explain` on another function are refused.
             let mut bad = explain.clone();
             bad["operation"] = json!(2);
-            assert!(check(&plan(json!({"contract": "safe", "function": "approveHash", "args": [hash], "explain": bad})), &skill, &action, 1, ME, &input).is_err());
+            assert!(check(&plan(json!({"contract": "safe", "function": "approveHash", "args": [hash], "explain": bad})), &skill, &action, 1, Account::Sender(ME), &input).is_err());
             let mut missing = explain.clone();
             missing.as_object_mut().unwrap().remove("nonce");
-            assert!(check(&plan(json!({"contract": "safe", "function": "approveHash", "args": [hash], "explain": missing})), &skill, &action, 1, ME, &input).unwrap_err().contains("nonce"));
+            assert!(check(&plan(json!({"contract": "safe", "function": "approveHash", "args": [hash], "explain": missing})), &skill, &action, 1, Account::Sender(ME), &input).unwrap_err().contains("nonce"));
             let exec = check(
                 &plan(
                     json!({"contract": "safe", "function": "execTransaction", "args": [], "explain": explain}),
@@ -1568,7 +1720,7 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
                 &skill,
                 &action,
                 1,
-                ME,
+                Account::Sender(ME),
                 &input,
             );
             assert!(exec.is_err());
@@ -1580,8 +1732,15 @@ show = { collateral = "8 USD", debt = "8 USD", healthFactor = "18" }
             let skill = manifest::load(&dir).unwrap();
             let action = skill.action("safe_approve_hash").unwrap().clone();
             let plan = json!({"steps": [{"call": {"contract": "safe", "function": "swapOwner", "args": []}}]});
-            let error =
-                check(&plan, &skill, &action, 1, ME, &json!({"address": SAFE})).unwrap_err();
+            let error = check(
+                &plan,
+                &skill,
+                &action,
+                1,
+                Account::Sender(ME),
+                &json!({"address": SAFE}),
+            )
+            .unwrap_err();
             assert!(error.contains("not one of"), "{error}");
         }
     }
